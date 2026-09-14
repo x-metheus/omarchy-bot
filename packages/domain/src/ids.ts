@@ -21,3 +21,10 @@ export type TurnId = string;
 export function isBotId(id: string): boolean {
   return /^bot_[0-9a-f]{32}$/.test(id);
 }
+
+/** Local Sidecar install id: `dev_<32hex>`. */
+export type DeviceId = string;
+
+export function isDeviceId(id: string): boolean {
+  return /^dev_[0-9a-f]{32}$/.test(id);
+}

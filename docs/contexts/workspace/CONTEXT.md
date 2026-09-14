@@ -4,7 +4,7 @@ The end-user context for creating AI teammates, working with them through conver
 
 ## Language
 
-Definitions only. Rules and acceptance live in [the product boundary](../../workspace-redesign.md#shared-workspace-and-plugin-boundary) and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Host Session](../computer-control/CONTEXT.md), [Bot Computer](../computer-control/CONTEXT.md), [Bot Screen](../computer-control/CONTEXT.md), [Screen Projection](../computer-control/CONTEXT.md).
+Definitions only. Rules and acceptance live in [the product boundary](../../workspace-redesign.md#shared-workspace-and-plugin-boundary), [ADR 0011](../../adr/0011-local-sidecar-only-off-host.md), and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Host Session](../computer-control/CONTEXT.md), [Bot Computer](../computer-control/CONTEXT.md), [Bot Screen](../computer-control/CONTEXT.md), [Screen Projection](../computer-control/CONTEXT.md).
 
 **Bot**:
 A persistent assistant created and named by the user, with its own job instructions, configuration, and identity. Each Bot uses one Agent; multiple Bots may use the same Agent, and Agent inventory is not itself a Bot.
@@ -12,7 +12,15 @@ _Avoid_: Agent Bot, runtime Bot, Agent instance
 
 **Bot Client**:
 The user-facing application for conversations with Bots and observation or human control of their Bot Screens. It is distinct from the Agents and graphical sessions that execute the work.
-_Avoid_: Bot Desktop, Agent runtime, Host Session
+_Avoid_: Bot Desktop, Agent runtime, Host Session, Desktop Client
+
+**Omarchy Bot**:
+The named Bot Client. It is the Tauri application people install; the plugin daemon is not this application. Use on the plugin host is a viewer only.
+_Avoid_: Desktop, Desktop Client, Omarchy Bot Desktop, Bot Desktop, daemon, second plugin
+
+**Local Sidecar**:
+A Bun process started by Omarchy Bot only when it is not connected to the plugin daemon on the same machine. It registers outbound and runs host OS command, search, and file tools for the remote Agent. It is not an Agent, a daemon, or a Bot Screen.
+_Avoid_: Agent worker, Bot Computer, Host Session, compiled sidecar as the v1 form
 
 **Shared Workspace**:
 The common working-file space used by all Bots, distinct from the Omarchy Bot plugin's source, installation, and conversation data. Its files belong to the user's work rather than to an individual Bot, Thread, or Bot Screen.

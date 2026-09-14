@@ -40,7 +40,7 @@ Use the richest official interface for each Agent. Every installed version must 
 
 Use React 19 because Astryx and the stable TanStack React adapters cover the required accessible conversation interactions. Streaming updates are buffered, transcript rows subscribe selectively, and long histories may use TanStack Virtual. Computer frames do not flow through ordinary React message state.
 
-The Web frontend is also the foundation of the future Tauri Bot Client, as recorded in [ADR 0010](adr/0010-reuse-web-client-in-tauri.md). Reuse its UI and daemon-facing behavior; keep native shell details out of shared business logic and keep execution on Omarchy. This is a present architecture constraint, not a requirement to add Tauri dependencies or native scaffolding now; actual WebView codec/input compatibility must be verified when that client is built.
+The Web frontend is also the foundation of Omarchy Bot, as recorded in [ADR 0010](adr/0010-reuse-web-client-in-tauri.md). Reuse its UI and daemon-facing behavior; keep native shell details out of shared business logic and keep execution on Omarchy. This is a present architecture constraint, not a requirement to add Tauri dependencies or native scaffolding now; actual WebView codec/input compatibility must be verified when that client is built.
 
 ### Astryx policy
 
@@ -93,7 +93,8 @@ Token deltas update the projection directly and do not trigger query refetches.
 - Current implementation specification: [`../.scratch/shared-workspace-desktop-boundary/spec.md`](../.scratch/shared-workspace-desktop-boundary/spec.md)
 - Historical vs current requirement homes: [`../.scratch/shared-workspace-desktop-boundary/requirement-map.md`](../.scratch/shared-workspace-desktop-boundary/requirement-map.md)
 - Shared files / isolated Screens: [`adr/0009-share-work-files-isolate-bot-screens.md`](adr/0009-share-work-files-isolate-bot-screens.md)
-- Future Tauri Bot Client: [`adr/0010-reuse-web-client-in-tauri.md`](adr/0010-reuse-web-client-in-tauri.md)
+- Omarchy Bot (Tauri): [`adr/0010-reuse-web-client-in-tauri.md`](adr/0010-reuse-web-client-in-tauri.md)
+- Local Sidecar only off-host: [`adr/0011-local-sidecar-only-off-host.md`](adr/0011-local-sidecar-only-off-host.md)
 - Agent inventory: [`agents-integration.md`](agents-integration.md)
 - Astryx: <https://astryx.atmeta.com/> and <https://github.com/facebook/astryx>
 - React: <https://react.dev/>

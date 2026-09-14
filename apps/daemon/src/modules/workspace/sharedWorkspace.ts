@@ -43,3 +43,17 @@ export function resolveWorkCwd(explicitCwd?: string | null): string {
   }
   return prepareSharedWorkspace();
 }
+
+/** Resolve a Sidecar transfer path inside Shared Workspace. Absolute and `..` escapes fail closed. */
+export function confinedWorkspacePath(relative: string, root = sharedWorkspaceDir()): string {
+  const trimmed = relative.trim();
+  if (trimmed.length === 0 || trimmed === "/") {
+    throw new Error("Shared Workspace path must be explicit");
+  }
+  const base = path.resolve(root);
+  const resolved = path.resolve(base, trimmed);
+  if (resolved !== base && !resolved.startsWith(`${base}${path.sep}`)) {
+    throw new Error("path escapes Shared Workspace");
+  }
+  return resolved;
+}

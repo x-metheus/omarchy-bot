@@ -20,6 +20,7 @@ import type {
   ComputerViewDto,
   CreateBotBodyDto,
   DeleteBotResultDto,
+  DeviceDto,
   DictationDto,
   DictationResultDto,
   EventEnvelope,
@@ -105,6 +106,11 @@ export class ApiClient {
   // ----- agents -----
   listAgents(): Promise<AgentDto[]> {
     return this.req("/api/agents");
+  }
+
+  /** Online Local Sidecar roster. Does not start or supervise a Sidecar. */
+  listDevices(): Promise<DeviceDto[]> {
+    return this.req("/api/devices");
   }
   recheckAgent(id: AgentDto["id"]): Promise<AgentDto> {
     return this.req(`/api/agents/${id}/recheck`, { method: "POST" });

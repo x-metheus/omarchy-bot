@@ -23,15 +23,15 @@ These paths are hints, not ownership walls. Follow the concepts when a change cr
 
 For shared work files, desktop/session sharing, application-state ownership, Changes UI, or resource-cost claims, read [ADR 0009](docs/adr/0009-share-work-files-isolate-bot-screens.md) and [the product boundary](docs/workspace-redesign.md#shared-workspace-and-plugin-boundary). They distinguish the accepted model from implementation gaps; historical specs and measurements do not override them.
 
-For frontend reuse, client-shell integration, Tauri planning, or client-versus-execution responsibilities, read [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md). Tauri is an accepted future client, not a replacement execution host or a second business-logic implementation. Reuse the current Web UI and daemon-facing behavior; keep execution on Omarchy; do not add native scaffolding now; do not treat Chromium tests as WebView proof.
+For frontend reuse, client-shell integration, Tauri planning, or client-versus-execution responsibilities, read [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md). Omarchy Bot is the named Bot Client (Tauri), not a replacement execution host, a second business-logic implementation, or a "Desktop" product. Reuse the current Web UI and daemon-facing HTTP/WebSocket behavior; keep the daemon bound to the Omarchy plugin; start a Local Sidecar only when Omarchy Bot is not talking to the daemon on the same machine; do not treat Chromium tests as WebView proof.
 
 ## Vocabulary
 
-Glossaries define terms. Product rules and acceptance live in [the product boundary](docs/workspace-redesign.md#shared-workspace-and-plugin-boundary), [ADR 0009](docs/adr/0009-share-work-files-isolate-bot-screens.md), [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md), and [the current implementation specification](.scratch/shared-workspace-desktop-boundary/spec.md).
+Glossaries define terms. Product rules and acceptance live in [the product boundary](docs/workspace-redesign.md#shared-workspace-and-plugin-boundary), [ADR 0009](docs/adr/0009-share-work-files-isolate-bot-screens.md), [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md), [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md), and [the current implementation specification](.scratch/shared-workspace-desktop-boundary/spec.md).
 
 | Term | Glossary |
 | --- | --- |
-| Bot, Bot Client, Thread, Shared Workspace | `docs/contexts/workspace/CONTEXT.md` |
+| Bot, Bot Client, Omarchy Bot, Local Sidecar, Thread, Shared Workspace | `docs/contexts/workspace/CONTEXT.md` |
 | Agent, Native Session | `docs/contexts/agent-integration/CONTEXT.md` |
 | Host Session, Bot Screen, Bot Desktop Session, Screen Projection | `docs/contexts/computer-control/CONTEXT.md` |
 

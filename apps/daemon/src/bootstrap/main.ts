@@ -21,6 +21,7 @@ import { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { PluginsService } from "../modules/plugins/plugins.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
+import { DeviceRoster } from "../modules/devices/deviceRoster.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
@@ -72,6 +73,8 @@ export async function main(options: MainOptions = {}): Promise<{
         turns.onAgentBotMessageRequest(agentId, request, mailbox),
       onAgentPluginRequest: (agentId, request, signal) =>
         turns.onAgentPluginRequest(agentId, request, signal),
+      onAgentLocalRequest: (agentId, request, signal) =>
+        turns.onAgentLocalRequest(agentId, request, devices, signal),
     },
     {
       agents: agentsDir,
@@ -137,7 +140,8 @@ export async function main(options: MainOptions = {}): Promise<{
     const worker = await supervisor.agentWorker("pi");
     return worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
   });
-  const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins);
+  const devices = new DeviceRoster();
+  const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices);
   mailbox = new MailboxService(db, events, threads, agents, turns);
   const computer = new ComputerBroker(
     db,
@@ -191,6 +195,7 @@ export async function main(options: MainOptions = {}): Promise<{
     computer,
     screens,
     projections,
+    devices,
     supervisor,
   };
   const http = startHttp(svc);

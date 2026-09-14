@@ -35,6 +35,11 @@ import {
   type HistoryPayload,
   type ProbePayload,
   type AgentPluginTurnContext,
+  type AgentLocalTurnContext,
+  type AgentLocalToolContext,
+  type AgentLocalToolOutput,
+  type AgentLocalToolResult,
+  type LocalActionName,
   type AgentPluginToolResult,
   type SessionOpenedPayload,
 } from "@omarchy-bot/agent-contract";
@@ -42,6 +47,7 @@ import { isSurfaceId, type ComputerAction } from "@omarchy-bot/domain";
 import { normalizeSessionEvent, toNormalizedMessages, type SessionRuntime } from "./normalize.ts";
 import { sdkVersion } from "./sdk-version.ts";
 import { createComputerTool } from "./computer-tool.ts";
+import { createLocalTool } from "./local-tool.ts";
 import { createBotMessageTool } from "./bot-message-tool.ts";
 import { thinkingCapabilityForProbe } from "./thinking-capability.ts";
 import { createPluginTools, disposePluginCalls, handlePluginResult } from "./plugin-tools.ts";
@@ -54,6 +60,7 @@ interface SessionEntry extends SessionRuntime {
   computer?: AgentComputerTurnContext;
   botMessage?: AgentBotMessageTurnContext;
   plugins?: AgentPluginTurnContext;
+  local?: AgentLocalTurnContext;
 }
 
 const sessions = new Map<string, SessionEntry>();
@@ -153,6 +160,66 @@ function handleBotMessageResult(result: AgentBotMessageToolResult): void {
   else pending.reject(new Error(result.error));
 }
 
+
+interface PendingLocalRequest {
+  resolve: (output: AgentLocalToolOutput) => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+const localRequests = new Map<string, PendingLocalRequest>();
+
+function requestLocal(
+  context: AgentLocalToolContext,
+  action: LocalActionName,
+  args: {
+    target?: "this-device" | string;
+    command?: string;
+    path?: string;
+    destination?: string;
+    query?: string;
+    contents?: string;
+    direction?: "to-workspace" | "from-workspace";
+  },
+  signal: AbortSignal | undefined,
+): Promise<AgentLocalToolOutput> {
+  signal?.throwIfAborted();
+  const requestId = crypto.randomUUID();
+  return new Promise<AgentLocalToolOutput>((resolve, reject) => {
+    const pending: PendingLocalRequest = { resolve, reject };
+    if (signal !== undefined) {
+      pending.signal = signal;
+      pending.onAbort = () => {
+        if (localRequests.delete(requestId)) {
+          writeJsonl({ type: "local.cancel", requestId });
+          reject(new Error("local tool call cancelled"));
+        }
+      };
+      signal.addEventListener("abort", pending.onAbort, { once: true });
+    }
+    localRequests.set(requestId, pending);
+    writeJsonl({
+      type: "local.request",
+      requestId,
+      context,
+      action,
+      ...args,
+    });
+  });
+}
+
+function handleLocalResult(result: AgentLocalToolResult): void {
+  const pending = localRequests.get(result.requestId);
+  if (pending === undefined) return;
+  localRequests.delete(result.requestId);
+  if (pending.signal !== undefined && pending.onAbort !== undefined) {
+    pending.signal.removeEventListener("abort", pending.onAbort);
+  }
+  if (result.ok === true) pending.resolve(result.payload);
+  else pending.reject(new Error(result.error));
+}
+
 let authAvailable: boolean | undefined;
 async function hasAuthenticatedModel(): Promise<boolean> {
   if (authAvailable !== undefined) return authAvailable;
@@ -221,6 +288,7 @@ function attachSubscription(entry: SessionEntry): void {
       delete entry.computer;
       delete entry.botMessage;
       delete entry.plugins;
+      delete entry.local;
       disposePluginCalls(sessionId);
       if (entry.aborted) emit({ type: "turn.cancelled", sessionId });
       else emit({ type: "turn.completed", sessionId });
@@ -241,6 +309,10 @@ async function openSession(
   const botMessageTool = createBotMessageTool(
     () => newEntry?.botMessage,
     { request: requestBotMessage },
+  );
+  const localTool = createLocalTool(
+    () => newEntry?.local,
+    { request: requestLocal },
   );
   const sessionId = `s_${crypto.randomUUID()}`;
   const pluginTools = createPluginTools(options.plugins, () => newEntry?.plugins);
@@ -284,7 +356,7 @@ async function openSession(
     modelRuntime: rt,
     ...(model !== undefined ? { model } : {}),
     resourceLoader: loader,
-    customTools: [computerTool, botMessageTool, ...pluginTools],
+    customTools: [computerTool, botMessageTool, localTool, ...pluginTools],
   });
 
   const nativeSessionId = session.sessionFile ?? `mem:${sessionId}`;
@@ -400,6 +472,16 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         if (cmd.plugins !== undefined && (cmd.plugins.botId !== entry.botId || cmd.plugins.workerSessionId !== cmd.sessionId || cmd.plugins.turnId !== cmd.turnId)) {
           throw new Error("Plugin tool binding must match the Agent command");
         }
+        if (
+          cmd.local !== undefined
+          && (
+            cmd.local.botId !== entry.botId
+            || cmd.local.workerSessionId !== cmd.sessionId
+            || cmd.local.turnId !== cmd.turnId
+          )
+        ) {
+          throw new Error("local tool binding must match the Agent command");
+        }
         const images =
           cmd.message.attachments && cmd.message.attachments.length > 0
             ? await Promise.all(
@@ -426,6 +508,8 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         else entry.botMessage = cmd.botMessage;
         if (cmd.plugins === undefined) delete entry.plugins;
         else entry.plugins = cmd.plugins;
+        if (cmd.local === undefined) delete entry.local;
+        else entry.local = cmd.local;
         entry.running = true;
         entry.finished = false;
         entry.aborted = false;
@@ -437,6 +521,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
             delete entry.computer;
             delete entry.botMessage;
             delete entry.plugins;
+            delete entry.local;
             disposePluginCalls(entry.sessionId);
             emit({ type: "error", sessionId: entry.sessionId, message: String(err), retryable: false });
           });
@@ -511,6 +596,8 @@ await readJsonl(
         handleBotMessageResult(msg as AgentBotMessageToolResult);
       } else if (msg.type === "plugin.result") {
         handlePluginResult(msg as AgentPluginToolResult);
+      } else if (msg.type === "local.result") {
+        handleLocalResult(msg as AgentLocalToolResult);
       } else {
         void handleMessage(msg as AgentCommand);
       }
@@ -524,8 +611,12 @@ await readJsonl(
     for (const pending of botMessageRequests.values()) {
       pending.reject(new Error("daemon connection closed during Bot message tool call"));
     }
+    for (const pending of localRequests.values()) {
+      pending.reject(new Error("daemon connection closed during local tool call"));
+    }
     botMessageRequests.clear();
     computerRequests.clear();
+    localRequests.clear();
     process.exit(0);
   },
 );

@@ -13,6 +13,7 @@
  *   process-only     completes with Thinking, Tool, and Native Event records but no Response
  *   attachment-echo validates the daemon's managed worker paths and echoes metadata/content
  *   computer:<action> invokes the daemon-owned Bot Screen tool bridge
+ *   local.run:<command> invokes the daemon-owned Local Sidecar tool bridge
  *
  *   send_bot_message:<targetBotId>:<text>[:retry] invokes the daemon-owned mailbox bridge
  *   send_bot_message_after_release:<file>:<targetBotId>:<text> delays that bridge for readiness tests
@@ -219,6 +220,10 @@ const respondError = (requestId: string, error: string): void => {
   write({ requestId, ok: false, error });
 };
 
+const localRequests = new Map<string, {
+  resolve: (value: { deviceId: string; hostname: string; text: string; exitCode?: number }) => void;
+  reject: (error: Error) => void;
+}>();
 const computerRequests = new Map<string, {
   resolve: (payload: unknown) => void;
   reject: (error: Error) => void;
@@ -265,6 +270,73 @@ async function requestComputer(
     action,
   });
   return pending.promise;
+}
+
+
+function requestLocal(
+  context: BotMessageTurnContext,
+  toolCallId: string,
+  action: "run" | "search" | "read" | "write" | "transfer",
+  args: {
+    target?: string;
+    command?: string;
+    path?: string;
+    destination?: string;
+    query?: string;
+    contents?: string;
+    direction?: "to-workspace" | "from-workspace";
+  } = {},
+): Promise<{ deviceId: string; hostname: string; text: string; exitCode?: number }> {
+  const requestId = crypto.randomUUID();
+  const pending = Promise.withResolvers<{ deviceId: string; hostname: string; text: string; exitCode?: number }>();
+  localRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
+  write({
+    type: "local.request",
+    requestId,
+    context: { ...context, toolCallId },
+    action,
+    ...args,
+  });
+  return pending.promise;
+}
+
+function parseLocalDirective(text: string): {
+  action: "run" | "search" | "read" | "write" | "transfer";
+  target?: string;
+  command?: string;
+  path?: string;
+  destination?: string;
+  query?: string;
+  contents?: string;
+  direction?: "to-workspace" | "from-workspace";
+} | undefined {
+  if (!text.startsWith("local.")) return undefined;
+  const body = text.slice("local.".length);
+  const at = body.match(/^(run|search|read|write|transfer)@(dev_[0-9a-f]{32}|this-device):(.*)$/);
+  const plain = body.match(/^(run|search|read|write|transfer):(.*)$/);
+  const matched = at ?? plain;
+  if (matched === null) return undefined;
+  const action = matched[1] as "run" | "search" | "read" | "write" | "transfer";
+  const target = at === null ? undefined : at[2];
+  const rest = at === null ? plain![2]! : at[3]!;
+  if (action === "run") return { action, command: rest, ...(target !== undefined ? { target } : {}) };
+  if (action === "search") return { action, query: rest, ...(target !== undefined ? { target } : {}) };
+  if (action === "read") return { action, path: rest, ...(target !== undefined ? { target } : {}) };
+  if (action === "write") {
+    const split = rest.indexOf(":");
+    const path = split < 0 ? rest : rest.slice(0, split);
+    const contents = split < 0 ? "" : rest.slice(split + 1);
+    return { action, path, contents, ...(target !== undefined ? { target } : {}) };
+  }
+  const parts = rest.split(":");
+  const direction = parts[0] === "from-workspace" ? "from-workspace" as const : "to-workspace" as const;
+  return {
+    action,
+    direction,
+    path: parts[1] ?? "",
+    destination: parts.slice(2).join(":"),
+    ...(target !== undefined ? { target } : {}),
+  };
 }
 
 function cancelComputerRequest(requestId: string): void {
@@ -324,6 +396,14 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       if (pending === undefined) break;
       computerRequests.delete(msg.requestId!);
       if (msg.ok === true) pending.resolve(msg.payload);
+      else pending.reject(new Error(String(msg.error)));
+      break;
+    }
+    case "local.result": {
+      const pending = msg.requestId === undefined ? undefined : localRequests.get(msg.requestId);
+      if (pending === undefined) break;
+      localRequests.delete(msg.requestId!);
+      if (msg.ok === true) pending.resolve(msg.payload as { deviceId: string; hostname: string; text: string; exitCode?: number });
       else pending.reject(new Error(String(msg.error)));
       break;
     }
@@ -424,6 +504,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         message: command.message,
         computer: msg.computer,
         botMessage: msg.botMessage,
+        local: msg.local,
       });
       const { sessionId, message } = command;
       let text = message.text;
@@ -594,6 +675,64 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             return;
           }
           write({ type: "event", event: { type: "turn.completed", sessionId } });
+          return;
+        }
+
+        const localDirective = parseLocalDirective(text);
+        if (localDirective !== undefined) {
+          const binding = botMessageTurnContext(msg.local);
+          const toolCallId = `local-${command.turnId}`;
+          const safeTarget = redactToolErrorSummary(
+            localDirective.command ?? localDirective.path ?? localDirective.query ?? localDirective.action,
+          );
+          write({
+            type: "event",
+            event: {
+              type: "tool.started",
+              sessionId,
+              id: toolCallId,
+              name: "local",
+              status: "running",
+              target: safeTarget,
+            },
+          });
+          respond(msg.requestId!, { accepted: true });
+          try {
+            if (binding === undefined) throw new Error("local tool binding missing");
+            const { action, ...args } = localDirective;
+            const result = await requestLocal(binding, toolCallId, action, args);
+            write({
+              type: "event",
+              event: {
+                type: "tool.completed",
+                sessionId,
+                id: toolCallId,
+                name: "local",
+                status: "completed",
+                target: `${result.hostname} ${safeTarget}`,
+              },
+            });
+            emitResponse(sessionId, command.turnId, result.text);
+            write({ type: "event", event: { type: "turn.completed", sessionId } });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            write({
+              type: "event",
+              event: {
+                type: "tool.completed",
+                sessionId,
+                id: toolCallId,
+                name: "local",
+                status: "error",
+                target: safeTarget,
+                errorSummary: redactToolErrorSummary(message),
+              },
+            });
+            write({
+              type: "event",
+              event: { type: "error", sessionId, message, retryable: false },
+            });
+          }
           return;
         }
         if (text.startsWith("computer:")) {

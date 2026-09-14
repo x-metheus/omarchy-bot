@@ -10,6 +10,9 @@ import {
   isAgentPluginToolRequest,
   type AgentPluginToolRequest,
   type AgentPluginToolOutput,
+  isAgentLocalToolRequest,
+  type AgentLocalToolRequest,
+  type AgentLocalToolOutput,
 } from "@omarchy-bot/agent-contract";
 import { stderr } from "@omarchy-bot/agent-contract";
 
@@ -35,6 +38,10 @@ export interface WorkerClientOptions {
     request: AgentPluginToolRequest,
     signal: AbortSignal,
   ) => Promise<AgentPluginToolOutput>;
+  onLocalRequest?: (
+    request: AgentLocalToolRequest,
+    signal: AbortSignal,
+  ) => Promise<AgentLocalToolOutput>;
 }
 
 interface Pending {
@@ -162,6 +169,21 @@ export class WorkerClient {
       void this.#handleBotMessageRequest(msg);
       return;
     }
+    if (msg?.type === "local.request") {
+      if (!isAgentLocalToolRequest(msg)) {
+        if (typeof msg.requestId === "string" && this.alive) {
+          this.write({
+            type: "local.result",
+            requestId: msg.requestId,
+            ok: false,
+            error: "invalid local tool request",
+          });
+        }
+        return;
+      }
+      void this.#handleLocalRequest(msg);
+      return;
+    }
     if (msg?.type === "plugin.request") {
       if (!isAgentPluginToolRequest(msg)) {
         if (typeof msg.requestId === "string" && this.alive) this.write({ type: "plugin.result", requestId: msg.requestId, ok: false, error: "invalid plugin tool request" });
@@ -179,6 +201,10 @@ export class WorkerClient {
       return;
     }
     if (msg?.type === "bot-message.cancel" && typeof msg.requestId === "string") {
+      this.#incoming.get(msg.requestId)?.abort("tool call cancelled");
+      return;
+    }
+    if (msg?.type === "local.cancel" && typeof msg.requestId === "string") {
       this.#incoming.get(msg.requestId)?.abort("tool call cancelled");
       return;
     }
@@ -259,6 +285,34 @@ export class WorkerClient {
       if (this.alive) this.write({ type: "plugin.result", requestId: request.requestId, ok: false, error: error instanceof Error ? error.message : String(error) });
     } finally {
       if (this.#incoming.get(request.requestId) === controller) this.#incoming.delete(request.requestId);
+    }
+  }
+
+  async #handleLocalRequest(request: AgentLocalToolRequest): Promise<void> {
+    if (this.#incoming.has(request.requestId)) {
+      if (this.alive) this.write({ type: "local.result", requestId: request.requestId, ok: false, error: "duplicate local request identity" });
+      return;
+    }
+    const controller = new AbortController();
+    this.#incoming.set(request.requestId, controller);
+    try {
+      if (this.opts.onLocalRequest === undefined) {
+        throw new Error(`${this.opts.name} cannot route local tools`);
+      }
+      const payload = await this.opts.onLocalRequest(request, controller.signal);
+      if (controller.signal.aborted) throw new Error("local tool call cancelled");
+      if (this.alive) {
+        this.write({ type: "local.result", requestId: request.requestId, ok: true, payload });
+      }
+    } catch (error) {
+      if (this.alive) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.write({ type: "local.result", requestId: request.requestId, ok: false, error: message });
+      }
+    } finally {
+      if (this.#incoming.get(request.requestId) === controller) {
+        this.#incoming.delete(request.requestId);
+      }
     }
   }
 

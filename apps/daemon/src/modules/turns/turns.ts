@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import {
@@ -11,6 +13,8 @@ import {
   type WorkerUserMessage,
   type AgentPluginToolRequest,
   type AgentPluginToolOutput,
+  type AgentLocalToolRequest,
+  type AgentLocalToolOutput,
 } from "@omarchy-bot/agent-contract";
 import type { SendResultDto, TurnDto } from "@omarchy-bot/protocol";
 import type { AgentId, SurfaceId, TurnStatus } from "@omarchy-bot/domain";
@@ -24,8 +28,9 @@ import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "../bots/bots.ts";
 import type { ComputerBroker } from "../computer/broker.ts";
 import type { MailboxService } from "../mailbox/mailbox.ts";
-import { resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
+import { confinedWorkspacePath, resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
 import type { PluginsService, PluginLease } from "../plugins/plugins.ts";
+import type { DeviceRoster } from "../devices/deviceRoster.ts";
 
 interface TurnContext {
   turnId: string;
@@ -36,6 +41,7 @@ interface TurnContext {
   computerToolSurfaces: Map<string, SurfaceId>;
   startedComputerToolCalls: Set<string>;
   startedBotMessageToolCalls: Set<string>;
+  startedLocalToolCalls: Set<string>;
   pluginLease?: PluginLease;
   startedPluginToolCalls: Map<string, string>;
   dispatchedPluginToolCalls: Set<string>;
@@ -86,8 +92,9 @@ export class TurnService {
     private readonly bots: BotsService,
     private readonly attachments: AttachmentsService,
     private readonly supervisor: Supervisor,
-    private readonly cfg: { turnTimeoutMs: number },
+    private readonly cfg: { turnTimeoutMs: number; sharedWorkspaceDir: string },
     private readonly plugins: PluginsService,
+    private readonly devices: DeviceRoster,
   ) {}
 
   #turnDto(id: string): TurnDto | undefined {
@@ -332,6 +339,7 @@ export class TurnService {
       computerToolSurfaces: new Map(),
       startedComputerToolCalls: new Set(),
       startedBotMessageToolCalls: new Set(),
+      startedLocalToolCalls: new Set(),
       ...(pluginLease ? { pluginLease } : {}),
       startedPluginToolCalls: new Map(),
       dispatchedPluginToolCalls: new Set(),
@@ -370,6 +378,9 @@ export class TurnService {
         workerSessionId: opened.sessionId,
       },
       ...(pluginLease ? { plugins: { botId, turnId, workerSessionId: opened.sessionId } } : {}),
+      ...(this.devices.list().length > 0
+        ? { local: { botId, turnId, workerSessionId: opened.sessionId } }
+        : {}),
     }, 60_000);
     const failSend = (err: unknown): void => {
       if (this.#turns.get(opened.sessionId) !== ctx) return;
@@ -525,6 +536,85 @@ export class TurnService {
       request.targetBotId,
       request.text,
     );
+  }
+
+  /** Fan a Turn-bound `local` request to one online Sidecar; never execute it here. */
+  async onAgentLocalRequest(
+    agentId: AgentId,
+    request: AgentLocalToolRequest,
+    devices: DeviceRoster,
+    signal: AbortSignal,
+  ): Promise<AgentLocalToolOutput> {
+    const requested = request.context;
+    const active = this.#turns.get(requested.workerSessionId);
+    if (
+      active === undefined
+      || active.agentId !== agentId
+      || active.botId !== requested.botId
+      || active.turnId !== requested.turnId
+      || active.workerSessionId !== requested.workerSessionId
+    ) {
+      throw new Error("local tool context is stale or mismatched");
+    }
+    if (requested.toolCallId.length === 0) {
+      throw new Error("local tool context has no tool-call identity");
+    }
+    if (!active.startedLocalToolCalls.has(requested.toolCallId)) {
+      throw new Error("local tool context has no active native tool call");
+    }
+    signal.throwIfAborted();
+    const device = devices.resolve(request.target);
+    const needed =
+      request.action === "run" ? "shell"
+      : request.action === "search" ? "search"
+      : request.action === "transfer" ? "transfer"
+      : "files";
+    if (!device.capabilities.includes(needed)) {
+      throw new Error(`Local Sidecar ${device.hostname} cannot ${request.action}`);
+    }
+    if (request.action === "search" && (request.query === "/" || request.path === "/")) {
+      throw new Error("Local Sidecar search cannot scan /");
+    }
+    const job = this.#workspaceTransfer(request);
+    signal.throwIfAborted();
+    const result = await devices.dispatch({
+      deviceId: device.id,
+      action: request.action,
+      botId: active.botId,
+      turnId: active.turnId,
+      ...(request.command !== undefined ? { command: request.command } : {}),
+      ...(request.path !== undefined ? { path: request.path } : {}),
+      ...(request.destination !== undefined ? { destination: request.destination } : {}),
+      ...(request.query !== undefined ? { query: request.query } : {}),
+      ...(job.contents !== undefined ? { contents: job.contents } : {}),
+      ...(request.direction !== undefined ? { direction: request.direction } : {}),
+    });
+    signal.throwIfAborted();
+    if (request.action === "transfer" && request.direction === "to-workspace") {
+      if (request.destination === undefined) {
+        throw new Error("transfer into Shared Workspace requires an explicit destination path");
+      }
+      const dest = confinedWorkspacePath(request.destination, this.cfg.sharedWorkspaceDir);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, result.text);
+    }
+    return {
+      deviceId: result.deviceId,
+      hostname: result.hostname,
+      text: result.text,
+      ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+    };
+  }
+
+  #workspaceTransfer(request: AgentLocalToolRequest): { contents?: string } {
+    if (request.action !== "transfer" || request.direction !== "from-workspace") {
+      return request.contents === undefined ? {} : { contents: request.contents };
+    }
+    if (request.path === undefined || request.destination === undefined) {
+      throw new Error("transfer onto a Sidecar requires an explicit destination path");
+    }
+    const source = confinedWorkspacePath(request.path, this.cfg.sharedWorkspaceDir);
+    return { contents: readFileSync(source, "utf8") };
   }
 
   async onAgentPluginRequest(agentId: AgentId, request: AgentPluginToolRequest, signal: AbortSignal): Promise<AgentPluginToolOutput> {
@@ -715,6 +805,9 @@ export class TurnService {
         if (event.name === "send_bot_message") {
           ctx.startedBotMessageToolCalls.add(event.id);
         }
+        if (event.name === "local") {
+          ctx.startedLocalToolCalls.add(event.id);
+        }
         if (ctx.pluginLease?.snapshot.tools.some((tool) => tool.name === event.name)) {
           ctx.startedPluginToolCalls.set(event.id, event.name);
         }
@@ -735,6 +828,7 @@ export class TurnService {
         if (event.type === "tool.completed") {
           ctx.startedComputerToolCalls.delete(event.id);
           ctx.startedBotMessageToolCalls.delete(event.id);
+          ctx.startedLocalToolCalls.delete(event.id);
           ctx.startedPluginToolCalls.delete(event.id);
         }
         break;

@@ -12,6 +12,11 @@ import type {
   AgentBotMessageToolRequest,
   AgentBotMessageTurnContext,
 } from "./bot-message-protocol.ts";
+import type {
+  AgentLocalToolCancel,
+  AgentLocalToolRequest,
+  AgentLocalTurnContext,
+} from "./local-protocol.ts";
 
 /**
  * Normalized agent events (agents-integration.md §2). Adapters may only emit a
@@ -126,6 +131,7 @@ export type AgentCommand =
       computer: AgentComputerTurnContext;
       botMessage?: AgentBotMessageTurnContext;
       plugins?: AgentPluginTurnContext;
+      local?: AgentLocalTurnContext;
     }
   | { type: "message.steer"; requestId: string; sessionId: string; text: string }
   | { type: "turn.abort"; requestId: string; sessionId: string }
@@ -194,6 +200,8 @@ export type WorkerOutbound =
   | AgentComputerToolCancel
   | AgentBotMessageToolRequest
   | AgentBotMessageToolCancel
+  | AgentLocalToolRequest
+  | AgentLocalToolCancel
   | AgentPluginToolRequest
   | { type: "plugin.cancel"; requestId: string }
   | AgentResult;

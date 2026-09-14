@@ -27,6 +27,7 @@ import { handleDictationRequest } from "./dictationRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import { handlePluginRequest } from "./pluginRoutes.ts";
 import type { PluginsService } from "../modules/plugins/plugins.ts";
+import type { DeviceRoster } from "../modules/devices/deviceRoster.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -50,6 +51,7 @@ export interface DaemonServices {
   computer: ComputerBroker;
   screens: BotScreenManager;
   projections: ScreenProjectionService;
+  devices: DeviceRoster;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
   supervisor: Supervisor;
 }
@@ -69,7 +71,13 @@ interface ProjectionWsData {
   reservation: ProjectionSocketReservation;
 }
 
-type WsData = EventsWsData | ProjectionWsData;
+interface DeviceWsData {
+  kind: "device";
+  svc: DaemonServices;
+  deviceId?: string;
+}
+
+type WsData = EventsWsData | ProjectionWsData | DeviceWsData;
 
 /** Parse a JSON body with zod; 400 with the first issue on failure. */
 async function parseBody<T>(req: Request, schema: z.ZodType<T>): Promise<T> {
@@ -100,6 +108,15 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       const upgraded = server.upgrade(req, { data: { kind: "events", svc } satisfies EventsWsData });
       if (upgraded) return undefined as unknown as Response;
       return json({ error: "expected websocket upgrade" }, 426);
+    }
+
+    if (pathname === "/api/devices") {
+      if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        const upgraded = server.upgrade(req, { data: { kind: "device", svc } satisfies DeviceWsData });
+        if (upgraded) return undefined as unknown as Response;
+        return json({ error: "expected websocket upgrade" }, 426);
+      }
+      if (req.method === "GET") return json(svc.devices.list());
     }
 
     const projectionSocket = pathname.match(/^\/api\/computer\/projection\/(control|rfb)$/);
@@ -265,6 +282,29 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
           data.svc.projections.socketMessage(data.reservation, message);
           return;
         }
+        if (data.kind === "device") {
+          let frame: { type?: string };
+          try {
+            frame = JSON.parse(String(raw)) as { type?: string };
+          } catch {
+            return;
+          }
+          if (frame.type === "register") {
+            const result = data.svc.devices.register(ws, frame);
+            if (!result.ok) {
+              ws.send(JSON.stringify({ type: "error", error: result.error }));
+              return;
+            }
+            data.deviceId = result.device.id;
+            ws.send(JSON.stringify({ type: "registered", deviceId: result.device.id }));
+            return;
+          }
+          if (frame.type === "local.result") {
+            data.svc.devices.complete(frame);
+            return;
+          }
+          return;
+        }
         let msg: { type: string; lastCursor?: number };
         try {
           msg = JSON.parse(String(raw));
@@ -286,6 +326,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       close(ws) {
         const data = ws.data;
         if (data.kind === "events") data.sub?.();
+        else if (data.kind === "device") data.svc.devices.disconnect(ws, data.deviceId);
         else data.svc.projections.socketClosed(data.reservation);
       },
     },
