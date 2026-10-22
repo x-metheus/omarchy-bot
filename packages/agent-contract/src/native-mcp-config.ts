@@ -25,6 +25,7 @@ const NativeMcpSecret = z.object({
   field: z.string(),
   value: z.string(),
 });
+const NativeMcpServiceToken = z.object({ url: z.string(), token: z.string() });
 const NativeMcpEntry = z.object({
   id: z.string(),
   pi: z.string().nullable(),
@@ -38,7 +39,7 @@ export const NativeMcpMetadata = z.object({
   entries: z.record(NativeMcpEntry),
   adapterPackage: z.string().optional(),
   packageRevisions: z.record(z.string()).default({}),
-  serviceTokens: z.record(z.object({ url: z.string(), token: z.string() })).default({}),
+  serviceTokens: z.record(NativeMcpServiceToken).default({}),
   secrets: z.record(NativeMcpSecret).default({}),
 });
 export type NativeMcpMetadata = z.infer<typeof NativeMcpMetadata>;
@@ -69,8 +70,12 @@ export function readNativeMcpMetadata(value: unknown): NativeMcpMetadata {
     const secret = NativeMcpSecret.safeParse(raw);
     if (secret.success) parsed.secrets[key] = secret.data;
   }
-  const tokens = NativeMcpMetadata.shape.serviceTokens.safeParse(value.serviceTokens ?? {});
-  if (tokens.success) parsed.serviceTokens = tokens.data;
+  if (record(value.serviceTokens)) {
+    for (const [name, raw] of Object.entries(value.serviceTokens)) {
+      const token = NativeMcpServiceToken.safeParse(raw);
+      if (token.success) parsed.serviceTokens[name] = token.data;
+    }
+  }
   return parsed;
 }
 

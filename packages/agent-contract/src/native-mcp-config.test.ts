@@ -60,10 +60,11 @@ test("a partial secret or entry is skipped and a valid owner still receives its 
       broken: { id: 1 },
       owned: { id: "mcp_owned", pi: null, codex: null, owner: { accountId: "acct", serviceId: "svc" } },
     },
-    serviceTokens: { owned: { url: "https://mcp.example/rpc", token: "svc-token" } },
+    serviceTokens: { broken: { token: 1 }, owned: { url: "https://mcp.example/rpc", token: "svc-token" } },
   });
   expect(Object.keys(metadata.entries)).toEqual(["owned"]);
   expect(Object.keys(metadata.secrets)).toEqual([envKey]);
+  expect(Object.keys(metadata.serviceTokens)).toEqual(["owned"]);
   const config: { mcpServers: Record<string, { command?: string; args?: string[]; url?: string; env?: Record<string, string>; headers?: Record<string, string> }> } = {
     mcpServers: {
       docs: { command: "node", args: ["server.mjs"], env: { TOKEN: "${TOKEN}" } },
