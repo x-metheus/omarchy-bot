@@ -288,3 +288,15 @@ test("ordinary Creator Python cache files do not masquerade as local source modi
   await writeFile(path.join(path.dirname(creator.path!), "scripts", "local-customization.py"), "print('intentional edit')\n");
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.find((skill) => skill.id === creator.id)?.modified).toBe(true);
 });
+
+test("disabling a skill reads enabled from the request body", async () => {
+  const h = await startPlugins();
+  const directory = path.join(h.home, ".omarchy-bot", "workspace", ".agents", "skills", "toggle-check");
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(directory, "SKILL.md"), "---\nname: toggle-check\ndescription: Toggle me\n---\nStay disabled after the patch.\n");
+  const before = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  const skill = before.skills.find((entry) => entry.name === "toggle-check");
+  if (!skill) throw new Error("toggle-check was not discovered");
+  expect((await apiStatus(h, "PATCH", `/api/plugins/skills/${encodeURIComponent(skill.id)}`, { enabled: false })).status).toBe(204);
+  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.find((entry) => entry.id === skill.id)?.enabled).toBe(false);
+});

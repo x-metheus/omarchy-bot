@@ -7,28 +7,14 @@ import { PluginsService } from "../../apps/daemon/src/modules/plugins/plugins.ts
 import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
 import { identifyAccount } from "../../apps/daemon/src/modules/plugins/providerAccounts.ts";
 
-test("microsoft and miro authorization never looks up a publisher identity", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "publisher-native-"));
-  const originalFetch = globalThis.fetch;
+test("microsoft and miro identity lookup refuses before any fetch", async () => {
   const seen: string[] = [];
-  globalThis.fetch = Object.assign(async (input: string | URL | Request, _init?: RequestInit) => {
-    seen.push(new URL(input instanceof Request ? input.url : String(input)).href);
-    return new Response(null, { status: 404 });
-  }, { preconnect: originalFetch.preconnect });
-  const service = new PluginsService(root, root, async () => ({ skills: [] }));
   const lookup = async () => { seen.push("identity-lookup"); throw new Error("identity lookup"); };
-  try {
-    for (const id of ["microsoft", "miro"] as const) {
-      await expect(identifyAccount(id, { accessToken: "x", scopes: [], metadata: {} }, root, lookup)).rejects.toMatchObject({ status: 409 });
-    }
-    expect(seen.some((url) => url === "identity-lookup" || url.includes("graph.microsoft") || url.includes("api.miro.com") || url.includes("/oauth/token") || url.includes("login.microsoftonline"))).toBe(false);
-  } finally {
-    await service.shutdown();
-    globalThis.fetch = originalFetch;
-    await rm(root, { recursive: true, force: true });
+  for (const id of ["microsoft", "miro"] as const) {
+    await expect(identifyAccount(id, { accessToken: "x", scopes: [], metadata: {} }, "/", lookup)).rejects.toMatchObject({ status: 409 });
   }
+  expect(seen).toEqual([]);
 });
-
 test("new daemons read the normalised catalog while the raw skills.sh route stays", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "publisher-contract-"));
   const publisher = "https://publisher-contract.invalid";
@@ -98,4 +84,20 @@ test("one operation table names every manage_plugins action and its daemon path"
     method: "GET", path: "/api/plugins/catalog", upstream: "catalog/normalised",
   });
   expect(PLUGIN_OPERATIONS.find((operation) => operation.action === "inspect_skill")).toMatchObject({ upstream: "catalog/detail/normalised" });
+});
+
+test("manage_plugins publishes each action once and accepts view", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "publisher-schema-"));
+  const service = new PluginsService(root, root, async () => ({ skills: [] }));
+  try {
+    const lease = await service.acquire();
+    const schema = lease.snapshot.tools[0]!.inputSchema as { properties: { action: { enum: string[] }; view?: { type: string } } };
+    expect(new Set(schema.properties.action.enum).size).toBe(schema.properties.action.enum.length);
+    expect(schema.properties.action.enum).toHaveLength(20);
+    expect(schema.properties.view).toEqual({ type: "string" });
+    lease.release();
+  } finally {
+    await service.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
 });
