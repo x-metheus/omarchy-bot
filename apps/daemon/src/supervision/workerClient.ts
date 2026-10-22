@@ -335,6 +335,7 @@ export class WorkerClient {
     const stdin = (this.#proc as unknown as { stdin?: { write: (s: string) => void; flush?: () => void } } | undefined)?.stdin;
     if (!stdin) throw new Error(`${this.opts.name} worker not running`);
     stdin.write(JSON.stringify(obj) + "\n");
+    stdin.flush?.();
   }
 
   async stop(graceMs = 3000): Promise<void> {

@@ -45,6 +45,7 @@ interface TurnContext {
   pluginLease?: PluginLease;
   startedPluginToolCalls: Map<string, string>;
   dispatchedPluginToolCalls: Set<string>;
+  dispatchedLocalToolCalls: Set<string>;
   closeSession(): void;
   turnTimeout: ReturnType<typeof setTimeout>;
   /** Present only when cancellation came from the explicit abort path. */
@@ -343,6 +344,7 @@ export class TurnService {
       ...(pluginLease ? { pluginLease } : {}),
       startedPluginToolCalls: new Map(),
       dispatchedPluginToolCalls: new Set(),
+      dispatchedLocalToolCalls: new Set(),
       closeSession: () => {
         if (worker.alive) void worker.request({ type: "session.close", sessionId: opened.sessionId }, 5_000).catch(() => {
           this.events.append("agent", agentId, "agent.error", { agentId, message: "Could not close an idle native session", retryable: false });
@@ -562,6 +564,10 @@ export class TurnService {
     if (!active.startedLocalToolCalls.has(requested.toolCallId)) {
       throw new Error("local tool context has no active native tool call");
     }
+    if (active.dispatchedLocalToolCalls.has(requested.toolCallId)) {
+      throw new Error("local tool call was already dispatched");
+    }
+    active.dispatchedLocalToolCalls.add(requested.toolCallId);
     signal.throwIfAborted();
     const device = devices.resolve(request.target);
     const needed =
@@ -829,6 +835,7 @@ export class TurnService {
           ctx.startedComputerToolCalls.delete(event.id);
           ctx.startedBotMessageToolCalls.delete(event.id);
           ctx.startedLocalToolCalls.delete(event.id);
+          ctx.dispatchedLocalToolCalls.delete(event.id);
           ctx.startedPluginToolCalls.delete(event.id);
         }
         break;

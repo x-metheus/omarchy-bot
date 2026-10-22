@@ -1,7 +1,7 @@
 # 02: Dispatch `local` once per Tool Call
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** claimed
 **Blocked by:** —
 
 **What to build:** `computer` and `plugin` refuse a second dispatch for the same `toolCallId` (`apps/daemon/src/modules/turns/turns.ts:496, 626`); `local` only checks that the Tool Call started (`turns.ts:562`), so repeated `local.request`s each create a Sidecar job.
