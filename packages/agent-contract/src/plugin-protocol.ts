@@ -7,7 +7,6 @@ export interface AgentPluginToolDefinition {
 /** Immutable configuration selected before a turn opens its native session. No credentials. */
 export interface AgentPluginSnapshot {
   revision: number;
-  skills: { name: string; filePath: string }[];
   tools: AgentPluginToolDefinition[];
   diagnostics: string[];
 }
@@ -32,8 +31,20 @@ export interface AgentPluginToolOutput {
 export type AgentPluginToolResult =
   | { type: "plugin.result"; requestId: string; ok: true; payload: AgentPluginToolOutput }
   | { type: "plugin.result"; requestId: string; ok: false; error: string };
+export interface NativeMcpStatus {
+  name: string;
+  configurationRevision: string;
+  status: "connected" | "cached" | "failed" | "needs-auth" | "not-connected" | "disabled";
+  toolCount: number;
+  disabled: boolean;
+}
+export interface NativeMcpControlResult {
+  servers: NativeMcpStatus[];
+  result?: Record<string, unknown>;
+}
 export interface NativePluginResources {
   skills: { name: string; description: string; path: string }[];
+  mcp?: NativeMcpStatus[];
 }
 
 const REQUEST_KEYS: Record<string, true> = { type: true, requestId: true, context: true, name: true, arguments: true };

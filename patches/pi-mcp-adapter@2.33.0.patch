@@ -1,0 +1,99 @@
+diff --git a/node_modules/pi-mcp-adapter/.bun-tag-83b1df48863ec897 b/.bun-tag-83b1df48863ec897
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/pi-mcp-adapter/.bun-tag-fab1e7a1e727130c b/.bun-tag-fab1e7a1e727130c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/pi-mcp-adapter/mcp-refresh-lock-helper.cjs b/mcp-refresh-lock-helper.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..60bb56ab82f83ac5e8c26fcf8348e996f6583690
+--- /dev/null
++++ b/mcp-refresh-lock-helper.cjs
+@@ -0,0 +1,12 @@
++'use strict';
++const { tryLock } = require('fs-native-extensions');
++const { setTimeout: delay } = require('node:timers/promises');
++
++// The parent owns fd 3's open description. EOF means it exited or cancelled
++// before acquisition; do not leave an orphan waiting for a discarded request.
++process.stdin.resume();
++process.stdin.once('end', () => process.exit(1));
++(async () => {
++  while (!tryLock(3)) await delay(50 + Math.floor(Math.random() * 50));
++  process.exit(0);
++})().catch(() => process.exit(1));
+diff --git a/mcp-refresh-lock.ts b/mcp-refresh-lock.ts
+index b07b0a37a7c095424851e7348e830d245a1bbe8c..2ee2d234f913f157a321e1fa195e08de17c8cf52 100644
+--- a/mcp-refresh-lock.ts
++++ b/mcp-refresh-lock.ts
+@@ -4,6 +4,8 @@ import { createRequire } from "node:module";
+ import { join } from "node:path";
+ import { userInfo } from "node:os";
+ import { setTimeout as delay } from "node:timers/promises";
++import { spawn } from "node:child_process";
++import { fileURLToPath } from "node:url";
+ 
+ const require = createRequire(import.meta.url);
+ 
+@@ -22,7 +24,6 @@ export async function acquireRefreshLock(
+   signal?: AbortSignal,
+ ): Promise<RefreshLock> {
+   signal?.throwIfAborted();
+-  const { tryLock } = require("fs-native-extensions") as { tryLock(fd: number): boolean };
+   const root = join(baseDir, "refresh-locks-v2");
+   mkdirSync(root, { recursive: true, mode: 0o700 });
+   const key = createHash("sha256").update(serverName, "utf8").digest("hex");
+@@ -35,8 +36,26 @@ export async function acquireRefreshLock(
+     closeSync(fd);
+   };
+   try {
+-    while (!tryLock(fd)) {
+-      await delay(50 + Math.floor(Math.random() * 50), undefined, { signal });
++    if (process.versions.bun && process.platform === "linux") {
++      // Bun cannot load this addon's libuv fd bridge. Linux OFD locks belong
++      // to the shared open description, so the parent retains the acquired
++      // lock after the Node helper exits, until release closes its own fd.
++      await new Promise<void>((resolve, reject) => {
++        const child = spawn("node", [fileURLToPath(new URL("./mcp-refresh-lock-helper.cjs", import.meta.url))], {
++          stdio: ["pipe", "ignore", "ignore", fd], ...(signal ? { signal } : {}),
++        });
++        child.once("error", reject);
++        child.once("exit", (code) => {
++          child.stdin?.destroy();
++          if (code === 0) resolve();
++          else reject(new Error("Native OAuth refresh lock helper failed"));
++        });
++      });
++    } else {
++      const { tryLock } = require("fs-native-extensions") as { tryLock(fd: number): boolean };
++      while (!tryLock(fd)) {
++        await delay(50 + Math.floor(Math.random() * 50), undefined, { signal });
++      }
+     }
+     signal?.throwIfAborted();
+     return { release };
+diff --git a/proxy-modes.ts b/proxy-modes.ts
+index 49f1b4eccfbee9a14ef6e71db8d8392dcba6ed23..701f41f33524c8a6a91f1d957e853ac9905bd50c 100644
+--- a/proxy-modes.ts
++++ b/proxy-modes.ts
+@@ -951,6 +951,7 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
+       ? await state.manager.reconnect(serverName, definition, currentConnection, ownedSignal)
+       : await state.manager.connect(serverName, definition, ownedSignal);
+     if (connection.status === "needs-auth") {
++      updateStatusBar(state);
+       const autoAuth = await attemptAutoAuth(state, serverName, ownedSignal);
+       if (autoAuth.status === "failed") {
+         return {
+diff --git a/unix-socket-transport.ts b/unix-socket-transport.ts
+index f6b4577eb4a5f9459eb6e324338f325549841421..9aa7cbe65e09b2cd0ac3ad07de209c144e454a42 100644
+--- a/unix-socket-transport.ts
++++ b/unix-socket-transport.ts
+@@ -30,7 +30,7 @@ export class UnixSocketClientTransport implements Transport {
+       });
+       socket.on("data", chunk => {
+         try {
+-          this.readBuffer.append(chunk);
++          this.readBuffer.append(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+           while (true) {
+             const message = this.readBuffer.readMessage();
+             if (message === null) break;

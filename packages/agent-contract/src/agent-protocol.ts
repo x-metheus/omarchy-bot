@@ -120,6 +120,7 @@ export type AgentEvent =
 export type AgentCommand =
   | { type: "probe"; requestId: string }
   | { type: "resources.list"; requestId: string; cwd: string }
+  | { type: "mcp.control"; requestId: string; cwd: string; action: "status" | "connect" | "auth-start" | "auth-complete"; server?: string; redirectUrl?: string }
   | { type: "session.open"; requestId: string; botId: string; threadId: string; options: OpenSessionOptionsLike }
   | { type: "session.resume"; requestId: string; botId: string; threadId: string; nativeSessionId: string; options: OpenSessionOptionsLike }
   | {

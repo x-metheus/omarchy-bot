@@ -22,6 +22,10 @@ _Avoid_: Desktop, Desktop Client, Omarchy Bot Desktop, Bot Desktop, daemon, seco
 A Bun process started by Omarchy Bot only when it is not connected to the plugin daemon on the same machine. It registers outbound and runs host OS command, search, and file tools for the remote Agent. It is not an Agent, a daemon, or a Bot Screen.
 _Avoid_: Agent worker, Bot Computer, Host Session, compiled sidecar as the v1 form
 
+**This Device**:
+The Local Sidecar of the Omarchy Bot install that sent the user message starting the current Turn. A Turn started from a browser tab, a mobile-class client, or Omarchy Bot on the plugin host has no This Device.
+_Avoid_: the only online Sidecar, default device, any laptop
+
 **Shared Workspace**:
 The common working-file space used by all Bots, distinct from the Omarchy Bot plugin's source, installation, and conversation data. Its files belong to the user's work rather than to an individual Bot, Thread, or Bot Screen.
 _Avoid_: Per-Bot workspace, plugin repository, Bot Screen, Hyprland workspace

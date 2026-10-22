@@ -50,6 +50,12 @@ Host Session: the user's original Omarchy desktop, separate from the Bot Compute
 
 `~/.omarchy-bot/memory/` is a future directory intention, not an implemented memory feature or a decision about memory semantics. This revision does not relocate existing databases, managed attachments, avatars, or other product data.
 
+Shared plugin discovery follows the [native plugin specification](../.scratch/shared-plugins-native-discovery/spec.md): canonical Skills live at `~/.omarchy-bot/workspace/.agents/skills`, with native client discovery links where needed. Custom MCP configuration is reconciled conservatively across project `.mcp.json`, `.pi/mcp.json`, and `.codex/config.toml`, preserving unrelated settings and exposing conflicts and client-specific limits. Externally configured/user-level resources retain native precedence and remain read-only in the panel. Credentials remain write-only in the Client and private to application/native-client stores, never shared files or model-visible output.
+
+Pi business MCP execution belongs only to pinned `pi-mcp-adapter@2.33.0`; the existing plugin Tool Call bridge manages inventory/configuration, not another MCP runtime. Services group official MCP connections and published companions, without REST business fallback; [provider-specific setup](../packages/protocol/src/pluginProviders.ts) and separate external-client login still apply. The locally supplied official OpenAI Skill Creator includes complete resources and vendored PyYAML; Pi creation requires ordinary Python 3, not Codex/Claude installation or credentials, and uses native file/execution tools without publication, registration, or an authoring service.
+
+Native file resources remain mutable. Configuration reload and disable/remove operations follow the applicable native session/extension boundary, not a blanket per-Turn immutable Skill revision lease, and do not kill unrelated Turns. Default cwd, explicit Thread cwd, shared work ownership, local-only Bot deletion, and Host Session isolation are unchanged. These contracts do not establish live provider OAuth, native Claude/Codex authoring, packaged startup, or Chromium/Tauri equivalence.
+
 Changes is removed from the accepted interface and its backing product capability, not merely hidden. No review workflow or work-artifact panel replaces it. The Computer Surface remains the desktop observation/control entry; this correction does not add an arbitrary-URL webview or adopt a coding-workspace information architecture.
 
 ### Implementation status

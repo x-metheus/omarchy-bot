@@ -615,6 +615,18 @@ function HomeScreen(): JSX.Element {
         open={pluginsOpen}
         onClose={() => setPluginsOpen(false)}
         mobileReturnFocusRef={mobileNavigationTriggerRef}
+        bots={bots.data ?? []}
+        selectedBotId={selectedBotId}
+        onCreateSkill={async (botId, description) => {
+          const response = await api.sendBotMessage(botId, {
+            text: `Use the installed skill-creator Skill to create and validate a reusable Agent Skill for this request:\n\n${description}\n\nSave the complete Skill in the shared native Skills installation so all Bots and Agents can discover it. Keep the Skill Agent-neutral, preserve existing resources, and do not publish it automatically.`,
+            clientTag: randomUuid(),
+          });
+          invalidate("threads");
+          invalidate("bots");
+          void navigate({ search: { bot: botId, thread: response.threadId } });
+          setPluginsOpen(false);
+        }}
       />
       <CreateBotDialog
         isOpen={createOpen}

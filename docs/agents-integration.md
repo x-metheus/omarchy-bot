@@ -100,20 +100,86 @@ type AgentCommand =
 
 The exact accepted commands are versioned. An adapter may report an operation unavailable; it may not silently route it through a weaker headless or PTY transport.
 
-### Managed plugin snapshots
+### Native plugin discovery and runtime
 
-`plugins: true` means the adapter accepts managed Skills and tool definitions on
-session open/resume, discovers native Skills through `resources.list`, and
-implements the correlated plugin-call/result boundary. Pi supports this contract.
-Other adapters must report `false` until their native integration is exercised.
+`plugins: true` describes the adapter's exercised native plugin integration and
+correlated inventory/configuration Tool Call bridge. Pi is the implemented
+adapter; other adapters must report `false` until their integration is exercised.
+The bridge is not a second business MCP runtime: Pi business MCP calls execute
+only through pinned `pi-mcp-adapter@2.33.0`, never daemon-injected business tools.
+The pinned dependency patch fixes Unix-socket Buffer addressing, publishes
+`needs-auth` status after a gateway connection attempt, and preserves native
+OAuth refresh-lock exclusion under Bun/Linux. Bun cannot safely call the native
+fd-lock binding directly; an inherited-descriptor Node helper acquires the same
+Linux open-file-description lock retained by the parent. **Node must be on PATH**;
+there is no lock bypass or host-global dependency installation.
+`@omarchy-bot/agent-contract/native-mcp-revision` is server-only; keep its Node
+filesystem/crypto dependencies out of the browser-facing package barrel.
 
-The daemon acquires one global configuration snapshot per Turn. MCP connections
-and installed Skill revisions remain leased until that Turn ends; edits apply
-to the next Turn. The worker loads Skills through its native resource loader
-without rewriting native configuration. Tool execution returns through the
-daemon only for the active Turn's matching native Tool Call, with cancellation
-and error propagation. OAuth tokens and MCP credentials never enter the worker
-snapshot or the Client DTOs.
+Canonical shared Skills live at `~/.omarchy-bot/workspace/.agents/skills`, with
+native client discovery links where needed. User-level and externally configured
+resources retain native precedence and remain read-only in the panel. Custom
+project MCP entries are reconciled conservatively across `.mcp.json`,
+`.pi/mcp.json`, and `.codex/config.toml`; unrelated settings are preserved and
+conflicts or client-specific limits are visible. Credentials stay in private
+application/native-client stores, not shared files, Client read DTOs, or
+model-visible output. Credential inputs remain write-only.
+
+Reload follows the native session/extension lifecycle. Native file resources are
+mutable, with no blanket per-Turn immutable Skill revision lease. Disabling or
+removing resources applies at the applicable native boundary without aborting
+unrelated Turns. The shared default cwd and explicit Thread cwd behavior are
+unchanged. Services use official MCP connections and companions only, with no
+REST business fallback; provider-specific setup and separate external-client
+login remain necessary.
+Enabled remote Skills and official companion resources use the same staged
+updater. MCP package ownership is explicit: save either a native `transport`
+(stdio command or HTTP endpoint) or a `package` containing an exact public npm
+`name` without a version suffix, optional `bin`, `args`, and write-only `env`.
+These are mutually exclusive inputs. Opaque native commands remain supported
+first-class definitions; the product never guesses package identity from `npx`,
+shell arguments, or an executable path.
+
+Managed npm packages resolve `latest` and install privately under product-owned
+storage, never into host/global package installations. Node 24+ on PATH is required
+to run their validated Node-compatible entrypoints. The Linux launcher uses
+Node's experimental [`process.execve` API](https://nodejs.org/api/process.html#processexecvefile-args-env) to replace itself while retaining its
+PID, start time, and stdio; no extra business protocol or idle supervisor remains.
+Packages or dependencies declaring `preinstall`, `install`, or `postinstall`
+hooks are unsupported; installation never runs those hooks. Package read DTOs
+expose the selected binary and arguments,
+installed/available versions, modification state, last check, and update status
+(`current`, `modified`, `failed`, or `available`); environment values remain
+write-only and only saved key names are exposed.
+Changing npm package identity or switching between managed and native-command
+ownership clears saved environment credentials unless they are supplied again.
+
+Automatic updates and explicit `POST /api/plugins/mcp/:id/update` requests with
+an empty JSON object use the same ownership and safety rules. Clean replacements
+are staged, with local content rechecked before activation; local modifications
+block replacement and failures retain the prior usable installation. Updates
+respect native reload boundaries without forcibly terminating Active Turns or
+swapping their in-use tool registry. Obsolete package processes and installations
+are released only when native consumers can safely let them go. Package
+management does not introduce another business MCP runtime. The bundled adapter
+changes with the product runtime; hosted MCP deployments remain provider-owned
+and are not locally pinnable or roll-backable packages.
+
+The official OpenAI Skill Creator, complete companion resources, and vendored
+PyYAML are supplied locally for native file/execution-based creation. Ordinary
+Python 3 is required; Pi creation requires neither Codex/Claude installation nor
+their credentials. There is no publication, registration, or authoring service.
+See the [native plugin specification and upstream references](../.scratch/shared-plugins-native-discovery/spec.md)
+and [provider setup references](../packages/protocol/src/pluginProviders.ts).
+Acceptance on 2026-09-12 exercised real Pi SDK 0.84.4 / adapter 2.33.0 stdio and
+HTTP tool calls, controlled headless PKCE authorization, complete Creator scripts
+with bundled Python dependencies, packaged production daemon startup, and
+desktop/narrow Chromium. Native Codex 0.154.0 discovery returned the same physical
+shared Skills and projected MCP configuration. These observations do not prove
+live provider consent/business access, native Claude/Codex model authoring, or
+Tauri/WebView compatibility. See the
+[installed acceptance record](../.scratch/shared-plugins-native-discovery/issues/16-installed-plugin-upgrade-and-recovery.md)
+for exact evidence and unavailable prerequisites.
 
 Adapters assign a stable common block ID at each native Response or Thinking block start and reuse it for every delta and end event. They preserve occurrence order and expose only Thinking content or provider-authored summaries officially supplied by the backend.
 

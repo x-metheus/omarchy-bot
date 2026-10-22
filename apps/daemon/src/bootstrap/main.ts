@@ -139,6 +139,15 @@ export async function main(options: MainOptions = {}): Promise<{
   const plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
     const worker = await supervisor.agentWorker("pi");
     return worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
+  }, async (input) => {
+    const worker = await supervisor.agentWorker("pi");
+    return worker.request({ type: "mcp.control", cwd: cfg.sharedWorkspaceDir, ...input }, 90_000);
+  }, () => {
+    const host = cfg.host.includes(":") && !cfg.host.startsWith("[") ? `[${cfg.host}]` : cfg.host;
+    const origin = new URL(`http://${host}:${http.port}`);
+    if (origin.hostname === "0.0.0.0") origin.hostname = "127.0.0.1";
+    if (origin.hostname === "[::]") origin.hostname = "[::1]";
+    return origin.origin;
   });
   const devices = new DeviceRoster();
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices);

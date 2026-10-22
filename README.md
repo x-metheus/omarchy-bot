@@ -27,7 +27,7 @@ Omarchy Bot is an Omarchy plugin for local AI teammates, not a general-purpose L
 | **Hand work to another Bot** | Durable, asynchronous 1:1 mail creates a target-owned Thread without forwarding the source conversation. |
 
 > [!IMPORTANT]
-> **Current support:** Omarchy on **x86_64**, with **Pi** as the current Agent backend. Other Agents require an adapter and a passing versioned conformance inventory before becoming selectable. The Tauri desktop client is planned, not shipped.
+> **Current support:** Omarchy on **x86_64**, with **Pi** as the current Agent backend. Other Agents require an adapter and a passing versioned conformance inventory before becoming selectable. Omarchy Bot (Tauri) is planned, not shipped.
 
 ## Installation
 
@@ -92,7 +92,7 @@ The current implementation includes a Bun daemon, React web client, SQLite persi
 
 **Host Session acceptance remains open.** Automated real-Sway conformance covers two routed Screens, shared profile/runtime markers, Agent control, projection, URL reuse, deletion/reprovision, and host environment isolation. It does not prove the user's top bar, shortcuts, or ordinary physical-input experience. See the [runtime decision and evidence](docs/contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md).
 
-The future Tauri client will reuse the Web frontend while execution stays on Omarchy. [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md) defines that contract; Tauri packaging and WebView compatibility are not implemented or verified by the current client.
+Omarchy Bot (Tauri) will reuse the Web frontend while execution stays on the plugin. [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md) define that contract; Tauri packaging and WebView compatibility are not implemented or verified by the current client. The application is Omarchy Bot, not a Desktop SKU.
 
 ## Development
 
@@ -149,36 +149,84 @@ Vite previews the public pages only; OAuth and catalog functions run on Vercel.
 Open **Plugins** above **Settings** in the Bot Client sidebar. It opens a large
 dialog on desktop and a tall sheet on mobile without navigating away from the
 current conversation or discarding its draft.
-Managed MCP servers, Skills, and connected service accounts apply globally to all
-Bots. Changes take effect at the next Turn; running Turns retain their configuration
-and installed Skill revision. Provider-side access revocation can still interrupt
-a running call.
+Shared MCP configuration, Skills, and connected service accounts serve all Bots.
+Effective availability follows the Agent's native discovery and session/extension
+reload lifecycle, not an unconditional next-Turn snapshot. Native Skill files
+remain mutable; there is no blanket per-Turn immutable revision lease. Disabling
+or removing a resource applies at the applicable native boundary without killing
+unrelated Turns. Provider-side revocation can still interrupt a running call.
 
-- **MCP:** stdio subprocesses and remote Streamable HTTP, with legacy SSE fallback.
-  Environment variables and HTTP headers are write-only in the Client.
+- **MCP:** custom project configuration is reconciled across `.mcp.json`,
+  `.pi/mcp.json`, and `.codex/config.toml`, preserving unrelated/client-specific
+  settings and reporting conflicts and unsupported fields instead of overwriting
+  them. Transport support and limits depend on the native client. Pi business MCP
+  calls run only through pinned `pi-mcp-adapter@2.33.0`, not daemon-injected tools.
+  Environment variables and HTTP headers remain write-only in the Client.
+  Choose an explicit **public npm package** to let Omarchy Bot own its private
+  installation and updates, or supply a native stdio command or HTTP endpoint.
+  Managed packages use an exact npm name without a version suffix, an optional
+  binary name, arguments, and write-only environment variables; installation and
+  updates resolve npm `latest`. **Node 24+ on PATH is required** for managed package
+  entrypoints; Node is also used by the Linux/Bun native OAuth OS-lock helper. Packages requiring
+  install-time scripts or non-Node entrypoints are unsupported. No host installation
+  or global package update is attempted.
+  Clean managed installations update at a safe native lifecycle boundary; local
+  modifications block replacement, and failed updates preserve the prior usable
+  version. Installed/available versions and update attention remain visible.
+  Active Turns are not forcibly terminated to update a package, and obsolete
+  native processes are released only when safe. Existing opaque stdio commands
+  remain first-class native inputs, never inferred package ownership or upgraded
+  by the product. Hosted MCP deployments remain provider-controlled.
 - **Skills:** search the formal skills.sh catalog, inspect, install, enable, and
-  remove without configuring a backend. Enabled Skills update automatically every
-  six hours. Installations
-  include companion files, not only `SKILL.md`. Pi discovers managed Skills
-  alongside native Skills; type `/` in the composer to select one.
+  remove without configuring a backend. Remote updates preserve local edits and
+  report conflicts. Installations include companion files, not only `SKILL.md`.
+  Canonical shared Skills live at `~/.omarchy-bot/workspace/.agents/skills`,
+  with native client discovery links where needed. Pi uses native discovery;
+  type `/` in the composer to select a Skill.
   If an entry no longer identifies a Skill in its source repository, installation
   fails rather than guessing a replacement.
-  **Discover** shows a paginated card catalog; **Installed** separates Skills
-  installed with Omarchy Bot (including disabled ones) from read-only Agent Skills.
+  **Discover** shows a paginated card catalog; **Installed** counts shared Skills
+  (including disabled ones), without Agent badges. Other discovered resources
+  remain read-only in a separate section and are not counted as shared installs.
   Browsing uses server-side pages of 12. Search retrieves up to 200 matches once
   and pages the cached results locally, with an explicit limit notice.
-- **Services:** separate service cards share a provider account pool, support
-  multiple accounts, and request the supported provider group at first consent.
-  Google Drive, Gmail, and Calendar are separate cards, as are Microsoft mail,
-  calendar, and OneDrive. Provider endpoints and registration notes are maintained
-  in `packages/protocol/src/pluginProviders.ts`.
+- **Services:** search by name, provider, description, or category. Category tabs
+  and grouped browsing share the same filter; returning from a Service preserves
+  the search and category. **Connected** includes only Services with a connected
+  native component, not merely an account grant awaiting authorization.
+  Services share a provider account pool and support multiple accounts. Each
+  groups only its official MCP connections and published companion Skills;
+  there is no REST business fallback. Provider-specific
+  setup, account eligibility, consent, and separate external-client login still
+  apply. See the [provider endpoints and setup references](packages/protocol/src/pluginProviders.ts).
+- **Create a Skill:** the [official OpenAI Skill Creator](https://github.com/openai/skills/tree/main/skills/.system/skill-creator),
+  its complete resources, and vendored PyYAML are supplied locally. Ordinary
+  Python 3 is required; Pi creation needs no Codex/Claude installation or
+  credentials. Bots use native file/execution tools to create shared local files,
+  without publication, registration, or a separate authoring service.
+  In **Plugins → Skills**, **Create skill** is visible in both Discover and
+  Installed. Describe the behavior and choose a Bot; **Start creation** sends
+  the request through the normal Bot message API in a new conversation, leaving
+  existing Threads and drafts unchanged. Missing or disabled Creator resources
+  are shown explicitly rather than pretending creation is ready. A daemon still
+  running an older build must be restarted to load newly bundled resources.
 
-Native Agent configuration is read-only. Managed configuration and OAuth tokens
-are stored locally under the daemon's plugin data directory: directories use
-mode `0700` and configuration uses `0600`. **Tokens are not encrypted at rest.**
+Externally configured and user-level resources retain native precedence and are
+read-only in this panel; shared project files are the editable configuration
+surface. Credentials stay in private application/native-client stores, never
+shared files or model-visible output. Application plugin directories use mode
+`0700` and private configuration uses `0600`. **Tokens are not encrypted at rest.**
 The publisher exchanges codes and refresh tokens but does not persist accounts.
 Installed Skills and stdio MCP servers are trusted local code, not a sandbox.
-Only Pi currently implements the managed-plugin Agent contract.
+The existing plugin Tool Call bridge manages inventory and configuration; it is
+not a second MCP runtime. See the [native plugin specification](.scratch/shared-plugins-native-discovery/spec.md)
+and [adapter boundary](docs/agents-integration.md#native-plugin-discovery-and-runtime).
+Acceptance exercised Pi SDK 0.84.4 with `pi-mcp-adapter@2.33.0`, real stdio and
+HTTP tools, controlled native PKCE authorization, packaged daemon startup and
+Creator execution, and desktop/narrow Chromium. Codex 0.154.0 discovered the same
+shared Skill files and custom MCP configuration. Live provider consent/business
+access, native Claude/Codex model authoring, and Tauri/WebView compatibility remain
+unverified; see the [acceptance record](.scratch/shared-plugins-native-discovery/issues/16-installed-plugin-upgrade-and-recovery.md).
 
 The composer uses Astryx's native slash-trigger menu. The pinned
 `@astryxdesign/core@0.5.2` patch removes the unsupported `aria-multiline` attribute

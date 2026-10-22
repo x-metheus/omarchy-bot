@@ -10,7 +10,6 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
-  loadSkills,
   ModelRuntime,
   SessionManager,
   type AgentSession,
@@ -51,12 +50,15 @@ import { createLocalTool } from "./local-tool.ts";
 import { createBotMessageTool } from "./bot-message-tool.ts";
 import { thinkingCapabilityForProbe } from "./thinking-capability.ts";
 import { createPluginTools, disposePluginCalls, handlePluginResult } from "./plugin-tools.ts";
+import { NativeMcp, NativeMcpControls, nativeMcpStatus } from "./native-mcp.ts";
 
 const AGENT_ID = "pi";
 
 interface SessionEntry extends SessionRuntime {
   session: AgentSession;
   botId: string;
+  nativeMcp: NativeMcp;
+  unsubscribe?: () => void;
   computer?: AgentComputerTurnContext;
   botMessage?: AgentBotMessageTurnContext;
   plugins?: AgentPluginTurnContext;
@@ -70,6 +72,8 @@ function getModelRuntime(): Promise<ModelRuntime> {
   modelRuntimePromise ??= ModelRuntime.create();
   return modelRuntimePromise;
 }
+
+const mcpControls = new NativeMcpControls(getModelRuntime);
 
 interface PendingComputerRequest {
   resolve: (output: AgentComputerToolOutput) => void;
@@ -246,7 +250,11 @@ async function resolveDefaultModel(): Promise<AgentSession["model"]> {
   try {
     return session.model;
   } finally {
-    session.dispose();
+    try {
+      await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    } finally {
+      session.dispose();
+    }
   }
 }
 
@@ -279,7 +287,7 @@ function sessionEntry(sessionId: string): SessionEntry {
 
 function attachSubscription(entry: SessionEntry): void {
   const { session, sessionId } = entry;
-  session.subscribe((ev) => {
+  entry.unsubscribe = session.subscribe((ev) => {
     if (!sessions.has(sessionId)) return;
     for (const event of normalizeSessionEvent(ev, sessionId, entry)) emit(event);
     if (ev.type === "agent_settled" && entry.running && !entry.finished) {
@@ -316,29 +324,15 @@ async function openSession(
   );
   const sessionId = `s_${crypto.randomUUID()}`;
   const pluginTools = createPluginTools(options.plugins, () => newEntry?.plugins);
-  const managedSkills = options.plugins?.skills.length
-    ? loadSkills({ cwd: options.cwd, agentDir: getAgentDir(), includeDefaults: false, skillPaths: options.plugins.skills.map((skill) => skill.filePath) })
-    : undefined;
 
   // Bot Job/Instructions are injected into Pi's native system prompt.
-  const loader = new DefaultResourceLoader({
-    cwd: options.cwd,
-    agentDir: getAgentDir(),
-    ...(managedSkills && options.plugins ? {
-      skillsOverride: (base) => {
-        const names = new Map(options.plugins!.skills.map((skill) => [skill.filePath, skill.name]));
-        const skills = managedSkills.skills.map((skill) => ({ ...skill, name: names.get(skill.filePath) ?? skill.name }));
-        if (skills.length !== options.plugins!.skills.length) throw new Error("A managed skill could not be loaded by Pi");
-        if (base.skills.some((skill) => skills.some((managed) => managed.name === skill.name))) throw new Error("A native skill conflicts with a managed skill command");
-        return { skills: [...base.skills, ...skills], diagnostics: [...base.diagnostics, ...managedSkills.diagnostics] };
-      },
-    } : {}),
-    appendSystemPrompt: [
+  const nativeMcp = new NativeMcp(options.cwd, [
       ...(options.instructions.trim() ? [`[omarchy-bot] Your Job/Instructions for this Bot:\n\n${options.instructions.trim()}`] : []),
       ...(options.plugins?.diagnostics.length ? [`[omarchy-bot] Unavailable plugins for this turn; do not claim to have used them:\n${options.plugins.diagnostics.join("\n")}`] : []),
-    ],
-  });
-  await loader.reload();
+  ]);
+  let session: AgentSession | undefined;
+  try {
+  await nativeMcp.load();
 
   // Model resolution: "provider/model" or a bare model id searched across providers.
   const rt = await getModelRuntime();
@@ -349,15 +343,15 @@ async function openSession(
     if (!model) throw new Error(`model not found: ${options.model}`);
   }
 
-  const { session } = await createAgentSession({
+  ({ session } = await createAgentSession({
     cwd: options.cwd,
     agentDir: getAgentDir(),
     sessionManager: existing ? SessionManager.open(existing.nativeSessionId) : SessionManager.create(options.cwd),
     modelRuntime: rt,
     ...(model !== undefined ? { model } : {}),
-    resourceLoader: loader,
+    resourceLoader: nativeMcp.loader,
     customTools: [computerTool, botMessageTool, localTool, ...pluginTools],
-  });
+  }));
 
   const nativeSessionId = session.sessionFile ?? `mem:${sessionId}`;
   newEntry = {
@@ -365,6 +359,7 @@ async function openSession(
     botId: options.botId,
     nativeSessionId,
     session,
+    nativeMcp,
     running: false,
     finished: false,
     aborted: false,
@@ -374,11 +369,18 @@ async function openSession(
   };
   sessions.set(sessionId, newEntry);
   attachSubscription(newEntry);
+  await nativeMcp.bind(session);
   reply({
     requestId,
     ok: true,
     payload: { sessionId, nativeSessionId } satisfies SessionOpenedPayload,
   });
+  } catch (error) {
+    sessions.delete(sessionId);
+    newEntry?.unsubscribe?.();
+    await nativeMcp.dispose(session);
+    throw error;
+  }
 }
 
 async function handleMessage(cmd: AgentCommand): Promise<void> {
@@ -389,9 +391,13 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         await loader.reload();
         reply({ requestId: cmd.requestId, ok: true, payload: {
           skills: loader.getSkills().skills.map((skill) => ({ name: skill.name, description: skill.description, path: skill.filePath })),
+          mcp: nativeMcpStatus(cmd.cwd),
         } });
         return;
       }
+      case "mcp.control":
+        reply({ requestId: cmd.requestId, ok: true, payload: await mcpControls.execute(cmd) });
+        return;
       case "probe": {
         const sdkOk = true; // reaching here means the SDK imported and ran
         const authed = await hasAuthenticatedModel();
@@ -563,8 +569,9 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       case "session.close": {
         const entry = sessionEntry(cmd.sessionId);
         disposePluginCalls(cmd.sessionId);
-        entry.session.dispose();
         sessions.delete(cmd.sessionId);
+        entry.unsubscribe?.();
+        await entry.nativeMcp.dispose(entry.session);
         reply({ requestId: cmd.requestId, ok: true, payload: { closed: true } });
         return;
       }
@@ -586,9 +593,35 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
 writeJsonl({ type: "hello", v: PROTOCOL_VERSION, worker: `agent:${AGENT_ID}`, pid: process.pid });
 setInterval(() => writeJsonl({ type: "heartbeat" }), HEARTBEAT_MS).unref();
 
+
+let shuttingDown = false;
+const commands = new Set<Promise<void>>();
+async function shutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  disposePluginCalls();
+  for (const pending of computerRequests.values()) pending.reject(new Error("daemon connection closed during computer tool call"));
+  for (const pending of botMessageRequests.values()) pending.reject(new Error("daemon connection closed during Bot message tool call"));
+  for (const pending of localRequests.values()) pending.reject(new Error("daemon connection closed during local tool call"));
+  computerRequests.clear();
+  botMessageRequests.clear();
+  localRequests.clear();
+  const controlsClosed = mcpControls.dispose();
+  await Promise.allSettled(commands);
+  await Promise.allSettled([...sessions.values()].map((entry) => {
+    entry.unsubscribe?.();
+    return entry.nativeMcp.dispose(entry.session);
+  }));
+  sessions.clear();
+  await controlsClosed;
+  process.exit(0);
+}
+process.once("SIGTERM", () => { void shutdown(); });
+process.once("SIGINT", () => { void shutdown(); });
 await readJsonl(
   Bun.stdin.stream(),
   (msg) => {
+    if (shuttingDown) return;
     if (msg && typeof msg === "object" && "type" in msg) {
       if (msg.type === "computer.result") {
         handleComputerResult(msg as AgentComputerToolResult);
@@ -599,24 +632,11 @@ await readJsonl(
       } else if (msg.type === "local.result") {
         handleLocalResult(msg as AgentLocalToolResult);
       } else {
-        void handleMessage(msg as AgentCommand);
+        const command = handleMessage(msg as AgentCommand);
+        commands.add(command);
+        void command.finally(() => commands.delete(command));
       }
     }
   },
-  () => {
-    disposePluginCalls();
-    for (const pending of computerRequests.values()) {
-      pending.reject(new Error("daemon connection closed during computer tool call"));
-    }
-    for (const pending of botMessageRequests.values()) {
-      pending.reject(new Error("daemon connection closed during Bot message tool call"));
-    }
-    for (const pending of localRequests.values()) {
-      pending.reject(new Error("daemon connection closed during local tool call"));
-    }
-    botMessageRequests.clear();
-    computerRequests.clear();
-    localRequests.clear();
-    process.exit(0);
-  },
+  () => { void shutdown(); },
 );

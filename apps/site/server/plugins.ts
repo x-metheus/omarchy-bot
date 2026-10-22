@@ -9,7 +9,6 @@ import { PluginProviderId, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT } from ".
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store", "referrer-policy": "no-referrer" };
 const STATE_AUDIENCE = "omarchy-bot-oauth";
 const GOOGLE_JWKS = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
-const MICROSOFT_JWKS = createRemoteJWKSet(new URL("https://login.microsoftonline.com/common/discovery/v2.0/keys"));
 
 export class BrokerError extends Error {
   constructor(public readonly status: number, message: string) { super(message); }
@@ -34,11 +33,13 @@ function stateKey(): Uint8Array {
 
 function clientCredentials(providerId: PluginProviderId, origin: string): { clientId: string; clientSecret?: string } {
   const provider = PLUGIN_PROVIDERS[providerId];
+  if (!provider.publisherOAuth) throw new BrokerError(400, `${provider.name} requires native MCP OAuth discovery and authorization, not publisher OAuth.`);
   const clientId = process.env[`OAUTH_${providerId.toUpperCase()}_CLIENT_ID`]
     ?? (provider.clientMetadata ? `${origin}/api/plugins/oauth/client/${providerId}` : undefined);
   const clientSecret = process.env[`OAUTH_${providerId.toUpperCase()}_CLIENT_SECRET`];
   if (!clientId || (provider.tokenAuth === "post" && !clientSecret)) {
-    throw new BrokerError(503, `Publisher OAuth registration is missing for ${provider.name}. ${provider.registrationNote}`);
+    const prefix = `OAUTH_${providerId.toUpperCase()}`;
+    throw new BrokerError(503, `Configure ${prefix}_CLIENT_ID${provider.tokenAuth === "post" ? ` and ${prefix}_CLIENT_SECRET` : ""} on the publisher. ${provider.registrationNote}`);
   }
   return { clientId, ...(clientSecret ? { clientSecret } : {}) };
 }
@@ -122,16 +123,14 @@ async function tokenExchange(body: z.infer<typeof TokenBody>): Promise<Response>
     if (raw[key] !== undefined) tokens[key] = raw[key];
   }
   if (state && raw.scope === undefined) tokens.scope = state.scopes.join(" ");
-  if (state && (providerId === "google" || providerId === "microsoft")) {
+  if (state && providerId === "google") {
     if (typeof raw.id_token !== "string") throw new BrokerError(401, "The identity provider did not return its required ID token.");
-    const verified = await jwtVerify(raw.id_token, providerId === "google" ? GOOGLE_JWKS : MICROSOFT_JWKS, {
+    const verified = await jwtVerify(raw.id_token, GOOGLE_JWKS, {
       audience: credentials.clientId, algorithms: ["RS256"], clockTolerance: 30,
-      ...(providerId === "google" ? { issuer: ["https://accounts.google.com", "accounts.google.com"] } : {}),
+      issuer: ["https://accounts.google.com", "accounts.google.com"],
     });
     const claims = verified.payload;
     if (claims.nonce !== state.nonce) throw new BrokerError(401, "Identity nonce mismatch.");
-    if (providerId === "microsoft" && (typeof claims.tid !== "string" || !/^[0-9a-f-]{36}$/i.test(claims.tid)
-      || claims.iss !== `https://login.microsoftonline.com/${claims.tid}/v2.0`)) throw new BrokerError(401, "Microsoft identity issuer mismatch.");
     tokens.identity = { subject: claims.sub, tenantId: claims.tid, userId: claims.oid };
   }
   return new Response(JSON.stringify(tokens), { headers: JSON_HEADERS });
@@ -146,8 +145,11 @@ export async function handlePluginCloudRequest(request: Request): Promise<Respon
       let setupError: string | undefined;
       try { origin = publisherOrigin(); stateKey(); } catch (error) { setupError = error instanceof Error ? error.message : "Publisher setup is missing."; }
       return new Response(JSON.stringify(Object.values(PLUGIN_PROVIDERS).map((provider) => {
-        let setupReason = setupError;
-        if (!setupReason && origin) { try { clientCredentials(provider.id, origin); } catch (error) { setupReason = error instanceof Error ? error.message : "OAuth registration is missing."; } }
+        let setupReason: string | undefined;
+        if (!provider.nativeOAuth) {
+          setupReason = setupError;
+          if (!setupReason && origin) { try { clientCredentials(provider.id, origin); } catch (error) { setupReason = error instanceof Error ? error.message : "OAuth registration is missing."; } }
+        }
         return { id: provider.id, name: provider.name, mode: provider.mode, documentationUrl: provider.documentationUrl,
           services: provider.services.map(({ id, name, description }) => ({ id, name, description })), ...(setupReason ? { setupReason } : {}) };
       })), { headers: JSON_HEADERS });
@@ -174,7 +176,7 @@ export async function handlePluginCloudRequest(request: Request): Promise<Respon
         redirect_uri: `${origin}/api/plugins/oauth/callback`, response_type: "code", state,
         ...(scopes.length ? { scope: scopes.join(provider.scopeSeparator ?? " ") } : {}),
         ...(provider.pkce ? { code_challenge: body.challenge, code_challenge_method: "S256" } : {}),
-        ...(["google", "microsoft"].includes(provider.id) ? { nonce } : {}),
+        ...(provider.id === "google" ? { nonce } : {}),
       }).toString();
       return new Response(JSON.stringify({ url: authorize.href }), { headers: JSON_HEADERS });
     }

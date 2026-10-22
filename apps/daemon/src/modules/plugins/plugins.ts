@@ -3,18 +3,20 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { ToolListChangedNotificationSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { redactToolErrorSummary, type AgentPluginSnapshot, type AgentPluginToolDefinition, type AgentPluginToolOutput, type NativePluginResources } from "@omarchy-bot/agent-contract";
+import { redactToolErrorSummary, type AgentCommand, type AgentPluginSnapshot, type AgentPluginToolOutput, type NativeMcpControlResult, type NativePluginResources } from "@omarchy-bot/agent-contract";
 import {
-  PLUGIN_PROVIDERS, PluginProviderId, SaveMcpBody, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT,
-  type AuthorizePluginBody, type CatalogSkillDetailDto, type CatalogSkillDto, type InstalledSkillDto,
+  PLUGIN_PROVIDERS, PluginProviderId, McpDefinition, SaveMcpBody, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT,
+  type AuthorizePluginBody, type CatalogSkillDetailDto, type CatalogSkillDto, type InstalledSkillDto, type InstallSkillBody,
   type McpConnectionDto, type PluginAccountDto, type PluginProviderDto, type PluginServiceDefinition, type PluginStateDto,
   type SkillCatalogDto, type SkillCommandDto,
 } from "@omarchy-bot/protocol";
 import { HttpError } from "../bots/bots.ts";
-import { connectMcp, type McpConnection } from "./mcp.ts";
-import { materializeSkill, skillFrontmatter } from "./skillInstaller.ts";
+import { connectMcp } from "./mcp.ts";
+import { materializeSkill, materializeSkillSource, skillFrontmatter } from "./skillInstaller.ts";
+import { NativeSkills } from "./nativeSkills.ts";
+import { NativeMcpStore } from "./nativeMcp.ts";
+import { McpPackages } from "./mcpPackages.ts";
 
 const DEFAULT_PUBLISHER_ORIGIN = "https://omarchy-bot-site-ymlq.vercel.app";
 
@@ -25,10 +27,12 @@ const Grant = z.object({
 type Grant = z.infer<typeof Grant>;
 const Account = z.object({
   id: z.string(), providerId: PluginProviderId, label: z.string(), identity: z.string(), enabledServices: z.array(z.string()),
-  status: z.enum(["connected", "reauthorize"]), error: z.string().optional(), grant: Grant,
+  status: z.enum(["connected", "reauthorize"]), error: z.string().optional(), grant: Grant.optional(),
+  bundleErrors: z.record(z.string()).default({}),
+  native: z.object({ serviceId: z.string(), name: z.string() }).optional(), nativeManaged: z.boolean().default(false),
 });
 type Account = z.infer<typeof Account>;
-const Mcp = SaveMcpBody.extend({
+const Mcp = McpDefinition.extend({
   id: z.string(), generation: z.string(), status: z.enum(["unchecked", "connected", "error"]), toolCount: z.number(), error: z.string().optional(),
 });
 type Mcp = z.infer<typeof Mcp>;
@@ -45,27 +49,6 @@ const CatalogEntry = z.object({
 });
 const TokenResponse = z.object({ access_token: z.string().min(1), refresh_token: z.string().optional(), expires_in: z.coerce.number().positive().optional(), scope: z.string().optional() }).passthrough();
 const ProviderIdentityId = z.union([z.string().min(1), z.number().int()]);
-const ApiArguments = z.object({
-  method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("GET"), path: z.string().min(1),
-  query: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(), body: z.unknown().optional(),
-  bodyBase64: z.string().max(3 * 1024 * 1024).optional(), contentType: z.string().max(200).optional(),
-}).strict().refine((body) => body.body === undefined || body.bodyBase64 === undefined, "Choose JSON body or bodyBase64, not both");
-const API_TOOL_SCHEMA: Record<string, unknown> = {
-  type: "object", properties: {
-    method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-    path: { type: "string", description: "Provider-relative API path, never an arbitrary origin." },
-    query: { type: "object", additionalProperties: { type: ["string", "number", "boolean"] } },
-    body: { description: "JSON request body." }, bodyBase64: { type: "string", description: "Binary upload bytes as base64, instead of body." },
-    contentType: { type: "string" },
-  }, required: ["path"], additionalProperties: false,
-};
-
-interface PoolEntry {
-  promise: Promise<McpConnection>;
-  toolPromise?: Promise<AgentPluginToolDefinition[]>;
-  refs: number;
-  keep(): boolean;
-}
 interface OAuthPending {
   providerId: PluginProviderId; accountId?: string; verifier: string; cloudUrl: string; returnUrl: string; expiresAt: number;
   brokerState: string;
@@ -76,37 +59,44 @@ export interface PluginLease {
   release(): void;
 }
 
-function skillCommand(id: string): string {
-  return `omarchy-${createHash("sha256").update(id).digest("hex").slice(0, 16)}`;
-}
-function toolName(connectionId: string, name: string): string {
-  return `plugin_${name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 35)}_${createHash("sha256").update(connectionId).update("\0").update(name).digest("hex").slice(0, 16)}`;
-}
 function hasScopes(grant: Grant, service: PluginServiceDefinition): boolean {
   const granted = new Set(grant.scopes.map((scope) => scope.replace(/^https:\/\/graph\.microsoft\.com\//, "").toLowerCase()));
   return service.scopes.every((scope) => granted.has(scope.replace(/^https:\/\/graph\.microsoft\.com\//, "").toLowerCase()));
 }
 
 export class PluginsService {
+  readonly skills: NativeSkills;
   #state: z.infer<typeof StoredState>;
   #file: string;
-  #pool = new Map<string, PoolEntry>();
   #refreshing = new Map<Grant, Promise<string>>();
   #oauth = new Map<string, OAuthPending>();
   #installing = new Map<string, Promise<InstalledSkillDto>>();
-  #skillRefs = new Map<string, number>();
   #catalog = new Map<string, CatalogSkillDto>();
   #providerCache: { at: number; providers: PluginProviderDto[]; error?: string } | undefined;
-  #nativeCache?: { at: number; resources: NativePluginResources; error?: string };
+  #nativeCache: { at: number; resources: NativePluginResources; error?: string } | undefined;
   #nativePending: Promise<NativePluginResources> | undefined;
   #updatePromise: Promise<void> | undefined;
+  #serviceUpdates = new Map<string, Promise<void>>();
+  #serviceEpochs = new Map<string, number>();
   #timer: ReturnType<typeof setInterval>;
+  #reconcileTimer: ReturnType<typeof setInterval>;
+  #ready: Promise<void>;
   #stopping = false;
+  #defaultError: string | undefined;
+  readonly mcp: NativeMcpStore;
+  readonly packages: McpPackages;
 
-  constructor(private readonly rootDir: string, private readonly cwd: string, private readonly nativeResources: () => Promise<NativePluginResources>) {
+  constructor(private readonly rootDir: string, private readonly cwd: string, private readonly nativeResources: () => Promise<NativePluginResources>,
+    private readonly nativeControl?: (input: Pick<Extract<AgentCommand, { type: "mcp.control" }>, "action" | "server" | "redirectUrl">) => Promise<NativeMcpControlResult>,
+    private readonly clientOrigin?: () => string) {
     mkdirSync(rootDir, { recursive: true, mode: 0o700 });
     if (!lstatSync(rootDir).isDirectory() || lstatSync(rootDir).isSymbolicLink()) throw new Error("Plugin state directory must be a private real directory");
     chmodSync(rootDir, 0o700);
+    this.skills = new NativeSkills(cwd, rootDir);
+    this.mcp = new NativeMcpStore(cwd, rootDir);
+    this.packages = new McpPackages(this.mcp);
+    try { this.skills.provisionDefault(path.resolve(import.meta.dir, "../../../../../workers/pi/resources")); }
+    catch (error) { this.#defaultError = `Default Skill Creator needs attention: ${error instanceof Error ? error.message : String(error)}`; }
     this.#file = path.join(rootDir, "configuration.json");
     if (existsSync(this.#file)) {
       if (!lstatSync(this.#file).isFile() || lstatSync(this.#file).isSymbolicLink()) throw new Error("Plugin configuration must be a private regular file");
@@ -115,8 +105,36 @@ export class PluginsService {
     } else {
       this.#state = { version: 1, revision: 0, cloudUrl: null, accounts: [], mcp: [], skills: [] };
     }
-    this.#timer = setInterval(() => { if (this.#state.skills.length) void this.updateSkills().catch(() => undefined); }, 6 * 60 * 60 * 1000);
+    const unmigrated: Skill[] = [];
+    for (const skill of this.#state.skills) {
+      try {
+        if (!this.skills.list().some((entry) => entry.id === skill.id)) {
+          this.skills.install(this.#skillDto(skill), skill, { enabled: skill.enabled, installedAt: skill.installedAt, baselineVerified: false });
+        }
+      } catch (error) {
+        unmigrated.push({ ...skill, error: `Native migration needs attention: ${error instanceof Error ? error.message : String(error)}` });
+      }
+    }
+    if (this.#state.skills.length) {
+      this.#state.skills = unmigrated;
+      this.#persist(true);
+    }
+    const unmigratedMcp: Mcp[] = [];
+    for (const connection of this.#state.mcp) {
+      try { this.mcp.save(null, { name: connection.name, enabled: connection.enabled, transport: connection.transport }); }
+      catch (error) { unmigratedMcp.push({ ...connection, error: `Native migration needs attention: ${error instanceof Error ? error.message : String(error)}` }); }
+    }
+    if (this.#state.mcp.length) { this.#state.mcp = unmigratedMcp; this.#persist(true); }
+    this.#timer = setInterval(() => {
+      if (this.skills.list().some((skill) => skill.enabled && skill.sourceType !== "local")) void this.updateSkills().catch(() => undefined);
+      void this.packages.updateAll().catch(() => undefined);
+    }, 6 * 60 * 60 * 1000);
     this.#timer.unref();
+    this.#reconcileTimer = setInterval(() => {
+      try { this.skills.list(); this.packages.collect(); } catch (error) { this.#defaultError = error instanceof Error ? error.message : String(error); }
+    }, 2000);
+    this.#reconcileTimer.unref();
+    this.#ready = this.#initializeServices();
   }
 
   #persist(configurationChanged = false): void {
@@ -126,16 +144,8 @@ export class PluginsService {
       writeFileSync(temporary, JSON.stringify(this.#state), { flag: "wx", mode: 0o600 });
       renameSync(temporary, this.#file);
     } finally { if (existsSync(temporary)) unlinkSync(temporary); }
-    if (configurationChanged) this.#reap();
   }
 
-  #reap(): void {
-    for (const [key, entry] of this.#pool) {
-      if (entry.refs !== 0 || (!this.#stopping && entry.keep())) continue;
-      this.#pool.delete(key);
-      void entry.promise.then((connection) => connection.close()).catch(() => undefined);
-    }
-  }
 
   async #cloud(base: string, route: string, body?: unknown): Promise<unknown> {
     const url = new URL(base);
@@ -171,12 +181,14 @@ export class PluginsService {
 
   async #providers(): Promise<{ providers: PluginProviderDto[]; error?: string }> {
     if (this.#providerCache && Date.now() - this.#providerCache.at < 30_000) return this.#providerCache;
-    let providers: PluginProviderDto[] = Object.values(PLUGIN_PROVIDERS).map(({ id, name, mode, services, documentationUrl }) => ({ id, name, mode, documentationUrl,
-      services: services.map(({ id: serviceId, name: serviceName, description }) => ({ id: serviceId, name: serviceName, description })), setupReason: "Publisher backend is unavailable." }));
+    let providers: PluginProviderDto[] = Object.values(PLUGIN_PROVIDERS).map(({ id, name, mode, services, documentationUrl, nativeOAuth, registrationNote }) => ({ id, name, mode, documentationUrl, registrationNote,
+      services: services.map(({ id: serviceId, name: serviceName, description, skillSources }) => ({ id: serviceId, name: serviceName, description, ...(skillSources === undefined ? {} : { skillSources }) })),
+      ...(nativeOAuth ? { nativeAuthorization: true } : { setupReason: "Publisher backend is unavailable." }) }));
     let error: string | undefined;
     try {
       const remote = z.array(z.object({ id: PluginProviderId, setupReason: z.string().optional() })).parse(await this.#cloud(this.#cloudUrl(), "providers"));
       providers = providers.map((provider) => {
+        if (provider.nativeAuthorization) return provider;
         const registered = remote.find((item) => item.id === provider.id);
         const { setupReason: _reason, ...known } = provider;
         return { ...known, ...(registered === undefined ? { setupReason: "Publisher does not support this provider." } : registered.setupReason ? { setupReason: registered.setupReason } : {}) };
@@ -187,7 +199,6 @@ export class PluginsService {
   }
 
   async #native(): Promise<NativePluginResources> {
-    if (this.#nativeCache && Date.now() - this.#nativeCache.at < 30_000) return this.#nativeCache.resources;
     this.#nativePending ??= this.nativeResources().then((resources) => {
       this.#nativeCache = { at: Date.now(), resources };
       return resources;
@@ -199,8 +210,31 @@ export class PluginsService {
   }
 
   #accountDto(account: Account): PluginAccountDto {
-    const { grant, error, ...visible } = account;
-    return { ...visible, grantedScopes: [...grant.scopes], ...(error === undefined ? {} : { error }) };
+    const { grant, native, nativeManaged: _nativeManaged, bundleErrors, error: _error, ...visible } = account;
+    const connections = this.mcp.serviceConnections(account.id);
+    const skills = this.skills.list();
+    const components = PLUGIN_PROVIDERS[account.providerId].services.map((service) => {
+      const connection = connections.find((item) => item.name === this.#serviceName(account, service.id));
+      const ownedSkills = skills.filter((skill) => skill.serviceId === `${account.providerId}/${service.id}`);
+      const missing = account.enabledServices.includes(service.id) && (service.skillSources?.length ?? 0) !== ownedSkills.filter((skill) => skill.enabled).length;
+      const endpointChanged = connection?.transport.type === "http" && connection.transport.url !== service.mcpUrl;
+      return { serviceId: service.id, ...(connection ? { mcpId: connection.id } : {}),
+        status: endpointChanged ? "conflict" as const : connection?.status ?? "not-connected" as const,
+        toolCount: connection?.toolCount ?? 0,
+        ...(endpointChanged ? { error: "The native Service endpoint was modified; its official account binding needs attention" }
+          : bundleErrors[service.id] ? { error: bundleErrors[service.id] }
+          : missing ? { error: "Official companion Skills are missing, disabled, or invalid" }
+          : connection?.error ? { error: connection.error } : {}) };
+    });
+    if (native && account.status !== "connected" && components.some((component) => component.serviceId === native.serviceId && component.status === "connected")) {
+      account.status = "connected";
+      delete account.error;
+      this.#persist();
+    }
+    const nativeConnectionId = native ? connections.find((connection) => connection.name === native.name)?.id : undefined;
+    return { ...visible, status: account.status, grantedScopes: [...(grant?.scopes ?? [])], components,
+      identityVerified: native === undefined, ...(nativeConnectionId ? { nativeConnectionId } : {}),
+      ...(account.error === undefined ? {} : { error: account.error }) };
   }
   #mcpDto(connection: Mcp): McpConnectionDto {
     const { id, name, enabled, status, toolCount, error, transport } = connection;
@@ -214,97 +248,61 @@ export class PluginsService {
   }
 
   async state(): Promise<PluginStateDto> {
+    await this.#ready;
     const [cloud, native] = await Promise.all([this.#providers(), this.#native()]);
+    this.mcp.updateStatus(native.mcp ?? []);
+    const mcp = this.packages.list();
+    const skills = this.skills.list();
+    const nativeError = [this.#defaultError, this.#nativeCache?.error, ...this.mcp.errors, ...this.skills.errors, ...this.packages.errors].filter(Boolean).join("\n");
+    const workspaceSkills = new Set(skills.map((skill) => skill.path));
     return { revision: this.#state.revision, cloudUrl: this.#cloudUrl(), providers: cloud.providers,
-      accounts: this.#state.accounts.map((account) => this.#accountDto(account)), mcp: this.#state.mcp.map((connection) => this.#mcpDto(connection)), skills: this.#state.skills.map((skill) => this.#skillDto(skill)),
-      nativeSkills: native.skills.map((skill) => ({ ...skill, agentId: "pi", readOnly: true })),
-      ...(cloud.error ? { cloudError: cloud.error } : {}), ...(this.#nativeCache?.error ? { nativeError: this.#nativeCache.error } : {}) };
+      accounts: this.#state.accounts.map((account) => this.#accountDto(account)), mcp: [...mcp, ...this.#state.mcp.map((connection) => ({ ...this.#mcpDto(connection), enabled: false, readOnly: true }))],
+      skills: [...skills, ...this.#state.skills.map((skill) => ({ ...this.#skillDto(skill), enabled: false, readOnly: true }))],
+      nativeSkills: native.skills.filter((skill) => !workspaceSkills.has(skill.path)).map((skill) => ({ ...skill, agentId: "pi", readOnly: true })),
+      ...(cloud.error ? { cloudError: cloud.error } : {}), ...(nativeError ? { nativeError } : {}) };
   }
 
-  saveMcp(id: string | null, input: z.input<typeof SaveMcpBody>): McpConnectionDto {
-    const body = SaveMcpBody.parse(input);
-    const previous = id === null ? undefined : this.#state.mcp.find((entry) => entry.id === id);
-    if (id !== null && !previous) throw new HttpError(404, "MCP connection not found");
-    if (body.transport.type === "http") {
-      const url = new URL(body.transport.url);
-      if (url.username || url.password || [...url.searchParams.keys()].some((key) => /^(access_token|token|api[_-]?key|secret|password)$/i.test(key))) throw new HttpError(400, "Put MCP credentials in write-only headers, not in the URL");
-      if (body.transport.headers === undefined && previous?.transport.type === "http") body.transport.headers = previous.transport.headers;
-    } else if (body.transport.env === undefined && previous?.transport.type === "stdio") body.transport.env = previous.transport.env;
-    const connection: Mcp = { ...body, id: id ?? `mcp_${randomUUID().replace(/-/g, "")}`, generation: randomUUID(), status: "unchecked", toolCount: 0 };
-    this.#state.mcp = [...this.#state.mcp.filter((entry) => entry.id !== id), connection];
+  async saveMcp(id: string | null, input: z.input<typeof SaveMcpBody>, signal?: AbortSignal): Promise<McpConnectionDto> {
+    const result = await this.packages.save(id, input, signal);
     this.#persist(true);
-    return this.#mcpDto(connection);
+    return result;
+  }
+
+  async updateMcp(id: string, signal?: AbortSignal): Promise<McpConnectionDto> {
+    const result = await this.packages.update(id, signal);
+    this.#persist(true);
+    return result;
   }
 
   enableMcp(id: string, enabled: boolean): void {
-    const connection = this.#state.mcp.find((entry) => entry.id === id);
-    if (!connection) throw new HttpError(404, "MCP connection not found");
-    connection.enabled = enabled;
+    this.mcp.enable(id, enabled);
     this.#persist(true);
   }
   removeMcp(id: string): void {
-    if (!this.#state.mcp.some((entry) => entry.id === id)) throw new HttpError(404, "MCP connection not found");
-    this.#state.mcp = this.#state.mcp.filter((entry) => entry.id !== id);
+    this.packages.remove(id);
     this.#persist(true);
   }
 
-  #connection(key: string, create: () => Promise<McpConnection>, keep: () => boolean): PoolEntry {
-    let entry = this.#pool.get(key);
-    if (!entry) {
-      entry = { promise: create(), refs: 0, keep };
-      this.#pool.set(key, entry);
-      const selected = entry;
-      void entry.promise.then((connection) => {
-        const previousClose = connection.client.onclose;
-        connection.client.onclose = () => {
-          previousClose?.();
-          if (this.#pool.get(key) === selected) this.#pool.delete(key);
-        };
-        connection.client.setNotificationHandler(ToolListChangedNotificationSchema, () => { delete selected.toolPromise; });
-      }).catch(() => { if (this.#pool.get(key) === selected) this.#pool.delete(key); });
-    }
-    return entry;
-  }
-
-  async #tools(entry: PoolEntry): Promise<AgentPluginToolDefinition[]> {
-    entry.toolPromise ??= (async () => {
-      const signal = AbortSignal.timeout(20_000);
-      const connection = await entry.promise;
-      if (!connection.client.getServerCapabilities()?.tools) return [];
-      const tools: AgentPluginToolDefinition[] = [];
-      const cursors = new Set<string>();
-      const names = new Set<string>();
-      let cursor: string | undefined;
-      do {
-        const page = await connection.client.listTools(cursor ? { cursor } : {}, { timeout: 20_000, signal });
-        for (const tool of page.tools) {
-          if (names.has(tool.name)) throw new Error("MCP server returned duplicate tool names");
-          names.add(tool.name);
-          tools.push({ name: tool.name, description: tool.description ?? tool.title ?? tool.name, inputSchema: tool.inputSchema });
-        }
-        cursor = page.nextCursor;
-        if (cursor && cursors.has(cursor)) throw new Error("MCP server returned a repeated tool-list cursor");
-        if (cursor) cursors.add(cursor);
-        if (tools.length > 2000) throw new Error("MCP server exposed more than 2000 tools");
-      } while (cursor);
-      return tools;
-    })().catch((error) => { delete entry.toolPromise; throw error; });
-    return entry.toolPromise;
-  }
 
   async checkMcp(id: string): Promise<McpConnectionDto> {
-    const current = this.#state.mcp.find((entry) => entry.id === id);
-    if (!current) throw new HttpError(404, "MCP connection not found");
-    const generation = current.generation;
-    const entry = this.#connection(`${id}:${generation}`, () => connectMcp(current.transport, this.cwd), () => this.#state.mcp.some((item) => item.id === id && item.generation === generation && item.enabled));
-    entry.refs++;
-    try {
-      const tools = await this.#tools(entry);
-      if (this.#state.mcp.includes(current)) { current.status = "connected"; current.toolCount = tools.length; delete current.error; this.#persist(); }
-    } catch (error) {
-      if (this.#state.mcp.includes(current)) { current.status = "error"; current.error = redactToolErrorSummary(error instanceof Error ? error.message : error); this.#persist(); }
-    } finally { entry.refs--; this.#reap(); }
-    return this.#mcpDto(current);
+    if (!this.nativeControl) throw new HttpError(503, "The native Pi MCP runtime is unavailable");
+    const name = this.mcp.name(id);
+    const result = await this.nativeControl({ action: "connect", server: name });
+    this.mcp.updateStatus(result.servers);
+    const entry = this.packages.list().find((item) => item.id === id) ?? this.mcp.list(true).find((item) => item.id === id)!;
+    return result.result?.error ? { ...entry, status: result.result.error === "auth_required" ? "needs-auth" : "error", error: String(result.result.error) } : entry;
+  }
+
+  async authorizeMcp(id: string, redirectUrl?: string): Promise<{ authorizationUrl?: string; authenticated?: boolean; error?: string }> {
+    if (!this.nativeControl) throw new HttpError(503, "The native Pi MCP runtime is unavailable");
+    const name = this.mcp.name(id);
+    const response = await this.nativeControl({ action: redirectUrl === undefined ? "auth-start" : "auth-complete", server: name, ...(redirectUrl === undefined ? {} : { redirectUrl }) });
+    this.mcp.updateStatus(response.servers);
+    return {
+      ...(typeof response.result?.authorizationUrl === "string" ? { authorizationUrl: response.result.authorizationUrl } : {}),
+      ...(typeof response.result?.authenticated === "boolean" ? { authenticated: response.result.authenticated } : {}),
+      ...(typeof response.result?.error === "string" ? { error: response.result.error } : {}),
+    };
   }
 
   async catalog(query = "", cursor?: string, view = "trending"): Promise<SkillCatalogDto> {
@@ -339,41 +337,69 @@ export class PluginsService {
       ...(raw.installs === undefined ? {} : { installs: raw.installs }), content, url: `https://skills.sh/${id.split("/").map(encodeURIComponent).join("/")}` };
   }
 
-  installSkill(id: string): Promise<InstalledSkillDto> {
+  installSkill(input: string | InstallSkillBody): Promise<InstalledSkillDto> {
+    if (typeof input !== "string" && "source" in input) return this.#installSource(input);
+    const id = typeof input === "string" ? input : input.id;
     const pending = this.#installing.get(id);
     if (pending) return pending;
-    const existed = this.#state.skills.some((skill) => skill.id === id);
+    const previous = this.skills.list().find((skill) => skill.id === id);
+    if (previous?.origin === "service") throw new HttpError(409, "Update this Skill through its owning Service bundle");
+    if (previous && (previous.id.startsWith("source_") || previous.origin === "default")) {
+      return this.#installSource({ source: previous.installUrl, ...(previous.skillPath === undefined ? {} : { skillPath: previous.skillPath }) }, previous.id);
+    }
     const operation = (async () => {
       const detail = await this.detail(id);
       const installed = await materializeSkill(detail, path.join(this.rootDir, "skills"));
-      const previous = this.#state.skills.find((skill) => skill.id === id);
-      if (this.#stopping || (existed && !previous)) {
-        await this.#removeUnusedSkill(installed.directory);
-        throw new HttpError(409, "Skill was removed or plugin runtime stopped during installation");
-      }
-      const now = new Date().toISOString();
-      const { content: _content, url: _url, ...catalog } = detail;
-      const skill: Skill = { ...catalog, ...installed, enabled: previous?.enabled ?? true, installedAt: previous?.installedAt ?? now,
-        updatedAt: previous?.revision === installed.revision ? previous.updatedAt : now, lastCheckedAt: now };
-      this.#state.skills = [...this.#state.skills.filter((item) => item.id !== id), skill];
-      this.#persist(previous?.revision !== installed.revision);
-      if (previous?.directory !== skill.directory && previous) void this.#removeUnusedSkill(previous.directory);
-      return this.#skillDto(skill);
+      try {
+        if (this.#stopping || (previous && !this.skills.list().some((skill) => skill.id === id))) throw new HttpError(409, "Skill was removed or plugin runtime stopped during installation");
+        const skill = this.skills.install(detail, installed);
+        this.#nativeCache = undefined;
+        this.#persist(true);
+        return skill;
+      } finally { await this.#removeUnusedSkill(installed.directory); }
     })().catch((error) => {
-      const skill = this.#state.skills.find((item) => item.id === id);
-      if (skill) { skill.error = redactToolErrorSummary(error instanceof Error ? error.message : error); skill.lastCheckedAt = new Date().toISOString(); this.#persist(); }
+      this.skills.markError(id, redactToolErrorSummary(error instanceof Error ? error.message : error));
       throw error;
     }).finally(() => { this.#installing.delete(id); });
     this.#installing.set(id, operation);
     return operation;
   }
 
+  #installSource(input: Exclude<InstallSkillBody, { id: string }>, existingId?: string): Promise<InstalledSkillDto> {
+    const key = existingId ?? `source:${JSON.stringify(input)}`;
+    const pending = this.#installing.get(key);
+    if (pending) return pending;
+    const operation = (async () => {
+      const source = await materializeSkillSource(input, path.join(this.rootDir, "skills"));
+      try {
+        if (this.#stopping || (existingId && !this.skills.list().some((skill) => skill.id === existingId))) throw new HttpError(409, "Skill was removed or plugin runtime stopped during installation");
+        const catalog = existingId ? { ...source.catalog, id: existingId } : source.catalog;
+        const installed = this.skills.install(catalog, source);
+        this.#nativeCache = undefined;
+        this.#persist(true);
+        return installed;
+      } finally { await this.#removeUnusedSkill(source.directory); }
+    })().catch((error) => {
+      if (existingId) this.skills.markError(existingId, redactToolErrorSummary(error instanceof Error ? error.message : error));
+      throw error;
+    }).finally(() => { this.#installing.delete(key); });
+    this.#installing.set(key, operation);
+    return operation;
+  }
+
   updateSkills(): Promise<void> {
     this.#updatePromise ??= (async () => {
       const failures: string[] = [];
-      for (const skill of [...this.#state.skills]) {
+      for (const skill of this.skills.list().filter((entry) => entry.enabled && entry.sourceType !== "local" && entry.origin !== "service")) {
         if (this.#stopping) break;
         try { await this.installSkill(skill.id); } catch { failures.push(skill.name); }
+      }
+      const updated = new Set<string>();
+      for (const account of this.#state.accounts) for (const serviceId of account.enabledServices) {
+        const key = `${account.providerId}/${serviceId}`;
+        if (this.#stopping || updated.has(key)) continue;
+        updated.add(key);
+        try { await this.updateService(account.id, serviceId); } catch { failures.push(key); }
       }
       if (failures.length) throw new HttpError(502, `Could not update: ${failures.join(", ")}. Existing installed versions are retained.`);
     })().finally(() => { this.#updatePromise = undefined; });
@@ -381,36 +407,193 @@ export class PluginsService {
   }
 
   enableSkill(id: string, enabled: boolean): void {
-    const skill = this.#state.skills.find((entry) => entry.id === id);
-    if (!skill) throw new HttpError(404, "Installed skill not found");
-    skill.enabled = enabled;
+    this.skills.enable(id, enabled);
+    this.#nativeCache = undefined;
     this.#persist(true);
   }
   removeSkill(id: string): void {
-    const skill = this.#state.skills.find((entry) => entry.id === id);
-    if (!skill) throw new HttpError(404, "Installed skill not found");
-    this.#state.skills = this.#state.skills.filter((entry) => entry.id !== id);
+    this.skills.remove(id);
+    this.#nativeCache = undefined;
     this.#persist(true);
-    void this.#removeUnusedSkill(skill.directory);
   }
   async #removeUnusedSkill(directory: string): Promise<void> {
-    if ((this.#skillRefs.get(directory) ?? 0) > 0 || this.#state.skills.some((skill) => skill.directory === directory)) return;
+    if (this.#state.skills.some((skill) => skill.directory === directory)) return;
     const relative = path.relative(path.join(this.rootDir, "skills"), directory);
     if (/^[0-9a-f]{64}$/.test(relative)) await rm(directory, { recursive: true, force: true });
   }
 
   async commands(): Promise<SkillCommandDto[]> {
     const native = await this.#native();
-    return [
-      ...this.#state.skills.filter((skill) => skill.enabled).map((skill): SkillCommandDto => ({ name: skill.name, description: skill.description, command: `/skill:${skillCommand(skill.id)}`, source: "managed" })),
-      ...native.skills.map((skill): SkillCommandDto => ({ name: skill.name, description: skill.description, command: `/skill:${skill.name}`, source: "native" })),
+    const shared = this.skills.list();
+    const sharedPaths = new Set(shared.map((skill) => skill.path));
+    const candidates = [
+      ...shared.filter((skill) => skill.enabled).map((skill): SkillCommandDto => ({ name: skill.name, description: skill.description, command: `/skill:${skill.name}`, source: "native" })),
+      ...native.skills.filter((skill) => !sharedPaths.has(skill.path)).map((skill): SkillCommandDto => ({ name: skill.name, description: skill.description, command: `/skill:${skill.name}`, source: "native" })),
     ];
+    return candidates.filter((skill, index) => candidates.findIndex((other) => other.command === skill.command) === index);
+  }
+
+  #serviceName(account: Account, serviceId: string): string { return `service-${account.id}-${serviceId}`; }
+
+  #serviceEpoch(account: Account, serviceId: string): number {
+    return this.#serviceEpochs.get(`${account.id}/${serviceId}`) ?? 0;
+  }
+
+  #changeService(account: Account, serviceId: string): number {
+    const epoch = this.#serviceEpoch(account, serviceId) + 1;
+    this.#serviceEpochs.set(`${account.id}/${serviceId}`, epoch);
+    return epoch;
+  }
+
+  async #ensureBundle(account: Account, service: PluginServiceDefinition, update = false): Promise<void> {
+    const epoch = this.#serviceEpoch(account, service.id);
+    const sourceIds = (service.skillSources ?? []).map((source) => ({
+      source, id: `service:${account.providerId}:${service.id}:${createHash("sha256").update(source).digest("hex").slice(0, 12)}`,
+    }));
+    const before = new Map(this.skills.list().filter((skill) => skill.serviceId === `${account.providerId}/${service.id}`).map((skill) => [skill.id, skill]));
+    const downloaded = new Map<string, Awaited<ReturnType<typeof materializeSkillSource>>>();
+    try {
+      for (const { source, id } of sourceIds) {
+        if (update || !before.has(id)) downloaded.set(id, await materializeSkillSource({ source }, path.join(this.rootDir, "skills")));
+      }
+      if (this.#stopping || !this.#state.accounts.includes(account) || this.#serviceEpoch(account, service.id) !== epoch
+        || !this.mcp.serviceConnections(account.id).some((connection) => connection.name === this.#serviceName(account, service.id))) throw new HttpError(409, "Service changed or was removed during component preparation");
+      const current = new Map(this.skills.list().map((skill) => [skill.id, skill]));
+      const enabled = this.#state.accounts.some((entry) => entry.providerId === account.providerId && entry.enabledServices.includes(service.id));
+      const installations: Parameters<NativeSkills["installBundle"]>[0][number][] = [];
+      for (const { id } of sourceIds) {
+        const existing = current.get(id);
+        if (update && existing?.revision !== before.get(id)?.revision) throw new HttpError(409, "Service content changed during download; the current bundle was retained");
+        if (!update && existing?.enabled === enabled) continue;
+        const resource = downloaded.get(id);
+        if (resource && (update || !existing)) {
+          installations.push({ catalog: { ...resource.catalog, id }, materialized: resource, options: { origin: "service", serviceId: `${account.providerId}/${service.id}`, enabled } });
+        } else if (existing?.path) {
+          installations.push({
+            catalog: { id, name: existing.name, description: existing.description, source: existing.source, sourceType: existing.sourceType, installUrl: existing.installUrl,
+              ...(existing.skillPath ? { skillPath: existing.skillPath } : {}) },
+            materialized: { directory: path.dirname(existing.path), revision: existing.revision },
+            options: { origin: "service", serviceId: `${account.providerId}/${service.id}`, enabled },
+          });
+        } else throw new HttpError(409, "An official companion resource disappeared during preparation");
+      }
+      this.skills.installBundle(installations);
+      for (const owner of this.#state.accounts.filter((entry) => entry.providerId === account.providerId)) delete owner.bundleErrors[service.id];
+      this.#nativeCache = undefined;
+      this.#persist(true);
+    } catch (error) {
+      const detail = redactToolErrorSummary(error instanceof Error ? error.message : error);
+      if (this.#state.accounts.includes(account)) account.bundleErrors[service.id] = detail;
+      for (const { id } of sourceIds) this.skills.markError(id, detail);
+      this.#persist();
+      if (error instanceof HttpError && error.status === 409) throw error;
+      throw new HttpError(502, `Official Service content could not be prepared; the previous bundle was retained. ${detail}`);
+    } finally {
+      await Promise.all([...downloaded.values()].map((resource) => this.#removeUnusedSkill(resource.directory)));
+    }
+  }
+
+  async #provisionService(account: Account, service: PluginServiceDefinition, enabled: boolean): Promise<void> {
+    if (!service.mcpUrl) throw new HttpError(409, "This Service does not publish an official MCP endpoint");
+    const epoch = this.#serviceEpoch(account, service.id);
+    const name = this.#serviceName(account, service.id);
+    const existing = this.mcp.serviceConnections(account.id).find((connection) => connection.name === name);
+    if (existing) {
+      if (existing.transport.type !== "http" || existing.transport.url !== service.mcpUrl) throw new HttpError(409, "The native Service endpoint was modified; it was not overwritten");
+    } else {
+      const native = account.native ? PLUGIN_PROVIDERS[account.providerId].nativeOAuth : undefined;
+      this.mcp.putService(name, { url: service.mcpUrl, disabled: true,
+        ...(native ? { oauth: {
+          ...(native.publicClientId ? { clientId: native.publicClientId } : {}),
+          ...(native.redirectPort ? { redirectUri: `http://localhost:${native.redirectPort}/callback` } : {}),
+          ...(native.authServerMetadataUrl ? { authServerMetadataUrl: native.authServerMetadataUrl } : {}),
+          ...(service.scopes.length ? { scope: service.scopes.join(" ") } : {}),
+        } } : {}) }, { accountId: account.id, serviceId: service.id });
+    }
+    const token = enabled && account.grant ? await this.#token(account.providerId, account.grant) : undefined;
+    if (!this.#state.accounts.includes(account) || this.#serviceEpoch(account, service.id) !== epoch) throw new HttpError(409, "Service changed during credential preparation");
+    await this.#ensureBundle(account, service);
+    if (!this.#state.accounts.includes(account) || this.#serviceEpoch(account, service.id) !== epoch) throw new HttpError(409, "Service changed during provisioning");
+    const connection = this.mcp.serviceConnections(account.id).find((entry) => entry.name === name);
+    if (!connection) throw new HttpError(409, "Service was removed during provisioning");
+    if (token !== undefined) this.mcp.setServiceToken(name, service.mcpUrl, token);
+    if (connection.enabled !== enabled) this.mcp.enable(connection.id, enabled, true);
+  }
+
+  async #initializeServices(): Promise<void> {
+    for (const account of this.#state.accounts) {
+      if (account.nativeManaged) continue;
+      if (!PLUGIN_PROVIDERS[account.providerId].publisherOAuth && account.grant) {
+        account.status = "reauthorize";
+        account.error = "The previous API grant is not an official MCP grant. Add a native Service account; the old account identity was retained.";
+        account.enabledServices = [];
+        account.nativeManaged = true;
+        this.#persist();
+        continue;
+      }
+      try {
+        for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
+          if (account.enabledServices.includes(service.id)) await this.#provisionService(account, service, true);
+        }
+        account.nativeManaged = true;
+        this.#persist();
+      } catch (error) { account.error = redactToolErrorSummary(error instanceof Error ? error.message : error); this.#persist(); }
+    }
+  }
+
+  async #prepareServiceCredentials(): Promise<void> {
+    await this.#ready;
+    for (const account of this.#state.accounts) {
+      if (!account.grant || account.status !== "connected") continue;
+      try {
+        const token = await this.#token(account.providerId, account.grant);
+        for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
+          if (account.enabledServices.includes(service.id) && service.mcpUrl && this.mcp.serviceConnections(account.id).some((entry) => entry.name === this.#serviceName(account, service.id))) {
+            this.mcp.setServiceToken(this.#serviceName(account, service.id), service.mcpUrl, token);
+          }
+        }
+      } catch (error) { account.error = redactToolErrorSummary(error instanceof Error ? error.message : error); this.#persist(); }
+    }
+  }
+
+  async #authorizeNative(body: AuthorizePluginBody, previous?: Account): Promise<{ url: string }> {
+    const provider = PLUGIN_PROVIDERS[body.providerId];
+    if (previous && !previous.native) throw new HttpError(409, "An API grant cannot be silently rebound to native MCP authorization. Add a separate Service account.");
+    const serviceId = body.serviceId ?? previous?.native?.serviceId ?? (provider.services.length === 1 ? provider.services[0]!.id : undefined);
+    const service = provider.services.find((item) => item.id === serviceId);
+    if (!service) throw new HttpError(400, "Select the exact Service or region before native authorization");
+    if (previous && previous.native?.serviceId !== service.id) throw new HttpError(409, "Add a separate account connection for a different Service region");
+    const id = previous?.id ?? `account_${randomUUID().replace(/-/g, "")}`;
+    const account: Account = previous ?? {
+      id, providerId: body.providerId, label: `${provider.name} · ${id.slice(-6)}`,
+      identity: "Native OAuth account identity is not exposed by this provider connection",
+      enabledServices: [service.id], status: "reauthorize", nativeManaged: true,
+      bundleErrors: {},
+      native: { serviceId: service.id, name: `service-${id}-${service.id}` },
+    };
+    if (!previous) this.#state.accounts.push(account);
+    this.#changeService(account, service.id);
+    this.#persist(true);
+    try {
+      await this.#provisionService(account, service, account.enabledServices.includes(service.id));
+      const connection = this.mcp.serviceConnections(account.id).find((entry) => entry.name === account.native!.name)!;
+      const result = await this.authorizeMcp(connection.id);
+      if (result.error) throw new HttpError(502, result.error);
+      if (result.authenticated) await this.checkMcp(connection.id);
+      return { url: result.authorizationUrl ?? body.returnUrl };
+    } catch (error) {
+      account.error = redactToolErrorSummary(error instanceof Error ? error.message : error);
+      this.#persist();
+      throw error;
+    }
   }
 
   async authorize(body: AuthorizePluginBody): Promise<{ url: string }> {
     const cloudUrl = this.#cloudUrl();
     const account = body.accountId === undefined ? undefined : this.#state.accounts.find((entry) => entry.id === body.accountId);
     if (body.accountId !== undefined && (!account || account.providerId !== body.providerId)) throw new HttpError(404, "Provider account not found");
+    await this.#ready;
+    if (PLUGIN_PROVIDERS[body.providerId].nativeOAuth && (!account?.grant || !PLUGIN_PROVIDERS[body.providerId].publisherOAuth)) return this.#authorizeNative(body, account);
     for (const [state, entry] of this.#oauth) if (entry.expiresAt < Date.now()) this.#oauth.delete(state);
     const localState = randomBytes(32).toString("base64url");
     const verifier = randomBytes(32).toString("base64url");
@@ -445,15 +628,28 @@ export class PluginsService {
     const previous = pending.accountId === undefined ? undefined : this.#state.accounts.find((account) => account.id === pending.accountId);
     if (pending.accountId !== undefined && !previous) throw new HttpError(409, "Account was removed during authorization");
     if (previous && previous.identity !== identity.identity) throw new HttpError(409, "A different provider identity was authorized. Use Add account instead of reconnecting this account.");
-    if (!grant.refreshToken && previous?.status === "connected" && previous.grant.cloudUrl === grant.cloudUrl && previous.grant.refreshToken) {
+    if (!grant.refreshToken && previous?.status === "connected" && previous.grant?.cloudUrl === grant.cloudUrl && previous.grant.refreshToken) {
       grant.refreshToken = previous.grant.refreshToken;
     }
     const services = PLUGIN_PROVIDERS[pending.providerId].services.filter((service) => hasScopes(grant, service)).map((service) => service.id);
     const account: Account = { id: previous?.id ?? `account_${randomUUID().replace(/-/g, "")}`, providerId: pending.providerId,
       label: previous?.label ?? identity.label, identity: identity.identity, enabledServices: previous ? previous.enabledServices.filter((id) => services.includes(id)) : services,
-      status: "connected", grant };
+      bundleErrors: { ...previous?.bundleErrors },
+      status: "connected", grant, nativeManaged: true };
     this.#state.accounts = [...this.#state.accounts.filter((item) => item.id !== account.id), account];
+    for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
+      this.#changeService(account, service.id);
+      if (!account.enabledServices.includes(service.id)) {
+        const connection = this.mcp.serviceConnections(account.id).find((entry) => entry.name === this.#serviceName(account, service.id));
+        if (connection) this.mcp.enable(connection.id, false, true);
+        this.#releaseBundle(account.providerId, service.id);
+      }
+    }
     this.#persist(true);
+    for (const service of PLUGIN_PROVIDERS[account.providerId].services) if (account.enabledServices.includes(service.id)) {
+      try { await this.#provisionService(account, service, true); }
+      catch (error) { account.bundleErrors[service.id] = redactToolErrorSummary(error instanceof Error ? error.message : error); this.#persist(); }
+    }
     return { returnUrl: pending.returnUrl, label: account.label };
   }
 
@@ -463,19 +659,82 @@ export class PluginsService {
     account.label = label;
     this.#persist(true);
   }
-  enableService(id: string, serviceId: string, enabled: boolean): PluginAccountDto {
+  async enableService(id: string, serviceId: string, enabled: boolean): Promise<PluginAccountDto> {
+    await this.#ready;
     const account = this.#state.accounts.find((entry) => entry.id === id);
     if (!account) throw new HttpError(404, "Provider account not found");
     const service = PLUGIN_PROVIDERS[account.providerId].services.find((entry) => entry.id === serviceId);
     if (!service) throw new HttpError(404, "Service is not part of this provider account");
-    if (enabled && (account.status === "reauthorize" || !hasScopes(account.grant, service))) throw new HttpError(409, "This service needs additional consent. Reconnect the account to request the supported provider permission group.");
+    if (enabled && (account.status === "reauthorize" || (account.grant && !hasScopes(account.grant, service)))) throw new HttpError(409, "This service needs additional consent. Reconnect the account to request the supported provider permission group.");
+    if (account.native && account.native.serviceId !== serviceId) throw new HttpError(409, "Authorize this Service or region as a separate native account connection");
+    const epoch = this.#changeService(account, serviceId);
+    const wasEnabled = account.enabledServices.includes(serviceId);
     account.enabledServices = enabled ? [...new Set([...account.enabledServices, serviceId])] : account.enabledServices.filter((entry) => entry !== serviceId);
     this.#persist(true);
+    try {
+      if (enabled) await this.#provisionService(account, service, true);
+      else {
+        const connection = this.mcp.serviceConnections(account.id).find((entry) => entry.name === this.#serviceName(account, serviceId));
+        if (connection) this.mcp.enable(connection.id, false, true);
+        this.#releaseBundle(account.providerId, serviceId);
+      }
+    } catch (error) {
+      if (this.#state.accounts.includes(account) && this.#serviceEpoch(account, serviceId) === epoch) {
+        account.enabledServices = wasEnabled ? [...new Set([...account.enabledServices, serviceId])] : account.enabledServices.filter((entry) => entry !== serviceId);
+        account.bundleErrors[serviceId] = redactToolErrorSummary(error instanceof Error ? error.message : error);
+        this.#persist();
+      }
+      throw error;
+    }
     return this.#accountDto(account);
   }
+
+  #releaseBundle(providerId: PluginProviderId, serviceId: string): void {
+    const owners = this.#state.accounts.filter((account) => account.providerId === providerId
+      && this.mcp.serviceConnections(account.id).some((connection) => connection.name === this.#serviceName(account, serviceId)));
+    const enabled = owners.some((account) => account.enabledServices.includes(serviceId));
+    for (const skill of this.skills.list().filter((entry) => entry.origin === "service" && entry.serviceId === `${providerId}/${serviceId}`)) {
+      if (!owners.length) this.skills.remove(skill.id, true);
+      else if (skill.enabled !== enabled) this.skills.enable(skill.id, enabled, true);
+    }
+    this.#nativeCache = undefined;
+  }
+
+  async removeService(id: string, serviceId: string): Promise<void> {
+    await this.#ready;
+    const account = this.#state.accounts.find((entry) => entry.id === id);
+    if (!account) throw new HttpError(404, "Provider account not found");
+    if (!PLUGIN_PROVIDERS[account.providerId].services.some((service) => service.id === serviceId)) throw new HttpError(404, "Unknown Service for this account");
+    this.#changeService(account, serviceId);
+    const connection = this.mcp.serviceConnections(id).find((entry) => entry.name === this.#serviceName(account, serviceId));
+    if (connection) this.mcp.remove(connection.id, true);
+    account.enabledServices = account.enabledServices.filter((entry) => entry !== serviceId);
+    delete account.bundleErrors[serviceId];
+    this.#releaseBundle(account.providerId, serviceId);
+    this.#persist(true);
+  }
+
+  updateService(id: string, serviceId: string): Promise<void> {
+    const account = this.#state.accounts.find((entry) => entry.id === id);
+    if (!account) throw new HttpError(404, "Provider account not found");
+    const service = PLUGIN_PROVIDERS[account.providerId].services.find((entry) => entry.id === serviceId);
+    if (!service || !this.mcp.serviceConnections(id).some((entry) => entry.name === this.#serviceName(account, serviceId))) throw new HttpError(404, "Service is not installed for this account");
+    const key = `${account.providerId}/${serviceId}`;
+    const pending = this.#serviceUpdates.get(key);
+    if (pending) return pending;
+    const operation = this.#ensureBundle(account, service, true).finally(() => { if (this.#serviceUpdates.get(key) === operation) this.#serviceUpdates.delete(key); });
+    this.#serviceUpdates.set(key, operation);
+    return operation;
+  }
   disconnectAccount(id: string): void {
-    if (!this.#state.accounts.some((entry) => entry.id === id)) throw new HttpError(404, "Provider account not found");
+    const account = this.#state.accounts.find((entry) => entry.id === id);
+    if (!account) throw new HttpError(404, "Provider account not found");
+    for (const connection of this.mcp.serviceConnections(id)) this.mcp.remove(connection.id, true);
     this.#state.accounts = this.#state.accounts.filter((entry) => entry.id !== id);
+    for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
+      this.#serviceEpochs.delete(`${id}/${service.id}`);
+      this.#releaseBundle(account.providerId, service.id);
+    }
     this.#persist(true);
   }
 
@@ -600,40 +859,7 @@ export class PluginsService {
     return { identity: `${providerId}:${id}`, label: typeof label === "string" && label.trim() ? label.trim() : `${PLUGIN_PROVIDERS[providerId].name} · ${id}` };
   }
 
-  async #apiCall(providerId: PluginProviderId, grant: Grant, service: PluginServiceDefinition, input: Record<string, unknown>, signal: AbortSignal): Promise<AgentPluginToolOutput> {
-    const args = ApiArguments.parse(input);
-    const api = service.api!;
-    if (!args.path.startsWith("/") || args.path.startsWith("//") || args.path.includes("\\")) throw new Error("Use a provider-relative API path");
-    const url = new URL(args.path, api.baseUrl);
-    const decoded = decodeURIComponent(url.pathname);
-    if (url.origin !== api.baseUrl || url.username || url.password || url.hash || decoded.split("/").includes("..")
-      || !api.pathPrefixes.some((prefix) => decoded === prefix || decoded.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`))) throw new Error("API path is outside this service card");
-    for (const [key, value] of Object.entries(args.query ?? {})) url.searchParams.set(key, String(value));
-    if (!hasScopes(grant, service)) throw new Error("Provider grant no longer includes the permissions required by this service");
-    const response = await this.#authenticatedFetch(providerId, grant)(url, {
-      method: args.method, signal, headers: { "content-type": args.contentType ?? (args.bodyBase64 === undefined ? "application/json" : "application/octet-stream"), ...(providerId === "microsoft" ? { Prefer: 'IdType="ImmutableId"' } : {}) },
-      ...(args.bodyBase64 !== undefined ? { body: Buffer.from(args.bodyBase64, "base64") } : args.body !== undefined ? { body: JSON.stringify(args.body) } : {}),
-    });
-    const contentType = response.headers.get("content-type") ?? "";
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (location && providerId === "microsoft" && url.pathname.endsWith("/content")) return { content: [{ type: "text", text: JSON.stringify({ status: response.status, downloadUrl: location, note: "Provider-issued preauthenticated download URL; do not attach account credentials." }) }] };
-      throw new Error(`Provider returned an unexpected redirect (${response.status})`);
-    }
-    if (!contentType.includes("json") && !contentType.startsWith("text/") && response.ok && response.status !== 204) {
-      const bytes = Buffer.from(await response.arrayBuffer());
-      const directory = path.join(this.rootDir, "results");
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-      const file = path.join(directory, `${randomUUID()}.bin`);
-      await writeFile(file, bytes, { mode: 0o600, flag: "wx" });
-      return { content: [{ type: "text", text: JSON.stringify({ status: response.status, filePath: file, contentType, bytes: bytes.length }) }] };
-    }
-    const text = await response.text();
-    return { content: [{ type: "text", text: JSON.stringify({ status: response.status, body: contentType.includes("json") && text ? JSON.parse(text) : text,
-      ...(response.headers.get("retry-after") ? { retryAfter: response.headers.get("retry-after") } : {}) }) }], ...(response.ok ? {} : { isError: true }) };
-  }
-
-  async #toolOutput(result: CallToolResult | AgentPluginToolOutput): Promise<AgentPluginToolOutput> {
+  async #toolOutput(result: AgentPluginToolOutput): Promise<AgentPluginToolOutput> {
     const encoded = JSON.stringify(result);
     if (Buffer.byteLength(encoded) > 2 * 1024 * 1024) {
       const directory = path.join(this.rootDir, "results");
@@ -650,131 +876,96 @@ export class PluginsService {
 
   async acquire(): Promise<PluginLease> {
     if (this.#stopping) throw new Error("Plugin runtime is stopping");
-    const snapshot: AgentPluginSnapshot = { revision: this.#state.revision, tools: [], skills: [], diagnostics: [] };
-    const calls = new Map<string, (args: Record<string, unknown>, signal: AbortSignal) => Promise<CallToolResult | AgentPluginToolOutput>>();
-    const entries = new Set<PoolEntry>();
-    const skillDirectories: string[] = [];
-    const activeCalls = new Set<AbortController>();
+    await this.#prepareServiceCredentials();
+    this.mcp.reconcile();
+    const snapshot: AgentPluginSnapshot = {
+      revision: this.#state.revision,
+      diagnostics: [...this.mcp.errors, ...this.skills.list().filter((skill) => skill.error).map((skill) => `${skill.name}: ${skill.error}`),
+        ...this.#state.accounts.map((account) => `Service account ${account.id}: ${account.label}; ${account.identity}. Native MCP server names are ${account.enabledServices.map((serviceId) => this.#serviceName(account, serviceId)).join(", ") || "none enabled"}.${account.error ? ` Needs attention: ${account.error}` : ""}`)],
+      tools: [{
+        name: "manage_plugins",
+        description: "Inspect shared Services, native MCP connections and Skills. inspect reads installed inventory; inspect_skill reads catalog source and content. Search and install complete independent Skills from the catalog or explicit sources; update Skills, and enable, disable or remove Skills and custom MCPs without a product approval gate. Authorize, enable, disable, remove or update Services; label or disconnect exact account ids. Updates preserve local modifications. Changes affect subsequent native resource reloads; actual reload and native/provider authorization still apply. authorize_service returns a real URL pending user authorization, never completed consent. Never claim an unprobed MCP is connected. Use Pi's native mcp tool for provider business operations, and the default official skill-creator for local authoring.",
+        inputSchema: { type: "object", properties: {
+          action: { type: "string", enum: ["list", "inspect", "inspect_skill", "search_skills", "install_skill", "enable_skill", "remove_skill", "update_skills", "authorize_service", "enable_service", "remove_service", "update_service", "label_account", "disconnect_account", "save_mcp", "update_mcp", "enable_mcp", "remove_mcp", "check_mcp", "authorize_mcp"] },
+          id: { type: "string" }, query: { type: "string" }, cursor: { type: "string" }, source: { type: "string" },
+          skillPath: { type: "string" }, ref: { type: "string" }, enabled: { type: "boolean" },
+          providerId: { type: "string", enum: PluginProviderId.options }, serviceId: { type: "string" }, label: { type: "string" },
+          connection: { type: "object", description: "SaveMcpBody: name, enabled, and either transport {type:stdio,command,args?,env?} / {type:http,url,headers?}, or package {name: exact public npm package,bin?,args?,env?}. Managed npm packages update automatically; arbitrary native commands remain user-owned. Credential fields are write-only." },
+          redirectUrl: { type: "string" },
+        }, required: ["action"], additionalProperties: false },
+      }],
+    };
     let released = false;
-    let statusChanged = false;
-    const accountErrors = new Map<Account, string[]>();
-    const release = (): void => {
-      if (released) return;
-      released = true;
-      for (const controller of activeCalls) controller.abort("Plugin turn ended");
-      for (const entry of entries) entry.refs--;
-      for (const directory of skillDirectories) {
-        const count = (this.#skillRefs.get(directory) ?? 1) - 1;
-        if (count > 0) this.#skillRefs.set(directory, count); else this.#skillRefs.delete(directory);
-        void this.#removeUnusedSkill(directory);
-      }
-      this.#reap();
-    };
-    const addMcp = async (key: string, description: string, entry: PoolEntry, onStatus: (error: string | undefined, count: number) => void) => {
-      if (!entries.has(entry)) { entry.refs++; entries.add(entry); }
-      try {
-        const tools = await this.#tools(entry);
-        for (const tool of tools) {
-          const name = toolName(key, tool.name);
-          if (calls.has(name)) throw new Error("MCP server returned duplicate tool names");
-          snapshot.tools.push({ ...tool, name, description: `${description}\n${tool.description}` });
-          calls.set(name, async (args, signal) => {
-            const connection = await entry.promise;
-            const result = await connection.client.callTool({ name: tool.name, arguments: args }, undefined, { signal, timeout: 120_000 });
-            return result as CallToolResult;
-          });
-        }
-        onStatus(undefined, tools.length);
-      } catch (error) {
-        const message = redactToolErrorSummary(error instanceof Error ? error.message : error);
-        snapshot.diagnostics.push(`${description}: ${message}`);
-        onStatus(message, 0);
-      }
-    };
-    try {
-    // Capture enabled lists before awaiting any network request. Later mutations cannot alter this turn.
-    const skills = this.#state.skills.filter((skill) => skill.enabled);
-    const connections = this.#state.mcp.filter((connection) => connection.enabled);
-    const services = this.#state.accounts.flatMap((account) => account.status === "connected"
-      ? PLUGIN_PROVIDERS[account.providerId].services.filter((service) => account.enabledServices.includes(service.id)).map((service) => ({ account, grant: account.grant, service, label: account.label, identity: account.identity })) : []);
-    for (const { account } of services) accountErrors.set(account, []);
-    for (const account of this.#state.accounts) {
-      if (account.status === "reauthorize" && account.enabledServices.length) snapshot.diagnostics.push(`${account.label} (${account.identity}): provider authorization requires reconnecting.`);
-    }
-    for (const skill of skills) {
-      this.#skillRefs.set(skill.directory, (this.#skillRefs.get(skill.directory) ?? 0) + 1);
-      skillDirectories.push(skill.directory);
-      snapshot.skills.push({ name: skillCommand(skill.id), filePath: path.join(skill.directory, "SKILL.md") });
-    }
-    await Promise.all([
-      ...connections.map(async (connection) => {
-        const key = `${connection.id}:${connection.generation}`;
-        const entry = this.#connection(key, () => connectMcp(connection.transport, this.cwd), () => this.#state.mcp.some((item) => item.id === connection.id && item.generation === connection.generation && item.enabled));
-        await addMcp(connection.id, `Custom MCP: ${connection.name} (${connection.id})`, entry, (error, count) => {
-          if (!this.#state.mcp.includes(connection)) return;
-          const status = error ? "error" : "connected";
-          if (connection.status !== status || connection.toolCount !== count || connection.error !== error) statusChanged = true;
-          connection.status = status; connection.toolCount = count;
-          if (error) connection.error = error; else delete connection.error;
-        });
-      }),
-      ...services.map(async ({ account, grant, service, label, identity }) => {
-        const key = `${account.id}:${grant.generation}:${service.id}`;
-        const description = `${service.name}; account ${label}; provider identity ${identity}; account ID ${account.id}. This tool is bound to that account. Choose accounts based on the user's request; do not assume a default account.`;
-        if (!hasScopes(grant, service)) {
-          snapshot.diagnostics.push(`${description}: additional consent is required`);
-          accountErrors.get(account)!.push(`${service.name}: additional consent is required`);
-          return;
-        }
-        if (service.api) {
-          const name = toolName(`${account.id}:${service.id}`, `${service.id}_request`);
-          snapshot.tools.push({ name, description: `${description}\n${service.api.instructions}`, inputSchema: API_TOOL_SCHEMA });
-          calls.set(name, (args, signal) => this.#apiCall(account.providerId, grant, service, args, signal));
-        }
-        if (service.mcpUrl) {
-          let url = service.mcpUrl;
-          if (account.providerId === "intercom" && grant.metadata.region === "EU") url = "https://mcp.eu.intercom.com/mcp";
-          const entry = this.#connection(key, () => connectMcp({ type: "http", url }, this.cwd, this.#authenticatedFetch(account.providerId, grant)),
-            () => this.#state.accounts.some((item) => item.id === account.id && item.grant === grant && item.enabledServices.includes(service.id)));
-          await addMcp(`${account.id}:${service.id}`, description, entry, (error) => {
-            if (error) accountErrors.get(account)!.push(`${service.name}: ${error}`);
-          });
-        }
-      }),
-    ]);
-    for (const [account, errors] of accountErrors) {
-      if (!this.#state.accounts.includes(account) || account.status === "reauthorize") continue;
-      const error = errors.length ? errors.join("; ") : undefined;
-      if (account.error !== error) statusChanged = true;
-      if (error) account.error = error; else delete account.error;
-    }
-    if (Buffer.byteLength(JSON.stringify(snapshot)) > 3 * 1024 * 1024) throw new HttpError(413, "Enabled plugin schemas exceed the worker protocol frame limit. Disable an oversized connection.");
-    if (statusChanged) this.#persist();
     return {
       snapshot,
       call: async (name, args, signal) => {
+        signal.throwIfAborted();
         if (released) throw new Error("Plugin turn snapshot was released");
-        const call = calls.get(name);
-        if (!call) throw new Error("Plugin tool does not belong to this turn snapshot");
-        const controller = new AbortController();
-        activeCalls.add(controller);
-        try { return await this.#toolOutput(await call(args, AbortSignal.any([signal, controller.signal]))); }
-        finally { activeCalls.delete(controller); }
+        if (name !== "manage_plugins") throw new Error("Plugin management tool does not belong to this turn");
+        const input = z.object({
+          action: z.enum(["list", "inspect", "inspect_skill", "search_skills", "install_skill", "enable_skill", "remove_skill", "update_skills", "authorize_service", "enable_service", "remove_service", "update_service", "label_account", "disconnect_account", "save_mcp", "update_mcp", "enable_mcp", "remove_mcp", "check_mcp", "authorize_mcp"]),
+          id: z.string().optional(), query: z.string().optional(), cursor: z.string().optional(), source: z.string().optional(),
+          skillPath: z.string().optional(), ref: z.string().optional(), enabled: z.boolean().optional(), connection: SaveMcpBody.optional(), redirectUrl: z.string().optional(),
+          providerId: PluginProviderId.optional(), serviceId: z.string().optional(), label: z.string().optional(),
+        }).strict().parse(args);
+        const id = (): string => { if (!input.id) throw new HttpError(400, "Select an exact plugin id from list or search"); return input.id; };
+        const enabled = (): boolean => { if (input.enabled === undefined) throw new HttpError(400, "Specify enabled explicitly"); return input.enabled; };
+        const serviceId = (): string => { if (!input.serviceId) throw new HttpError(400, "Select an exact Service id from list"); return input.serviceId; };
+        let result: unknown;
+        switch (input.action) {
+          case "list": result = await this.state(); break;
+          case "inspect": {
+            const state = await this.state();
+            result = [...state.skills, ...state.mcp, ...state.accounts].find((entry) => entry.id === id());
+            if (!result) throw new HttpError(404, "Plugin not found");
+            break;
+          }
+          case "inspect_skill": result = await this.detail(id()); break;
+          case "search_skills": result = await this.catalog(input.query ?? "", input.cursor); break;
+          case "install_skill": result = await this.installSkill(input.source ? { source: input.source, ...(input.skillPath === undefined ? {} : { skillPath: input.skillPath }), ...(input.ref === undefined ? {} : { ref: input.ref }) } : id()); break;
+          case "enable_skill": this.enableSkill(id(), enabled()); result = this.skills.list().find((entry) => entry.id === input.id); break;
+          case "remove_skill": this.removeSkill(id()); result = { removed: true }; break;
+          case "update_skills": await this.updateSkills(); result = await this.state(); break;
+          case "authorize_service": {
+            if (!input.providerId) throw new HttpError(400, "Specify the provider id");
+            if (!this.clientOrigin) throw new HttpError(503, "Service authorization requires a configured daemon client origin");
+            const authorization = await this.authorize({ providerId: input.providerId, returnUrl: this.clientOrigin(),
+              ...(input.id === undefined ? {} : { accountId: input.id }), ...(input.serviceId === undefined ? {} : { serviceId: input.serviceId }) });
+            result = { ...authorization, pendingAuthorization: true };
+            break;
+          }
+          case "enable_service": result = await this.enableService(id(), serviceId(), enabled()); break;
+          case "remove_service": await this.removeService(id(), serviceId()); result = { removed: true }; break;
+          case "update_service": await this.updateService(id(), serviceId()); result = { completed: true, state: await this.state() }; break;
+          case "label_account": {
+            const label = input.label?.trim();
+            if (!label) throw new HttpError(400, "Specify a nonblank account label");
+            this.labelAccount(id(), label);
+            result = (await this.state()).accounts.find((entry) => entry.id === input.id);
+            break;
+          }
+          case "disconnect_account": this.disconnectAccount(id()); result = { disconnected: true }; break;
+          case "save_mcp": if (!input.connection) throw new HttpError(400, "Provide a complete connection definition"); result = await this.saveMcp(input.id ?? null, input.connection, signal); break;
+          case "update_mcp": result = await this.updateMcp(id(), signal); break;
+          case "enable_mcp": this.enableMcp(id(), enabled()); result = this.packages.list().find((entry) => entry.id === input.id); break;
+          case "remove_mcp": this.removeMcp(id()); result = { removed: true }; break;
+          case "check_mcp": result = await this.checkMcp(id()); break;
+          case "authorize_mcp": result = await this.authorizeMcp(id(), input.redirectUrl); break;
+        }
+        return this.#toolOutput({ content: [{ type: "text", text: JSON.stringify(result) }] });
       },
-      release,
+      release: () => { released = true; },
     };
-    } catch (error) {
-      release();
-      throw error;
-    }
   }
 
   async shutdown(): Promise<void> {
     this.#stopping = true;
     clearInterval(this.#timer);
+    clearInterval(this.#reconcileTimer);
+    await this.packages.shutdown();
+    await this.#ready;
     this.#oauth.clear();
     await Promise.allSettled(this.#installing.values());
-    await Promise.allSettled([...this.#pool.values()].map(async (entry) => (await entry.promise).close()));
-    this.#pool.clear();
+    await Promise.allSettled(this.#serviceUpdates.values());
   }
 }

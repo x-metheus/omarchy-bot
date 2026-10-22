@@ -17,9 +17,15 @@
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "1.62.1",
     "@types/bun": "latest",
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "26.4.0",
     "typescript": "^5.7.0"
   },
+  "overrides": {
+    "@types/node": "26.4.0"
+  },
   "patchedDependencies": {
-    "@astryxdesign/core@0.5.2": "patches/@astryxdesign%2Fcore@0.5.2.patch"
+    "@astryxdesign/core@0.5.2": "patches/@astryxdesign%2Fcore@0.5.2.patch",
+    "pi-mcp-adapter@2.33.0": "patches/pi-mcp-adapter@2.33.0.patch"
   }
 }

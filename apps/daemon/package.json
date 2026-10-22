@@ -18,6 +18,7 @@
     "tar": "^7.5.0",
     "yaml": "^2.8.1",
     "fflate": "^0.8.2",
+    "toml-eslint-parser": "^0.10.0",
     "@omarchy-bot/agent-contract": "workspace:*",
     "@omarchy-bot/domain": "workspace:*",
     "@omarchy-bot/protocol": "workspace:*",

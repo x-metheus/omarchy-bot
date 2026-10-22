@@ -1,0 +1,61 @@
+{
+  "repository": "https://github.com/openai/skills",
+  "sourceDirectory": "skills/.system/skill-creator",
+  "commit": "49f948faa9258a0c61caceaf225e179651397431",
+  "license": {
+    "spdx": "Apache-2.0",
+    "source": "https://github.com/openai/skills/blob/49f948faa9258a0c61caceaf225e179651397431/skills/.system/skill-creator/LICENSE.txt",
+    "file": "LICENSE.txt"
+  },
+  "files": [
+    {
+      "path": "LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "gitBlob": "d645695673349e3947e8e5ae42332d0ac3164cd7",
+      "size": 11358,
+      "mode": "100644"
+    },
+    {
+      "path": "SKILL.md",
+      "sha256": "a17383bfb1448637ac1f757ad891ddb9676fa30b0eff620200f0e1cbc0cc0d50",
+      "gitBlob": "72bc0b97e7a6476254a9d5c424c9971748402ec3",
+      "size": 18664,
+      "mode": "100644"
+    },
+    {
+      "path": "agents/openai.yaml",
+      "sha256": "fcc3ba02bdf8d6df1f891637cf5336d2d7ef87bb8910fa622bd150c8e0d4c55b",
+      "gitBlob": "f5ce09ed118b72908b7308fcfc1619f59e89f6ea",
+      "size": 192,
+      "mode": "100644"
+    },
+    {
+      "path": "references/openai_yaml.md",
+      "sha256": "9fb5928b7f4a746fdb39df503ebbd7a659d5e64b47f85a60626aa1a03fd76b17",
+      "gitBlob": "da5629f8de500ec6f81291d239a2d9c68d1d9044",
+      "size": 2130,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/generate_openai_yaml.py",
+      "sha256": "b8f6be33a9d72dd7a8da02e7a9fffea23dc79e94862e6dd6358b57a8899d8f73",
+      "gitBlob": "1a9d784f8704999daf55a2b9036094949d9af3f8",
+      "size": 6614,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/init_skill.py",
+      "sha256": "bcb8982d3f033a094f2f1be43123ac8537e2562d25d8ba4d8ef2196ae514d96d",
+      "gitBlob": "f90703eca8159a21a9684ed1df974c702d92f814",
+      "size": 14483,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/quick_validate.py",
+      "sha256": "6cc9dc3199c935916cf6f73fcbbbb0e3bb1b58c8f5109fefa499978908164f51",
+      "gitBlob": "0547b4041a5f58fa19892079a114a1df98286406",
+      "size": 3293,
+      "mode": "100644"
+    }
+  ]
+}
