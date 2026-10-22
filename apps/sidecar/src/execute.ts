@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { DeviceLocalJobFrame } from "../../../packages/protocol/src/index.ts";
+import { LOCAL_RESULT_TEXT_MAX, type DeviceLocalJobFrame } from "../../../packages/protocol/src/index.ts";
 
 const SECRET_DIR_NAMES = new Set([".ssh", ".gnupg", ".aws", ".config"]);
 const SEARCH_HIT_LIMIT = 32;
@@ -69,7 +69,11 @@ export async function executeLocalJob(
       if (job.path === undefined) {
         return { ok: false, error: "transfer into Shared Workspace requires a Sidecar source path" };
       }
-      return { ok: true, text: readFileSync(confinedSidecarPath(job.path, root), "utf8") };
+      const text = readFileSync(confinedSidecarPath(job.path, root), "utf8");
+      if (text.length > LOCAL_RESULT_TEXT_MAX) {
+        return { ok: false, error: `transfer exceeds the ${LOCAL_RESULT_TEXT_MAX} character result frame` };
+      }
+      return { ok: true, text };
     }
     return { ok: false, error: `unsupported local action ${job.action}` };
   } catch (error) {

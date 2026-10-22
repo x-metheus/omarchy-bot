@@ -33,11 +33,13 @@ export const DeviceHeartbeatFrame = z.object({
 });
 export type DeviceHeartbeatFrame = z.infer<typeof DeviceHeartbeatFrame>;
 
+export const LOCAL_RESULT_TEXT_MAX = 16_384;
+
 export const DeviceLocalResultFrame = z.object({
   type: z.literal("local.result"),
   jobId: z.string().min(1).max(256),
   ok: z.boolean(),
-  text: z.string().max(16_384).optional(),
+  text: z.string().max(LOCAL_RESULT_TEXT_MAX).optional(),
   error: z.string().max(2_048).optional(),
   exitCode: z.number().int().optional(),
 });

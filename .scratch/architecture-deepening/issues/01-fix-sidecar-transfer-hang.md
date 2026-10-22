@@ -1,7 +1,7 @@
 # 01: Fix the Sidecar transfer hang
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** claimed
 **Blocked by:** —
 
 **What to build:** A `local` transfer of a file larger than 16 KiB currently never completes. `apps/sidecar/src/execute.ts:72` returns the whole file, `DeviceLocalResultFrame.text` is `max(16_384)` (`packages/protocol/src/devices.ts:40`), and `DeviceRoster.complete` drops the failed parse (`apps/daemon/src/modules/devices/deviceRoster.ts:142`) so the pending job never settles.

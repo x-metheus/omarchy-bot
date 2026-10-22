@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import {
+  LOCAL_RESULT_TEXT_MAX,
   DeviceLocalResultFrame,
   DeviceRegisterFrame,
   type DeviceDto,
@@ -139,14 +140,21 @@ export class DeviceRoster {
 
   complete(raw: unknown): void {
     const parsed = DeviceLocalResultFrame.safeParse(raw);
-    if (!parsed.success) return;
+    if (!parsed.success) {
+      const jobId = jobIdOf(raw);
+      const pending = jobId === undefined ? undefined : this.#jobs.get(jobId);
+      if (jobId === undefined || pending === undefined) return;
+      this.#jobs.delete(jobId);
+      pending.reject(new Error(`local.result frame for job ${jobId} did not parse`));
+      return;
+    }
     const pending = this.#jobs.get(parsed.data.jobId);
     if (pending === undefined) return;
     this.#jobs.delete(parsed.data.jobId);
     if (parsed.data.ok) {
       const text = parsed.data.text ?? "";
       pending.resolve({
-        text: pending.action === "transfer" ? text.slice(0, 65_536) : redactLocalOutput(text),
+        text: pending.action === "transfer" ? text.slice(0, LOCAL_RESULT_TEXT_MAX) : redactLocalOutput(text),
         ...(parsed.data.exitCode !== undefined ? { exitCode: parsed.data.exitCode } : {}),
       });
       return;
@@ -161,4 +169,10 @@ export class DeviceRoster {
       pending.reject(new Error(error));
     }
   }
+}
+
+function jobIdOf(raw: unknown): string | undefined {
+  if (typeof raw !== "object" || raw === null || !("jobId" in raw)) return undefined;
+  const jobId = raw.jobId;
+  return typeof jobId === "string" && jobId.length > 0 ? jobId : undefined;
 }

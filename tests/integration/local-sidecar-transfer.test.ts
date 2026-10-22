@@ -95,4 +95,26 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
     expect(existsSync(path.join(h.svc.cfg.sharedWorkspaceDir, "inbox/denied.txt"))).toBeFalse();
     expect((await messages(h, sent.threadId)).some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "error")).toBeTrue();
   });
+
+  test("a transfer larger than the result frame settles instead of hanging", async () => {
+    h = await startDaemon();
+    const sidecar = await connect();
+    await sidecar.register({
+      deviceId: DEVICE_A,
+      hostname: "laptop",
+      capabilities: ["transfer"],
+    });
+    writeFileSync(sidecar.sandboxPath("big.txt"), "x".repeat(16_385));
+    const botId = await makeBot(h, "Large transfer Bot");
+    const pending = sendToBot(h, botId, "local.transfer:to-workspace:big.txt:inbox/big.txt");
+    await sidecar.waitForJob();
+    await sidecar.allowOnce();
+    const sent = await pending;
+    await waitThreadIdle(h, sent.threadId);
+    const landed = path.join(h.svc.cfg.sharedWorkspaceDir, "inbox/big.txt");
+    expect(existsSync(landed)).toBeFalse();
+    const tool = (await messages(h, sent.threadId)).find((message) => message.kind === "tool" && message.toolCall?.name === "local");
+    expect(tool?.toolCall?.status).toBe("error");
+    expect(tool?.toolCall?.errorSummary).toContain("did not parse");
+  });
 });
