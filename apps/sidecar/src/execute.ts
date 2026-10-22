@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { LOCAL_RESULT_TEXT_MAX, type DeviceLocalJobFrame } from "../../../packages/protocol/src/index.ts";
+import { LOCAL_RESULT_TEXT_MAX, type DeviceLocalJobFrame } from "@omarchy-bot/protocol";
 
 const SECRET_DIR_NAMES = new Set([".ssh", ".gnupg", ".aws", ".config"]);
 const SEARCH_HIT_LIMIT = 32;
