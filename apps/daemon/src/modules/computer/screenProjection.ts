@@ -20,6 +20,7 @@ import type {
   BotScreenProjectionSource,
 } from "./botScreenManager.ts";
 import { InputDiagnostics, type InputDiagnosticCategory } from "./inputDiagnostics.ts";
+import type { ScreenInputLease } from "./screenInputLease.ts";
 
 const PREVIEW_INTERVAL_MS = 1_000;
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
@@ -225,9 +226,7 @@ export class ScreenProjectionService {
   constructor(
     private readonly screens: BotScreenManager,
     private readonly diagnostics: InputDiagnostics,
-    private readonly canAcceptWebControl: (owner: ComputerSurfaceOwner) => boolean,
-    private readonly webControlClaimed: (owner: ComputerSurfaceOwner) => void,
-    private readonly webControlReleased: (owner: ComputerSurfaceOwner) => void,
+    private readonly lease: ScreenInputLease,
   ) {
     this.#unsubscribeScreens = screens.subscribe((transition) => {
       if (transition.state === "failed" || transition.state === "stopped") {
@@ -468,15 +467,13 @@ export class ScreenProjectionService {
     );
   }
 
-  async revokeControl(surfaceId: SurfaceId): Promise<void> {
+  suspendInput(surfaceId: SurfaceId): void {
     for (const session of this.#sessions.values()) {
       if (session.source.surfaceId === surfaceId) session.inputSuspended = true;
     }
-    const controller = this.#controllers.get(surfaceId);
-    if (controller !== undefined) await this.#revokeInput(controller);
   }
 
-  async restoreControl(surfaceId: SurfaceId): Promise<void> {
+  async restoreInput(surfaceId: SurfaceId): Promise<void> {
     const session = [...this.#sessions.values()].find((candidate) =>
       candidate.source.surfaceId === surfaceId
       && candidate.mode === "expanded"
@@ -723,7 +720,7 @@ export class ScreenProjectionService {
       this.#rejectInput(session);
       return;
     }
-    if (!this.canAcceptWebControl(session.owner)) {
+    if (!this.lease.canAcceptWebControl(session.owner.surfaceId)) {
       void this.#revokeInput(controller).catch((error) => this.#close(session, true, error));
       return;
     }
@@ -901,7 +898,7 @@ export class ScreenProjectionService {
       this.#sessions.get(session.id) !== session
       || session.mode !== "expanded"
       || session.control === undefined
-      || (!force && !this.canAcceptWebControl(session.owner))
+      || (!force && !this.lease.canAcceptWebControl(session.owner.surfaceId))
       || this.#isInputController(session)
       || session.inputSuspended
     ) return false;
@@ -935,18 +932,17 @@ export class ScreenProjectionService {
         || session.mode !== "expanded"
       ) return;
       const accepted = await session.source.setInputAuthority(epoch);
-      controller.epoch = accepted;
-      this.#controllerEpochs.set(surfaceId, accepted);
+      if (accepted !== epoch) throw new Error(`stale controller epoch ${accepted}`);
       controller.provisioned = true;
       if (
         controller.revoked
         || this.#controllers.get(surfaceId) !== controller
         || this.#sessions.get(session.id) !== session
         || session.mode !== "expanded"
-        || (!force && !this.canAcceptWebControl(session.owner))
+        || (!force && !this.lease.canAcceptWebControl(session.owner.surfaceId))
       ) return;
       controller.active = true;
-      this.webControlClaimed(session.owner);
+      this.lease.webControlClaimed(session.owner);
       controller.announced = true;
       this.#sendInputAuthority(controller, true);
       this.#recordDiagnostic(surfaceId, "controller", "accepted", 0);
@@ -1014,7 +1010,7 @@ export class ScreenProjectionService {
       } finally {
         if (controller.announced) {
           controller.announced = false;
-          this.webControlReleased(controller.session.owner);
+          this.lease.webControlReleased(controller.session.owner);
         }
       }
     });

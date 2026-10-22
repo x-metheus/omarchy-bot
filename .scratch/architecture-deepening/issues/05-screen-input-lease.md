@@ -1,7 +1,7 @@
 # 05: ScreenInputLease
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** claimed
 **Blocked by:** —
 
 **What to build:** One in-process `ScreenInputLease` module that owns "who may type into Screen X": a single controller epoch per Screen, the shared-seat queue, Takeover phases, Web Control ownership, and held key/button release. Screen Projection keeps only wire-protocol translation and the key-code table; runtimes only deliver events. The Computer Broker keeps the Agent `computer` tool entry, per-Screen state DTO, and the user-facing Takeover request.

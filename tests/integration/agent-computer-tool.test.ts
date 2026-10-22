@@ -161,16 +161,14 @@ async function botSurface(h: Harness, botId: string): Promise<SurfaceId> {
 
 function coordination(h: Harness, surfaceId: SurfaceId): {
   authority_kind: "idle" | "agent" | "web" | "takeover";
-  controller_epoch: number;
 } | null {
   return h.svc.db
     .query(
-      `SELECT authority_kind, controller_epoch
+      `SELECT authority_kind
        FROM computer_surface_coordination WHERE surface_id = ?`,
     )
     .get(surfaceId) as {
       authority_kind: "idle" | "agent" | "web" | "takeover";
-      controller_epoch: number;
     } | null;
 }
 
@@ -253,7 +251,7 @@ describe("Bot-bound Pi computer tool", () => {
     expect(transcript.some((message) => message.kind === "tool" && message.toolCall?.name === "computer")).toBeTrue();
   });
 
-  test("different Surfaces run concurrently while one Surface orders Agent actions", async () => {
+  test("one shared seat orders Agent input across Screens while one Screen stays ordered", async () => {
     const adapter = new AgentToolRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const firstBot = await makeBot(h, "Concurrent first Bot");
@@ -266,10 +264,9 @@ describe("Bot-bound Pi computer tool", () => {
       sendToBot(h, firstBot, "computer:click:first-b"),
       sendToBot(h, secondBot, "computer:click:second"),
     ]);
-    await adapter.waitForActions(2);
+    await adapter.waitForActions(1);
     expect(adapter.maxInFlight.get(firstSurface)).toBe(1);
-    expect(adapter.maxInFlight.get(secondSurface)).toBe(1);
-    expect(adapter.maxAcrossSurfaces).toBe(2);
+    expect(adapter.maxAcrossSurfaces).toBe(1);
     adapter.releaseActions();
     const turns = await turnsPromise;
     await Promise.all(turns.map((turn) => waitThreadIdle(h!, turn.threadId)));
@@ -522,14 +519,13 @@ describe("Bot-bound Pi computer tool", () => {
     staleDb
       .query(
         `UPDATE computer_surface_coordination
-         SET authority_kind = 'web', controller_epoch = 41, updated_at = ? WHERE surface_id = ?`,
+         SET authority_kind = 'web', updated_at = ? WHERE surface_id = ?`,
       )
       .run(new Date(0).toISOString(), surfaceId);
     staleDb.close();
     h = await startDaemon(home, { botScreenAdapter: new AgentToolRuntimeAdapter() });
     expect(coordination(h, surfaceId)).toEqual({
       authority_kind: "idle",
-      controller_epoch: 42,
     });
     const turn = h.svc.threads.turnRow(sent.turnId);
     expect(turn?.status).toBe("failed");

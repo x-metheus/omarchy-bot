@@ -10,6 +10,7 @@ import type {
   BotScreenManager,
   BotScreenTransition,
 } from "./botScreenManager.ts";
+import type { ScreenInputLease } from "./screenInputLease.ts";
 
 
 
@@ -64,8 +65,8 @@ export interface ComputerSurfaceOwner {
  */
 export class ComputerBroker {
   #surfaceOperations = new Map<SurfaceId, Promise<void>>();
+  #seat: Promise<void> = Promise.resolve();
   #pendingAgentTools = new Map<SurfaceId, PendingAgentTool>();
-  #webControlOwners = new Map<SurfaceId, ComputerSurfaceOwner>();
   #unsubscribeScreens: () => void;
 
   constructor(
@@ -73,13 +74,14 @@ export class ComputerBroker {
     private readonly events: EventLog,
     private readonly screens: BotScreenManager,
     private readonly artifactsDir: string,
-    private readonly revokeWebControl: WebControlRevoker,
-    private readonly restoreWebControl: WebControlRestorer,
+    private readonly lease: ScreenInputLease,
+    private readonly projections: { suspendInput(surfaceId: SurfaceId): void; restoreInput(surfaceId: SurfaceId): Promise<void> },
   ) {
+    this.lease.onWebControl = (owner, claimed) => this.#noteWebControl(owner, claimed);
     this.db
       .query(
         `UPDATE computer_surface_coordination
-         SET authority_kind = 'idle', controller_epoch = controller_epoch + 1, updated_at = ?`,
+         SET authority_kind = 'idle', updated_at = ?`,
       )
       .run(new Date().toISOString());
     this.events.subscribe((event) => {
@@ -143,11 +145,10 @@ export class ComputerBroker {
     this.db
       .query(
         `INSERT INTO computer_surface_coordination
-           (surface_id, authority_kind, controller_epoch, updated_at)
-         VALUES (?, ?, 1, ?)
+           (surface_id, authority_kind, updated_at)
+         VALUES (?, ?, ?)
          ON CONFLICT(surface_id) DO UPDATE SET
            authority_kind = excluded.authority_kind,
-           controller_epoch = computer_surface_coordination.controller_epoch + 1,
            updated_at = excluded.updated_at`,
       )
       .run(owner.surfaceId, authority, new Date().toISOString());
@@ -174,7 +175,7 @@ export class ComputerBroker {
           : "unavailable" as const;
     const screenUse = pending?.phase === "held"
       || pending?.phase === "completing"
-      || this.#webControlOwners.has(owner.surfaceId)
+      || this.lease.screenUse(owner.surfaceId) === "human"
       ? "human" as const
       : takeover === "available" ? "bot" as const : "idle" as const;
     return {
@@ -234,7 +235,8 @@ export class ComputerBroker {
     pending.phase = "completing";
     this.#event(owner);
     try {
-      await this.revokeWebControl(owner.surfaceId);
+      await this.lease.revoke(owner.surfaceId);
+      this.projections.suspendInput(owner.surfaceId);
       if (pending.cancellation !== undefined) throw pending.cancellation;
       const capture = await this.#invokeAction(
         owner,
@@ -256,7 +258,7 @@ export class ComputerBroker {
       if (pending.cancellation === undefined) {
         pending.phase = "completing";
         try {
-          await this.restoreWebControl(owner.surfaceId);
+          await this.projections.restoreInput(owner.surfaceId);
         } catch (restoreError) {
           pending.phase = "waiting";
           this.#transitionAuthority(owner, "idle");
@@ -274,39 +276,26 @@ export class ComputerBroker {
     }
   }
 
-  canAcceptWebControl(input: ComputerSurfaceOwner): boolean {
-    const owner = this.resolveOwner(input.botId, input.surfaceId);
-    if (owner === undefined) return false;
-    const pending = this.#pendingAgentTools.get(owner.surfaceId);
-    return pending === undefined || pending.phase === "held" || pending.phase === "waiting";
-  }
-
-  webControlClaimed(input: ComputerSurfaceOwner): void {
+  #noteWebControl(input: ComputerSurfaceOwner, claimed: boolean): void {
     const owner = this.#requireOwner(input);
     const pending = this.#pendingAgentTools.get(owner.surfaceId);
-    if (pending !== undefined) {
-      if (pending.phase === "waiting") pending.phase = "held";
-      else if (pending.phase !== "held" && pending.phase !== "completing") return;
-      this.#transitionAuthority(owner, "takeover");
+    if (claimed) {
+      if (pending !== undefined) {
+        if (pending.phase === "waiting") pending.phase = "held";
+        else if (pending.phase !== "held" && pending.phase !== "completing") return;
+        this.#transitionAuthority(owner, "takeover");
+      } else {
+        this.#transitionAuthority(owner, "web");
+      }
     } else {
-      this.#webControlOwners.set(owner.surfaceId, owner);
-      this.#transitionAuthority(owner, "web");
+      if (pending?.phase === "held") pending.phase = "waiting";
+      const authority = pending?.phase === "running"
+        ? "agent"
+        : pending?.phase === "takeover-requested" || pending?.phase === "completing"
+          ? "takeover"
+          : "idle";
+      this.#transitionAuthority(owner, authority);
     }
-    this.#event(owner);
-  }
-
-  webControlReleased(input: ComputerSurfaceOwner): void {
-    const owner = this.#requireOwner(input);
-    this.#webControlOwners.delete(owner.surfaceId);
-    const pending = this.#pendingAgentTools.get(owner.surfaceId);
-    if (pending?.phase === "held") pending.phase = "waiting";
-    const authority = pending?.phase === "running"
-      ? "agent"
-      : pending?.phase === "takeover-requested"
-          || pending?.phase === "completing"
-        ? "takeover"
-        : "idle";
-    this.#transitionAuthority(owner, authority);
     this.#event(owner);
   }
 
@@ -314,12 +303,24 @@ export class ComputerBroker {
     input: ComputerSurfaceOwner,
     turnId: string,
     action: ComputerAction,
+    signal?: AbortSignal,
   ): Promise<BotScreenBoundActionResult> {
     const owner = this.#requireOwner(input);
     const inputAuthority = isInputAction(action.name)
       ? { surfaceId: owner.surfaceId, botId: owner.botId, turnId }
       : undefined;
-    return this.screens.act(owner, action, inputAuthority);
+    const run = (): Promise<BotScreenBoundActionResult> => this.screens.act(owner, action, inputAuthority);
+    if (inputAuthority === undefined) return run();
+    const previous = this.#seat;
+    const gate = Promise.withResolvers<void>();
+    this.#seat = gate.promise;
+    await previous;
+    try {
+      signal?.throwIfAborted();
+      return await run();
+    } finally {
+      gate.resolve();
+    }
   }
 
   async #recordActionResult(
@@ -382,7 +383,7 @@ export class ComputerBroker {
       pending.activated.promise.catch(() => {});
       pending.completion.promise.catch(() => {});
       this.#pendingAgentTools.set(owner.surfaceId, pending);
-      this.#webControlOwners.delete(owner.surfaceId);
+      this.lease.webControlReleased(owner);
       this.#transitionAuthority(owner, "agent");
       this.#event(owner);
       const cancel = (): void => {
@@ -396,9 +397,10 @@ export class ComputerBroker {
       try {
         let initial: BotScreenBoundActionResult;
         try {
-          await this.revokeWebControl(owner.surfaceId);
+          this.projections.suspendInput(owner.surfaceId);
+          await this.lease.revoke(owner.surfaceId);
           signal.throwIfAborted();
-          initial = await this.#invokeAction(owner, turnId, action);
+          initial = await this.#invokeAction(owner, turnId, action, signal);
           signal.throwIfAborted();
         } catch (error) {
           pending.actionError = error;
@@ -448,10 +450,10 @@ export class ComputerBroker {
       pending.activated.reject(error);
       pending.completion.reject(error);
     }
-    for (const owner of this.#webControlOwners.values()) {
-      this.#transitionAuthority(owner, "idle");
+    for (const surfaceId of this.lease.webSurfaceIds()) {
+      const owner = this.#ownerForSurface(surfaceId);
+      if (owner !== undefined) this.#transitionAuthority(owner, "idle");
     }
-    this.#webControlOwners.clear();
     this.#pendingAgentTools.clear();
     this.#surfaceOperations.clear();
   }
@@ -489,7 +491,7 @@ export class ComputerBroker {
     const held = pending.phase === "held" || pending.phase === "completing" || pending.phase === "waiting";
     pending.phase = "settled";
     this.#transitionAuthority(pending.owner, "idle");
-    if (held) await this.revokeWebControl(pending.owner.surfaceId).catch(() => {});
+    if (held) await this.lease.revoke(pending.owner.surfaceId).catch(() => {});
     pending.activated.reject(error);
     pending.completion.reject(error);
     this.#event(pending.owner);

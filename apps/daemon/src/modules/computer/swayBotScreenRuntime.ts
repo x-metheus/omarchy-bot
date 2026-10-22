@@ -992,7 +992,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       deliver: (send: (event: BotScreenInputAction) => Promise<void>) => Promise<void>,
     ): Promise<void> => {
       await this.#withInputLease(session, async () => {
-        const epoch = ++lastInputEpoch;
+        const epoch = lastInputEpoch + 1;
+        lastInputEpoch = epoch;
         await virtualInput.setInputAuthority(epoch);
         let sequence = 0;
         try {
@@ -1471,25 +1472,30 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       },
       act,
       setInputAuthority: async (controllerEpoch) => {
+        if (!Number.isSafeInteger(controllerEpoch) || controllerEpoch <= lastInputEpoch) {
+          throw new BotScreenInputRejectedError("stale controller epoch");
+        }
         const acquired = await this.#acquireInputLease(provision.surfaceId);
         try {
           await this.#focusWorkspace(session);
-          const epoch = Math.max(controllerEpoch, lastInputEpoch + 1);
-          lastInputEpoch = epoch;
-          await virtualInput.setInputAuthority(epoch);
-          return epoch;
+          lastInputEpoch = controllerEpoch;
+          await virtualInput.setInputAuthority(controllerEpoch);
+          return controllerEpoch;
         } catch (error) {
           if (acquired) this.#releaseInputLease(provision.surfaceId);
           throw error;
         }
       },
       input: async (event) => {
-        if (this.#inputLeaseOwner !== provision.surfaceId) {
-          throw new BotScreenInputRejectedError("Bot Screen does not own the shared input seat");
+        if (event.controllerEpoch !== lastInputEpoch || this.#inputLeaseOwner !== provision.surfaceId) {
+          throw new BotScreenInputRejectedError("stale controller epoch");
         }
         await virtualInput.input(event);
       },
       releaseInput: async (controllerEpoch) => {
+        if (controllerEpoch !== undefined && controllerEpoch !== lastInputEpoch) {
+          throw new BotScreenInputRejectedError("stale controller epoch");
+        }
         try {
           await virtualInput.release(controllerEpoch);
         } finally {
