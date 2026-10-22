@@ -9,6 +9,7 @@ import {
   nativeMcpSecretKey,
   nativeMcpSecretPlaceholder,
   parseNativeMcpMetadata,
+  readNativeMcpMetadata,
   resolveNativeMcpCredentials,
 } from "./native-mcp-config.ts";
 
@@ -26,6 +27,7 @@ test("endpoint identity prefers url, otherwise command and args", () => {
   expect(nativeMcpEndpoint({ url: "https://mcp.example/rpc", command: "ignored", args: ["nope"] })).toBe("https://mcp.example/rpc");
   expect(nativeMcpEndpoint({ command: "node", args: ["server.mjs"] })).toBe(stdioEndpoint);
   expect(nativeMcpEndpoint({ command: "node" })).toBe('{"command":"node","args":[]}');
+  expect(nativeMcpEndpoint({ url: "", command: "node", args: ["server.mjs"] })).toBe(stdioEndpoint);
 });
 
 test("secret keys and placeholders are stable", () => {
@@ -46,6 +48,32 @@ test("metadata schema accepts the private file and fills omitted maps", () => {
   expect(emptyNativeMcpMetadata()).toEqual(parseNativeMcpMetadata({ version: 1, entries: {} }));
   expect(() => parseNativeMcpMetadata({ version: 2, entries: {} })).toThrow();
   expect(() => parseNativeMcpMetadata({ version: 1, entries: {}, secrets: { bad: { server: "docs" } } })).toThrow();
+});
+
+test("a partial secret is skipped and service tokens apply without an entries map", () => {
+  const metadata = readNativeMcpMetadata({
+    secrets: {
+      bad: { server: "docs" },
+      [envKey]: { server: "docs", endpoint: stdioEndpoint, kind: "env", field: "TOKEN", value: "env-secret" },
+    },
+    serviceTokens: { owned: { url: "https://mcp.example/rpc", token: "svc-token" } },
+  });
+  expect(metadata.entries).toEqual({});
+  expect(Object.keys(metadata.secrets)).toEqual([envKey]);
+  metadata.entries.owned = { id: "mcp_owned", pi: null, codex: null, owner: { accountId: "acct", serviceId: "svc" } };
+  const config: { mcpServers: Record<string, { command?: string; args?: string[]; url?: string; env?: Record<string, string>; headers?: Record<string, string> }> } = {
+    mcpServers: {
+      docs: { command: "node", args: ["server.mjs"], env: { TOKEN: "${TOKEN}" } },
+      owned: { url: "https://mcp.example/rpc" },
+    },
+  };
+  resolveNativeMcpCredentials(config, metadata);
+  const docs = config.mcpServers.docs!;
+  const owned = config.mcpServers.owned!;
+  expect(docs.env?.TOKEN).toBe("env-secret");
+  expect(owned.headers).toEqual({ Authorization: "Bearer svc-token" });
+  expect(() => readNativeMcpMetadata({ secrets: null })).toThrow();
+  expect(() => readNativeMcpMetadata({ version: 9 })).toThrow();
 });
 
 test("runtime status is the worker union, not connection-projection status", () => {

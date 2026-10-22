@@ -18,6 +18,14 @@ export function nativeMcpConfigFile(privateDir: string): string {
   return path.join(privateDir, "native-mcp.json");
 }
 
+const NativeMcpSecret = z.object({
+  server: z.string(),
+  endpoint: z.string(),
+  kind: z.enum(["env", "header"]),
+  field: z.string(),
+  value: z.string(),
+});
+
 export const NativeMcpMetadata = z.object({
   version: z.literal(1),
   entries: z.record(z.object({
@@ -30,13 +38,7 @@ export const NativeMcpMetadata = z.object({
   adapterPackage: z.string().optional(),
   packageRevisions: z.record(z.string()).default({}),
   serviceTokens: z.record(z.object({ url: z.string(), token: z.string() })).default({}),
-  secrets: z.record(z.object({
-    server: z.string(),
-    endpoint: z.string(),
-    kind: z.enum(["env", "header"]),
-    field: z.string(),
-    value: z.string(),
-  })).default({}),
+  secrets: z.record(NativeMcpSecret).default({}),
 });
 export type NativeMcpMetadata = z.infer<typeof NativeMcpMetadata>;
 
@@ -47,10 +49,29 @@ export function emptyNativeMcpMetadata(): NativeMcpMetadata {
 export function parseNativeMcpMetadata(value: unknown): NativeMcpMetadata {
   return NativeMcpMetadata.parse(value);
 }
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
-/** `url` when set; otherwise the stdio command and args, including an absent url. */
+/** Pi loads whatever records it can. A bad secret is skipped; service tokens need no entries map. */
+export function readNativeMcpMetadata(value: unknown): NativeMcpMetadata {
+  if (!record(value) || !record(value.secrets)) throw new Error("Private MCP credential metadata is malformed");
+  const parsed = emptyNativeMcpMetadata();
+  if (value.version === 1) parsed.version = 1;
+  const entries = NativeMcpMetadata.shape.entries.safeParse(value.entries);
+  if (entries.success) parsed.entries = entries.data;
+  for (const [key, raw] of Object.entries(value.secrets)) {
+    const secret = NativeMcpSecret.safeParse(raw);
+    if (secret.success) parsed.secrets[key] = secret.data;
+  }
+  const tokens = NativeMcpMetadata.shape.serviceTokens.safeParse(value.serviceTokens ?? {});
+  if (tokens.success) parsed.serviceTokens = tokens.data;
+  return parsed;
+}
+
+/** Non-empty `url` when set; otherwise the stdio command and args. An empty url is absent. */
 export function nativeMcpEndpoint(server: { url?: string; command?: unknown; args?: unknown }): string {
-  return server.url ?? JSON.stringify({ command: server.command, args: server.args ?? [] });
+  return server.url ? server.url : JSON.stringify({ command: server.command, args: server.args ?? [] });
 }
 
 export function nativeMcpSecretKey(server: string, endpoint: string, kind: "env" | "header", field: string): string {

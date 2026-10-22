@@ -15,7 +15,7 @@ import { createMcpAdapter, MCP_STATUS_EVENT } from "pi-mcp-adapter";
 import { loadMcpConfig } from "pi-mcp-adapter/config";
 import type { McpConfig } from "pi-mcp-adapter/types";
 import type { AgentCommand, NativeMcpStatus } from "@omarchy-bot/agent-contract";
-import { isNativeMcpRuntimeStatus, nativeMcpConfigFile, nativeMcpPrivateDir, parseNativeMcpMetadata, resolveNativeMcpCredentials } from "@omarchy-bot/agent-contract/native-mcp-config";
+import { isNativeMcpRuntimeStatus, nativeMcpConfigFile, nativeMcpPrivateDir, readNativeMcpMetadata, resolveNativeMcpCredentials } from "@omarchy-bot/agent-contract/native-mcp-config";
 import { nativeMcpRevision } from "@omarchy-bot/agent-contract/native-mcp-revision";
 
 const inlinePath = "<inline:omarchy-native-mcp>";
@@ -77,7 +77,7 @@ function nativeConfig(cwd: string): NativeConfig {
   try {
     const revision = nativeMcpRevision(cwd, file);
     const config = loadMcpConfig(undefined, cwd);
-    if (existsSync(file)) resolveNativeMcpCredentials(config, parseNativeMcpMetadata(JSON.parse(readFileSync(file, "utf8"))));
+    if (existsSync(file)) resolveNativeMcpCredentials(config, readNativeMcpMetadata(JSON.parse(readFileSync(file, "utf8"))));
     if (nativeMcpRevision(cwd, file) !== revision) throw new Error("Native MCP configuration changed while loading");
     return { config, revision };
   } catch {
