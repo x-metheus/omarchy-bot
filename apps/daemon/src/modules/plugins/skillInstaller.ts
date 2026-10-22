@@ -167,7 +167,13 @@ export async function materializeSkill(detail: CatalogSkillDetailDto, rootDir: s
 }
 
 /** Materialize one explicitly selected source without depending on catalog registration. */
-export async function materializeSkillSource(input: Exclude<InstallSkillBody, { id: string }>, rootDir: string): Promise<{ catalog: CatalogSkillDto; directory: string; revision: string }> {
+export interface MaterializedSkillSource {
+  catalog: CatalogSkillDto;
+  directory: string;
+  revision: string;
+}
+
+export async function materializeSkillSource(input: Exclude<InstallSkillBody, { id: string }>, rootDir: string): Promise<MaterializedSkillSource> {
   await mkdir(rootDir, { recursive: true, mode: 0o700 });
   const staging = path.join(rootDir, `.source-${randomUUID()}`);
   const target = path.join(staging, "skill");

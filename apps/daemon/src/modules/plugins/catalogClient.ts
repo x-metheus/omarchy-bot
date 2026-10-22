@@ -1,6 +1,6 @@
 import { redactToolErrorSummary } from "@omarchy-bot/agent-contract";
 import {
-  HttpsOrigin, NormalisedCatalogResponse, NormalisedSkillDetail, PLUGIN_PROVIDERS,
+  HttpsOrigin, NormalisedCatalogResponse, NormalisedSkillDetail, PLUGIN_OPERATIONS, PLUGIN_PROVIDERS,
   PublisherProvidersResponse, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT,
   type CatalogSkillDetailDto, type CatalogSkillDto, type PluginProviderDto, type SkillCatalogDto,
 } from "@omarchy-bot/protocol";
@@ -56,7 +56,9 @@ export class CatalogClient {
 
   async catalog(query = "", cursor?: string, view = "trending"): Promise<SkillCatalogDto> {
     const parameters = new URLSearchParams({ q: query, view, ...(cursor === undefined ? {} : { cursor }) });
-    const raw = NormalisedCatalogResponse.parse(await this.request(`catalog/normalised?${parameters}`));
+    const route = PLUGIN_OPERATIONS.find((operation) => operation.action === "search_skills")?.upstream;
+    if (!route) throw new HttpError(500, "Catalog search has no publisher route");
+    const raw = NormalisedCatalogResponse.parse(await this.request(`${route}?${parameters}`));
     const isSearch = Boolean(query.trim());
     if (!isSearch && !raw.pagination) throw new HttpError(502, "Catalog pagination is unavailable");
     const skills = raw.skills.map((entry): CatalogSkillDto => {
@@ -74,7 +76,9 @@ export class CatalogClient {
   }
 
   async detail(id: string): Promise<CatalogSkillDetailDto> {
-    const raw = NormalisedSkillDetail.parse(await this.request(`catalog/detail/normalised?${new URLSearchParams({ id })}`));
+    const route = PLUGIN_OPERATIONS.find((operation) => operation.action === "inspect_skill")?.upstream;
+    if (!route) throw new HttpError(500, "Catalog detail has no publisher route");
+    const raw = NormalisedSkillDetail.parse(await this.request(`${route}?${new URLSearchParams({ id })}`));
     const content = raw.content;
     const cached = this.entries.get(id);
     const sourceType = cached?.sourceType ?? (raw.source.includes("/") ? "github" : "well-known");

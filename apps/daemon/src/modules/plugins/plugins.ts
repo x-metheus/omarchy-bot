@@ -13,8 +13,10 @@ import {
   type PluginProviderDto, type PluginServiceDefinition, type PluginStateDto, type SkillCatalogDto, type SkillCommandDto,
 } from "@omarchy-bot/protocol";
 import { HttpError } from "../bots/bots.ts";
-import { connectMcp } from "./mcp.ts";
 import { CatalogClient } from "./catalogClient.ts";
+import { hasScopes, identifyAccount } from "./providerAccounts.ts";
+import { toolOperation } from "./pluginDispatch.ts";
+import { SkillInstalls } from "./skillInstall.ts";
 import { materializeSkill, materializeSkillSource } from "./skillInstaller.ts";
 import { NativeSkills } from "./nativeSkills.ts";
 import { NativeMcpStore } from "./nativeMcp.ts";
@@ -46,7 +48,6 @@ type Skill = z.infer<typeof Skill>;
 const StoredState = z.object({
   version: z.literal(1), revision: z.number().int().nonnegative(), cloudUrl: HttpsOrigin.nullable(), accounts: z.array(Account), mcp: z.array(Mcp), skills: z.array(Skill),
 });
-const ProviderIdentityId = z.union([z.string().min(1), z.number().int()]);
 interface OAuthPending {
   providerId: PluginProviderId; accountId?: string; verifier: string; cloudUrl: string; returnUrl: string; expiresAt: number;
   brokerState: string;
@@ -57,10 +58,6 @@ export interface PluginLease {
   release(): void;
 }
 
-function hasScopes(grant: Grant, service: PluginServiceDefinition): boolean {
-  const granted = new Set(grant.scopes.map((scope) => scope.replace(/^https:\/\/graph\.microsoft\.com\//, "").toLowerCase()));
-  return service.scopes.every((scope) => granted.has(scope.replace(/^https:\/\/graph\.microsoft\.com\//, "").toLowerCase()));
-}
 
 export class PluginsService {
   readonly skills: NativeSkills;
@@ -68,11 +65,10 @@ export class PluginsService {
   #file: string;
   #refreshing = new Map<Grant, Promise<string>>();
   #oauth = new Map<string, OAuthPending>();
-  #installing = new Map<string, Promise<InstalledSkillDto>>();
+  readonly skillInstalls: SkillInstalls;
   readonly publisher: CatalogClient;
   #nativeCache: { at: number; resources: NativePluginResources; error?: string } | undefined;
   #nativePending: Promise<NativePluginResources> | undefined;
-  #updatePromise: Promise<void> | undefined;
   #serviceUpdates = new Map<string, Promise<void>>();
   #serviceEpochs = new Map<string, number>();
   #timer: ReturnType<typeof setInterval>;
@@ -90,6 +86,16 @@ export class PluginsService {
     if (!lstatSync(rootDir).isDirectory() || lstatSync(rootDir).isSymbolicLink()) throw new Error("Plugin state directory must be a private real directory");
     chmodSync(rootDir, 0o700);
     this.skills = new NativeSkills(cwd, rootDir);
+    this.skillInstalls = new SkillInstalls({
+      rootDir, skills: this.skills,
+      stopping: () => this.#stopping,
+      detail: (id) => this.detail(id),
+      persist: (changed) => this.#persist(changed ?? false),
+      clearNative: () => { this.#nativeCache = undefined; },
+      legacyDirectories: () => this.#state.skills.map((skill) => skill.directory),
+      accounts: () => this.#state.accounts,
+      updateService: (id, serviceId) => this.updateService(id, serviceId),
+    });
     this.publisher = new CatalogClient(() => this.#cloudUrl());
     this.mcp = new NativeMcpStore(cwd, rootDir);
     this.packages = new McpPackages(this.mcp);
@@ -275,88 +281,19 @@ export class PluginsService {
   }
 
   installSkill(input: string | InstallSkillBody): Promise<InstalledSkillDto> {
-    if (typeof input !== "string" && "source" in input) return this.#installSource(input);
-    const id = typeof input === "string" ? input : input.id;
-    const pending = this.#installing.get(id);
-    if (pending) return pending;
-    const previous = this.skills.list().find((skill) => skill.id === id);
-    if (previous?.origin === "service") throw new HttpError(409, "Update this Skill through its owning Service bundle");
-    if (previous && (previous.id.startsWith("source_") || previous.origin === "default")) {
-      return this.#installSource({ source: previous.installUrl, ...(previous.skillPath === undefined ? {} : { skillPath: previous.skillPath }) }, previous.id);
-    }
-    const operation = (async () => {
-      const detail = await this.detail(id);
-      const installed = await materializeSkill(detail, path.join(this.rootDir, "skills"));
-      try {
-        if (this.#stopping || (previous && !this.skills.list().some((skill) => skill.id === id))) throw new HttpError(409, "Skill was removed or plugin runtime stopped during installation");
-        const skill = this.skills.install(detail, installed);
-        this.#nativeCache = undefined;
-        this.#persist(true);
-        return skill;
-      } finally { await this.#removeUnusedSkill(installed.directory); }
-    })().catch((error) => {
-      this.skills.markError(id, redactToolErrorSummary(error instanceof Error ? error.message : error));
-      throw error;
-    }).finally(() => { this.#installing.delete(id); });
-    this.#installing.set(id, operation);
-    return operation;
+    return this.skillInstalls.install(input);
   }
-
-  #installSource(input: Exclude<InstallSkillBody, { id: string }>, existingId?: string): Promise<InstalledSkillDto> {
-    const key = existingId ?? `source:${JSON.stringify(input)}`;
-    const pending = this.#installing.get(key);
-    if (pending) return pending;
-    const operation = (async () => {
-      const source = await materializeSkillSource(input, path.join(this.rootDir, "skills"));
-      try {
-        if (this.#stopping || (existingId && !this.skills.list().some((skill) => skill.id === existingId))) throw new HttpError(409, "Skill was removed or plugin runtime stopped during installation");
-        const catalog = existingId ? { ...source.catalog, id: existingId } : source.catalog;
-        const installed = this.skills.install(catalog, source);
-        this.#nativeCache = undefined;
-        this.#persist(true);
-        return installed;
-      } finally { await this.#removeUnusedSkill(source.directory); }
-    })().catch((error) => {
-      if (existingId) this.skills.markError(existingId, redactToolErrorSummary(error instanceof Error ? error.message : error));
-      throw error;
-    }).finally(() => { this.#installing.delete(key); });
-    this.#installing.set(key, operation);
-    return operation;
-  }
-
   updateSkills(): Promise<void> {
-    this.#updatePromise ??= (async () => {
-      const failures: string[] = [];
-      for (const skill of this.skills.list().filter((entry) => entry.enabled && entry.sourceType !== "local" && entry.origin !== "service")) {
-        if (this.#stopping) break;
-        try { await this.installSkill(skill.id); } catch { failures.push(skill.name); }
-      }
-      const updated = new Set<string>();
-      for (const account of this.#state.accounts) for (const serviceId of account.enabledServices) {
-        const key = `${account.providerId}/${serviceId}`;
-        if (this.#stopping || updated.has(key)) continue;
-        updated.add(key);
-        try { await this.updateService(account.id, serviceId); } catch { failures.push(key); }
-      }
-      if (failures.length) throw new HttpError(502, `Could not update: ${failures.join(", ")}. Existing installed versions are retained.`);
-    })().finally(() => { this.#updatePromise = undefined; });
-    return this.#updatePromise;
+    return this.skillInstalls.update();
   }
-
   enableSkill(id: string, enabled: boolean): void {
-    this.skills.enable(id, enabled);
-    this.#nativeCache = undefined;
-    this.#persist(true);
+    this.skillInstalls.enable(id, enabled);
   }
   removeSkill(id: string): void {
-    this.skills.remove(id);
-    this.#nativeCache = undefined;
-    this.#persist(true);
+    this.skillInstalls.remove(id);
   }
   async #removeUnusedSkill(directory: string): Promise<void> {
-    if (this.#state.skills.some((skill) => skill.directory === directory)) return;
-    const relative = path.relative(path.join(this.rootDir, "skills"), directory);
-    if (/^[0-9a-f]{64}$/.test(relative)) await rm(directory, { recursive: true, force: true });
+    await this.skillInstalls.removeUnused(directory);
   }
 
   async commands(): Promise<SkillCommandDto[]> {
@@ -725,61 +662,7 @@ export class PluginsService {
   }
 
   async #identify(providerId: PluginProviderId, grant: Grant): Promise<{ identity: string; label: string }> {
-    const fetchWithAccount = this.#authenticatedFetch(providerId, grant);
-    const json = async (url: string, init?: RequestInit): Promise<Record<string, unknown>> => {
-      const response = await fetchWithAccount(url, { ...init, signal: AbortSignal.timeout(30_000), headers: { "content-type": "application/json", accept: "application/json", ...init?.headers } });
-      if (!response.ok) throw new HttpError(502, `${PLUGIN_PROVIDERS[providerId].name} identity lookup returned HTTP ${response.status}`);
-      return z.record(z.unknown()).parse(await response.json());
-    };
-    let id: unknown;
-    let label: unknown;
-    switch (providerId) {
-      case "google": {
-        const user = await json("https://openidconnect.googleapis.com/v1/userinfo");
-        const claims = z.object({ subject: z.string() }).safeParse(grant.metadata.identity);
-        if (!claims.success || claims.data.subject !== user.sub) throw new HttpError(401, "Google access token and verified identity do not match");
-        id = user.sub; label = user.email ?? user.name; break;
-      }
-      case "github": { const user = await json("https://api.github.com/user"); id = user.id; label = user.login; break; }
-      case "linear": {
-        const result = z.object({ data: z.object({ viewer: z.object({ id: ProviderIdentityId, name: z.string() }) }) }).parse(await json("https://api.linear.app/graphql", { method: "POST", body: JSON.stringify({ query: "{ viewer { id name } }" }) }));
-        id = result.data.viewer.id; label = result.data.viewer.name; break;
-      }
-      case "dropbox": {
-        const user = z.object({ account_id: z.string(), email: z.string().optional(), name: z.object({ display_name: z.string() }).optional() }).parse(await json("https://api.dropboxapi.com/2/users/get_current_account", { method: "POST", body: "null" }));
-        id = user.account_id; label = user.email ?? user.name?.display_name; break;
-      }
-      case "intercom": {
-        const user = z.object({ id: ProviderIdentityId, email: z.string().nullish(), name: z.string().nullish(), app: z.object({ id_code: z.string(), name: z.string().optional(), region: z.string().optional() }) }).parse(await json("https://api.intercom.io/me"));
-        if (user.app.region === "AU") throw new HttpError(409, "Intercom MCP does not support Australian workspaces");
-        id = `${user.app.id_code}:${user.id}`; label = user.email ? `${user.email} · ${user.app.name ?? user.app.id_code}` : user.name; grant.metadata.region = user.app.region; break;
-      }
-      case "notion": {
-        if (typeof grant.metadata.user_id === "string" && typeof grant.metadata.workspace_id === "string") id = `${grant.metadata.workspace_id}:${grant.metadata.user_id}`;
-        label = `${grant.metadata.email_domain ?? "Notion"} · ${grant.metadata.workspace_id ?? ""}`; break;
-      }
-      case "asana": {
-        const data = z.object({ gid: ProviderIdentityId.optional(), id: ProviderIdentityId.optional(), email: z.string().optional(), name: z.string().optional() }).parse(grant.metadata.data);
-        id = data.gid ?? data.id; label = data.email ?? data.name; break;
-      }
-      case "hubspot": {
-        const connection = await connectMcp({ type: "http", url: PLUGIN_PROVIDERS.hubspot.services[0]!.mcpUrl! }, this.cwd, fetchWithAccount);
-        try {
-          const result = await connection.client.callTool({ name: "get_user_details", arguments: {} }, undefined, { timeout: 30_000 });
-          if (result.isError) throw new HttpError(502, "HubSpot could not return its authenticated user details");
-          const text = (result.content as { type: string; text?: string }[]).filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n");
-          const user = z.record(z.unknown()).parse(result.structuredContent ?? JSON.parse(text));
-          const details = z.record(z.unknown()).parse(user.data ?? user);
-          const userId = ProviderIdentityId.parse(details.userId ?? details.user_id);
-          const hubId = ProviderIdentityId.parse(details.hubId ?? details.hub_id ?? details.portalId);
-          id = `${hubId}:${userId}`;
-          label = details.email ?? details.userEmail;
-        } finally { await connection.close(); }
-        break;
-      }
-    }
-    if ((typeof id !== "string" && typeof id !== "number") || !String(id)) throw new HttpError(502, `${PLUGIN_PROVIDERS[providerId].name} did not return a stable authorized account identity`);
-    return { identity: `${providerId}:${id}`, label: typeof label === "string" && label.trim() ? label.trim() : `${PLUGIN_PROVIDERS[providerId].name} · ${id}` };
+    return identifyAccount(providerId, grant, this.cwd, this.#authenticatedFetch(providerId, grant));
   }
 
   async #toolOutput(result: AgentPluginToolOutput): Promise<AgentPluginToolOutput> {
@@ -826,50 +709,15 @@ export class PluginsService {
         if (released) throw new Error("Plugin turn snapshot was released");
         if (name !== "manage_plugins") throw new Error("Plugin management tool does not belong to this turn");
         const input = PluginManageInput.parse(args);
-        const id = (): string => { if (!input.id) throw new HttpError(400, "Select an exact plugin id from list or search"); return input.id; };
-        const enabled = (): boolean => { if (input.enabled === undefined) throw new HttpError(400, "Specify enabled explicitly"); return input.enabled; };
-        const serviceId = (): string => { if (!input.serviceId) throw new HttpError(400, "Select an exact Service id from list"); return input.serviceId; };
-        let result: unknown;
-        switch (input.action) {
-          case "list": result = await this.state(); break;
-          case "inspect": {
-            const state = await this.state();
-            result = [...state.skills, ...state.mcp, ...state.accounts].find((entry) => entry.id === id());
-            if (!result) throw new HttpError(404, "Plugin not found");
-            break;
-          }
-          case "inspect_skill": result = await this.detail(id()); break;
-          case "search_skills": result = await this.catalog(input.query ?? "", input.cursor); break;
-          case "install_skill": result = await this.installSkill(input.source ? { source: input.source, ...(input.skillPath === undefined ? {} : { skillPath: input.skillPath }), ...(input.ref === undefined ? {} : { ref: input.ref }) } : id()); break;
-          case "enable_skill": this.enableSkill(id(), enabled()); result = this.skills.list().find((entry) => entry.id === input.id); break;
-          case "remove_skill": this.removeSkill(id()); result = { removed: true }; break;
-          case "update_skills": await this.updateSkills(); result = await this.state(); break;
-          case "authorize_service": {
-            if (!input.providerId) throw new HttpError(400, "Specify the provider id");
-            if (!this.clientOrigin) throw new HttpError(503, "Service authorization requires a configured daemon client origin");
-            const authorization = await this.authorize({ providerId: input.providerId, returnUrl: this.clientOrigin(),
-              ...(input.id === undefined ? {} : { accountId: input.id }), ...(input.serviceId === undefined ? {} : { serviceId: input.serviceId }) });
-            result = { ...authorization, pendingAuthorization: true };
-            break;
-          }
-          case "enable_service": result = await this.enableService(id(), serviceId(), enabled()); break;
-          case "remove_service": await this.removeService(id(), serviceId()); result = { removed: true }; break;
-          case "update_service": await this.updateService(id(), serviceId()); result = { completed: true, state: await this.state() }; break;
-          case "label_account": {
-            const label = input.label?.trim();
-            if (!label) throw new HttpError(400, "Specify a nonblank account label");
-            this.labelAccount(id(), label);
-            result = (await this.state()).accounts.find((entry) => entry.id === input.id);
-            break;
-          }
-          case "disconnect_account": this.disconnectAccount(id()); result = { disconnected: true }; break;
-          case "save_mcp": if (!input.connection) throw new HttpError(400, "Provide a complete connection definition"); result = await this.saveMcp(input.id ?? null, input.connection, signal); break;
-          case "update_mcp": result = await this.updateMcp(id(), signal); break;
-          case "enable_mcp": this.enableMcp(id(), enabled()); result = this.packages.list().find((entry) => entry.id === input.id); break;
-          case "remove_mcp": this.removeMcp(id()); result = { removed: true }; break;
-          case "check_mcp": result = await this.checkMcp(id()); break;
-          case "authorize_mcp": result = await this.authorizeMcp(id(), input.redirectUrl); break;
-        }
+        if (input.action === "authorize_service" && !this.clientOrigin) throw new HttpError(503, "Service authorization requires a configured daemon client origin");
+        const row = toolOperation(input.action);
+        if (!row) throw new HttpError(404, "Unknown plugin operation");
+        const { action, ...fields } = input;
+        const result = await row.handler(this, {
+          ...fields, ...(input.id === undefined ? {} : { accountId: input.id }),
+          ...(action === "authorize_service" && this.clientOrigin ? { returnUrl: this.clientOrigin() } : {}),
+          tool: true, signal,
+        } as Parameters<typeof row.handler>[1]);
         return this.#toolOutput({ content: [{ type: "text", text: JSON.stringify(result) }] });
       },
       release: () => { released = true; },
@@ -883,7 +731,7 @@ export class PluginsService {
     await this.packages.shutdown();
     await this.#ready;
     this.#oauth.clear();
-    await Promise.allSettled(this.#installing.values());
+    await Promise.allSettled(this.skillInstalls.pending());
     await Promise.allSettled(this.#serviceUpdates.values());
   }
 }

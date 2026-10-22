@@ -163,7 +163,11 @@ export interface PluginOperation {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** Daemon HTTP path. `:id` and `:serviceId` are the only parameters. */
   path: string;
+  /** Publisher route when this daemon path calls the normalised catalog. */
+  upstream?: string;
   body?: ZodTypeAny;
+  /** Present when the same action has a second HTTP path the agent tool does not call. */
+  tool?: false;
 }
 
 const account = "/api/plugins/accounts/:id";
@@ -171,12 +175,11 @@ const service = `${account}/services/:serviceId`;
 const mcp = "/api/plugins/mcp/:id";
 const skill = "/api/plugins/skills/:id";
 
-/** The only action list. HTTP routes and manage_plugins both dispatch from this table. */
 export const PLUGIN_OPERATIONS = [
   { action: "list", method: "GET", path: "/api/plugins" },
   { action: "inspect", method: "GET", path: "/api/plugins/inspect" },
-  { action: "inspect_skill", method: "GET", path: "/api/plugins/catalog/detail" },
-  { action: "search_skills", method: "GET", path: "/api/plugins/catalog" },
+  { action: "inspect_skill", method: "GET", path: "/api/plugins/catalog/detail", upstream: "catalog/detail/normalised" },
+  { action: "search_skills", method: "GET", path: "/api/plugins/catalog", upstream: "catalog/normalised" },
   { action: "install_skill", method: "POST", path: "/api/plugins/skills", body: InstallSkillBody },
   { action: "enable_skill", method: "PATCH", path: skill, body: PluginEnabledBody },
   { action: "remove_skill", method: "DELETE", path: skill },
@@ -188,6 +191,7 @@ export const PLUGIN_OPERATIONS = [
   { action: "label_account", method: "PATCH", path: account, body: PluginAccountBody },
   { action: "disconnect_account", method: "DELETE", path: account },
   { action: "save_mcp", method: "POST", path: "/api/plugins/mcp", body: SaveMcpBody },
+  { action: "save_mcp", method: "PUT", path: mcp, body: SaveMcpBody, tool: false },
   { action: "update_mcp", method: "POST", path: `${mcp}/update`, body: z.object({}).strict() },
   { action: "enable_mcp", method: "PATCH", path: mcp, body: PluginEnabledBody },
   { action: "remove_mcp", method: "DELETE", path: mcp },
@@ -198,6 +202,6 @@ export type PluginAction = (typeof PLUGIN_OPERATIONS)[number]["action"];
 
 
 export const PluginManageInput = PluginOperationInput.extend({
-  action: z.enum(PLUGIN_OPERATIONS.map((operation) => operation.action) as [PluginAction, ...PluginAction[]]),
+  action: z.enum(PLUGIN_OPERATIONS.flatMap((operation) => "tool" in operation && operation.tool === false ? [] : [operation.action]) as [PluginAction, ...PluginAction[]]),
 });
 export type PluginManageInput = z.infer<typeof PluginManageInput>;

@@ -5,11 +5,27 @@ import path from "node:path";
 import { PLUGIN_OPERATIONS, PLUGIN_PROVIDERS } from "../../packages/protocol/src/index.ts";
 import { PluginsService } from "../../apps/daemon/src/modules/plugins/plugins.ts";
 import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
+import { identifyAccount } from "../../apps/daemon/src/modules/plugins/providerAccounts.ts";
 
-test("publisher OAuth never reaches Microsoft or Miro identity lookups", () => {
-  for (const id of ["microsoft", "miro"] as const) {
-    expect(PLUGIN_PROVIDERS[id].publisherOAuth).toBe(false);
-    expect(PLUGIN_PROVIDERS[id].nativeOAuth).toBeDefined();
+test("microsoft and miro authorization never looks up a publisher identity", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "publisher-native-"));
+  const originalFetch = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = Object.assign(async (input: string | URL | Request, _init?: RequestInit) => {
+    seen.push(new URL(input instanceof Request ? input.url : String(input)).href);
+    return new Response(null, { status: 404 });
+  }, { preconnect: originalFetch.preconnect });
+  const service = new PluginsService(root, root, async () => ({ skills: [] }));
+  const lookup = async () => { seen.push("identity-lookup"); throw new Error("identity lookup"); };
+  try {
+    for (const id of ["microsoft", "miro"] as const) {
+      await expect(identifyAccount(id, { accessToken: "x", scopes: [], metadata: {} }, root, lookup)).rejects.toMatchObject({ status: 409 });
+    }
+    expect(seen.some((url) => url === "identity-lookup" || url.includes("graph.microsoft") || url.includes("api.miro.com") || url.includes("/oauth/token") || url.includes("login.microsoftonline"))).toBe(false);
+  } finally {
+    await service.shutdown();
+    globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -69,13 +85,17 @@ test("new daemons read the normalised catalog while the raw skills.sh route stay
 });
 
 test("one operation table names every manage_plugins action and its daemon path", () => {
-  expect(PLUGIN_OPERATIONS.map((operation) => operation.action)).toEqual([
+  const actions = [...new Set(PLUGIN_OPERATIONS.map((operation) => operation.action))];
+  expect(actions).toEqual([
     "list", "inspect", "inspect_skill", "search_skills", "install_skill", "enable_skill", "remove_skill", "update_skills",
     "authorize_service", "enable_service", "remove_service", "update_service", "label_account", "disconnect_account",
     "save_mcp", "update_mcp", "enable_mcp", "remove_mcp", "check_mcp", "authorize_mcp",
   ]);
+  expect(PLUGIN_OPERATIONS).toHaveLength(actions.length + 1);
   expect(new Set(PLUGIN_OPERATIONS.map((operation) => `${operation.method} ${operation.path}`)).size).toBe(PLUGIN_OPERATIONS.length);
+  expect(PLUGIN_OPERATIONS.find((operation) => operation.method === "PUT")).toMatchObject({ action: "save_mcp", path: "/api/plugins/mcp/:id" });
   expect(PLUGIN_OPERATIONS.find((operation) => operation.action === "search_skills")).toMatchObject({
-    method: "GET", path: "/api/plugins/catalog",
+    method: "GET", path: "/api/plugins/catalog", upstream: "catalog/normalised",
   });
+  expect(PLUGIN_OPERATIONS.find((operation) => operation.action === "inspect_skill")).toMatchObject({ upstream: "catalog/detail/normalised" });
 });
