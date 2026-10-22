@@ -567,7 +567,6 @@ export class TurnService {
     if (active.dispatchedLocalToolCalls.has(requested.toolCallId)) {
       throw new Error("local tool call was already dispatched");
     }
-    active.dispatchedLocalToolCalls.add(requested.toolCallId);
     signal.throwIfAborted();
     const device = devices.resolve(request.target);
     const needed =
@@ -583,6 +582,7 @@ export class TurnService {
     }
     const job = this.#workspaceTransfer(request);
     signal.throwIfAborted();
+    active.dispatchedLocalToolCalls.add(requested.toolCallId);
     const result = await devices.dispatch({
       deviceId: device.id,
       action: request.action,

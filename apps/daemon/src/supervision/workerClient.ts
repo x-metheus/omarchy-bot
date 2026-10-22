@@ -59,6 +59,8 @@ export class WorkerClient {
   #pending = new Map<string, Pending>();
   #incoming = new Map<string, AbortController>();
   #hello: { v: number; worker: string; pid: number } | undefined;
+  /** Frames written to the worker, so a test can read a result without a second stdout reader. */
+  readonly sent: unknown[] = [];
   #lastMessageAt = 0;
   #stopping = false;
   #watchdog?: ReturnType<typeof setInterval>;
@@ -336,6 +338,7 @@ export class WorkerClient {
     if (!stdin) throw new Error(`${this.opts.name} worker not running`);
     stdin.write(JSON.stringify(obj) + "\n");
     stdin.flush?.();
+    this.sent.push(obj);
   }
 
   async stop(graceMs = 3000): Promise<void> {

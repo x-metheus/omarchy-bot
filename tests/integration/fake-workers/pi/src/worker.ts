@@ -399,6 +399,11 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       else pending.reject(new Error(String(msg.error)));
       break;
     }
+    case "local.request": {
+      write(msg);
+      break;
+    }
+
     case "local.result": {
       const pending = msg.requestId === undefined ? undefined : localRequests.get(msg.requestId);
       if (pending === undefined) break;
