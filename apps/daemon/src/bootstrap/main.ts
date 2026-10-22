@@ -159,7 +159,7 @@ export async function main(options: MainOptions = {}): Promise<{
       if (source === undefined) throw new Error("Bot Screen is unavailable");
       return source.setInputAuthority(epoch);
     },
-    deliver: async (surfaceId, epoch, event) => {
+    deliver: async (surfaceId, epoch, event, sequence = 1) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));
       if (source === undefined) throw new Error("Bot Screen is unavailable");
       await source.input({
@@ -167,13 +167,35 @@ export async function main(options: MainOptions = {}): Promise<{
         runtimeGeneration: source.runtimeGeneration,
         geometryGeneration: source.geometryGeneration,
         controllerEpoch: epoch,
-        sequence: 1,
         ...event,
+        sequence,
       });
     },
-    release: async (surfaceId, epoch) => {
+    release: async (surfaceId, epoch, held, nextSequence = 1) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));
-      await source?.releaseInput(epoch);
+      if (source === undefined) return;
+      let sequence = nextSequence;
+      const context = {
+        surfaceId,
+        runtimeGeneration: source.runtimeGeneration,
+        geometryGeneration: source.geometryGeneration,
+        controllerEpoch: epoch,
+      };
+      for (const keyCode of held.keys) {
+        await source.input({ ...context, sequence: sequence++, type: "key", keyCode, state: "released" });
+      }
+      for (const button of held.buttons) {
+        await source.input({
+          ...context,
+          sequence: sequence++,
+          type: "button",
+          x: 0,
+          y: 0,
+          button,
+          state: "released",
+        });
+      }
+      await source.releaseInput(epoch);
     },
     capture: (surfaceId) => screens.capture(ownerFor(surfaceId)),
   });

@@ -20,7 +20,7 @@ import type {
   BotScreenProjectionSource,
 } from "./botScreenManager.ts";
 import { InputDiagnostics, type InputDiagnosticCategory } from "./inputDiagnostics.ts";
-import type { ScreenInputLease } from "./screenInputLease.ts";
+import type { ScreenInputLease, WebControlGrant } from "./screenInputLease.ts";
 
 const PREVIEW_INTERVAL_MS = 1_000;
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
@@ -170,6 +170,7 @@ interface InputController {
   heldCodes: Set<string>;
   heldButtons: Set<"left" | "middle" | "right">;
   release: Promise<void>;
+  grant?: WebControlGrant;
 }
 
 const KEY_CODES: Record<string, number> = {
@@ -219,7 +220,6 @@ export class ScreenProjectionService {
     promise: Promise<void>;
   }>();
   #controllers = new Map<SurfaceId, InputController>();
-  #controllerEpochs = new Map<SurfaceId, number>();
   #releaseBarriers = new Map<SurfaceId, Promise<void>>();
   #unsubscribeScreens: () => void;
 
@@ -869,7 +869,8 @@ export class ScreenProjectionService {
         const queued = controller.queue.shift();
         if (queued === undefined) return;
         try {
-          await controller.session.source.input(queued.event);
+          if (controller.grant === undefined) throw new Error("Web Control grant is unavailable");
+          await controller.grant.input(queued.event);
         } catch (error) {
           if (queued.category !== undefined) {
             this.#recordDiagnostic(
@@ -905,11 +906,9 @@ export class ScreenProjectionService {
     const surfaceId = session.source.surfaceId;
     const previous = this.#controllers.get(surfaceId);
     if (previous !== undefined && previous.session !== session) void this.#revokeInput(previous);
-    const epoch = (this.#controllerEpochs.get(surfaceId) ?? 0) + 1;
-    this.#controllerEpochs.set(surfaceId, epoch);
     const controller: InputController = {
       session,
-      epoch,
+      epoch: 0,
       nextSequence: 1,
       queue: [],
       draining: false,
@@ -931,8 +930,12 @@ export class ScreenProjectionService {
         || this.#sessions.get(session.id) !== session
         || session.mode !== "expanded"
       ) return;
-      const accepted = await session.source.setInputAuthority(epoch);
-      if (accepted !== epoch) throw new Error(`stale controller epoch ${accepted}`);
+      const grant = await this.lease.acquireWebControl({
+        surfaceId,
+        runtimeGeneration: session.source.runtimeGeneration,
+      });
+      controller.epoch = grant.epoch;
+      controller.grant = grant;
       controller.provisioned = true;
       if (
         controller.revoked
@@ -1002,7 +1005,8 @@ export class ScreenProjectionService {
     const startedAt = Date.now();
     const release = prior.then(async () => {
       try {
-        if (controller.provisioned) await controller.session.source.releaseInput(controller.epoch);
+        if (controller.grant !== undefined) await controller.grant.release();
+        else if (controller.provisioned) await controller.session.source.releaseInput(controller.epoch);
         this.#recordDiagnostic(surfaceId, "release", "released", Date.now() - startedAt);
       } catch (error) {
         this.#recordDiagnostic(surfaceId, "release", "failed", Date.now() - startedAt);

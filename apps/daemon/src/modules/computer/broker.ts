@@ -65,7 +65,6 @@ export interface ComputerSurfaceOwner {
  */
 export class ComputerBroker {
   #surfaceOperations = new Map<SurfaceId, Promise<void>>();
-  #seat: Promise<void> = Promise.resolve();
   #pendingAgentTools = new Map<SurfaceId, PendingAgentTool>();
   #unsubscribeScreens: () => void;
 
@@ -218,6 +217,7 @@ export class ComputerBroker {
       return { ok: false };
     }
     if (pending.phase === "takeover-requested") {
+      await this.lease.requestTakeover(owner.surfaceId);
       pending.phase = "held";
       pending.activated.resolve();
       this.#transitionAuthority(owner, "takeover");
@@ -309,18 +309,20 @@ export class ComputerBroker {
     const inputAuthority = isInputAction(action.name)
       ? { surfaceId: owner.surfaceId, botId: owner.botId, turnId }
       : undefined;
-    const run = (): Promise<BotScreenBoundActionResult> => this.screens.act(owner, action, inputAuthority);
-    if (inputAuthority === undefined) return run();
-    const previous = this.#seat;
-    const gate = Promise.withResolvers<void>();
-    this.#seat = gate.promise;
-    await previous;
-    try {
-      signal?.throwIfAborted();
-      return await run();
-    } finally {
-      gate.resolve();
-    }
+    if (inputAuthority === undefined) return this.screens.act(owner, action);
+    await this.screens.ensureReady(owner);
+    const generation = this.db
+      .query(`SELECT runtime_generation FROM bot_surfaces WHERE surface_id = ?`)
+      .get(owner.surfaceId) as { runtime_generation: number } | null;
+    if (generation === null) throw new Error("unknown Computer Surface");
+    return this.lease.performBotInput(
+      { surfaceId: owner.surfaceId, runtimeGeneration: generation.runtime_generation },
+      {
+        turnId,
+        signal: signal ?? new AbortController().signal,
+        run: (_send, epoch) => this.screens.act(owner, action, { ...inputAuthority, controllerEpoch: epoch }),
+      },
+    );
   }
 
   async #recordActionResult(
@@ -383,6 +385,16 @@ export class ComputerBroker {
       pending.activated.promise.catch(() => {});
       pending.completion.promise.catch(() => {});
       this.#pendingAgentTools.set(owner.surfaceId, pending);
+      const generation = this.db
+        .query(`SELECT runtime_generation FROM bot_surfaces WHERE surface_id = ?`)
+        .get(owner.surfaceId) as { runtime_generation: number } | null;
+      if (generation !== null) {
+        const handle = this.lease.beginAgentTool(
+          { surfaceId: owner.surfaceId, runtimeGeneration: generation.runtime_generation },
+          { turnId, toolCallId },
+        );
+        void handle.actionFinished(pending.actionDone.promise);
+      }
       this.lease.webControlReleased(owner);
       this.#transitionAuthority(owner, "agent");
       this.#event(owner);
@@ -410,6 +422,7 @@ export class ComputerBroker {
         }
 
         if (pending.phase === "running") {
+          await this.lease.settleAgentTool(owner.surfaceId, toolCallId);
           pending.phase = "settled";
           this.#transitionAuthority(owner, "idle");
           return this.#withImageFile(owner, await this.#recordActionResult(owner, initial));

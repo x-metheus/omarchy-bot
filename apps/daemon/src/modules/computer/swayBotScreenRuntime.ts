@@ -989,12 +989,16 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         });
     let lastInputEpoch = 0;
     const sendAgentInput = async (
+      granted: number | undefined,
       deliver: (send: (event: BotScreenInputAction) => Promise<void>) => Promise<void>,
     ): Promise<void> => {
       await this.#withInputLease(session, async () => {
-        const epoch = lastInputEpoch + 1;
+        const epoch = granted ?? lastInputEpoch + 1;
+        if (granted !== undefined && granted < lastInputEpoch) {
+          throw new BotScreenInputRejectedError("stale controller epoch");
+        }
         lastInputEpoch = epoch;
-        await virtualInput.setInputAuthority(epoch);
+        if (granted === undefined) await virtualInput.setInputAuthority(epoch);
         let sequence = 0;
         try {
           await deliver(async (event) => {
@@ -1008,7 +1012,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
             });
           });
         } finally {
-          await virtualInput.release(epoch);
+          if (granted === undefined) await virtualInput.release(epoch);
         }
       });
     };
@@ -1215,7 +1219,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         const x = requireCoordinate(action.args.x, "click x");
         const y = requireCoordinate(action.args.y, "click y");
         const button = pointerButton(action.args.button);
-        await sendAgentInput(async (send) => {
+        await sendAgentInput(inputAuthority?.controllerEpoch, async (send) => {
           await send({ type: "motion", x, y });
           await send({ type: "button", x, y, button, state: "pressed" });
           await send({ type: "button", x, y, button, state: "released" });
@@ -1227,14 +1231,14 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         const y = optionalCoordinate(action.args.y, 0);
         const deltaX = requireCoordinate(action.args.deltaX, "scroll deltaX");
         const deltaY = requireCoordinate(action.args.deltaY, "scroll deltaY");
-        await sendAgentInput(async (send) => {
+        await sendAgentInput(inputAuthority?.controllerEpoch, async (send) => {
           await send({ type: "scroll", x, y, deltaX, deltaY });
         });
         return {};
       }
       if (action.name === "key") {
         const keyCodes = linuxKeyChord(action.args.key);
-        await sendAgentInput(async (send) => {
+        await sendAgentInput(inputAuthority?.controllerEpoch, async (send) => {
           for (const keyCode of keyCodes) await send({ type: "key", keyCode, state: "pressed" });
           for (const keyCode of keyCodes.toReversed()) await send({ type: "key", keyCode, state: "released" });
         });
@@ -1242,7 +1246,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       }
       if (action.name === "type") {
         if (typeof action.args.text !== "string") throw new Error("type requires args.text");
-        await sendAgentInput(async (send) => {
+        await sendAgentInput(inputAuthority?.controllerEpoch, async (send) => {
           await send({ type: "paste", text: action.args.text as string });
         });
         return {};

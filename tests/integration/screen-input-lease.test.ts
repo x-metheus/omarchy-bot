@@ -209,4 +209,72 @@ describe("ScreenInputLease", () => {
     expect(await first).toBe("first");
     expect(await second).toBe("second");
   });
+
+  test("aborting one cross-Screen waiter does not let the next one type", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    const holder = await lease.acquireWebControl(target(SURFACE_A));
+    const firstAbort = new AbortController();
+    const first = lease.performBotInput(target(SURFACE_B), {
+      turnId: "turn-b",
+      signal: firstAbort.signal,
+      run: async (send) => {
+        await send({ type: "motion", x: 1, y: 1 });
+      },
+    });
+    await lease.seatQueued();
+    firstAbort.abort(new Error("steering"));
+    await expect(first).rejects.toThrow(/steering/);
+    let secondStarted = false;
+    const second = lease.performBotInput(target(SURFACE_B), {
+      turnId: "turn-b2",
+      signal: new AbortController().signal,
+      run: async (send) => {
+        secondStarted = true;
+        await send({ type: "motion", x: 2, y: 2 });
+      },
+    });
+    await lease.seatQueued();
+    expect(secondStarted).toBeFalse();
+    expect(sink.events.some((event) => event.surfaceId === SURFACE_B && event.kind === "grant")).toBeFalse();
+    await holder.release();
+    await second;
+    expect(secondStarted).toBeTrue();
+  });
+
+  test("a Bot action on the Screen the user holds waits instead of replacing the grant", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    const holder = await lease.acquireWebControl(target(SURFACE_A, 1));
+    let started = false;
+    const bot = lease.performBotInput(target(SURFACE_A, 1), {
+      turnId: "turn-a",
+      signal: new AbortController().signal,
+      run: async (send) => {
+        started = true;
+        await send({ type: "motion", x: 1, y: 1 });
+      },
+    });
+    await lease.seatQueued();
+    expect(started).toBeFalse();
+    expect(sink.events.filter((event) => event.kind === "grant")).toEqual([
+      { surfaceId: SURFACE_A, epoch: 1, kind: "grant" },
+    ]);
+    await holder.release();
+    await bot;
+    expect(started).toBeTrue();
+  });
+
+  test("a grant for a different runtime generation is rejected", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    const holder = await lease.acquireWebControl(target(SURFACE_A, 1));
+    await expect(lease.performBotInput(target(SURFACE_A, 99), {
+      turnId: "turn-stale",
+      signal: new AbortController().signal,
+      run: async () => "ran",
+    })).rejects.toThrow(/generation/i);
+    expect(sink.events.filter((event) => event.kind === "grant")).toHaveLength(1);
+    await holder.release();
+  });
 });

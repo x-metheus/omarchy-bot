@@ -441,20 +441,22 @@ export class BotScreenManager {
     if (inputAuthority !== undefined && inputAuthority.surfaceId !== owner.surfaceId) {
       throw new Error("input authority does not belong to this Computer Surface");
     }
-    return this.#serialize(owner.surfaceId, async () => {
+    const prepared = await this.#serialize(owner.surfaceId, async () => {
       const runtime = await this.#readyRuntime(owner);
       const entry = this.#entries.get(owner.surfaceId);
       if (runtime === undefined || entry?.runtime !== runtime) {
         throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
-      const runtimeGeneration = this.#row(owner.surfaceId).runtime_generation;
-      const result = await runtime.act(action, inputAuthority);
-      if (this.#entries.get(owner.surfaceId) !== entry || entry.runtime !== runtime) {
+      return { runtime, entry, runtimeGeneration: this.#row(owner.surfaceId).runtime_generation };
+    });
+    const result = await prepared.runtime.act(action, inputAuthority);
+    return this.#serialize(owner.surfaceId, async () => {
+      if (this.#entries.get(owner.surfaceId) !== prepared.entry || prepared.entry.runtime !== prepared.runtime) {
         throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
       return {
         ...result,
-        desktopSession: { botId: owner.botId, surfaceId: owner.surfaceId, runtimeGeneration },
+        desktopSession: { botId: owner.botId, surfaceId: owner.surfaceId, runtimeGeneration: prepared.runtimeGeneration },
       };
     });
   }

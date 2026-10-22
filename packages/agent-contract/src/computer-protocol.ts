@@ -6,6 +6,8 @@ export interface ComputerInputAuthority {
   surfaceId: SurfaceId;
   botId: string;
   turnId: string;
+  /** Present when the Screen input lease already granted this epoch. */
+  controllerEpoch?: number;
 }
 
 export type ComputerCommand =
