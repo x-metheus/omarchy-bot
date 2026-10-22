@@ -17,8 +17,8 @@ Origin: architecture review and grilling session on 2026-10-22. Each ticket reco
 | # | Ticket | Type | Blocked by | Status |
 |---|---|---|---|---|
 | 01 | [Fix the Sidecar transfer hang](./issues/01-fix-sidecar-transfer-hang.md) | task | — | resolved |
-| 02 | [Dispatch `local` once per Tool Call](./issues/02-local-dispatch-once.md) | task | — | claimed |
-| 03 | [Deepen the turn-bound ToolChannel](./issues/03-tool-channel.md) | task | 01, 02 | ready-for-agent |
+| 02 | [Dispatch `local` once per Tool Call](./issues/02-local-dispatch-once.md) | task | — | resolved |
+| 03 | [Deepen the turn-bound ToolChannel](./issues/03-tool-channel.md) | task | 01, 02 | claimed |
 | 04 | [SidecarBroker for `local` jobs](./issues/04-sidecar-broker.md) | task | 03 | ready-for-agent |
 | 05 | [ScreenInputLease](./issues/05-screen-input-lease.md) | task | — | ready-for-agent |
 | 06 | [Narrow the Bot Screen runtime seam](./issues/06-narrow-runtime-seam.md) | task | 05 | ready-for-agent |

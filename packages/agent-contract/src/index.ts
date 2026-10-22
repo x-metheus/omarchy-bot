@@ -6,3 +6,4 @@ export * from "./computer-tool.ts";
 export * from "./plugin-protocol.ts";
 export * from "./local-protocol.ts";
 export * from "./local-tool.ts";
+export * from "./tool-channel.ts";

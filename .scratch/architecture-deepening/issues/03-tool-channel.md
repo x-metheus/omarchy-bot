@@ -1,7 +1,7 @@
 # 03: Deepen the turn-bound ToolChannel
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** claimed
 **Blocked by:** 01, 02
 
 **What to build:** Replace the four hand-copied reverse tool-call paths (`computer`, `local`, `plugin`, `send_bot_message`) with one `ToolChannel` module that has a worker half and a daemon half in `packages/agent-contract`.
