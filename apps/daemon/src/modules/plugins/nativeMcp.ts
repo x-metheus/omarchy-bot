@@ -6,16 +6,12 @@ import { parseForESLint, type AST } from "toml-eslint-parser";
 import { z } from "zod";
 import { McpDefinition, type McpConnectionDto } from "@omarchy-bot/protocol";
 import type { NativeMcpStatus } from "@omarchy-bot/agent-contract";
+import { emptyNativeMcpMetadata, type NativeMcpMetadata, nativeMcpConfigFile, nativeMcpEndpoint, nativeMcpSecretKey, nativeMcpSecretPlaceholder, parseNativeMcpMetadata } from "@omarchy-bot/agent-contract/native-mcp-config";
 import { nativeMcpRevision } from "@omarchy-bot/agent-contract/native-mcp-revision";
 import { HttpError } from "../bots/bots.ts";
 
 type Definition = Record<string, unknown>;
 type Document = { file: string; text: string; values: Record<string, Definition>; root: Record<string, unknown>; toml: boolean };
-const Metadata = z.object({ version: z.literal(1), entries: z.record(z.object({
-  id: z.string(), pi: z.string().nullable(), codex: z.string().nullable(),
-  sources: z.object({ shared: z.string().nullable(), pi: z.string().nullable(), codex: z.string().nullable() }).optional(),
-  owner: z.object({ accountId: z.string(), serviceId: z.string() }).optional(),
-})), adapterPackage: z.string().optional(), packageRevisions: z.record(z.string()).default({}), serviceTokens: z.record(z.object({ url: z.string(), token: z.string() })).default({}), secrets: z.record(z.object({ server: z.string(), endpoint: z.string(), kind: z.enum(["env", "header"]), field: z.string(), value: z.string() })).default({}) });
 type Common = { command?: string; args?: string[]; url?: string; env?: Record<string, string>; headers?: Record<string, string>; disabled: boolean };
 
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
@@ -157,7 +153,7 @@ export class NativeMcpStore {
   readonly #shared: string;
   readonly #pi: string;
   readonly #codex: string;
-  #metadata: z.infer<typeof Metadata>;
+  #metadata: NativeMcpMetadata;
   #pending = new Set<string>();
   #conflicts = new Map<string, string>();
   #limitations = new Map<string, string>();
@@ -166,11 +162,11 @@ export class NativeMcpStore {
   errors: string[] = [];
 
   constructor(readonly workspace: string, readonly privateDir: string) {
-    this.#file = path.join(privateDir, "native-mcp.json");
+    this.#file = nativeMcpConfigFile(privateDir);
     this.#shared = path.join(workspace, ".mcp.json");
     this.#pi = path.join(workspace, ".pi", "mcp.json");
     this.#codex = path.join(workspace, ".codex", "config.toml");
-    this.#metadata = existsSync(this.#file) ? Metadata.parse(JSON.parse(readFileSync(this.#file, "utf8"))) : { version: 1, entries: {}, secrets: {}, serviceTokens: {}, packageRevisions: {} };
+    this.#metadata = existsSync(this.#file) ? parseNativeMcpMetadata(JSON.parse(readFileSync(this.#file, "utf8"))) : emptyNativeMcpMetadata();
     try { this.#registerAdapter(); } catch (error) { this.#setupError = error instanceof Error ? error.message : String(error); }
   }
 
@@ -439,12 +435,12 @@ export class NativeMcpStore {
       const url = new URL(value.url);
       if (url.username || url.password || [...url.searchParams.keys()].some((key) => /token|secret|password|api.?key/i.test(key))) throw new HttpError(400, "Keep MCP credentials out of URLs");
     }
-    const endpoint = value.url ?? JSON.stringify({ command: value.command, args: value.args ?? [] });
+    const endpoint = nativeMcpEndpoint(value);
     if (previousName && previous && body.transport.type === "stdio" && body.transport.env === undefined && previous.command === value.command) {
-      const oldEndpoint = JSON.stringify({ command: previous.command, args: previous.args ?? [] });
+      const oldEndpoint = nativeMcpEndpoint({ command: previous.command, args: previous.args ?? [] });
       for (const [key, secret] of Object.entries(this.#metadata.secrets)) {
-        if (secret.server !== previousName || secret.endpoint !== oldEndpoint || secret.kind !== "env" || value.env?.[secret.field] !== `\${${secret.field}}`) continue;
-        const rebound = `OMARCHY_BOT_MCP_${createHash("sha256").update(body.name).update("\0").update(endpoint).update("\0env\0").update(secret.field).digest("hex").slice(0, 24).toUpperCase()}`;
+        if (secret.server !== previousName || secret.endpoint !== oldEndpoint || secret.kind !== "env" || value.env?.[secret.field] !== nativeMcpSecretPlaceholder("env", secret.field, key)) continue;
+        const rebound = nativeMcpSecretKey(body.name, endpoint, "env", secret.field);
         delete this.#metadata.secrets[key];
         this.#metadata.secrets[rebound] = { ...secret, server: body.name, endpoint };
       }
@@ -452,9 +448,9 @@ export class NativeMcpStore {
     for (const [kind, fields] of [["env", value.env], ["header", value.headers]] as const) {
       for (const [field, secret] of Object.entries(fields ?? {})) {
         if (reference(secret) || /^Bearer \$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(secret) || secret.startsWith("!")) continue;
-        const key = `OMARCHY_BOT_MCP_${createHash("sha256").update(body.name).update("\0").update(endpoint).update("\0").update(kind).update("\0").update(field).digest("hex").slice(0, 24).toUpperCase()}`;
+        const key = nativeMcpSecretKey(body.name, endpoint, kind, field);
         this.#metadata.secrets[key] = { server: body.name, endpoint, kind, field, value: secret };
-        fields![field] = `\${${kind === "env" ? field : key}}`;
+        fields![field] = nativeMcpSecretPlaceholder(kind, field, key);
       }
     }
     this.#persist();

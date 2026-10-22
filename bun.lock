@@ -83,6 +83,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@omarchy-bot/domain": "workspace:*",
+        "zod": "^3.24.0",
       },
     },
     "packages/api-client": {

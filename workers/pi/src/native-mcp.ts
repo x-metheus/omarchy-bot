@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import {
   createAgentSession,
@@ -16,10 +15,10 @@ import { createMcpAdapter, MCP_STATUS_EVENT } from "pi-mcp-adapter";
 import { loadMcpConfig } from "pi-mcp-adapter/config";
 import type { McpConfig } from "pi-mcp-adapter/types";
 import type { AgentCommand, NativeMcpStatus } from "@omarchy-bot/agent-contract";
+import { isNativeMcpRuntimeStatus, nativeMcpConfigFile, nativeMcpPrivateDir, parseNativeMcpMetadata, resolveNativeMcpCredentials } from "@omarchy-bot/agent-contract/native-mcp-config";
 import { nativeMcpRevision } from "@omarchy-bot/agent-contract/native-mcp-revision";
 
 const inlinePath = "<inline:omarchy-native-mcp>";
-const statuses: Record<string, true> = { connected: true, cached: true, failed: true, "needs-auth": true, "not-connected": true, disabled: true };
 const live = new Set<NativeMcp>();
 
 // Identify the package, not tool/extension names: unrelated extensions may also
@@ -74,32 +73,11 @@ interface NativeConfig {
 }
 
 function nativeConfig(cwd: string): NativeConfig {
-  const file = path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "plugins", "native-mcp.json");
+  const file = nativeMcpConfigFile(nativeMcpPrivateDir());
   try {
     const revision = nativeMcpRevision(cwd, file);
     const config = loadMcpConfig(undefined, cwd);
-    if (existsSync(file)) {
-      const metadata: unknown = JSON.parse(readFileSync(file, "utf8"));
-      if (!record(metadata) || !record(metadata.secrets)) throw new Error("Private MCP credential metadata is malformed");
-      for (const [key, raw] of Object.entries(metadata.secrets)) {
-        if (!record(raw) || typeof raw.server !== "string" || typeof raw.endpoint !== "string" || typeof raw.field !== "string" || typeof raw.value !== "string") continue;
-        const server = config.mcpServers[raw.server];
-        if (!server) continue;
-        const endpoint = server.url ?? JSON.stringify({ command: server.command, args: server.args ?? [] });
-        if (endpoint !== raw.endpoint) continue;
-        if (raw.kind === "env" && server.env?.[raw.field] === `\${${raw.field}}`) server.env[raw.field] = raw.value.startsWith("!") ? `!${raw.value}` : raw.value;
-        if (raw.kind === "header" && server.headers?.[raw.field] === `\${${key}}`) server.headers[raw.field] = raw.value.startsWith("!") ? `!${raw.value}` : raw.value;
-      }
-      if (record(metadata.serviceTokens) && record(metadata.entries)) {
-        for (const [name, value] of Object.entries(metadata.serviceTokens)) {
-          const server = config.mcpServers[name];
-          const ownership = metadata.entries[name];
-          if (!server || server.disabled || !record(value) || typeof value.token !== "string" || value.url !== server.url || !record(ownership) || !record(ownership.owner)) continue;
-          if (Object.keys(server.headers ?? {}).length) continue;
-          server.headers = { Authorization: `Bearer ${value.token}` };
-        }
-      }
-    }
+    if (existsSync(file)) resolveNativeMcpCredentials(config, parseNativeMcpMetadata(JSON.parse(readFileSync(file, "utf8"))));
     if (nativeMcpRevision(cwd, file) !== revision) throw new Error("Native MCP configuration changed while loading");
     return { config, revision };
   } catch {
@@ -126,7 +104,7 @@ export class NativeMcp {
       const next: NativeMcpStatus[] = [];
       for (const server of payload.servers) {
         if (!record(server) || typeof server.name !== "string" || typeof server.status !== "string"
-          || !Object.hasOwn(statuses, server.status) || typeof server.disabled !== "boolean"
+          || !isNativeMcpRuntimeStatus(server.status) || typeof server.disabled !== "boolean"
           || typeof server.toolCount !== "number" || !Number.isSafeInteger(server.toolCount) || server.toolCount < 0) return;
         next.push({ name: server.name, configurationRevision: this.configurationRevision, status: server.status as NativeMcpStatus["status"], toolCount: server.toolCount, disabled: server.disabled });
       }
