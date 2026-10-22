@@ -40,6 +40,13 @@ export async function handlePluginRequest(request: Request, plugins: PluginsServ
     });
   }
   if (route === "" && request.method === "GET") return Response.json(await plugins.state(), { headers: { "cache-control": "no-store" } });
+  if (route === "/inspect" && request.method === "GET") {
+    const state = await plugins.state();
+    const id = url.searchParams.get("id") ?? "";
+    const found = [...state.skills, ...state.mcp, ...state.accounts].find((entry) => entry.id === id);
+    if (!found) throw new HttpError(404, "Plugin not found");
+    return Response.json(found, { headers: { "cache-control": "no-store" } });
+  }
   if (route === "/commands" && request.method === "GET") return Response.json(await plugins.commands());
   if (route === "/settings" && request.method === "PUT") {
     plugins.configure((await body(request, ConfigurePluginsBody)).cloudUrl);
@@ -109,3 +116,4 @@ export async function handlePluginRequest(request: Request, plugins: PluginsServ
   }
   throw new HttpError(404, "Unknown plugin operation");
 }
+

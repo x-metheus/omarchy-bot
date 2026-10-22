@@ -6,14 +6,16 @@ import { z } from "zod";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { redactToolErrorSummary, type AgentCommand, type AgentPluginSnapshot, type AgentPluginToolOutput, type NativeMcpControlResult, type NativePluginResources } from "@omarchy-bot/agent-contract";
 import {
-  PLUGIN_PROVIDERS, PluginProviderId, McpDefinition, SaveMcpBody, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT,
-  type AuthorizePluginBody, type CatalogSkillDetailDto, type CatalogSkillDto, type InstalledSkillDto, type InstallSkillBody,
-  type McpConnectionDto, type PluginAccountDto, type PluginProviderDto, type PluginServiceDefinition, type PluginStateDto,
-  type SkillCatalogDto, type SkillCommandDto,
+  HttpsOrigin, OAuthStartResponse, PLUGIN_OPERATIONS, PLUGIN_PROVIDERS,
+  PluginManageInput, PluginProviderId, PublisherTokenResponse, McpDefinition, SaveMcpBody,
+  TOKEN_METADATA_KEYS, type AuthorizePluginBody, type CatalogSkillDetailDto,
+  type InstalledSkillDto, type InstallSkillBody, type McpConnectionDto, type PluginAccountDto,
+  type PluginProviderDto, type PluginServiceDefinition, type PluginStateDto, type SkillCatalogDto, type SkillCommandDto,
 } from "@omarchy-bot/protocol";
 import { HttpError } from "../bots/bots.ts";
 import { connectMcp } from "./mcp.ts";
-import { materializeSkill, materializeSkillSource, skillFrontmatter } from "./skillInstaller.ts";
+import { CatalogClient } from "./catalogClient.ts";
+import { materializeSkill, materializeSkillSource } from "./skillInstaller.ts";
 import { NativeSkills } from "./nativeSkills.ts";
 import { NativeMcpStore } from "./nativeMcp.ts";
 import { McpPackages } from "./mcpPackages.ts";
@@ -22,7 +24,7 @@ const DEFAULT_PUBLISHER_ORIGIN = "https://omarchy-bot-site-ymlq.vercel.app";
 
 const Grant = z.object({
   generation: z.string(), accessToken: z.string(), refreshToken: z.string().optional(), expiresAt: z.number().optional(),
-  scopes: z.array(z.string()), cloudUrl: z.string().url(), metadata: z.record(z.unknown()).default({}),
+  scopes: z.array(z.string()), cloudUrl: HttpsOrigin, metadata: z.record(z.unknown()).default({}),
 });
 type Grant = z.infer<typeof Grant>;
 const Account = z.object({
@@ -42,12 +44,8 @@ const Skill = z.object({
 });
 type Skill = z.infer<typeof Skill>;
 const StoredState = z.object({
-  version: z.literal(1), revision: z.number().int().nonnegative(), cloudUrl: z.string().url().nullable(), accounts: z.array(Account), mcp: z.array(Mcp), skills: z.array(Skill),
+  version: z.literal(1), revision: z.number().int().nonnegative(), cloudUrl: HttpsOrigin.nullable(), accounts: z.array(Account), mcp: z.array(Mcp), skills: z.array(Skill),
 });
-const CatalogEntry = z.object({
-  id: z.string(), name: z.string(), source: z.string(), sourceType: z.enum(["github", "well-known"]), installUrl: z.string().url().nullable(), installs: z.number().optional(),
-});
-const TokenResponse = z.object({ access_token: z.string().min(1), refresh_token: z.string().optional(), expires_in: z.coerce.number().positive().optional(), scope: z.string().optional() }).passthrough();
 const ProviderIdentityId = z.union([z.string().min(1), z.number().int()]);
 interface OAuthPending {
   providerId: PluginProviderId; accountId?: string; verifier: string; cloudUrl: string; returnUrl: string; expiresAt: number;
@@ -71,8 +69,7 @@ export class PluginsService {
   #refreshing = new Map<Grant, Promise<string>>();
   #oauth = new Map<string, OAuthPending>();
   #installing = new Map<string, Promise<InstalledSkillDto>>();
-  #catalog = new Map<string, CatalogSkillDto>();
-  #providerCache: { at: number; providers: PluginProviderDto[]; error?: string } | undefined;
+  readonly publisher: CatalogClient;
   #nativeCache: { at: number; resources: NativePluginResources; error?: string } | undefined;
   #nativePending: Promise<NativePluginResources> | undefined;
   #updatePromise: Promise<void> | undefined;
@@ -93,6 +90,7 @@ export class PluginsService {
     if (!lstatSync(rootDir).isDirectory() || lstatSync(rootDir).isSymbolicLink()) throw new Error("Plugin state directory must be a private real directory");
     chmodSync(rootDir, 0o700);
     this.skills = new NativeSkills(cwd, rootDir);
+    this.publisher = new CatalogClient(() => this.#cloudUrl());
     this.mcp = new NativeMcpStore(cwd, rootDir);
     this.packages = new McpPackages(this.mcp);
     try { this.skills.provisionDefault(path.resolve(import.meta.dir, "../../../../../workers/pi/resources")); }
@@ -147,55 +145,18 @@ export class PluginsService {
   }
 
 
-  async #cloud(base: string, route: string, body?: unknown): Promise<unknown> {
-    const url = new URL(base);
-    if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new HttpError(400, "Publisher URL must be an HTTPS origin");
-    const response = await fetch(`${url.origin}/api/plugins/${route}`, {
-      method: body === undefined ? "GET" : "POST", redirect: "error", signal: AbortSignal.timeout(30_000),
-      headers: { "content-type": "application/json", accept: "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    let payload: unknown;
-    try { payload = await response.json(); } catch { throw new HttpError(502, "Publisher backend returned an invalid response"); }
-    if (!response.ok) {
-      const message = payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string" ? payload.error : `Publisher backend returned HTTP ${response.status}`;
-      throw new HttpError(response.status, redactToolErrorSummary(message));
-    }
-    return payload;
-  }
-
   #cloudUrl(): string {
     return this.#state.cloudUrl ?? DEFAULT_PUBLISHER_ORIGIN;
   }
 
   configure(cloudUrl: string | null): void {
     if (cloudUrl !== null) {
-      const url = new URL(cloudUrl);
-      if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new HttpError(400, "Publisher URL must be an HTTPS origin");
-      cloudUrl = url.origin;
+      try { cloudUrl = HttpsOrigin.parse(cloudUrl); }
+      catch (error) { throw new HttpError(400, error instanceof Error ? error.message : "Publisher URL must be an HTTPS origin"); }
     }
     this.#state.cloudUrl = cloudUrl;
-    this.#providerCache = undefined;
-    this.#catalog.clear();
+    this.publisher.clear();
     this.#persist(true);
-  }
-
-  async #providers(): Promise<{ providers: PluginProviderDto[]; error?: string }> {
-    if (this.#providerCache && Date.now() - this.#providerCache.at < 30_000) return this.#providerCache;
-    let providers: PluginProviderDto[] = Object.values(PLUGIN_PROVIDERS).map(({ id, name, mode, services, documentationUrl, nativeOAuth, registrationNote }) => ({ id, name, mode, documentationUrl, registrationNote,
-      services: services.map(({ id: serviceId, name: serviceName, description, skillSources }) => ({ id: serviceId, name: serviceName, description, ...(skillSources === undefined ? {} : { skillSources }) })),
-      ...(nativeOAuth ? { nativeAuthorization: true } : { setupReason: "Publisher backend is unavailable." }) }));
-    let error: string | undefined;
-    try {
-      const remote = z.array(z.object({ id: PluginProviderId, setupReason: z.string().optional() })).parse(await this.#cloud(this.#cloudUrl(), "providers"));
-      providers = providers.map((provider) => {
-        if (provider.nativeAuthorization) return provider;
-        const registered = remote.find((item) => item.id === provider.id);
-        const { setupReason: _reason, ...known } = provider;
-        return { ...known, ...(registered === undefined ? { setupReason: "Publisher does not support this provider." } : registered.setupReason ? { setupReason: registered.setupReason } : {}) };
-      });
-    } catch (failure) { error = redactToolErrorSummary(failure instanceof Error ? failure.message : failure); }
-    this.#providerCache = { at: Date.now(), providers, ...(error ? { error } : {}) };
-    return this.#providerCache;
   }
 
   async #native(): Promise<NativePluginResources> {
@@ -249,7 +210,7 @@ export class PluginsService {
 
   async state(): Promise<PluginStateDto> {
     await this.#ready;
-    const [cloud, native] = await Promise.all([this.#providers(), this.#native()]);
+    const [cloud, native] = await Promise.all([this.publisher.providers(), this.#native()]);
     this.mcp.updateStatus(native.mcp ?? []);
     const mcp = this.packages.list();
     const skills = this.skills.list();
@@ -305,36 +266,12 @@ export class PluginsService {
     };
   }
 
-  async catalog(query = "", cursor?: string, view = "trending"): Promise<SkillCatalogDto> {
-    const parameters = new URLSearchParams({ q: query, view, ...(cursor === undefined ? {} : { cursor }) });
-    const raw = z.object({ data: z.array(CatalogEntry), pagination: z.object({ page: z.number().int().nonnegative(), perPage: z.number().int().positive(), total: z.number().int().nonnegative(), hasMore: z.boolean() }).optional() }).parse(await this.#cloud(this.#cloudUrl(), `catalog?${parameters}`));
-    const isSearch = Boolean(query.trim());
-    if (!isSearch && !raw.pagination) throw new HttpError(502, "Catalog pagination is unavailable");
-    const skills = raw.data.map((entry): CatalogSkillDto => {
-      const { installs, ...fields } = entry;
-      const skill: CatalogSkillDto = { ...fields, installUrl: entry.installUrl ?? (entry.sourceType === "github" ? `https://github.com/${entry.source}` : `https://${entry.source}`), description: "", ...(installs === undefined ? {} : { installs }) };
-      this.#catalog.set(skill.id, skill);
-      return skill;
-    });
-    return {
-      skills,
-      total: isSearch ? skills.length : raw.pagination!.total,
-      pageSize: isSearch ? SKILL_CATALOG_PAGE_SIZE : raw.pagination!.perPage,
-      ...(isSearch ? { searchLimit: SKILL_SEARCH_LIMIT } : raw.pagination!.hasMore ? { nextCursor: String(raw.pagination!.page + 1) } : {}),
-    };
+  catalog(query = "", cursor?: string, view = "trending"): Promise<SkillCatalogDto> {
+    return this.publisher.catalog(query, cursor, view);
   }
 
-  async detail(id: string): Promise<CatalogSkillDetailDto> {
-    const raw = z.object({ id: z.string(), source: z.string(), slug: z.string(), installs: z.number().optional(), files: z.array(z.object({ path: z.string(), contents: z.string() })).nullable() }).parse(await this.#cloud(this.#cloudUrl(), `catalog/detail?${new URLSearchParams({ id })}`));
-    const content = raw.files?.find((file) => file.path === "SKILL.md")?.contents ?? "";
-    const cached = this.#catalog.get(id);
-    const sourceType = cached?.sourceType ?? (raw.source.includes("/") ? "github" : "well-known");
-    let metadata = { name: cached?.name ?? raw.slug, description: cached?.description ?? "" };
-    if (content) metadata = skillFrontmatter(content);
-    // The catalog can use the original name while detail returns a canonical slug.
-    if (raw.id !== `${raw.source}/${raw.slug}` || (raw.id !== id && (!content || id !== `${raw.source}/${metadata.name}`))) throw new HttpError(502, "Catalog returned a mismatched skill identity");
-    return { id, ...metadata, source: raw.source, sourceType, installUrl: cached?.installUrl ?? (sourceType === "github" ? `https://github.com/${raw.source}` : `https://${raw.source}`),
-      ...(raw.installs === undefined ? {} : { installs: raw.installs }), content, url: `https://skills.sh/${id.split("/").map(encodeURIComponent).join("/")}` };
+  detail(id: string): Promise<CatalogSkillDetailDto> {
+    return this.publisher.detail(id);
   }
 
   installSkill(input: string | InstallSkillBody): Promise<InstalledSkillDto> {
@@ -598,7 +535,7 @@ export class PluginsService {
     const localState = randomBytes(32).toString("base64url");
     const verifier = randomBytes(32).toString("base64url");
     const callback = new URL("/api/plugins/oauth/callback", body.returnUrl);
-    const result = z.object({ url: z.string().url() }).parse(await this.#cloud(cloudUrl, "oauth/start", { providerId: body.providerId, callbackUrl: callback.href,
+    const result = OAuthStartResponse.parse(await this.publisher.request("oauth/start", { providerId: body.providerId, callbackUrl: callback.href,
       localState, challenge: createHash("sha256").update(verifier).digest("base64url") }));
     if (new URL(result.url).origin !== new URL(PLUGIN_PROVIDERS[body.providerId].authorizeUrl).origin) throw new HttpError(502, "Publisher returned an unexpected authorization origin");
     const brokerState = new URL(result.url).searchParams.get("state");
@@ -617,11 +554,9 @@ export class PluginsService {
     const brokerState = url.searchParams.get("brokerState");
     if (url.searchParams.has("error") || !code || !brokerState) throw new HttpError(400, "Authorization was not granted");
     if (brokerState !== pending.brokerState) throw new HttpError(400, "Authorization callback belongs to a different publisher transaction");
-    const tokens = TokenResponse.parse(await this.#cloud(pending.cloudUrl, "oauth/token", { grantType: "authorization_code", code, state: brokerState, verifier: pending.verifier }));
+    const tokens = PublisherTokenResponse.parse(await this.publisher.request("oauth/token", { grantType: "authorization_code", code, state: brokerState, verifier: pending.verifier }, pending.cloudUrl));
     const metadata: Record<string, unknown> = {};
-    for (const key of ["identity", "user_id", "workspace_id", "email_domain", "team_id", "data"]) {
-      if (tokens[key] !== undefined) metadata[key] = tokens[key];
-    }
+    for (const key of TOKEN_METADATA_KEYS) if (key !== "refresh_token" && key !== "expires_in" && key !== "refresh_token_expires_in" && key !== "scope" && tokens[key] !== undefined) metadata[key] = tokens[key];
     const grant: Grant = { generation: randomUUID(), accessToken: tokens.access_token, scopes: (tokens.scope ?? "").split(/[\s,]+/).filter(Boolean), cloudUrl: pending.cloudUrl, metadata,
       ...(tokens.refresh_token === undefined ? {} : { refreshToken: tokens.refresh_token }), ...(tokens.expires_in === undefined ? {} : { expiresAt: Date.now() + tokens.expires_in * 1000 }) };
     const identity = await this.#identify(pending.providerId, grant);
@@ -745,7 +680,7 @@ export class PluginsService {
     const refresh = (async () => {
       try {
         if (!grant.refreshToken) throw new HttpError(401, "Access expired or was revoked; reconnect this provider account");
-        const replacement = TokenResponse.parse(await this.#cloud(grant.cloudUrl, "oauth/token", { grantType: "refresh_token", providerId, refreshToken: grant.refreshToken }));
+        const replacement = PublisherTokenResponse.parse(await this.publisher.request("oauth/token", { grantType: "refresh_token", providerId, refreshToken: grant.refreshToken }, grant.cloudUrl));
         grant.accessToken = replacement.access_token;
         if (replacement.refresh_token !== undefined) grant.refreshToken = replacement.refresh_token;
         if (replacement.expires_in === undefined) delete grant.expiresAt;
@@ -805,12 +740,6 @@ export class PluginsService {
         if (!claims.success || claims.data.subject !== user.sub) throw new HttpError(401, "Google access token and verified identity do not match");
         id = user.sub; label = user.email ?? user.name; break;
       }
-      case "microsoft": {
-        const user = await json("https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName");
-        const claims = z.object({ tenantId: z.string(), userId: z.string() }).safeParse(grant.metadata.identity);
-        if (!claims.success || claims.data.userId !== user.id) throw new HttpError(401, "Microsoft token identity did not match its directory context");
-        id = `${claims.data.tenantId}:${user.id}`; label = user.mail ?? user.userPrincipalName ?? user.displayName; break;
-      }
       case "github": { const user = await json("https://api.github.com/user"); id = user.id; label = user.login; break; }
       case "linear": {
         const result = z.object({ data: z.object({ viewer: z.object({ id: ProviderIdentityId, name: z.string() }) }) }).parse(await json("https://api.linear.app/graphql", { method: "POST", body: JSON.stringify({ query: "{ viewer { id name } }" }) }));
@@ -824,12 +753,6 @@ export class PluginsService {
         const user = z.object({ id: ProviderIdentityId, email: z.string().nullish(), name: z.string().nullish(), app: z.object({ id_code: z.string(), name: z.string().optional(), region: z.string().optional() }) }).parse(await json("https://api.intercom.io/me"));
         if (user.app.region === "AU") throw new HttpError(409, "Intercom MCP does not support Australian workspaces");
         id = `${user.app.id_code}:${user.id}`; label = user.email ? `${user.email} · ${user.app.name ?? user.app.id_code}` : user.name; grant.metadata.region = user.app.region; break;
-      }
-      case "miro": {
-        const user = z.object({ user: z.object({ id: ProviderIdentityId, name: z.string().optional() }).optional(), team: z.object({ id: ProviderIdentityId, name: z.string().optional() }).optional() }).parse(await json("https://api.miro.com/v1/oauth-token"));
-        const userId = ProviderIdentityId.parse(user.user?.id ?? grant.metadata.user_id);
-        const teamId = ProviderIdentityId.parse(user.team?.id ?? grant.metadata.team_id);
-        id = `${teamId}:${userId}`; label = [user.user?.name, user.team?.name].filter(Boolean).join(" · "); break;
       }
       case "notion": {
         if (typeof grant.metadata.user_id === "string" && typeof grant.metadata.workspace_id === "string") id = `${grant.metadata.workspace_id}:${grant.metadata.user_id}`;
@@ -886,7 +809,7 @@ export class PluginsService {
         name: "manage_plugins",
         description: "Inspect shared Services, native MCP connections and Skills. inspect reads installed inventory; inspect_skill reads catalog source and content. Search and install complete independent Skills from the catalog or explicit sources; update Skills, and enable, disable or remove Skills and custom MCPs without a product approval gate. Authorize, enable, disable, remove or update Services; label or disconnect exact account ids. Updates preserve local modifications. Changes affect subsequent native resource reloads; actual reload and native/provider authorization still apply. authorize_service returns a real URL pending user authorization, never completed consent. Never claim an unprobed MCP is connected. Use Pi's native mcp tool for provider business operations, and the default official skill-creator for local authoring.",
         inputSchema: { type: "object", properties: {
-          action: { type: "string", enum: ["list", "inspect", "inspect_skill", "search_skills", "install_skill", "enable_skill", "remove_skill", "update_skills", "authorize_service", "enable_service", "remove_service", "update_service", "label_account", "disconnect_account", "save_mcp", "update_mcp", "enable_mcp", "remove_mcp", "check_mcp", "authorize_mcp"] },
+          action: { type: "string", enum: PLUGIN_OPERATIONS.map((operation) => operation.action) },
           id: { type: "string" }, query: { type: "string" }, cursor: { type: "string" }, source: { type: "string" },
           skillPath: { type: "string" }, ref: { type: "string" }, enabled: { type: "boolean" },
           providerId: { type: "string", enum: PluginProviderId.options }, serviceId: { type: "string" }, label: { type: "string" },
@@ -902,12 +825,7 @@ export class PluginsService {
         signal.throwIfAborted();
         if (released) throw new Error("Plugin turn snapshot was released");
         if (name !== "manage_plugins") throw new Error("Plugin management tool does not belong to this turn");
-        const input = z.object({
-          action: z.enum(["list", "inspect", "inspect_skill", "search_skills", "install_skill", "enable_skill", "remove_skill", "update_skills", "authorize_service", "enable_service", "remove_service", "update_service", "label_account", "disconnect_account", "save_mcp", "update_mcp", "enable_mcp", "remove_mcp", "check_mcp", "authorize_mcp"]),
-          id: z.string().optional(), query: z.string().optional(), cursor: z.string().optional(), source: z.string().optional(),
-          skillPath: z.string().optional(), ref: z.string().optional(), enabled: z.boolean().optional(), connection: SaveMcpBody.optional(), redirectUrl: z.string().optional(),
-          providerId: PluginProviderId.optional(), serviceId: z.string().optional(), label: z.string().optional(),
-        }).strict().parse(args);
+        const input = PluginManageInput.parse(args);
         const id = (): string => { if (!input.id) throw new HttpError(400, "Select an exact plugin id from list or search"); return input.id; };
         const enabled = (): boolean => { if (input.enabled === undefined) throw new HttpError(400, "Specify enabled explicitly"); return input.enabled; };
         const serviceId = (): string => { if (!input.serviceId) throw new HttpError(400, "Select an exact Service id from list"); return input.serviceId; };

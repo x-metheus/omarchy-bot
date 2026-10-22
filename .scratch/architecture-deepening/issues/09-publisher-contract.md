@@ -1,7 +1,7 @@
 # 09: PublisherContract and PluginsService split
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** claimed
 **Blocked by:** —
 
 **What to build:** Type the daemon ↔ publisher contract once and split `apps/daemon/src/modules/plugins/plugins.ts` (971 lines) into deeper modules: provider accounts (OAuth, tokens, identity, scopes), catalog client, Service bundle provisioning, Skill install, driven by one operation table.

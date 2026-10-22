@@ -3,8 +3,11 @@ import { isIP } from "node:net";
 import { getVercelOidcToken } from "@vercel/oidc";
 import { createRemoteJWKSet, errors as joseErrors, jwtVerify, SignJWT } from "jose";
 import { z } from "zod";
-import { PLUGIN_PROVIDERS } from "../../../packages/protocol/src/pluginProviders.ts";
-import { PluginProviderId, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT } from "../../../packages/protocol/src/plugins.ts";
+import {
+  HttpsOrigin, OAuthStartBody, OAuthTokenBody, PLUGIN_PROVIDERS, PluginProviderId,
+  SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT, TOKEN_METADATA_KEYS, normaliseCatalog,
+  SkillsShCatalogResponse, SkillsShDetailResponse,
+} from "@omarchy-bot/protocol";
 
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store", "referrer-policy": "no-referrer" };
 const STATE_AUDIENCE = "omarchy-bot-oauth";
@@ -18,11 +21,9 @@ function publisherOrigin(): string {
   const configured = process.env.PLUGIN_CLOUD_URL ?? process.env.SITE_URL
     ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : undefined);
   if (!configured) throw new BrokerError(503, "Configure the publisher PLUGIN_CLOUD_URL with its stable HTTPS origin.");
-  const url = new URL(configured);
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
-    throw new BrokerError(503, "PLUGIN_CLOUD_URL must be an HTTPS origin, without a path or credentials.");
-  }
-  return url.origin;
+  const url = HttpsOrigin.safeParse(configured);
+  if (!url.success) throw new BrokerError(503, "PLUGIN_CLOUD_URL must be an HTTPS origin, without a path or credentials.");
+  return url.data;
 }
 
 function stateKey(): Uint8Array {
@@ -58,16 +59,8 @@ function callbackUrl(value: string): URL {
   return url;
 }
 
-const StartBody = z.object({
-  providerId: PluginProviderId,
-  callbackUrl: z.string().url(),
-  localState: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/),
-  challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-}).strict();
-const TokenBody = z.discriminatedUnion("grantType", [
-  z.object({ grantType: z.literal("authorization_code"), code: z.string().min(1).max(8192), state: z.string().min(1).max(16384), verifier: z.string().regex(/^[A-Za-z0-9_-]{43,128}$/) }).strict(),
-  z.object({ grantType: z.literal("refresh_token"), providerId: PluginProviderId, refreshToken: z.string().min(1).max(32768) }).strict(),
-]);
+const StartBody = OAuthStartBody;
+const TokenBody = OAuthTokenBody;
 const StatePayload = z.object({
   providerId: PluginProviderId, callbackUrl: z.string(), localState: z.string(), challenge: z.string(), clientId: z.string(), nonce: z.string(), scopes: z.array(z.string()),
 });
@@ -119,9 +112,7 @@ async function tokenExchange(body: z.infer<typeof TokenBody>): Promise<Response>
     throw new BrokerError(status, `${provider.name} OAuth failed: ${code}.`);
   }
   const tokens: Record<string, unknown> = { access_token: raw.access_token, token_type: raw.token_type ?? "Bearer" };
-  for (const key of ["refresh_token", "expires_in", "refresh_token_expires_in", "scope", "user_id", "workspace_id", "email_domain", "team_id", "data"]) {
-    if (raw[key] !== undefined) tokens[key] = raw[key];
-  }
+  for (const key of TOKEN_METADATA_KEYS) if (raw[key] !== undefined) tokens[key] = raw[key];
   if (state && raw.scope === undefined) tokens.scope = state.scopes.join(" ");
   if (state && providerId === "google") {
     if (typeof raw.id_token !== "string") throw new BrokerError(401, "The identity provider did not return its required ID token.");
@@ -131,7 +122,7 @@ async function tokenExchange(body: z.infer<typeof TokenBody>): Promise<Response>
     });
     const claims = verified.payload;
     if (claims.nonce !== state.nonce) throw new BrokerError(401, "Identity nonce mismatch.");
-    tokens.identity = { subject: claims.sub, tenantId: claims.tid, userId: claims.oid };
+    tokens.identity = { subject: claims.sub };
   }
   return new Response(JSON.stringify(tokens), { headers: JSON_HEADERS });
 }
@@ -192,18 +183,24 @@ export async function handlePluginCloudRequest(request: Request): Promise<Respon
       return new Response(null, { status: 303, headers: { ...JSON_HEADERS, location: destination.href } });
     }
     if (route === "oauth/token" && request.method === "POST") return await tokenExchange(TokenBody.parse(await readBody(request)));
-    if ((route === "catalog" || route === "catalog/detail") && request.method === "GET") {
+    if ((route === "catalog" || route === "catalog/detail" || route === "catalog/normalised" || route === "catalog/detail/normalised") && request.method === "GET") {
+      const injected = process.env.VERCEL_OIDC_TOKEN;
       let token: string;
-      try { token = await getVercelOidcToken(); } catch { throw new BrokerError(503, "Enable Vercel OIDC federation. Local development also requires an authenticated, linked Vercel project."); }
+      if (injected) token = injected;
+      else {
+        try { token = await getVercelOidcToken(); } catch { throw new BrokerError(503, "Enable Vercel OIDC federation. Local development also requires an authenticated, linked Vercel project."); }
+      }
+      const normalised = route.endsWith("/normalised");
+      const detail = route.startsWith("catalog/detail");
       let upstream: URL;
-      if (route === "catalog/detail") {
+      if (detail) {
         const id = url.searchParams.get("id") ?? "";
         const parts = id.split("/");
         if (parts.length < 2 || parts.length > 3 || parts.some((part, index) => !part || part === "." || part === ".." || !(index === parts.length - 1 ? /^[A-Za-z0-9_.:-]+$/ : /^[A-Za-z0-9_.-]+$/).test(part))) throw new BrokerError(400, "Invalid skill identity.");
         upstream = new URL(`https://skills.sh/api/v1/skills/${parts.map(encodeURIComponent).join("/")}`);
       } else {
         const query = (url.searchParams.get("q") ?? "").trim();
-        if (query.length === 1 || query.length > 256) throw new BrokerError(400, "Search needs 2–256 characters.");
+        if (query.length === 1 || query.length > 256) throw new BrokerError(400, "Search needs 2\u2013256 characters.");
         upstream = new URL(query ? "https://skills.sh/api/v1/skills/search" : "https://skills.sh/api/v1/skills");
         if (query) { upstream.searchParams.set("q", query); upstream.searchParams.set("limit", String(SKILL_SEARCH_LIMIT)); }
         else {
@@ -214,11 +211,23 @@ export async function handlePluginCloudRequest(request: Request): Promise<Respon
         }
       }
       const response = await fetch(upstream, { headers: { authorization: `Bearer ${token}`, accept: "application/json" }, signal: AbortSignal.timeout(30_000), redirect: "error" });
-      const headers = new Headers({ "content-type": "application/json", "referrer-policy": "no-referrer" });
-      for (const name of ["cache-control", "retry-after", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset"]) {
-        const value = response.headers.get(name); if (value) headers.set(name, value);
+      if (!normalised) {
+        const headers = new Headers({ "content-type": "application/json", "referrer-policy": "no-referrer" });
+        for (const name of ["cache-control", "retry-after", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset"]) {
+          const value = response.headers.get(name); if (value) headers.set(name, value);
+        }
+        return new Response(response.body, { status: response.status, headers });
       }
-      return new Response(response.body, { status: response.status, headers });
+      if (!response.ok) return new Response(JSON.stringify({ error: "Catalog upstream request failed." }), { status: response.status === 429 ? 429 : 502, headers: JSON_HEADERS });
+      const payload: unknown = await response.json();
+      const body = detail
+        ? (() => {
+          const raw = SkillsShDetailResponse.parse(payload);
+          const content = raw.files?.find((file) => file.path === "SKILL.md")?.contents ?? "";
+          return { id: raw.id, source: raw.source, slug: raw.slug, content, ...(raw.installs === undefined ? {} : { installs: raw.installs }) };
+        })()
+        : normaliseCatalog(SkillsShCatalogResponse.parse(payload));
+      return new Response(JSON.stringify(body), { headers: JSON_HEADERS });
     }
     return new Response(JSON.stringify({ error: "Unknown publisher endpoint." }), { status: 404, headers: JSON_HEADERS });
   } catch (error) {
