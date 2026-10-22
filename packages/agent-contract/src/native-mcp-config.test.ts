@@ -50,17 +50,20 @@ test("metadata schema accepts the private file and fills omitted maps", () => {
   expect(() => parseNativeMcpMetadata({ version: 1, entries: {}, secrets: { bad: { server: "docs" } } })).toThrow();
 });
 
-test("a partial secret is skipped and service tokens apply without an entries map", () => {
+test("a partial secret or entry is skipped and a valid owner still receives its service token", () => {
   const metadata = readNativeMcpMetadata({
     secrets: {
       bad: { server: "docs" },
       [envKey]: { server: "docs", endpoint: stdioEndpoint, kind: "env", field: "TOKEN", value: "env-secret" },
     },
+    entries: {
+      broken: { id: 1 },
+      owned: { id: "mcp_owned", pi: null, codex: null, owner: { accountId: "acct", serviceId: "svc" } },
+    },
     serviceTokens: { owned: { url: "https://mcp.example/rpc", token: "svc-token" } },
   });
-  expect(metadata.entries).toEqual({});
+  expect(Object.keys(metadata.entries)).toEqual(["owned"]);
   expect(Object.keys(metadata.secrets)).toEqual([envKey]);
-  metadata.entries.owned = { id: "mcp_owned", pi: null, codex: null, owner: { accountId: "acct", serviceId: "svc" } };
   const config: { mcpServers: Record<string, { command?: string; args?: string[]; url?: string; env?: Record<string, string>; headers?: Record<string, string> }> } = {
     mcpServers: {
       docs: { command: "node", args: ["server.mjs"], env: { TOKEN: "${TOKEN}" } },

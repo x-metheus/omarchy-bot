@@ -25,16 +25,17 @@ const NativeMcpSecret = z.object({
   field: z.string(),
   value: z.string(),
 });
+const NativeMcpEntry = z.object({
+  id: z.string(),
+  pi: z.string().nullable(),
+  codex: z.string().nullable(),
+  sources: z.object({ shared: z.string().nullable(), pi: z.string().nullable(), codex: z.string().nullable() }).optional(),
+  owner: z.object({ accountId: z.string(), serviceId: z.string() }).optional(),
+});
 
 export const NativeMcpMetadata = z.object({
   version: z.literal(1),
-  entries: z.record(z.object({
-    id: z.string(),
-    pi: z.string().nullable(),
-    codex: z.string().nullable(),
-    sources: z.object({ shared: z.string().nullable(), pi: z.string().nullable(), codex: z.string().nullable() }).optional(),
-    owner: z.object({ accountId: z.string(), serviceId: z.string() }).optional(),
-  })),
+  entries: z.record(NativeMcpEntry),
   adapterPackage: z.string().optional(),
   packageRevisions: z.record(z.string()).default({}),
   serviceTokens: z.record(z.object({ url: z.string(), token: z.string() })).default({}),
@@ -53,13 +54,17 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** Pi loads whatever records it can. A bad secret is skipped; service tokens need no entries map. */
+/** Pi loads whatever records it can. A bad secret or entry is skipped; service tokens need no entries map. */
 export function readNativeMcpMetadata(value: unknown): NativeMcpMetadata {
   if (!record(value) || !record(value.secrets)) throw new Error("Private MCP credential metadata is malformed");
   const parsed = emptyNativeMcpMetadata();
   if (value.version === 1) parsed.version = 1;
-  const entries = NativeMcpMetadata.shape.entries.safeParse(value.entries);
-  if (entries.success) parsed.entries = entries.data;
+  if (record(value.entries)) {
+    for (const [name, raw] of Object.entries(value.entries)) {
+      const entry = NativeMcpEntry.safeParse(raw);
+      if (entry.success) parsed.entries[name] = entry.data;
+    }
+  }
   for (const [key, raw] of Object.entries(value.secrets)) {
     const secret = NativeMcpSecret.safeParse(raw);
     if (secret.success) parsed.secrets[key] = secret.data;
