@@ -212,7 +212,8 @@ interface FakeSession {
   directive?: string | undefined;
   /** One turn's tool-bridge signal: turn.abort aborts every bridge waiting on it. */
   turnAbort?: AbortController;
-  computerAbort?: AbortController;
+  /** A non-streaming bridge call (local, send_bot_message) whose Turn abort must cancel. */
+  toolInFlight?: boolean;
   steerReply?: ((text: string) => void) | undefined;
 }
 const sessions = new Map<string, FakeSession>();
@@ -503,6 +504,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               target: targetBotId,
             },
           });
+          s.toolInFlight = true;
           while (mailboxReleasePath !== undefined && !existsSync(mailboxReleasePath)) {
             await Bun.sleep(10);
           }
@@ -563,6 +565,8 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               type: "event",
               event: { type: "error", sessionId, message, retryable: false },
             });
+          } finally {
+            s.toolInFlight = false;
           }
           respond(msg.requestId!, { accepted: true });
           return;
@@ -657,6 +661,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             },
           });
           respond(msg.requestId!, { accepted: true });
+          s.toolInFlight = true;
           try {
             if (binding === undefined) throw new Error("local tool binding missing");
             const { action, ...args } = localDirective;
@@ -692,6 +697,8 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               type: "event",
               event: { type: "error", sessionId, message, retryable: false },
             });
+          } finally {
+            s.toolInFlight = false;
           }
           return;
         }
@@ -732,13 +739,11 @@ readJsonl(Bun.stdin.stream(), (raw) => {
                     args: parts[2] === "fail" ? { fail: true } : {},
                   };
             s.streaming = true;
-            const computerAbort = new AbortController();
-            s.computerAbort = computerAbort;
             const result = await requestComputer(
               context,
               requestToolCallId,
               action,
-              computerAbort.signal,
+              turnAbort.signal,
             );
             write({
               type: "event",
@@ -771,7 +776,6 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             });
           } finally {
             s.streaming = false;
-            delete s.computerAbort;
           }
           respond(msg.requestId!, { accepted: true });
           return;
@@ -1246,15 +1250,15 @@ readJsonl(Bun.stdin.stream(), (raw) => {
 
       const cancel = (): void => {
         const s = sessions.get(sessionId);
-        if (!s?.streaming) return;
-        s.aborted = true;
+        if (!s) return;
+        // turnAbort covers every in-flight bridge (computer, local, send_bot_message),
+        // so abort it before the streaming gate: local and mail calls never stream.
         s.turnAbort?.abort();
         delete s.turnAbort;
-        if (s.computerAbort !== undefined) {
-          s.computerAbort.abort();
-          delete s.computerAbort;
-        }
+        if (!s.streaming && s.toolInFlight !== true) return;
+        s.aborted = true;
         s.streaming = false;
+        s.toolInFlight = false;
         s.steerReply?.("");
         s.steerReply = undefined;
         s.directive = undefined;

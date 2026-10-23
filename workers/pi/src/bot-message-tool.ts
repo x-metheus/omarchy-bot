@@ -36,10 +36,6 @@ export function createBotMessageTool(
       if (active === undefined) {
         throw new Error("send_bot_message tool has no active Omarchy turn binding");
       }
-      // The native tool call reaches this adapter unvalidated; extra fields never dispatch.
-      if (Object.keys(params).some((key) => key !== "targetBotId" && key !== "text")) {
-        throw new Error("Bot mail accepts only targetBotId and text");
-      }
       signal?.throwIfAborted();
       const output = await bridge.request(
         { ...active, toolCallId },
