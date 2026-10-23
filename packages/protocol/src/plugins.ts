@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PLUGIN_PROVIDER_IDS } from "@omarchy-bot/agent-contract";
+import { PLUGIN_PROVIDER_IDS, isMcpHttpUrl } from "@omarchy-bot/agent-contract";
 
 export const PluginProviderId = z.enum(PLUGIN_PROVIDER_IDS);
 export type PluginProviderId = z.infer<typeof PluginProviderId>;
@@ -46,7 +46,7 @@ export const McpTransport = z.discriminatedUnion("type", [
   }).strict(),
   z.object({
     type: z.literal("http"),
-    url: z.string().url().refine((value) => ["http:", "https:"].includes(new URL(value).protocol), "Use an HTTP or HTTPS URL"),
+    url: z.string().min(1).refine(isMcpHttpUrl, "Use an HTTP or HTTPS URL with a valid host"),
     headers: z.record(z.string()).optional(),
   }).strict(),
 ]);

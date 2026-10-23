@@ -15,9 +15,22 @@ export const MANAGE_PLUGINS_ACTIONS = [
 
 const text = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: "\\S" });
 
-// Same constraints as SaveMcpBody in @omarchy-bot/protocol: an http(s) URL with
-// a host, and an exact public npm package name or bin.
-const httpUrl = Type.String({ minLength: 1, pattern: "^[Hh][Tt][Tt][Pp][Ss]?://[^/\\s?#]+(?:[/?#][^\\s]*)?$" });
+// The one MCP endpoint rule, shared by MANAGE_PLUGINS_SCHEMA and SaveMcpBody:
+// an absolute http(s) URL with a host and no whitespace. new URL throws on a
+// malformed port, so every parse stays inside this check.
+const MCP_HTTP_URL_PATTERN = "^[Hh][Tt][Tt][Pp][Ss]?://[^/\\s?#]+(?:[/?#][^\\s]*)?$";
+const mcpHttpUrl = new RegExp(MCP_HTTP_URL_PATTERN);
+export function isMcpHttpUrl(value: string): boolean {
+  if (!mcpHttpUrl.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch { return false; }
+}
+
+const httpUrl = Type.Refine(Type.String({ minLength: 1, pattern: MCP_HTTP_URL_PATTERN }), isMcpHttpUrl, () => "Use an HTTP or HTTPS URL with a valid host");
+// An exact public npm package name or bin.
+
 const npmName = Type.String({ minLength: 1, maxLength: 214, pattern: "^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$" });
 const npmBin = Type.String({ minLength: 1, maxLength: 120, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" });
 
