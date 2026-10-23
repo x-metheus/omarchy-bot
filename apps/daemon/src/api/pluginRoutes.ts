@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { AuthorizePluginBody, ConfigurePluginsBody, InstallSkillBody, PluginAccountBody, PluginEnabledBody, PluginServiceBody, SaveMcpBody } from "@omarchy-bot/protocol";
+import { ConfigurePluginsBody } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
 import type { PluginsService } from "../modules/plugins/plugins.ts";
+import { matchPluginDispatch, type PluginCall } from "../modules/plugins/pluginDispatch.ts";
 
 async function body<T>(request: Request, schema: z.ZodType<T>): Promise<T> {
   if (!request.headers.get("content-type")?.includes("application/json")) throw new HttpError(415, "Use an application/json request body");
@@ -39,73 +40,27 @@ export async function handlePluginRequest(request: Request, plugins: PluginsServ
         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'" },
     });
   }
-  if (route === "" && request.method === "GET") return Response.json(await plugins.state(), { headers: { "cache-control": "no-store" } });
   if (route === "/commands" && request.method === "GET") return Response.json(await plugins.commands());
   if (route === "/settings" && request.method === "PUT") {
     plugins.configure((await body(request, ConfigurePluginsBody)).cloudUrl);
     return new Response(null, { status: 204 });
   }
-  if (route === "/catalog" && request.method === "GET") return Response.json(await plugins.catalog(url.searchParams.get("q") ?? "", url.searchParams.get("cursor") ?? undefined, url.searchParams.get("view") ?? "trending"));
-  if (route === "/catalog/detail" && request.method === "GET") return Response.json(await plugins.detail(url.searchParams.get("id") ?? ""));
-  if (route === "/skills" && request.method === "POST") return Response.json(await plugins.installSkill(await body(request, InstallSkillBody)), { status: 201 });
-  if (route === "/skills/update" && request.method === "POST") { await plugins.updateSkills(); return new Response(null, { status: 204 }); }
-  if (route === "/mcp" && request.method === "POST") return Response.json(await plugins.saveMcp(null, await body(request, SaveMcpBody)), { status: 201 });
-  if (route === "/authorize" && request.method === "POST") {
-    const input = await body(request, AuthorizePluginBody);
-    const returnUrl = new URL(input.returnUrl);
+  const matched = matchPluginDispatch(request.method, pathname);
+  if (!matched) throw new HttpError(404, "Unknown plugin operation");
+  const { row, ids } = matched;
+  const parsed = row.body ? await body(request, row.body as z.ZodType<Record<string, unknown>>) : {};
+  if (row.action === "authorize_service") {
+    const returnUrl = new URL(String(parsed.returnUrl ?? ""));
     const origin = request.headers.get("origin") ?? url.origin;
     if (returnUrl.origin !== origin || returnUrl.pathname !== "/" || returnUrl.search || returnUrl.hash || returnUrl.username || returnUrl.password) throw new HttpError(400, "Authorization must return to the initiating client origin");
-    return Response.json(await plugins.authorize(input), { headers: { "cache-control": "no-store" } });
   }
-  const mcp = route.match(/^\/mcp\/([^/]+)(\/check|\/authorize|\/update)?$/);
-  if (mcp) {
-    const id = decodeURIComponent(mcp[1]!);
-    if (mcp[2] === "/check" && request.method === "POST") return Response.json(await plugins.checkMcp(id));
-    if (mcp[2] === "/authorize" && request.method === "POST") {
-      const input = await body(request, z.object({ redirectUrl: z.string().url().max(8192).optional() }).strict());
-      return Response.json(await plugins.authorizeMcp(id, input.redirectUrl), { headers: { "cache-control": "no-store" } });
-    }
-    if (mcp[2] === "/update" && request.method === "POST") {
-      await body(request, z.object({}).strict());
-      return Response.json(await plugins.updateMcp(id));
-    }
-    if (!mcp[2]) {
-      if (request.method === "PUT") return Response.json(await plugins.saveMcp(id, await body(request, SaveMcpBody)));
-      if (request.method === "PATCH") { plugins.enableMcp(id, (await body(request, PluginEnabledBody)).enabled); return new Response(null, { status: 204 }); }
-      if (request.method === "DELETE") { plugins.removeMcp(id); return new Response(null, { status: 204 }); }
-    }
-  }
-  const skill = route.match(/^\/skills\/([^/]+)$/);
-  if (skill) {
-    const id = decodeURIComponent(skill[1]!);
-    if (request.method === "PATCH") { plugins.enableSkill(id, (await body(request, PluginEnabledBody)).enabled); return new Response(null, { status: 204 }); }
-    if (request.method === "DELETE") { plugins.removeSkill(id); return new Response(null, { status: 204 }); }
-  }
-  const service = route.match(/^\/accounts\/([^/]+)\/services\/([^/]+)(\/update)?$/);
-  if (service) {
-    const accountId = decodeURIComponent(service[1]!);
-    const serviceId = decodeURIComponent(service[2]!);
-    if (service[3] === "/update" && request.method === "POST") {
-      await body(request, z.object({}).strict());
-      await plugins.updateService(accountId, serviceId);
-      return new Response(null, { status: 204 });
-    }
-    if (!service[3] && request.method === "DELETE") {
-      await plugins.removeService(accountId, serviceId);
-      return new Response(null, { status: 204 });
-    }
-  }
-  const account = route.match(/^\/accounts\/([^/]+)(\/services)?$/);
-  if (account) {
-    const id = decodeURIComponent(account[1]!);
-    if (account[2] === "/services" && request.method === "PATCH") {
-      const input = await body(request, PluginServiceBody);
-      return Response.json(await plugins.enableService(id, input.serviceId, input.enabled));
-    }
-    if (!account[2]) {
-      if (request.method === "PATCH") { plugins.labelAccount(id, (await body(request, PluginAccountBody)).label); return new Response(null, { status: 204 }); }
-      if (request.method === "DELETE") { plugins.disconnectAccount(id); return new Response(null, { status: 204 }); }
-    }
-  }
-  throw new HttpError(404, "Unknown plugin operation");
+  const call = (row.action === "save_mcp"
+    ? { ...ids, connection: parsed as PluginCall["connection"] }
+    : row.method === "GET"
+      ? { ...ids, id: ids.id ?? url.searchParams.get("id") ?? undefined, query: url.searchParams.get("q") ?? "", cursor: url.searchParams.get("cursor") ?? undefined, view: url.searchParams.get("view") ?? "trending" }
+      : { ...ids, ...(parsed as PluginCall) }) as PluginCall;
+  const result = await row.handler(plugins, call);
+  if (row.empty) return new Response(null, { status: 204 });
+  return Response.json(result, { status: row.created ? 201 : 200, headers: { "cache-control": "no-store" } });
 }
+

@@ -1,9 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
+import { createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PLUGIN_PROVIDERS } from "../../packages/protocol/src/pluginProviders.ts";
 import type { InstalledSkillDto, PluginAccountDto, PluginStateDto, SkillCommandDto } from "../../packages/protocol/src/plugins.ts";
+import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
 import { api, apiStatus, startDaemon, type Harness } from "./helpers/harness.ts";
 
 const publisher = "https://service-publisher.invalid";
@@ -12,6 +14,14 @@ const gmailScope = "https://www.googleapis.com/auth/gmail.readonly";
 const originalFetch = globalThis.fetch;
 const originalServices = PLUGIN_PROVIDERS.google.services;
 let harness: Harness | undefined;
+const googleClientId = "fixture-google-client";
+const publisherEnv = {
+  PLUGIN_CLOUD_URL: process.env.PLUGIN_CLOUD_URL,
+  OAUTH_STATE_SECRET: process.env.OAUTH_STATE_SECRET,
+  OAUTH_GOOGLE_CLIENT_ID: process.env.OAUTH_GOOGLE_CLIENT_ID,
+  OAUTH_GOOGLE_CLIENT_SECRET: process.env.OAUTH_GOOGLE_CLIENT_SECRET,
+};
+let googleKey: { publicKey: KeyObject; privateKey: KeyObject } | undefined;
 
 afterEach(async () => {
   try {
@@ -20,6 +30,10 @@ afterEach(async () => {
     harness = undefined;
     PLUGIN_PROVIDERS.google.services = originalServices;
     globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries(publisherEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
@@ -48,39 +62,45 @@ async function startServices() {
     return { ...service, mcpUrl: `${publisher}/mcp/${service.id}` };
   });
 
-  // This publisher and userinfo fixture exercises the public grant lifecycle,
-  // not live Google consent or Google MCP access.
+  process.env.PLUGIN_CLOUD_URL = publisher;
+  process.env.OAUTH_STATE_SECRET = "service-publisher-secret-at-least-32b";
+  process.env.OAUTH_GOOGLE_CLIENT_ID = googleClientId;
+  process.env.OAUTH_GOOGLE_CLIENT_SECRET = "fixture-google-secret";
+  googleKey ??= generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = { ...googleKey.publicKey.export({ format: "jwk" }), kid: "fixture", alg: "RS256", use: "sig" };
+  // Provider token endpoint and userinfo only. The publisher itself is the real handler.
   const grants = new Map<string, { actor: string; scopes: string[]; token: string }>();
   const tokens = new Map<string, string>();
   let pending: { localState: string; callbackUrl: string; brokerState: string } | undefined;
   globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
-    const url = new URL(input instanceof Request ? input.url : String(input));
+    const request = new Request(input, init);
+    const url = new URL(request.url);
     if (url.origin === publisher) {
-      if (url.pathname === "/api/plugins/providers") return Response.json([{ id: "google" }]);
+      const copy = request.clone();
+      const response = await handlePluginCloudRequest(request);
       if (url.pathname === "/api/plugins/oauth/start") {
-        const request = new Request(input, init);
-        const body = await request.json() as { localState: string; callbackUrl: string };
-        const brokerState = `fixture-broker-${crypto.randomUUID()}`;
-        pending = { ...body, brokerState };
-        const authorization = new URL(PLUGIN_PROVIDERS.google.authorizeUrl);
-        authorization.searchParams.set("state", brokerState);
-        return Response.json({ url: authorization.href });
+        const sent = await copy.json() as { localState: string; callbackUrl: string };
+        const payload = await response.clone().json() as { url: string };
+        pending = { ...sent, brokerState: new URL(payload.url).searchParams.get("state") ?? "" };
       }
-      if (url.pathname === "/api/plugins/oauth/token") {
-        const request = new Request(input, init);
-        const body = await request.json() as { code: string; state: string };
-        const grant = grants.get(body.code);
-        if (!grant || body.state !== pending?.brokerState) return new Response(null, { status: 400 });
-        return Response.json({ access_token: grant.token, scope: ["openid", "email", ...grant.scopes].join(" "), expires_in: 3600, identity: { subject: grant.actor } });
-      }
-      return new Response(null, { status: 404 });
+      return response;
     }
+    if (url.origin === "https://oauth2.googleapis.com" && url.pathname === "/token") {
+      const code = new URLSearchParams(await request.text()).get("code") ?? "";
+      const grant = grants.get(code);
+      const statePayload = pending ? JSON.parse(Buffer.from(pending.brokerState.split(".")[1] ?? "", "base64url").toString()) as { nonce?: string } : {};
+      if (!grant || !googleKey) return Response.json({ error: "invalid_grant" }, { status: 400 });
+      const claims = { nonce: statePayload.nonce, iss: "https://accounts.google.com", aud: googleClientId, sub: grant.actor, exp: Math.floor(Date.now() / 1000) + 3600 };
+      const signingInput = `${Buffer.from(JSON.stringify({ alg: "RS256", kid: "fixture" })).toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}`;
+      const idToken = `${signingInput}.${createSign("RSA-SHA256").update(signingInput).sign(googleKey.privateKey).toString("base64url")}`;
+      return Response.json({ access_token: grant.token, scope: ["openid", "email", ...grant.scopes].join(" "), expires_in: 3600, id_token: idToken });
+    }
+    if (url.origin === "https://www.googleapis.com" && url.pathname === "/oauth2/v3/certs") return Response.json({ keys: [jwk] });
     if (url.href === "https://openidconnect.googleapis.com/v1/userinfo") {
-      const request = new Request(input, init);
       const actor = tokens.get((request.headers.get("authorization") ?? "").replace(/^Bearer /, ""));
       return actor ? Response.json({ sub: actor, email: `${actor}@example.invalid` }) : new Response(null, { status: 401 });
     }
-    return originalFetch(input, init);
+    return originalFetch(request);
   }, { preconnect: originalFetch.preconnect });
   const h = harness = await startDaemon(home);
   expect((await apiStatus(h, "PUT", "/api/plugins/settings", { cloudUrl: publisher })).status).toBe(204);

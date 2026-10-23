@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { materializeSkill } from "../../apps/daemon/src/modules/plugins/skillInstaller.ts";
 import { PluginsService } from "../../apps/daemon/src/modules/plugins/plugins.ts";
+import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
 import type { CatalogSkillDetailDto } from "../../packages/protocol/src/plugins.ts";
 
 test("a linked TAR rejects installation without crashing, leaving files, or poisoning later installs", async () => {
@@ -63,16 +64,22 @@ test("catalog names resolve to canonical details without accepting another skill
   const id = "owner/repository/react:components";
   let source = "owner/repository";
   let name = "react:components";
+  const publisher = "https://catalog-identity.invalid";
+  const previous = { url: process.env.PLUGIN_CLOUD_URL, secret: process.env.OAUTH_STATE_SECRET, oidc: process.env.VERCEL_OIDC_TOKEN };
+  process.env.PLUGIN_CLOUD_URL = publisher;
+  process.env.OAUTH_STATE_SECRET = "catalog-identity-secret-at-least-32-bytes";
+  process.env.VERCEL_OIDC_TOKEN = "fixture-oidc";
   globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
-    if (url.hostname !== "catalog-identity.invalid") return originalFetch(input, init);
+    if (url.origin === publisher) return handlePluginCloudRequest(new Request(url, init));
+    if (url.hostname !== "skills.sh") return originalFetch(input, init);
     return Response.json({
       id: `${source}/reactcomponents`, source, slug: "reactcomponents",
       files: [{ path: "SKILL.md", contents: `---\nname: ${name}\ndescription: Build React components\n---\nBuild components.\n` }],
     });
   }, { preconnect: originalFetch.preconnect });
   try {
-    service.configure("https://catalog-identity.invalid");
+    service.configure(publisher);
     await expect(service.detail(id)).resolves.toMatchObject({ id });
     source = "another/repository";
     await expect(service.detail(id)).rejects.toMatchObject({ status: 502 });
@@ -82,6 +89,10 @@ test("catalog names resolve to canonical details without accepting another skill
   } finally {
     await service.shutdown();
     globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries({ PLUGIN_CLOUD_URL: previous.url, OAUTH_STATE_SECRET: previous.secret, VERCEL_OIDC_TOKEN: previous.oidc })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     await rm(root, { recursive: true, force: true });
   }
 });
