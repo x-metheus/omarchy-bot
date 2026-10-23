@@ -1,7 +1,7 @@
 # 06: Narrow the Bot Screen runtime seam
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** claimed
 **Blocked by:** 05
 
 **What to build:** Move platform-neutral policy above `BotScreenRuntimeAdapter` (`botScreenManager.ts:110-155`) so the Sway adapter and the fake implement the same narrow contract: deliver input event, capture, route/launch window, lifecycle.

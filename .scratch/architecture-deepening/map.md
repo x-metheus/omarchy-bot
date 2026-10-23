@@ -20,8 +20,8 @@ Origin: architecture review and grilling session on 2026-10-22. Each ticket reco
 | 02 | [Dispatch `local` once per Tool Call](./issues/02-local-dispatch-once.md) | task | — | ready-for-agent |
 | 03 | [Deepen the turn-bound ToolChannel](./issues/03-tool-channel.md) | task | 01, 02 | ready-for-agent |
 | 04 | [SidecarBroker for `local` jobs](./issues/04-sidecar-broker.md) | task | 03 | ready-for-agent |
-| 05 | [ScreenInputLease](./issues/05-screen-input-lease.md) | task | — | claimed |
-| 06 | [Narrow the Bot Screen runtime seam](./issues/06-narrow-runtime-seam.md) | task | 05 | ready-for-agent |
+| 05 | [ScreenInputLease](./issues/05-screen-input-lease.md) | task | — | resolved |
+| 06 | [Narrow the Bot Screen runtime seam](./issues/06-narrow-runtime-seam.md) | task | 05 | claimed |
 | 07 | [Extract BotComputer from the Sway runtime](./issues/07-bot-computer-module.md) | task | 06 | ready-for-agent |
 | 08 | [Retire the computer worker](./issues/08-retire-computer-worker.md) | task | 07 | ready-for-agent |
 | 09 | [PublisherContract and PluginsService split](./issues/09-publisher-contract.md) | task | — | ready-for-agent |
