@@ -1,10 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import nodePath from "node:path";
 import { ApiClient } from "../../packages/api-client/src/index.ts";
 import { handleComputerRequest } from "../../apps/daemon/src/api/computerRoutes.ts";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
-import { WorkerClient, sanitizedEnv } from "../../apps/daemon/src/supervision/workerClient.ts";
 import { api, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 async function computerRequest<T>(h: Harness, method: string, path: string): Promise<{ response: Response; body: T }> {
@@ -382,93 +380,6 @@ describe("contextual computer control", () => {
       });
     expect(recoveredLifecycle).toContain("ready");
   }, 15_000);
-
-  test("restarting one Surface worker does not stop another Surface worker", async () => {
-    const first = await ownerFor(h, await makeBot(h, "First worker"));
-    const second = await ownerFor(h, await makeBot(h, "Second worker"));
-    const workerEnv = { PATH: process.env.PATH ?? "" };
-    const firstWorker = await h.svc.supervisor.startComputerWorker({
-      surfaceId: first.surfaceId,
-      runtimeGeneration: 1,
-      env: workerEnv,
-    });
-    const secondWorker = await h.svc.supervisor.startComputerWorker({
-      surfaceId: second.surfaceId,
-      runtimeGeneration: 1,
-      env: workerEnv,
-    });
-
-    await expect(firstWorker.act({ name: "observe", args: { crash: true } })).rejects.toThrow("worker exited");
-    await expect(firstWorker.exited).resolves.toThrow("Computer worker exited (17)");
-    await expect(secondWorker.act({ name: "observe", args: {} })).resolves.toMatchObject({
-      text: "fake-observe#1",
-    });
-
-    const restarted = await h.svc.supervisor.startComputerWorker({
-      surfaceId: first.surfaceId,
-      runtimeGeneration: 2,
-      env: workerEnv,
-    });
-    await expect(firstWorker.act({ name: "observe", args: {} })).rejects.toThrow("context is no longer active");
-    await expect(restarted.act(
-      { name: "observe", args: {} },
-      { surfaceId: second.surfaceId, botId: first.botId, turnId: "turn-wrong-surface" },
-    )).rejects.toThrow("mismatched input authority Surface");
-    await expect(Promise.all([
-      restarted.act({ name: "observe", args: {} }),
-      secondWorker.act({ name: "observe", args: {} }),
-    ])).resolves.toHaveLength(2);
-  });
-
-  test("computer worker protocol rejects another Surface, stale generation, and invalid input authority", async () => {
-    const first = await ownerFor(h, await makeBot(h, "Worker protocol owner"));
-    const second = await ownerFor(h, await makeBot(h, "Worker protocol other"));
-    const worker = new WorkerClient({
-      name: "computer-protocol-test",
-      script: nodePath.resolve(import.meta.dir, "../../workers/computer/src/worker.ts"),
-      env: {
-        ...sanitizedEnv(),
-        OMARCHY_BOT_SURFACE_ID: first.surfaceId,
-        OMARCHY_BOT_RUNTIME_GENERATION: "7",
-      },
-      onEvent: () => {},
-    });
-    await worker.start();
-    try {
-      const action = { name: "observe", args: {} };
-      await expect(worker.request({
-        type: "act",
-        surfaceId: second.surfaceId,
-        runtimeGeneration: 7,
-        action,
-      }, 1_000)).rejects.toThrow("command Surface does not match worker context");
-      await expect(worker.request({
-        type: "act",
-        surfaceId: first.surfaceId,
-        runtimeGeneration: 6,
-        action,
-      }, 1_000)).rejects.toThrow("runtime generation does not match worker context");
-      await expect(worker.request({
-        type: "act",
-        surfaceId: first.surfaceId,
-        runtimeGeneration: 7,
-        action: { name: "click", args: { x: 1, y: 1 } },
-      }, 1_000)).rejects.toThrow("input action requires explicit Bot Screen authority");
-      await expect(worker.request({
-        type: "act",
-        surfaceId: first.surfaceId,
-        runtimeGeneration: 7,
-        action,
-        inputAuthority: {
-          surfaceId: second.surfaceId,
-          botId: first.botId,
-          turnId: "turn-wrong-surface",
-        },
-      }, 1_000)).rejects.toThrow("input authority Surface does not match command Surface");
-    } finally {
-      await worker.stop();
-    }
-  });
 
 
   test("an active turn without a pending computer tool cannot enter Takeover", async () => {

@@ -12,7 +12,6 @@ import path from "node:path";
 import sharp from "sharp";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
-import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
 import {
   ApplicationUnits,
   applicationUnitName,
@@ -24,7 +23,6 @@ import {
 } from "./botComputer.ts";
 import {
   BotScreenInputRejectedError,
-  type BotScreenActionResult,
   type BotScreenCapture,
   type BotScreenCaptureStream,
   type BotScreenExpandedView,
@@ -55,7 +53,8 @@ import { BOT_DESKTOP_APP_ID, listApplicationToplevels, SwayIpcClient } from "./s
 import { resolveSwayRuntimeBinaries } from "./swayRuntimeSupply.ts";
 
 export interface SwayAdapterOptions extends BotComputerOptions {
-  computerWorkers: Pick<Supervisor, "startComputerWorker">;
+  /** Test hook. The scripted fixture blocks here so an in-flight launch stays pending. */
+  onLaunch?: () => Promise<void>;
   applicationCwd?: string;
 }
 
@@ -87,7 +86,6 @@ interface SwaySession {
   desktopPid?: number;
   desktopIdentity?: OwnedProcessIdentity | undefined;
   virtualInput?: WaylandVirtualInput;
-  computerWorker?: SurfaceComputerWorker;
   cleanup?: (() => Promise<void>) | undefined;
 }
 
@@ -369,7 +367,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       this.#writeSurfaceState(session);
       return runtime;
     } catch (error) {
-      await session?.computerWorker?.stop().catch(() => {});
       await session?.virtualInput?.stop().catch(() => {});
       if (desktopProcess !== undefined) await terminateDetachedProcess(desktopProcess).catch(() => {});
       await this.#units.stop(provision.surfaceId, computer.generation).catch(() => {});
@@ -402,7 +399,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     await this.#capture(computer.grim, computer.childEnv, state.outputName, videoWidth, videoHeight);
     await Promise.all([
       this.#units.stopRole(provision.surfaceId, computer.generation, "input").catch(() => {}),
-      this.#units.stopRole(provision.surfaceId, computer.generation, "worker").catch(() => {}),
       this.#units.stopRole(provision.surfaceId, computer.generation, "wayvnc").catch(() => {}),
     ]);
     rmSync(path.join(runtimeDir, "wayvnc.sock"), { force: true });
@@ -446,23 +442,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       );
       started = true;
     }
-    if (session.computerWorker === undefined || !await this.#workerPending(session.computerWorker)) {
-      session.computerWorker = await this.options.computerWorkers.startComputerWorker({
-        surfaceId: provision.surfaceId,
-        runtimeGeneration: computer.generation,
-        env: computer.childEnv,
-        wrapCommand: (targetEnvironment) => ({
-          commandPrefix: this.#units.command(
-            provision.surfaceId,
-            computer.generation,
-            "worker",
-            targetEnvironment,
-          ),
-          launcherEnvironment: this.#units.launcherEnvironment(targetEnvironment),
-        }),
-      });
-      started = true;
-    }
     return started;
   }
 
@@ -472,22 +451,12 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#runtimes.set(session.provision.surfaceId, runtime);
   }
 
-  async #workerPending(worker: SurfaceComputerWorker): Promise<boolean> {
-    let settled = false;
-    void worker.exited.then(
-      () => { settled = true; },
-      () => { settled = true; },
-    );
-    await Promise.resolve();
-    return !settled;
-  }
 
   #bindRuntime(session: SwaySession): BotScreenRuntime {
     const { provision, computer } = session;
     const virtualInput = session.virtualInput;
-    const computerWorker = session.computerWorker;
-    if (virtualInput === undefined || computerWorker === undefined) {
-      throw new Error("Sway Bot Screen helpers are required before binding a runtime");
+    if (virtualInput === undefined) {
+      throw new Error("Sway Bot Screen input helper is required before binding a runtime");
     }
     const swayIpc = new SwayIpcClient(computer.sockets.swaySock);
     const outputX = (Number(session.outputName.slice("HEADLESS-".length)) - 1) * OUTPUT_SLOT_WIDTH;
@@ -515,7 +484,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         type: "desktop-exited",
         error: new Error(`Bot Desktop exited with status ${status}`),
       })),
-      computerWorker.exited.then((error) => ({ type: "computer-worker-exited", error })),
       virtualInput.exited.then((error) => ({ type: "input-helper-exited", error })),
     ]);
     let stopped = false;
@@ -692,24 +660,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         return result;
       });
     };
-    const notify = async (args: Record<string, unknown>): Promise<BotScreenActionResult> => {
-      const result = await computerWorker.act({ name: "notify", args });
-      const workerImage = result.image === undefined
-        ? undefined
-        : {
-            mediaType: result.image.mediaType,
-            bytes: new Uint8Array(Buffer.from(result.image.base64, "base64")),
-          };
-      return {
-        ...(result.text === undefined ? {} : { text: result.text }),
-        ...(result.windowList === undefined ? {} : {
-          windowList: result.windowList.filter((window) =>
-            window.workspace === undefined || window.workspace === session.workspaceName
-          ),
-        }),
-        ...(workerImage === undefined ? {} : { image: workerImage }),
-      };
-    };
     const cleanupSurface = async (): Promise<void> => {
       stopped = true;
       if (cleanupComplete) return;
@@ -723,7 +673,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         await Promise.allSettled([...captureStreams].map((stream) => stream.close()));
         await Promise.allSettled([...expandedViews].map((view) => view.close()));
         await Promise.allSettled([
-          computerWorker.stop(),
           this.#stopDesktop(session),
           this.#units.stop(provision.surfaceId, computer.generation),
         ]);
@@ -739,6 +688,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     session.cleanup = cleanupSurface;
     const runtime: BotScreenRuntime = {
       generation: computer.generation,
+      sessionEnv: computer.childEnv,
       readiness: {
         compositor: "ready",
         waylandSocket: "private",
@@ -752,7 +702,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         desktopSurface: "ready",
         capture: "ready",
         input: "ready",
-        computerWorker: "ready",
       },
       expandedProjection: "rfb",
       capture,
@@ -906,7 +855,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       listWindows,
       focusWindow,
       launch,
-      notify,
       setInputAuthority: async (controllerEpoch) => {
         if (!Number.isSafeInteger(controllerEpoch) || controllerEpoch <= lastInputEpoch) {
           throw new BotScreenInputRejectedError("stale controller epoch");
@@ -948,6 +896,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     session: SwaySession,
     request: BotScreenLaunchRequest,
   ): Promise<{ text?: string }> {
+    await this.options.onLaunch?.();
     const cwd = this.options.applicationCwd;
     if (cwd === undefined || cwd === "" || !existsSync(cwd)) {
       throw new Error("Shared Workspace is unavailable for application launch");
@@ -1054,7 +1003,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       await session.virtualInput?.release().catch(() => {});
       await Promise.allSettled([
         session.virtualInput?.stop(),
-        session.computerWorker?.stop(),
         this.#stopDesktop(session),
         this.#units.stop(session.provision.surfaceId, session.computer.generation),
       ]);

@@ -136,7 +136,7 @@ describe("Bot Screen lifecycle", () => {
     const unaffected = await bot(h, await makeBot(h, "Isolated Lifecycle"));
     await Promise.all([activateScreen(h, failed), activateScreen(h, unaffected)]);
 
-    adapter.exitComputerWorker(failed.surfaceId, "fake computer worker crashed");
+    adapter.exitInputHelper(failed.surfaceId, "fake input helper crashed");
     await waitForState(h, failed, "unavailable");
     const cleanupDeadline = Date.now() + 5_000;
     while (adapter.running(failed.surfaceId) !== undefined) {
@@ -154,7 +154,7 @@ describe("Bot Screen lifecycle", () => {
       botId: failed.id,
       surfaceId: failed.surfaceId,
       state: "unavailable",
-      activity: "Bot Screen computer worker failed: fake computer worker crashed",
+      activity: "Bot Screen input helper failed: fake input helper crashed",
       takeover: "unavailable",
     });
     expect(adapter.starts).toHaveLength(startsBeforeRestart);
@@ -226,12 +226,6 @@ describe("Bot Screen lifecycle", () => {
         type: "input-helper-exited" as const,
         fail: () => adapter.exitInputHelper(affected.surfaceId),
         message: "Bot Screen input helper failed: fake Bot Screen input helper exited",
-        newComputer: false,
-      },
-      {
-        type: "computer-worker-exited" as const,
-        fail: () => adapter.exitComputerWorker(affected.surfaceId),
-        message: "Bot Screen computer worker failed: fake Bot Screen computer worker exited",
         newComputer: false,
       },
       {
@@ -1268,7 +1262,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
         { botId: owner.id, surfaceId: owner.surfaceId },
         "sway-viewer-close-turn",
         "sway-viewer-close-tool",
-        { name: "notify", args: { title: "held" } },
+        { name: "open_app", args: { app: fixture.application } },
         new AbortController().signal,
       );
       void pending.catch(() => {});

@@ -158,7 +158,6 @@ if (process.env.EXPECT_DEVELOPMENT_DEPENDENCY === "1") {
   for (const helper of helperPaths) {
     writeExecutable(root, helper, `#!/bin/sh\nprintf '%s\\n' ${path.basename(helper)}\n`);
   }
-  write(root, "workers/computer/src/worker.ts", 'export const workerFixture = "packaged";\n');
 
   return { root, cache, output };
 }

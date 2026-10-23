@@ -2,6 +2,6 @@
   "name": "@omarchy-bot/testkit",
   "version": "0.1.0",
   "type": "module",
-  "exports": { ".": "./src/index.ts", "./fake-agent-worker": "./src/fake-agent-worker.ts", "./fake-computer-worker": "./src/fake-computer-worker.ts" },
+  "exports": { ".": "./src/index.ts", "./fake-agent-worker": "./src/fake-agent-worker.ts" },
   "dependencies": { "@omarchy-bot/agent-contract": "workspace:*", "@omarchy-bot/domain": "workspace:*" }
 }

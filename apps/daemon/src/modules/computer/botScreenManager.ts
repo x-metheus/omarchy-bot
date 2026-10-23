@@ -98,7 +98,6 @@ export interface BotScreenRuntimeReadiness {
   desktopSurface: "ready";
   capture: "ready";
   input: "ready";
-  computerWorker: "ready";
 }
 
 export type BotScreenRuntimeOutcome =
@@ -106,7 +105,6 @@ export type BotScreenRuntimeOutcome =
   | { type: "session-bus-exited"; error: Error }
   | { type: "desktop-exited"; error: Error }
   | { type: "input-helper-exited"; error: Error }
-  | { type: "computer-worker-exited"; error: Error };
 
 
 export interface BotScreenProjectionSource {
@@ -143,6 +141,7 @@ export interface BotScreenRuntime {
   /** The Bot Computer generation this Screen attached under. */
   readonly generation: number;
   readonly readiness: BotScreenRuntimeReadiness;
+  readonly sessionEnv: Record<string, string>;
   readonly expandedProjection?: "rfb";
   capture(): Promise<BotScreenCapture>;
   openCaptureStream(): Promise<BotScreenCaptureStream>;
@@ -153,8 +152,6 @@ export interface BotScreenRuntime {
   focusWindow(window: ComputerWindowListItem): Promise<void>;
   /** Opens an application or URL on this Screen. */
   launch(request: BotScreenLaunchRequest): Promise<{ text?: string }>;
-  /** Notifies on this Screen's session bus. Retired with the Computer Worker (ADR 0010). */
-  notify(args: Record<string, unknown>): Promise<BotScreenActionResult>;
   setInputAuthority(controllerEpoch: number): Promise<number>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
@@ -206,8 +203,6 @@ async function runBotScreenAction(
       return runtime.launch({ app: launchTarget(action.args.app, "open_app requires args.app") });
     case "open_url":
       return runtime.launch({ url: launchTarget(action.args.url, "open_url requires args.url") });
-    case "notify":
-      return runtime.notify(action.args);
   }
 }
 
@@ -912,7 +907,6 @@ export class BotScreenManager {
       "session-bus-exited": "Bot Computer session bus",
       "desktop-exited": "Bot Desktop",
       "input-helper-exited": "Bot Screen input helper",
-      "computer-worker-exited": "Bot Screen computer worker",
     }[outcome.type];
     return new Error(`${component} failed: ${this.#failure(outcome.error)}`);
   }

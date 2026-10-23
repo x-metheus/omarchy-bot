@@ -352,7 +352,7 @@ export class WorkerClient {
   }
 }
 
-/** Agent workers get a sanitized desktop env; only computer-worker gets the real one. */
+/** Agent workers get a sanitized desktop env. */
 export function sanitizedEnv(): Record<string, string> {
   const keep = ["PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "OMARCHY_BOT_HOME", "NO_COLOR"];
   const env: Record<string, string> = {};

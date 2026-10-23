@@ -226,7 +226,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#blockedCaptureRelease.resolve();
   }
 
-  /** Actions that reached a Screen (window listing, focus, launch, notify). */
+  /** Actions that reached a Screen (window listing, focus, launch). */
   get actionsStarted(): number {
     return this.#actionsStarted;
   }
@@ -248,7 +248,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   crash(surfaceId: string, message: string): void {
-    this.exitComputerWorker(surfaceId, message);
+    this.exitInputHelper(surfaceId, message);
   }
 
   exitApplication(surfaceId: string): void {
@@ -267,9 +267,6 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#finish(surfaceId, { type: "input-helper-exited", error: new Error(message) });
   }
 
-  exitComputerWorker(surfaceId: string, message = "fake Bot Screen computer worker exited"): void {
-    this.#finish(surfaceId, { type: "computer-worker-exited", error: new Error(message) });
-  }
 
   exitCompositor(surfaceId: string, message = "fake Bot Screen compositor exited"): void {
     this.#compositorExited();
@@ -356,6 +353,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const expandedViews = new Set<BotScreenExpandedView>();
     const runtime: BotScreenRuntime = {
       generation,
+      sessionEnv: {},
       expandedProjection: "rfb",
       readiness: {
         compositor: "ready",
@@ -370,7 +368,6 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         desktopSurface: "ready",
         capture: "ready",
         input: "ready",
-        computerWorker: "ready",
       },
       capture: async (): Promise<BotScreenCapture> => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
@@ -498,12 +495,6 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           throw new Error("fake application launch failed");
         }
         return { text: `fake-open#${this.#actionsStarted}:${request.app ?? request.url ?? ""}` };
-      },
-      notify: async () => {
-        if (stopped) throw new Error("fake Bot Screen is stopped");
-        this.#countAction();
-        await this.#gateAction();
-        return { text: `fake-notify#${this.#actionsStarted}` };
       },
       setInputAuthority: async (epoch): Promise<number> => {
         if (!Number.isSafeInteger(epoch) || epoch <= highestControllerEpoch) {

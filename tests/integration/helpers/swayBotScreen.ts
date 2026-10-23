@@ -8,8 +8,6 @@ import type {
   BotScreenRuntimeAdapter,
 } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { ComputerWindowListItem } from "../../../packages/agent-contract/src/computer-protocol.ts";
-import type { ComputerAction } from "../../../packages/domain/src/computer.ts";
-import type { SurfaceComputerWorker } from "../../../apps/daemon/src/supervision/supervisor.ts";
 import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./fakeSwayIpc.ts";
 
 const LIVE_UNICODE_TITLE = "未保存 你好";
@@ -271,21 +269,12 @@ for await (const chunk of Bun.stdin.stream()) {
     captureHelperBin: executable(bin, "capture", "#!/bin/sh\nprintf 'READY\\n'\nwhile read -r command; do [ \"$command\" = close ] && exit 0; done\n"),
     botDesktopBin: desktop,
     wayvncBin: wayvnc,
-    computerWorkers: {
-      startComputerWorker: async (scope): Promise<SurfaceComputerWorker> => ({
-        surfaceId: scope.surfaceId,
-        runtimeGeneration: scope.runtimeGeneration,
-        exited: new Promise<Error>(() => {}),
-        act: async (action: ComputerAction) => {
-          actionsStarted += 1;
-          const ready = actionWaiters.filter((waiter) => actionsStarted >= waiter.count);
-          actionWaiters = actionWaiters.filter((waiter) => actionsStarted < waiter.count);
-          for (const waiter of ready) waiter.resolve();
-          if (blockActions) await actionGate.promise;
-          return { done: true, text: `worker-${action.name}` };
-        },
-        stop: async () => {},
-      }),
+    onLaunch: async () => {
+      actionsStarted += 1;
+      const ready = actionWaiters.filter((waiter) => actionsStarted >= waiter.count);
+      actionWaiters = actionWaiters.filter((waiter) => actionsStarted < waiter.count);
+      for (const waiter of ready) waiter.resolve();
+      if (blockActions) await actionGate.promise;
     },
   });
   const starts: BotScreenProvision[] = [];

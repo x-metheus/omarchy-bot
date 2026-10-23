@@ -9,7 +9,6 @@ import {
   PortableSwayRuntimeSupply,
   SWAY_RUNTIME_RELEASE,
 } from "../../apps/daemon/src/modules/computer/swayRuntimeSupply.ts";
-import type { Supervisor } from "../../apps/daemon/src/supervision/supervisor.ts";
 import type { ComputerWindowListItem } from "../../packages/agent-contract/src/computer-protocol.ts";
 import type { ComputerAction } from "../../packages/domain/src/computer.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
@@ -278,7 +277,6 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     mkdirSync(applicationCwd, { recursive: true, mode: 0o700 });
     const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
     process.env.OMARCHY_BOT_SCREEN_PROFILE = process.env.OMARCHY_BOT_SCREEN_PROFILE ?? "720p";
-    let supervisor: Pick<Supervisor, "startComputerWorker"> | undefined;
     const adapter = new SwayBotScreenRuntimeAdapter({
       runtimeRoot: path.join(daemonHome, "r"),
       profileRoot: path.join(daemonHome, "screens"),
@@ -288,25 +286,17 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       wayvncBin: binaries.wayvncBin,
       wlrRandrBin: binaries.wlrRandrBin,
       grimBin: grim,
-      computerWorkers: {
-        startComputerWorker: (scope) => {
-          if (supervisor === undefined) throw new Error("computer worker supervisor is not bound");
-          return supervisor.startComputerWorker(scope);
-        },
-      },
     });
 
     try {
       harness = await startDaemon(daemonHome, {
         botScreenAdapter: adapter,
-        useProductionComputerWorker: true,
         botScreenCapacity: 2,
       });
     } finally {
       if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
       else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
     }
-    supervisor = harness.svc.supervisor;
 
     const zeroGraphical = await measureSwayCosts([], RESOURCE_WINDOW_MS);
     resourceScenarios.zeroGraphicalUse = {

@@ -148,7 +148,7 @@ describe("Shared Workspace default cwd", () => {
 
   test("an explicit Thread cwd is preserved even when it equals a plugin directory", async () => {
     h = await startDaemon();
-    const pluginCwd = path.resolve(import.meta.dir, "../../workers/computer");
+    const pluginCwd = path.resolve(import.meta.dir, "../../workers/pi");
     const botId = await makeBot(h, "Explicit cwd Bot");
     const thread = h.svc.threads.createThread(botId, {
       title: "Plugin project",

@@ -78,13 +78,11 @@ export async function main(options: MainOptions = {}): Promise<{
     },
     {
       agents: agentsDir,
-      computer: process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR ?? path.resolve(agentsDir, "computer"),
     },
   );
   const productionScreenAdapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
-    computerWorkers: supervisor,
     capacity: cfg.botScreenCapacity,
     applicationCwd: prepareSharedWorkspace(cfg.sharedWorkspaceDir),
     runtimeSupply: new PortableSwayRuntimeSupply({ rootDir: cfg.botScreenSwayRuntimeSupplyDir }),

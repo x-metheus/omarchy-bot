@@ -5,9 +5,7 @@ import path from "node:path";
 import { SwayBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/swayBotScreenRuntime.ts";
 import { listApplicationToplevels } from "../../apps/daemon/src/modules/computer/swayIpc.ts";
 import type { BotScreenInputAction, BotScreenRuntime } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
-import type { ComputerAction } from "../../packages/domain/src/computer.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
-import type { ComputerWorkerScope, SurfaceComputerWorker } from "../../apps/daemon/src/supervision/supervisor.ts";
 import {
   readFakeSwayCommands,
   writeFakeSwayIpcMode,
@@ -183,8 +181,6 @@ async function startControlRuntime(options?: {
   controlDir: string;
   inputLog: string;
   failPastePath: string;
-  workerActions: ComputerAction[];
-  workerScope: ComputerWorkerScope | undefined;
   expandedViewCalls: number;
   application: string;
   applicationMarker: string;
@@ -285,8 +281,6 @@ await Promise.withResolvers<void>().promise;
     ].join("\n"),
   );
 
-  const workerActions: ComputerAction[] = [];
-  let workerScope: ComputerWorkerScope | undefined;
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "profiles"),
@@ -306,21 +300,6 @@ await Promise.withResolvers<void>().promise;
       "while :; do sleep 60; done",
       "",
     ].join("\n")),
-    computerWorkers: {
-      startComputerWorker: async (scope): Promise<SurfaceComputerWorker> => {
-        workerScope = scope;
-        return {
-          surfaceId: scope.surfaceId,
-          runtimeGeneration: scope.runtimeGeneration,
-          exited: new Promise<Error>(() => {}),
-          act: async (action) => {
-            workerActions.push(action);
-            return { done: true, text: `worker-${action.name}` };
-          },
-          stop: async () => {},
-        };
-      },
-    },
   });
 
   const runtime = await adapter.start({
@@ -338,21 +317,22 @@ await Promise.withResolvers<void>().promise;
     return originalExpanded();
   };
   writeFileSync(path.join(controlDir, "commands.log"), "");
-  const swaySock = workerScope?.env.SWAYSOCK;
   return {
     adapter,
     runtime,
     controlDir,
     inputLog,
     failPastePath,
-    workerActions,
     application,
     applicationMarker,
-    workerScope,
     get expandedViewCalls() {
       return expandedViewCalls;
     },
-    unlinkIpc: () => rmSync(swaySock!, { force: true }),
+    unlinkIpc: () => {
+      const socket = runtime.sessionEnv.SWAYSOCK;
+      if (socket === undefined) throw new Error("Bot Computer socket is missing");
+      rmSync(socket, { force: true });
+    },
   };
 }
 
@@ -362,7 +342,6 @@ test("listWindows returns ordinary and floating toplevels without a Screen Proje
     const windowList = await fixture.runtime.listWindows();
     expect(windowList).toEqual(EXPECTED_WINDOWS);
     expect(fixture.expandedViewCalls).toBe(0);
-    expect(fixture.workerActions).toEqual([]);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([]);
   } finally {
     await fixture.runtime.stop();
@@ -378,7 +357,6 @@ test("capture and window routing compose without a Screen Projection", async () 
     expect(image.mediaType).toBe("image/png");
     expect(image.bytes.slice(0, 8)).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     expect(fixture.expandedViewCalls).toBe(0);
-    expect(fixture.workerActions).toEqual([]);
   } finally {
     await fixture.runtime.stop();
   }
@@ -517,7 +495,6 @@ test("leased pointer, key, and paste events drive the private virtual-input help
     expect(pasteTexts(fixture.inputLog)).toEqual(["你好, world"]);
     expect(lines.filter((line) => line.startsWith("authority ")).length).toBe(1);
     expect(lines.filter((line) => line.startsWith("release ")).length).toBe(1);
-    expect(fixture.workerActions).toEqual([]);
   } finally {
     await fixture.runtime.stop();
   }
@@ -611,7 +588,6 @@ test("shared runtime launches applications into the requesting Screen workspace"
     await expect(
       fixture.runtime.launch({ app: fixture.application }),
     ).resolves.toEqual({ text: `launched ${fixture.application}` });
-    expect(fixture.workerActions).toEqual([]);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
       "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",
@@ -623,8 +599,8 @@ test("shared runtime launches applications into the requesting Screen workspace"
       path.join(root!, "profiles", "computer", "config"),
       path.join(root!, "workspace"),
     ].join("|"));
-    expect(fixture.workerScope?.env.WAYLAND_DISPLAY).toBe("wayland-0");
-    expect(fixture.workerScope?.env.SWAYSOCK).toContain(path.join(root!, "runtime", "computer"));
+    expect(fixture.runtime.sessionEnv.WAYLAND_DISPLAY).toBe("wayland-0");
+    expect(fixture.runtime.sessionEnv.SWAYSOCK).toContain(path.join(root!, "runtime", "computer"));
     expect(fixture.expandedViewCalls).toBe(0);
   } finally {
     await fixture.runtime.stop();
@@ -638,7 +614,6 @@ test("open_url reuses the shared browser profile and routes its new window", asy
     await expect(
       fixture.runtime.launch({ url }),
     ).resolves.toEqual({ text: `opened ${url}` });
-    expect(fixture.workerActions).toEqual([]);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
       "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",
