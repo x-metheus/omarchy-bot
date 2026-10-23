@@ -1,7 +1,7 @@
 # 03: Deepen the turn-bound ToolChannel
 
 **Type:** task
-**Status:** claimed
+**Status:** resolved
 **Blocked by:** 01, 02
 
 **What to build:** Replace the four hand-copied reverse tool-call paths (`computer`, `local`, `plugin`, `send_bot_message`) with one `ToolChannel` module that has a worker half and a daemon half in `packages/agent-contract`.
@@ -17,8 +17,14 @@ Decisions (settled):
 - The fake Pi worker imports the real worker half.
 - Migrate tool-by-tool on one branch: `send_bot_message`, `local`, `plugin`, `computer`; each step keeps integration suites green; remove old frames and `started*`/`dispatched*` sets in the final commit.
 
-- [ ] `ToolChannel` worker + daemon halves with tests at their interface (duplicate, not-started, dispatch-once, abort, session close, schema rejection).
-- [ ] All four tools migrated; per-tool validators, handlers, pending maps and TurnContext sets deleted.
-- [ ] Fake Pi worker uses the real worker half.
+- [x] `ToolChannel` worker + daemon halves with tests at their interface (duplicate, not-started, dispatch-once, abort, session close, schema rejection).
+- [x] All four tools migrated; per-tool validators, handlers, pending maps and TurnContext sets deleted.
+- [x] Fake Pi worker uses the real worker half.
 
 ## Comments
+
+## Answer
+
+The worker and daemon halves of `ToolChannel` now route `send_bot_message`, `local`, plugin tools, and `computer` through generic tool frames. The channel validates shared TypeBox schemas, requires a started Tool Call, dispatches it once, propagates cancellation to executors, and closes pending calls with their worker session. The fake Pi worker imports the real worker half. The former per-tool frames, handlers, pending maps, and TurnContext dispatch sets are removed.
+
+Review approved the implementation through `e8ec2fb` (`REVIEW.md`: `APPROVED`), including the shared MCP HTTP URL validation fix.
