@@ -814,6 +814,14 @@ describe("durable Bot mailbox", () => {
       "survive restart before claim",
     );
     const home = h.home;
+    const shutdownTurns = h.svc.turns.shutdown.bind(h.svc.turns);
+    h.svc.turns.shutdown = async () => {
+      await h!.svc.agents.recheck("pi");
+      expect(deliveryRow(h!, queued.deliveryId)).toEqual({
+        state: "queued", target_turn_id: null, failure_reason: null,
+      });
+      await shutdownTurns();
+    };
 
     await h.disconnectForRestart();
     h = await startDaemon(home);

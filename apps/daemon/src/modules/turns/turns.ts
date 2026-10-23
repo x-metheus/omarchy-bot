@@ -83,6 +83,7 @@ export class TurnService {
   #turnStarts = new Map<string, Promise<TurnContext>>();
   #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
   #timeoutQueues = new Map<AgentId, Promise<void>>();
+  #stopping = false;
 
   constructor(
     private readonly db: Database,
@@ -96,6 +97,13 @@ export class TurnService {
     private readonly plugins: PluginsService,
     private readonly devices: DeviceRoster,
   ) {}
+
+  async shutdown(): Promise<void> {
+    this.#stopping = true;
+    await Promise.allSettled(this.#turnStarts.values());
+    for (const ctx of this.#turns.values()) clearTimeout(ctx.turnTimeout);
+    await Promise.all(this.#timeoutQueues.values());
+  }
 
   #turnDto(id: string): TurnDto | undefined {
     const r = this.threads.turnRow(id);
@@ -145,6 +153,7 @@ export class TurnService {
     attachmentDraftToken?: string,
     opts: { cwd?: string } = {},
   ): Promise<SendResultDto> {
+    if (this.#stopping) throw new HttpError(503, "Daemon is stopping; new work cannot start");
     const bot = this.db.query(`SELECT * FROM bots WHERE id = ?`).get(botId) as { id: string; agent_id: string; instructions: string } | undefined;
     if (!bot) throw new HttpError(404, `unknown bot ${botId}`);
     if (
@@ -245,6 +254,7 @@ export class TurnService {
     envelope: string;
     acceptanceFailureReason: string;
   }): Promise<void> {
+    if (this.#stopping) throw new HttpError(503, "Daemon is stopping; new work cannot start");
     this.events.append("turn", input.turnId, "turn.created", {
       turnId: input.turnId,
       threadId: input.threadId,

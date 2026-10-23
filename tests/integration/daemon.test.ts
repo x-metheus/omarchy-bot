@@ -49,6 +49,36 @@ async function until(fn: () => Promise<boolean>, timeoutMs = 10_000): Promise<vo
   }
 }
 
+test("daemon shutdown cancels active Turn timeouts before closing persistence", async () => {
+  const daemon = await startDaemon();
+  try {
+    daemon.svc.cfg.turnTimeoutMs = 100;
+    const botId = await makeBot(daemon, "Shutdown timeout");
+    const sent = await sendToBot(daemon, botId, "hang");
+    await until(async () => {
+      const thread = await api<{ activeTurn?: { status: string } }>(daemon, "GET", `/api/threads/${sent.threadId}`);
+      return thread.activeTurn?.status === "working";
+    });
+    await daemon.svc.turns.shutdown();
+    const rejected = await apiStatus(daemon, "POST", `/api/bots/${botId}/messages`, { text: "late work" });
+    expect(rejected.status).toBe(503);
+    await daemon.stop();
+    // Real worker shutdown races the platform timeout; fake timers cannot drive the child process.
+    await Bun.sleep(5_500);
+    const restarted = await startDaemon(daemon.home);
+    try {
+      const thread = await api<{ latestTurn?: { status: string } }>(restarted, "GET", `/api/threads/${sent.threadId}`);
+      expect(thread.latestTurn?.status).toBe("failed");
+      const agents = await api<{ id: string; status: string }[]>(restarted, "GET", "/api/agents");
+      expect(agents.find((agent) => agent.id === "pi")?.status).toBe("ready");
+    } finally {
+      await restarted.stop();
+    }
+  } finally {
+    await daemon.stop();
+  }
+}, 15_000);
+
 describe("integration: agents API", () => {
   test("lists all nine agents with version/status/reason/guidance fields", async () => {
     const agents = await api<{ id: string; displayName: string; version: string; status: string; reason?: string; guidance?: string }[]>(h, "GET", "/api/agents");

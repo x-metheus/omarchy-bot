@@ -169,8 +169,10 @@ describe("bot profile editing", () => {
     h.svc.supervisor.agentWorker = async (agentId) => {
       const liveWorker = await originalAgentWorker(agentId);
       return new Proxy(liveWorker, {
-        get(target, property, receiver) {
-          if (property !== "request") return Reflect.get(target, property, receiver);
+        get(target, property) {
+          // `target`, not `receiver`: WorkerClient reads its private `#proc`
+          // field, which throws through a Proxy whose receiver is the proxy.
+          if (property !== "request") return Reflect.get(target, property, target);
           return async (command: Record<string, unknown>, timeoutMs: number) => {
             if (command.type === "session.resume" || command.type === "session.open") {
               const options = command.options;
@@ -193,7 +195,7 @@ describe("bot profile editing", () => {
 
     const messages = await api<{ text?: string }[]>(h, "GET", `/api/threads/${first.threadId}/messages`);
     expect(messages.some((message) => message.text === "keep this message")).toBeTrue();
-  });
+  }, 20_000);
 });
 
 describe("safe local avatar uploads", () => {

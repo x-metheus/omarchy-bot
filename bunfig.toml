@@ -1,3 +1,2 @@
 [test]
 pathIgnorePatterns = ["tests/e2e/**"]
-timeout = 20000

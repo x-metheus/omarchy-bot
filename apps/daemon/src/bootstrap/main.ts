@@ -249,6 +249,8 @@ export async function main(options: MainOptions = {}): Promise<{
     // Safe shutdown order: stop new work before revoking shared resources.
     clearInterval(statusTimer);
     await dictation.shutdown();
+    mailbox.pauseDispatch();
+    await turns.shutdown();
     computer.shutdown();
     await projections.shutdown();
     await screens.shutdown();
@@ -265,6 +267,8 @@ export async function main(options: MainOptions = {}): Promise<{
     removeSignalHandlers();
     clearInterval(statusTimer);
     await dictation.shutdown();
+    mailbox.pauseDispatch();
+    await turns.shutdown();
     computer.shutdown();
     await projections.shutdown();
     screens.detach();

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -91,18 +91,27 @@ describe("Shared Workspace default cwd", () => {
   });
 
   test("prepares the Shared Workspace once and reuses existing files without Git", async () => {
-    h = await startDaemon();
-    const workspace = sharedWorkspace(h);
-    expect(existsSync(workspace)).toBeFalse();
+    // The daemon prepares the Shared Workspace while booting, so this fixture
+    // starts from a workspace that already holds user files.
+    const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-reuse-"));
+    const workspace = path.join(home, ".omarchy-bot", "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const sentinel = path.join(workspace, "keep-me.txt");
+    writeFileSync(sentinel, "prior work");
+
+    h = await startDaemon(home);
+    expect(sharedWorkspace(h)).toBe(workspace);
+    expect(statSync(workspace).isDirectory()).toBeTrue();
+    expect(readFileSync(sentinel, "utf8")).toBe("prior work");
+    expect(existsSync(path.join(workspace, ".git"))).toBeFalse();
 
     const botId = await makeBot(h, "Reuse Bot");
     const first = await sendToBot(h, botId, "say: first file turn");
     await waitThreadIdle(h, first.threadId);
-    expect(statSync(workspace).isDirectory()).toBeTrue();
+    expect(sessionForThread(h, "session.open", botId, first.threadId).options?.cwd).toBe(workspace);
+    expect(readFileSync(sentinel, "utf8")).toBe("prior work");
     expect(existsSync(path.join(workspace, ".git"))).toBeFalse();
 
-    const sentinel = path.join(workspace, "keep-me.txt");
-    writeFileSync(sentinel, "prior work");
     const continued = await sendToThread(h, first.threadId, "say: continue in the same files");
     await waitThreadIdle(h, continued.threadId);
 
@@ -148,7 +157,7 @@ describe("Shared Workspace default cwd", () => {
 
   test("an explicit Thread cwd is preserved even when it equals a plugin directory", async () => {
     h = await startDaemon();
-    const pluginCwd = path.resolve(import.meta.dir, "../../workers/computer");
+    const pluginCwd = path.resolve(import.meta.dir, "../../workers/pi");
     const botId = await makeBot(h, "Explicit cwd Bot");
     const thread = h.svc.threads.createThread(botId, {
       title: "Plugin project",
@@ -204,22 +213,31 @@ describe("Shared Workspace default cwd", () => {
       process.chdir(sourceDir);
       h = await startDaemon();
       const workspace = sharedWorkspace(h);
-      mkdirSync(path.dirname(workspace), { recursive: true });
+      const sentinel = path.join(workspace, "keep-me.txt");
+      writeFileSync(sentinel, "prior work");
+      const retained = `${workspace}-retained`;
+      renameSync(workspace, retained);
       writeFileSync(workspace, "blocked");
-      const botId = await makeBot(h, "Blocked workspace Bot");
-      const sent = await sendToBot(h, botId, "say: must not use the source tree");
-      await waitThreadIdle(h, sent.threadId);
+      try {
+        const botId = await makeBot(h, "Blocked workspace Bot");
+        const sent = await sendToBot(h, botId, "say: must not use the source tree");
+        await waitThreadIdle(h, sent.threadId);
 
-      const thread = await api<ThreadDto>(h, "GET", `/api/threads/${sent.threadId}`);
-      expect(thread.latestTurn?.status).toBe("failed");
-      expect(thread.latestTurn?.reason).toContain("Shared Workspace is unavailable");
-      expect(
-        workerObservations(h).filter(
-          (observation) => observation.threadId === sent.threadId && observation.type === "session.open",
-        ),
-      ).toEqual([]);
-      expect(readFileSync(path.join(sourceDir, "install-sentinel.txt"), "utf8")).toBe("keep");
-      expect(existsSync(path.join(h.home, "db.sqlite"))).toBeTrue();
+        const thread = await api<ThreadDto>(h, "GET", `/api/threads/${sent.threadId}`);
+        expect(thread.latestTurn?.status).toBe("failed");
+        expect(thread.latestTurn?.reason).toContain("Shared Workspace is unavailable");
+        expect(
+          workerObservations(h).filter(
+            (observation) => observation.threadId === sent.threadId && observation.type === "session.open",
+          ),
+        ).toEqual([]);
+        expect(readFileSync(path.join(sourceDir, "install-sentinel.txt"), "utf8")).toBe("keep");
+        expect(readFileSync(path.join(retained, "keep-me.txt"), "utf8")).toBe("prior work");
+        expect(existsSync(path.join(h.home, "db.sqlite"))).toBeTrue();
+      } finally {
+        rmSync(workspace);
+        renameSync(retained, workspace);
+      }
     } finally {
       rmSync(sourceDir, { recursive: true, force: true });
     }

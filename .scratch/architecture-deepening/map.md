@@ -38,3 +38,12 @@ Origin: architecture review and grilling session on 2026-10-22. Each ticket reco
 - Tests are written at the deepened module's interface; old tests on the replaced shallow modules are deleted, not layered.
 - Host safety (AGENTS.md) applies: no host package managers, no host compositor/session changes; real-Sway tests stay behind their existing flags.
 - Every ticket ends with the relevant integration suites green and `bun run typecheck` (or the repo's equivalent) clean.
+
+## Integration verification
+
+- After ticket 10, repaired two existing Shared Workspace fixtures to cover startup reuse and inaccessible-directory failure without removing user files. The explicit plugin cwd now uses `workers/pi`, which survives ticket 08.
+- Repaired the profile test's `WorkerClient` Proxy receiver so private-field getters work; removed Bun's ignored `test.timeout` setting and gave the two-Turn scenario an explicit timeout.
+- Full-suite verification exposed active Turn timers surviving daemon teardown. Both stop paths now drain pending starts and in-flight timeout work and cancel active timers before closing persistence; a daemon shutdown/restart regression covers this lifecycle.
+- Shutdown rejects new Turn admission and pauses mailbox dispatch first, preserving unclaimed durable mail for restart; the existing queued-mail recovery regression now triggers readiness during teardown.
+- Real-model Pi conformance is blocked: the installed SDK reports no authenticated models and `No API key found for the selected model`. The user authorized continuing steps 1–3 with this explicit exception; the test remains unchanged.
+- Credential-free verification uses `bun test --path-ignore-patterns 'tests/e2e/**' --path-ignore-patterns 'tests/conformance/pi.test.ts'`; this does not constitute real-model or real-Sway acceptance.

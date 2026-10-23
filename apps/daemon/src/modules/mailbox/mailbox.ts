@@ -53,6 +53,7 @@ export class MailboxService {
   #nextPendingDelivery = 0;
   #drainScheduled = false;
 
+  #stopping = false;
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
@@ -63,6 +64,10 @@ export class MailboxService {
     this.agents.subscribe(({ agentId, to }) => {
       if (to === "ready") this.#scheduleAgentDispatch(agentId);
     });
+  }
+
+  pauseDispatch(): void {
+    this.#stopping = true;
   }
 
   enqueue(
@@ -232,6 +237,7 @@ export class MailboxService {
   }
 
   #drainDispatches(): void {
+    if (this.#stopping) return;
     while (
       this.#activeDispatches < MAX_CONCURRENT_DISPATCHES
       && this.#nextPendingDelivery < this.#pendingDeliveryIds.length
