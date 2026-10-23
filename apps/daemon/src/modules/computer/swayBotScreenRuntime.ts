@@ -66,8 +66,8 @@ const BOT_DESKTOP_SWAY_CRITERIA = `[app_id="^${BOT_DESKTOP_APP_ID.replaceAll("."
 const OUTPUT_SLOT_WIDTH = 8_192;
 
 interface SwaySurfaceState {
+  /** The Bot Computer generation this Screen attached under. */
   generation: number;
-  computerGeneration: number;
   outputName: string;
   workspaceName: string;
   desktopPid?: number;
@@ -242,7 +242,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (
         current !== undefined
         && currentRuntime !== undefined
-        && current.provision.generation === provision.generation
         && await this.#liveSurfaceValid(current)
       ) {
         await this.#ensureHelpers(current);
@@ -272,7 +271,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const runtime = this.#runtimes.get(surfaceId);
       const retained = this.#latestSurfaceState(surfaceId);
       const workspaceName = session?.workspaceName ?? retained?.state.workspaceName;
-      const computerGeneration = session?.computer.generation ?? retained?.state.computerGeneration;
+      const computerGeneration = session?.computer.generation ?? retained?.state.generation;
       if (session !== undefined && runtime !== undefined) {
         await this.#stopSession(session, runtime);
       }
@@ -299,7 +298,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const outputIndex = Number(outputName.slice("HEADLESS-".length));
     const workspaceName = surfaceWorkspace(provision.surfaceId);
     const runtimeSurfaceDir = path.join(this.options.runtimeRoot, provision.surfaceId);
-    const runtimeDir = path.join(runtimeSurfaceDir, String(provision.generation));
+    const runtimeDir = path.join(runtimeSurfaceDir, String(computer.generation));
     rmSync(runtimeSurfaceDir, { recursive: true, force: true });
     for (const directory of [this.options.runtimeRoot, runtimeSurfaceDir, runtimeDir]) {
       mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -325,7 +324,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       await swayIpc.runCommand(`workspace ${workspaceName}`);
       await swayIpc.runCommand(`move workspace to output ${outputName}`);
       desktopProcess = Bun.spawn([
-        ...this.#units.command(provision.surfaceId, provision.generation, "application", computer.childEnv),
+        ...this.#units.command(provision.surfaceId, computer.generation, "application", computer.childEnv),
         computer.botDesktop,
         String(provision.logicalWidth),
         String(provision.logicalHeight),
@@ -359,7 +358,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         desktopIdentity: ownedProcessIdentity(
           desktopProcess.pid,
           computer.runtimeDir,
-          applicationUnitName(provision.surfaceId, provision.generation, "application"),
+          applicationUnitName(provision.surfaceId, computer.generation, "application"),
         ),
       };
       await this.#startHelpers(session);
@@ -373,7 +372,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       await session?.computerWorker?.stop().catch(() => {});
       await session?.virtualInput?.stop().catch(() => {});
       if (desktopProcess !== undefined) await terminateDetachedProcess(desktopProcess).catch(() => {});
-      await this.#units.stop(provision.surfaceId, provision.generation).catch(() => {});
+      await this.#units.stop(provision.surfaceId, computer.generation).catch(() => {});
       rmSync(runtimeSurfaceDir, { recursive: true, force: true });
       if (computer.surfaceIds.size === 0) await computer.stop().catch(() => {});
       throw error;
@@ -385,14 +384,13 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     provision: BotScreenProvision,
   ): Promise<BotScreenRuntime | undefined> {
     const runtimeSurfaceDir = path.join(this.options.runtimeRoot, provision.surfaceId);
-    const runtimeDir = path.join(runtimeSurfaceDir, String(provision.generation));
+    const runtimeDir = path.join(runtimeSurfaceDir, String(computer.generation));
     const state = this.#readSurfaceState(runtimeDir);
     if (
       state === undefined
-      || state.generation !== provision.generation
-      || state.computerGeneration !== computer.generation
+      || state.generation !== computer.generation
       || !/^HEADLESS-[1-9]\d*$/.test(state.outputName)
-      || this.#outputClaimed(state.outputName)
+      || this.#outputClaimed(state.outputName, provision.surfaceId)
       || !ownedProcessRunning(state.desktopIdentity)
     ) {
       return undefined;
@@ -403,9 +401,9 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const videoHeight = Math.round(provision.logicalHeight * provision.scale);
     await this.#capture(computer.grim, computer.childEnv, state.outputName, videoWidth, videoHeight);
     await Promise.all([
-      this.#units.stopRole(provision.surfaceId, provision.generation, "input").catch(() => {}),
-      this.#units.stopRole(provision.surfaceId, provision.generation, "worker").catch(() => {}),
-      this.#units.stopRole(provision.surfaceId, provision.generation, "wayvnc").catch(() => {}),
+      this.#units.stopRole(provision.surfaceId, computer.generation, "input").catch(() => {}),
+      this.#units.stopRole(provision.surfaceId, computer.generation, "worker").catch(() => {}),
+      this.#units.stopRole(provision.surfaceId, computer.generation, "wayvnc").catch(() => {}),
     ]);
     rmSync(path.join(runtimeDir, "wayvnc.sock"), { force: true });
     const session: SwaySession = {
@@ -442,20 +440,21 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         computer.inputHelper,
         session.outputName,
         this.#units.launcherEnvironment(computer.childEnv),
+        computer.generation,
         provision,
-        this.#units.command(provision.surfaceId, provision.generation, "input", computer.childEnv),
+        this.#units.command(provision.surfaceId, computer.generation, "input", computer.childEnv),
       );
       started = true;
     }
     if (session.computerWorker === undefined || !await this.#workerPending(session.computerWorker)) {
       session.computerWorker = await this.options.computerWorkers.startComputerWorker({
         surfaceId: provision.surfaceId,
-        runtimeGeneration: provision.generation,
+        runtimeGeneration: computer.generation,
         env: computer.childEnv,
         wrapCommand: (targetEnvironment) => ({
           commandPrefix: this.#units.command(
             provision.surfaceId,
-            provision.generation,
+            computer.generation,
             "worker",
             targetEnvironment,
           ),
@@ -547,7 +546,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (sharedWayvnc === shared) sharedWayvnc = undefined;
         await this.#units.stopRole(
           provision.surfaceId,
-          provision.generation,
+          computer.generation,
           "wayvnc",
         ).catch(() => {});
         await terminateDetachedProcess(shared.process);
@@ -568,7 +567,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const starting = (async (): Promise<SharedWayvnc> => {
         const socketPath = path.join(session.runtimeDir, "wayvnc.sock");
         const wayvncProcess = Bun.spawn([
-          ...this.#units.command(provision.surfaceId, provision.generation, "wayvnc", computer.childEnv),
+          ...this.#units.command(provision.surfaceId, computer.generation, "wayvnc", computer.childEnv),
           wayvnc,
           "--unix-socket",
           "--output",
@@ -640,7 +639,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           session.videoHeight,
           this.#units.command(
             provision.surfaceId,
-            provision.generation,
+            computer.generation,
             `capture-${++captureStreamSequence}`,
             computer.childEnv,
           ),
@@ -726,7 +725,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         await Promise.allSettled([
           computerWorker.stop(),
           this.#stopDesktop(session),
-          this.#units.stop(provision.surfaceId, provision.generation),
+          this.#units.stop(provision.surfaceId, computer.generation),
         ]);
       })();
       cleanupInFlight = cleanup;
@@ -739,6 +738,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     };
     session.cleanup = cleanupSurface;
     const runtime: BotScreenRuntime = {
+      generation: computer.generation,
       readiness: {
         compositor: "ready",
         waylandSocket: "private",
@@ -1056,7 +1056,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         session.virtualInput?.stop(),
         session.computerWorker?.stop(),
         this.#stopDesktop(session),
-        this.#units.stop(session.provision.surfaceId, session.provision.generation),
+        this.#units.stop(session.provision.surfaceId, session.computer.generation),
       ]);
     }
     rmSync(session.runtimeSurfaceDir, { recursive: true, force: true });
@@ -1113,8 +1113,32 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     throw new Error("Bot Computer has no unassigned output");
   }
 
-  #outputClaimed(outputName: string): boolean {
-    return [...this.#sessions.values()].some((session) => session.outputName === outputName);
+  /**
+   * An output is claimed by a live session or by a retained Screen whose desktop is
+   * still running and has not been reattached yet; starting over it would strand that Screen.
+   */
+  #outputClaimed(outputName: string, exceptSurfaceId?: SurfaceId): boolean {
+    if ([...this.#sessions.values()].some((session) =>
+      session.outputName === outputName && session.provision.surfaceId !== exceptSurfaceId
+    )) return true;
+    return this.#retainedOutputs(exceptSurfaceId).has(outputName);
+  }
+
+  /** Outputs a not-yet-reattached Screen still owns through a live desktop. */
+  #retainedOutputs(exceptSurfaceId?: SurfaceId): Set<string> {
+    const claimed = new Set<string>();
+    const runtimeRoot = this.options.runtimeRoot;
+    if (!existsSync(runtimeRoot)) return claimed;
+    for (const entry of readdirSync(runtimeRoot)) {
+      if (entry === "computer" || entry === exceptSurfaceId) continue;
+      const surfaceId = entry as SurfaceId;
+      if (this.#sessions.has(surfaceId)) continue;
+      const retained = this.#latestSurfaceState(surfaceId);
+      if (retained !== undefined && ownedProcessRunning(retained.state.desktopIdentity)) {
+        claimed.add(retained.state.outputName);
+      }
+    }
+    return claimed;
   }
 
   #validateProvision(provision: BotScreenProvision): void {
@@ -1145,8 +1169,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     writeFileSync(
       path.join(session.runtimeDir, SURFACE_STATE_FILE),
       JSON.stringify({
-        generation: session.provision.generation,
-        computerGeneration: session.computer.generation,
+        generation: session.computer.generation,
         outputName: session.outputName,
         workspaceName: session.workspaceName,
         ...(session.desktopPid === undefined ? {} : { desktopPid: session.desktopPid }),
@@ -1164,8 +1187,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (
         typeof parsed.generation !== "number"
         || !Number.isSafeInteger(parsed.generation)
-        || typeof parsed.computerGeneration !== "number"
-        || !Number.isSafeInteger(parsed.computerGeneration)
         || typeof parsed.outputName !== "string"
         || typeof parsed.workspaceName !== "string"
       ) {
@@ -1174,7 +1195,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const computerRuntimeDir = path.join(
         this.options.runtimeRoot,
         "computer",
-        String(parsed.computerGeneration),
+        String(parsed.generation),
       );
       const desktopIdentity = readOwnedIdentity(
         parsed.desktopIdentity,
@@ -1184,7 +1205,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (desktopIdentity === undefined) return undefined;
       return {
         generation: parsed.generation,
-        computerGeneration: parsed.computerGeneration,
         outputName: parsed.outputName,
         workspaceName: parsed.workspaceName,
         ...(typeof parsed.desktopPid === "number" ? { desktopPid: parsed.desktopPid } : {}),

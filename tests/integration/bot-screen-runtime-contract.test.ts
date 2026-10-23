@@ -30,7 +30,6 @@ const SURFACE_ID = "surf_55555555555555555555555555555555" as SurfaceId;
 function provision(): BotScreenProvision {
   return {
     surfaceId: SURFACE_ID,
-    generation: 1,
     geometryGeneration: 7,
     logicalWidth: 1_920,
     logicalHeight: 1_080,
@@ -130,7 +129,7 @@ function contract(name: string, create: () => ContractScreen | Promise<ContractS
     test("delivers input only under the authority it granted", async () => {
       const envelope = (epoch: number, sequence: number): BotScreenInputEvent => ({
         surfaceId: screen.provision.surfaceId,
-        runtimeGeneration: screen.provision.generation,
+        runtimeGeneration: runtime.generation,
         geometryGeneration: screen.provision.geometryGeneration,
         controllerEpoch: epoch,
         sequence,

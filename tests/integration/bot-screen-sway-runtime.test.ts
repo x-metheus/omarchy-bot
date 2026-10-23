@@ -119,10 +119,9 @@ await serveFakeSwayIpc({
   };
 }
 
-function provision(surfaceId: SurfaceId, generation = 1) {
+function provision(surfaceId: SurfaceId) {
   return {
     surfaceId,
-    generation,
     geometryGeneration: 7,
     logicalWidth: 2,
     logicalHeight: 1,
@@ -176,32 +175,18 @@ test("two Screens share one private Bot Computer session and persistent profile"
     input: "ready" as const,
     computerWorker: "ready" as const,
   };
-  const first = await adapter.start({
-    surfaceId: SURFACE_A,
-    generation: 1,
-    geometryGeneration: 7,
-    logicalWidth: 2,
-    logicalHeight: 1,
-    scale: 1,
-    refreshRate: 15,
-  });
-  const second = await adapter.start({
-    surfaceId: SURFACE_B,
-    generation: 2,
-    geometryGeneration: 7,
-    logicalWidth: 2,
-    logicalHeight: 1,
-    scale: 1,
-    refreshRate: 15,
-  });
+  const first = await adapter.start(provision(SURFACE_A));
+  const second = await adapter.start(provision(SURFACE_B));
   expect(first.readiness).toEqual(expectedReadiness);
   expect(second.readiness).toEqual({
     ...expectedReadiness,
     output: { ...expectedReadiness.output, geometryGeneration: 7 },
   });
+  expect(second.generation).toBe(first.generation);
 
-  const firstRuntime = path.join(runtimeRoot, SURFACE_A, "1");
-  const secondRuntime = path.join(runtimeRoot, SURFACE_B, "2");
+  const computerGeneration = String(first.generation);
+  const firstRuntime = path.join(runtimeRoot, SURFACE_A, computerGeneration);
+  const secondRuntime = path.join(runtimeRoot, SURFACE_B, computerGeneration);
   const sharedProfile = path.join(profileRoot, "computer");
   expect(statSync(firstRuntime).mode & 0o777).toBe(0o700);
   expect(statSync(secondRuntime).mode & 0o777).toBe(0o700);
@@ -262,7 +247,7 @@ test("shared compositor exit reports the same infrastructure failure to every Sc
     },
   });
   const first = await adapter.start(provision(SURFACE_A));
-  const second = await adapter.start(provision(SURFACE_B, 2));
+  const second = await adapter.start(provision(SURFACE_B));
   try {
     process.kill(Number(readFileSync(swayPid, "utf8")), "SIGTERM");
     await expect(Promise.all([first.outcome, second.outcome])).resolves.toEqual([
@@ -308,7 +293,7 @@ test("Sway capture, worker actions, and private input succeed while missing WayV
   await runtime.setInputAuthority(1);
   const context = {
     surfaceId: SURFACE_A,
-    runtimeGeneration: 1,
+    runtimeGeneration: runtime.generation,
     geometryGeneration: 7,
     controllerEpoch: 1,
   };
@@ -551,9 +536,9 @@ test("a desktop exit fails only that Sway Screen and leaves the sibling runtime"
       startComputerWorker: async (scope) => fakeWorker(scope.surfaceId, scope.runtimeGeneration),
     },
   });
-  const affected = await adapter.start(provision(SURFACE_A, 1));
+  const affected = await adapter.start(provision(SURFACE_A));
   const affectedPid = Number(readFileSync(desktopPid, "utf8"));
-  const sibling = await adapter.start(provision(SURFACE_B, 1));
+  const sibling = await adapter.start(provision(SURFACE_B));
   const outcome = affected.outcome;
   process.kill(affectedPid, "SIGTERM");
   await expect(outcome).resolves.toMatchObject({
@@ -561,7 +546,7 @@ test("a desktop exit fails only that Sway Screen and leaves the sibling runtime"
   });
   expect(sibling.readiness.compositor).toBe("ready");
   expect((await sibling.capture()).mediaType).toBe("image/png");
-  expect(existsSync(path.join(root, "runtime", SURFACE_B, "1"))).toBeTrue();
+  expect(existsSync(path.join(root, "runtime", SURFACE_B, String(sibling.generation)))).toBeTrue();
   await affected.stop();
   await sibling.stop();
   await adapter.destroy(SURFACE_A);
@@ -617,7 +602,7 @@ exec ${JSON.stringify(realSway)} "$@"
   expect((await started.capture()).mediaType).toBe("image/png");
   const staleView = await started.acquireExpandedView();
   await expect(staleView.receive()).resolves.toEqual(expect.any(Uint8Array));
-  const staleWayvncSocket = path.join(root, "runtime", SURFACE_A, "1", "wayvnc.sock");
+  const staleWayvncSocket = path.join(root, "runtime", SURFACE_A, String(started.generation), "wayvnc.sock");
   expect(existsSync(staleWayvncSocket)).toBeTrue();
   const second = new SwayBotScreenRuntimeAdapter(options);
   const recovered = await second.reconcile(provision(SURFACE_A));
@@ -633,17 +618,64 @@ exec ${JSON.stringify(realSway)} "$@"
     computerWorker: "ready",
   });
   expect(readFileSync(swayStarts, "utf8").trim().split("\n")).toHaveLength(1);
+  expect(recovered!.generation).toBe(started.generation);
   expect(workerStarts).toBe(2);
   expect((await recovered!.capture()).mediaType).toBe("image/png");
-  expect(existsSync(path.join(root, "runtime", SURFACE_A, "1"))).toBeTrue();
+  expect(existsSync(path.join(root, "runtime", SURFACE_A, String(started.generation)))).toBeTrue();
   await recovered!.stop();
   expect(existsSync(path.join(root, "runtime", SURFACE_A))).toBeFalse();
   expect(existsSync(path.join(root, "profiles", "computer"))).toBeTrue();
   await second.destroy(SURFACE_A);
 });
 
-const realSway = process.env.OMARCHY_BOT_REAL_SWAY === "1" ? test : test.skip;
+test("a replacement Screen does not take an output a live unreconciled Screen still owns", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-retained-output-"));
+  const bin = path.join(root, "bin");
+  mkdirSync(bin);
+  const png = path.join(root, "screen.png");
+  writeFileSync(png, SCREEN_PNG);
+  const bins = installFakeSwayBins(bin, { png });
+  const options = {
+    runtimeRoot: path.join(root, "runtime"),
+    profileRoot: path.join(root, "profiles"),
+    swayBin: bins.sway,
+    wlrRandrBin: bins.wlrRandr,
+    grimBin: bins.grim,
+    inputHelperBin: bins.input,
+    captureHelperBin: bins.capture,
+    botDesktopBin: bins.desktop,
+    computerWorkers: {
+      startComputerWorker: async (scope: ComputerWorkerScope) => fakeWorker(scope.surfaceId, scope.runtimeGeneration),
+    },
+  };
+  const first = new SwayBotScreenRuntimeAdapter(options);
+  const retained = await first.start(provision(SURFACE_A));
 
+  // A second adapter sees the first Screen's live desktop on disk but has not reattached it yet.
+  const second = new SwayBotScreenRuntimeAdapter(options);
+  const replacement = await second.start(provision(SURFACE_B));
+  expect(replacement.generation).toBe(retained.generation);
+  const retainedState = JSON.parse(
+    readFileSync(
+      path.join(root, "runtime", SURFACE_A, String(retained.generation), "surface.json"),
+      "utf8",
+    ),
+  ) as { outputName: string };
+  const replacementState = JSON.parse(
+    readFileSync(
+      path.join(root, "runtime", SURFACE_B, String(replacement.generation), "surface.json"),
+      "utf8",
+    ),
+  ) as { outputName: string };
+  expect(replacementState.outputName).not.toBe(retainedState.outputName);
+
+  await replacement.stop();
+  await retained.stop();
+  await second.destroy(SURFACE_B);
+  await first.destroy(SURFACE_A);
+});
+
+const realSway = process.env.OMARCHY_BOT_REAL_SWAY === "1" ? test : test.skip;
 realSway("real pinned Sway delivers an RFB banner through acquireExpandedView", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "obw-"));
   const grim = Bun.which("grim");
@@ -856,48 +888,6 @@ realSway("WebSocket RFB survives preview teardown before expand", async () => {
   }
 }, 40_000);
 
-test("invalid shared state removes private orphans without terminating unrelated processes", async () => {
-  root = mkdtempSync(path.join(os.tmpdir(), "ob-pid-"));
-  const runtimeRoot = path.join(root, "r");
-  const runtimeComputerDir = path.join(runtimeRoot, "computer");
-  const runtimeDir = path.join(runtimeComputerDir, "123");
-  mkdirSync(runtimeDir, { recursive: true });
-  writeFileSync(path.join(runtimeComputerDir, "computer.json"), JSON.stringify({
-    generation: 123,
-  }));
-  const orphan = Bun.spawn(["sleep", "3600"], {
-    env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: runtimeDir },
-    stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true,
-  });
-  const victim = Bun.spawn(["sleep", "3600"], {
-    env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: path.join(root, "victim") },
-    stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true,
-  });
-  const adapter = new SwayBotScreenRuntimeAdapter({
-    runtimeRoot,
-    profileRoot: path.join(root, "profiles"),
-    computerWorkers: {
-      startComputerWorker: async (scope) => fakeWorker(scope.surfaceId, scope.runtimeGeneration),
-    },
-  });
-  try {
-    expect(await adapter.reconcile(provision(SURFACE_A))).toBeUndefined();
-    expect(await Promise.race([
-      orphan.exited.then(() => "exited"),
-      Bun.sleep(1_000).then(() => "alive"),
-    ])).toBe("exited");
-    expect(await Promise.race([
-      victim.exited.then(() => "exited"),
-      Bun.sleep(50).then(() => "alive"),
-    ])).toBe("alive");
-    expect(existsSync(runtimeComputerDir)).toBeFalse();
-  } finally {
-    if (orphan.exitCode === null) orphan.kill("SIGKILL");
-    if (victim.exitCode === null) victim.kill("SIGKILL");
-    await Promise.all([orphan.exited, victim.exited]);
-  }
-});
-
 test("partial Sway startup is not Cage and private orphan processes are cleaned", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "ob-partial-"));
   const bin = path.join(root, "bin");
@@ -916,13 +906,21 @@ test("partial Sway startup is not Cage and private orphan processes are cleaned"
   writeFileSync(bins.desktop, `#!/bin/sh\nprintf '%s' "$$" > ${JSON.stringify(desktopEntered)}\nexec sleep 3600\n`);
   const adapter = new SwayBotScreenRuntimeAdapter(options);
   const starting = adapter.start(provision(SURFACE_A)).then(() => "ready", () => "failed");
-  const runtimeDir = path.join(options.runtimeRoot, SURFACE_A, "1");
   try {
     const deadline = Date.now() + 3_000;
     while (!existsSync(desktopEntered)) {
       if (Date.now() > deadline) throw new Error("partial startup never reached Desktop");
       await Bun.sleep(10);
     }
+    const computerState: unknown = JSON.parse(
+      readFileSync(path.join(options.runtimeRoot, "computer", "computer.json"), "utf8"),
+    );
+    if (typeof computerState !== "object" || computerState === null || !("generation" in computerState)) {
+      throw new Error("Bot Computer state has no generation");
+    }
+    const computerGeneration = computerState.generation;
+    expect(typeof computerGeneration).toBe("number");
+    const runtimeDir = path.join(options.runtimeRoot, SURFACE_A, String(computerGeneration));
     expect(existsSync(path.join(runtimeDir, "session.json"))).toBeFalse();
     const recovered = new SwayBotScreenRuntimeAdapter(options);
     expect(await recovered.reconcile(provision(SURFACE_A))).toBeUndefined();

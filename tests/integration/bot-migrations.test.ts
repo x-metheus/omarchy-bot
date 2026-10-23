@@ -179,8 +179,14 @@ describe("integration: deployed schema convergence", () => {
       expect(adapter.starts).toHaveLength(1);
       expect(adapter.starts[0]).toMatchObject({
         surfaceId: "surf_11111111111111111111111111111111",
-        generation: 5,
       });
+      // Recovery records the attached Bot Computer generation, not a Screen counter.
+      expect(
+        db.query(
+          `SELECT runtime_generation FROM bot_surfaces
+           WHERE surface_id = 'surf_11111111111111111111111111111111'`,
+        ).get(),
+      ).toEqual({ runtime_generation: adapter.generation });
     } finally {
       await screens.shutdown();
       db.close();

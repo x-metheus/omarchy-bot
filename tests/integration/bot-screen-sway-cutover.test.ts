@@ -140,8 +140,9 @@ test("production Sway serves a Computer Surface, Agent-only use, and deletion", 
   expect(preview.status).toBe(200);
   await waitScreenReady(harness, owner);
   const agentShot = await harness.svc.screens.act(owner, { name: "screenshot", args: {} });
-  expect(agentShot.desktopSession?.runtimeGeneration).toBe(1);
-  expect(existsSync(path.join(harness.home, "r", owner.surfaceId, "1", "surface.json"))).toBeTrue();
+  const generation = agentShot.desktopSession?.runtimeGeneration;
+  expect(generation).toBeNumber();
+  expect(existsSync(path.join(harness.home, "r", owner.surfaceId, String(generation), "surface.json"))).toBeTrue();
 
   const workspaceMarker = path.join(harness.svc.cfg.sharedWorkspaceDir, "cutover-keep.txt");
   mkdirSync(harness.svc.cfg.sharedWorkspaceDir, { recursive: true });

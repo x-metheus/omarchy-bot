@@ -6,6 +6,7 @@ import type { MessageDto } from "../../packages/protocol/src/index.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import { api, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 import { createComputerTool } from "../../workers/pi/src/computer-tool.ts";
+import { until } from "./helpers/bot-screen-load-observe.ts";
 
 interface ComputerView {
   botId: string;
@@ -78,7 +79,7 @@ describe("Bot-bound Pi computer tool", () => {
     h = undefined;
   });
 
-  test("Pi receives the actual desktop generation after a desktop restart without changing conversation binding", async () => {
+  test("Pi receives the actual desktop generation after a computer restart without changing conversation binding", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const botId = await makeBot(h, "Desktop identity Bot");
@@ -94,21 +95,34 @@ describe("Bot-bound Pi computer tool", () => {
     });
 
     expect(h.svc.screens.status(owner)).toEqual({ state: "stopped" });
-    for (const runtimeGeneration of [1, 2]) {
-      const result = await tool.execute(
-        `identity-${runtimeGeneration}`,
-        { action: "observe" },
-        undefined,
-        undefined,
-        undefined as never,
-      );
-      expect(result.details.desktopSession).toEqual({ ...owner, runtimeGeneration });
-      const text = result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
-      expect(text).toContain(JSON.stringify({ ...owner, runtimeGeneration }));
-      expect(text).not.toContain(otherSurfaceId);
-      expect(result.content.some((item) => item.type === "image")).toBeTrue();
-      if (runtimeGeneration === 1) await h.svc.screens.destroy(surfaceId);
-    }
+    const observe = async (toolCallId: string) => tool.execute(
+      toolCallId,
+      { action: "observe" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    const first = await observe("identity-1");
+    expect(first.details.desktopSession).toEqual({ ...owner, runtimeGeneration: 1 });
+    const firstText = first.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+    expect(firstText).toContain(JSON.stringify({ ...owner, runtimeGeneration: 1 }));
+    expect(firstText).not.toContain(otherSurfaceId);
+    expect(first.content.some((item) => item.type === "image")).toBeTrue();
+
+    // Only a new Bot Computer advances the generation the tool reports.
+    adapter.exitCompositor(surfaceId);
+    await until(
+      () => adapter.running(surfaceId) === undefined ? true : undefined,
+      5_000,
+      "failed Screen runtime was not cleaned",
+    );
+    const second = await observe("identity-2");
+    expect(second.details.desktopSession).toEqual({ ...owner, runtimeGeneration: 2 });
+    const secondText = second.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+    expect(secondText).toContain(JSON.stringify({ ...owner, runtimeGeneration: 2 }));
+    expect(secondText).not.toContain(otherSurfaceId);
+    expect(second.content.some((item) => item.type === "image")).toBeTrue();
+
     expect(h.svc.screens.status({ botId: otherBotId, surfaceId: otherSurfaceId })).toEqual({ state: "stopped" });
   });
 

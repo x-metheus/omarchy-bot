@@ -74,7 +74,6 @@ export class BotScreenInputRejectedError extends Error {
 
 export interface BotScreenProvision {
   surfaceId: SurfaceId;
-  generation: number;
   geometryGeneration: number;
   logicalWidth: number;
   logicalHeight: number;
@@ -141,6 +140,8 @@ export interface BotScreenLaunchRequest {
  * routes the same windows, and owns only its own lifecycle.
  */
 export interface BotScreenRuntime {
+  /** The Bot Computer generation this Screen attached under. */
+  readonly generation: number;
   readonly readiness: BotScreenRuntimeReadiness;
   readonly expandedProjection?: "rfb";
   capture(): Promise<BotScreenCapture>;
@@ -387,7 +388,6 @@ interface SurfaceRow {
 
 interface RuntimeEntry {
   start: Promise<BotScreenRuntime>;
-  provision: BotScreenProvision;
   runtime?: BotScreenRuntime;
 }
 
@@ -451,7 +451,7 @@ export class BotScreenManager {
 
     for (const row of rows) {
       await this.#serialize(row.surface_id, async () => {
-        const provision = this.#provision(row.surface_id, row.runtime_generation, row);
+        const provision = this.#provision(row.surface_id, row);
         const runtime = await this.adapter.reconcile?.(provision).catch(() => undefined);
         if (row.lifecycle_state === "failed") {
           await runtime?.releaseInput().catch(() => {});
@@ -466,7 +466,7 @@ export class BotScreenManager {
           return;
         }
         if (runtime !== undefined) {
-          this.#install(row.surface_id, provision, Promise.resolve(runtime), runtime);
+          this.#install(row.surface_id, Promise.resolve(runtime), runtime);
           return;
         }
         this.#transition(row.surface_id, "stopped", null);
@@ -707,15 +707,14 @@ export class BotScreenManager {
           logical_height: this.options.logicalHeight,
         }
       : existingRow;
-    const generation = row.runtime_generation + 1;
     this.db
       .query(
         `UPDATE bot_surfaces
-         SET runtime_generation = ?, logical_width = ?, logical_height = ?
+         SET logical_width = ?, logical_height = ?
          WHERE surface_id = ?`,
       )
-      .run(generation, row.logical_width, row.logical_height, owner.surfaceId);
-    const provision = this.#provision(owner.surfaceId, generation, row);
+      .run(row.logical_width, row.logical_height, owner.surfaceId);
+    const provision = this.#provision(owner.surfaceId, row);
     const cleanupRuntime = this.#cleanupRuntimes.get(owner.surfaceId);
     const start = Promise.resolve().then(async () => {
       if (cleanupRuntime !== undefined) {
@@ -727,7 +726,7 @@ export class BotScreenManager {
       }
       return this.adapter.start(provision);
     });
-    const entry: RuntimeEntry = { provision, start };
+    const entry: RuntimeEntry = { start };
     this.#entries.set(owner.surfaceId, entry);
     this.#transition(owner.surfaceId, "starting", null);
     try {
@@ -737,7 +736,7 @@ export class BotScreenManager {
         await runtime.stop();
         return;
       }
-      this.#install(owner.surfaceId, provision, start, runtime);
+      this.#install(owner.surfaceId, start, runtime);
     } catch (error) {
       if (this.#entries.get(owner.surfaceId) !== entry) return;
       this.#entries.delete(owner.surfaceId);
@@ -747,12 +746,14 @@ export class BotScreenManager {
 
   #install(
     surfaceId: SurfaceId,
-    provision: BotScreenProvision,
     start: Promise<BotScreenRuntime>,
     runtime: BotScreenRuntime,
   ): void {
-    const entry: RuntimeEntry = { provision, start, runtime };
+    const entry: RuntimeEntry = { start, runtime };
     this.#entries.set(surfaceId, entry);
+    this.db
+      .query(`UPDATE bot_surfaces SET runtime_generation = ? WHERE surface_id = ?`)
+      .run(runtime.generation, surfaceId);
     this.#transition(surfaceId, "ready", null);
     void runtime.outcome.then((outcome) =>
       this.#failRuntime(surfaceId, entry, this.#outcomeFailure(outcome))
@@ -831,10 +832,9 @@ export class BotScreenManager {
   }
 
 
-  #provision(surfaceId: SurfaceId, generation: number, row: SurfaceRow): BotScreenProvision {
+  #provision(surfaceId: SurfaceId, row: SurfaceRow): BotScreenProvision {
     return {
       surfaceId,
-      generation,
       geometryGeneration: 1,
       logicalWidth: row.logical_width,
       logicalHeight: row.logical_height,

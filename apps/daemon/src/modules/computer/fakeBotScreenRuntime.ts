@@ -31,7 +31,6 @@ interface FakeBotScreenRuntimeOptions {
 }
 
 interface FakeRuntimeRecord {
-  provision: BotScreenProvision;
   runtime: BotScreenRuntime;
   finish(outcome: BotScreenRuntimeOutcome): void;
 }
@@ -89,6 +88,8 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #startAttempts = 0;
   #startAttemptWaiters: Array<{ count: number; resolve: () => void }> = [];
   #startFailures = new Map<string, string>();
+  /** The fake Bot Computer generation every attached Screen reports. */
+  #generation = 0;
 
   constructor(
     private readonly failure?: string,
@@ -230,9 +231,14 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     return this.#actionsStarted;
   }
 
+  /** The Bot Computer generation every attached Screen reports. */
+  get generation(): number {
+    return this.#generation;
+  }
+
   running(surfaceId: string): { generation: number } | undefined {
     const record = this.#runtimes.get(surfaceId);
-    return record === undefined ? undefined : { generation: record.provision.generation };
+    return record === undefined ? undefined : { generation: record.runtime.generation };
   }
 
   runtimeOutcome(surfaceId: string): Promise<BotScreenRuntimeOutcome> {
@@ -249,7 +255,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const record = this.#record(surfaceId);
     this.applicationExits.push({
       surfaceId,
-      runtimeGeneration: record.provision.generation,
+      runtimeGeneration: record.runtime.generation,
     });
   }
 
@@ -266,12 +272,21 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   exitCompositor(surfaceId: string, message = "fake Bot Screen compositor exited"): void {
+    this.#compositorExited();
     this.#finish(surfaceId, { type: "compositor-exited", error: new Error(message) });
   }
 
   /** The fake Bot Screens share one compositor, so all of them exit together. */
   exitSharedCompositor(message = "fake shared compositor exited"): void {
-    for (const surfaceId of [...this.#runtimes.keys()]) this.exitCompositor(surfaceId, message);
+    this.#compositorExited();
+    for (const surfaceId of [...this.#runtimes.keys()]) {
+      this.#finish(surfaceId, { type: "compositor-exited", error: new Error(message) });
+    }
+  }
+
+  /** A new compositor means a new generation for every Screen attached to it. */
+  #compositorExited(): void {
+    this.#generation += 1;
   }
 
   #record(surfaceId: string): FakeRuntimeRecord {
@@ -303,7 +318,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   async reconcile(provision: BotScreenProvision): Promise<BotScreenRuntime | undefined> {
     const record = this.#runtimes.get(provision.surfaceId);
-    if (record === undefined || record.provision.generation !== provision.generation) return undefined;
+    if (record === undefined || record.runtime.generation !== this.#generation) return undefined;
     if (!this.#unreconciled.delete(provision.surfaceId)) return record.runtime;
     await record.runtime.stop();
     return undefined;
@@ -325,6 +340,8 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const failure = this.#startFailures.get(provision.surfaceId) ?? this.failure;
     if (failure !== undefined) throw new Error(failure);
     this.starts.push(provision);
+    this.#generation ||= 1;
+    const generation = this.#generation;
     let stopped = false;
     let controllerEpoch: number | undefined;
     let highestControllerEpoch = 0;
@@ -338,6 +355,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const captureStreams = new Set<BotScreenCaptureStream>();
     const expandedViews = new Set<BotScreenExpandedView>();
     const runtime: BotScreenRuntime = {
+      generation,
       expandedProjection: "rfb",
       readiness: {
         compositor: "ready",
@@ -504,7 +522,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         }
         if (
           event.surfaceId !== provision.surfaceId
-          || event.runtimeGeneration !== provision.generation
+          || event.runtimeGeneration !== generation
           || event.geometryGeneration !== provision.geometryGeneration
           || event.controllerEpoch !== controllerEpoch
           || !Number.isSafeInteger(event.sequence)
@@ -531,7 +549,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           }
           const recorded = {
             surfaceId: provision.surfaceId,
-            runtimeGeneration: provision.generation,
+            runtimeGeneration: generation,
             event,
           };
           this.inputEvents.push(recorded);
@@ -542,7 +560,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           if (event.type === "key" || event.type === "paste") return;
           this.pointerEvents.push({
             surfaceId: provision.surfaceId,
-            runtimeGeneration: provision.generation,
+            runtimeGeneration: generation,
             event,
           });
           for (const waiter of this.#pointerWaiters.splice(0)) {
@@ -579,13 +597,13 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       stop: async (): Promise<void> => {
         if (stopped) return;
         stopped = true;
-        this.stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: provision.generation });
+        this.stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: generation });
         await Promise.allSettled([...captureStreams].map((stream) => stream.close()));
         await Promise.allSettled([...expandedViews].map((view) => view.close()));
         if (this.#runtimes.get(provision.surfaceId) === record) this.#runtimes.delete(provision.surfaceId);
       },
     };
-    record = { provision, runtime, finish: outcome.resolve };
+    record = { runtime, finish: outcome.resolve };
     this.#runtimes.set(provision.surfaceId, record);
     return runtime;
   }

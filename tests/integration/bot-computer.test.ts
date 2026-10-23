@@ -173,6 +173,39 @@ test("ensure discards the recorded computer and starts fresh when the compositor
   await second.stop();
 });
 
+test("invalid shared state removes private orphans without terminating unrelated processes", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-orphan-"));
+  const runtimeComputerDir = path.join(root, "runtime", "computer");
+  const orphanRuntimeDir = path.join(runtimeComputerDir, "123");
+  mkdirSync(orphanRuntimeDir, { recursive: true });
+  writeFileSync(path.join(runtimeComputerDir, "computer.json"), JSON.stringify({ generation: 123 }));
+  const orphan = Bun.spawn(["sleep", "3600"], {
+    env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: orphanRuntimeDir },
+    stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true,
+  });
+  const victim = Bun.spawn(["sleep", "3600"], {
+    env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: path.join(root, "victim") },
+    stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true,
+  });
+  const runtime = new BotComputerRuntime(computerOptions(installFakeComputerBins(path.join(root, "bin"))));
+  try {
+    expect(await runtime.reattach()).toBeUndefined();
+    expect(await Promise.race([
+      orphan.exited.then(() => "exited"),
+      Bun.sleep(1_000).then(() => "alive"),
+    ])).toBe("exited");
+    expect(await Promise.race([
+      victim.exited.then(() => "exited"),
+      Bun.sleep(50).then(() => "alive"),
+    ])).toBe("alive");
+    expect(existsSync(runtimeComputerDir)).toBeFalse();
+  } finally {
+    if (orphan.exitCode === null) orphan.kill("SIGKILL");
+    if (victim.exitCode === null) victim.kill("SIGKILL");
+    await Promise.all([orphan.exited, victim.exited]);
+  }
+});
+
 test("stop terminates the compositor and session bus and clears current", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-"));
   const bin = installFakeComputerBins(path.join(root, "bin"));
@@ -187,3 +220,4 @@ test("stop terminates the compositor and session bus and clears current", async 
   expect(alive(state.dbusPid)).toBeFalse();
   expect(existsSync(path.join(root, "runtime", "computer"))).toBeFalse();
 });
+

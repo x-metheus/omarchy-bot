@@ -325,7 +325,6 @@ await Promise.withResolvers<void>().promise;
 
   const runtime = await adapter.start({
     surfaceId: SURFACE_ID,
-    generation: 1,
     geometryGeneration: 7,
     logicalWidth: 2,
     logicalHeight: 1,
@@ -450,13 +449,14 @@ function pasteTexts(logPath: string): string[] {
 }
 
 function inputEnvelope(
+  runtime: BotScreenRuntime,
   epoch: number,
   sequence: number,
   event: BotScreenInputAction,
 ): Parameters<BotScreenRuntime["input"]>[0] {
   return {
     surfaceId: SURFACE_ID,
-    runtimeGeneration: 1,
+    runtimeGeneration: runtime.generation,
     geometryGeneration: 7,
     controllerEpoch: epoch,
     sequence,
@@ -468,7 +468,7 @@ test("input without the input lease is rejected before the helper is touched", a
   const fixture = await startControlRuntime();
   try {
     await expect(
-      fixture.runtime.input(inputEnvelope(1, 1, { type: "motion", x: 4, y: 5 })),
+      fixture.runtime.input(inputEnvelope(fixture.runtime, 1, 1, { type: "motion", x: 4, y: 5 })),
     ).rejects.toThrow();
     expect(inputHelperLines(fixture.inputLog)).toEqual([]);
   } finally {
@@ -480,31 +480,31 @@ test("leased pointer, key, and paste events drive the private virtual-input help
   const fixture = await startControlRuntime();
   try {
     const epoch = await fixture.runtime.setInputAuthority(1);
-    await fixture.runtime.input(inputEnvelope(epoch, 1, { type: "motion", x: 4, y: 5 }));
-    await fixture.runtime.input(inputEnvelope(epoch, 2, {
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 1, { type: "motion", x: 4, y: 5 }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 2, {
       type: "button",
       x: 4,
       y: 5,
       button: "left",
       state: "pressed",
     }));
-    await fixture.runtime.input(inputEnvelope(epoch, 3, {
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 3, {
       type: "button",
       x: 4,
       y: 5,
       button: "left",
       state: "released",
     }));
-    await fixture.runtime.input(inputEnvelope(epoch, 4, {
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 4, {
       type: "scroll",
       x: 4,
       y: 5,
       deltaX: 1,
       deltaY: -120,
     }));
-    await fixture.runtime.input(inputEnvelope(epoch, 5, { type: "key", keyCode: 28, state: "pressed" }));
-    await fixture.runtime.input(inputEnvelope(epoch, 6, { type: "key", keyCode: 28, state: "released" }));
-    await fixture.runtime.input(inputEnvelope(epoch, 7, { type: "paste", text: "你好, world" }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 5, { type: "key", keyCode: 28, state: "pressed" }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 6, { type: "key", keyCode: 28, state: "released" }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 7, { type: "paste", text: "你好, world" }));
     await fixture.runtime.releaseInput(epoch);
 
     const lines = inputHelperLines(fixture.inputLog);
@@ -527,7 +527,6 @@ test("human input authority serializes the shared seat across Screen workspaces"
   const fixture = await startControlRuntime();
   const second = await fixture.adapter.start({
     surfaceId: SURFACE_B,
-    generation: 2,
     geometryGeneration: 7,
     logicalWidth: 2,
     logicalHeight: 1,
@@ -592,7 +591,7 @@ test("a paste the private helper cannot perform fails the Screen input", async (
   try {
     const epoch = await fixture.runtime.setInputAuthority(1);
     await expect(
-      fixture.runtime.input(inputEnvelope(epoch, 1, { type: "paste", text: "你好, world" })),
+      fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 1, { type: "paste", text: "你好, world" })),
     ).rejects.toThrow();
     expect(pasteTexts(fixture.inputLog)).toEqual(["你好, world"]);
   } finally {

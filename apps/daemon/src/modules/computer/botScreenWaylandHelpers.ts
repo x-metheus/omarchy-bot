@@ -60,13 +60,14 @@ export class WaylandVirtualInput {
 
   private constructor(
     private readonly process: PointerProcess,
+    generation: number,
     provision: BotScreenProvision,
   ) {
     this.#responses = new ProcessLineReader(
       process.stdout,
       "Bot Screen input helper closed its protocol stream",
     );
-    this.#context = `${provision.surfaceId} ${provision.generation} ${provision.geometryGeneration}`;
+    this.#context = `${provision.surfaceId} ${generation} ${provision.geometryGeneration}`;
     this.exited = process.exited.then((status) => new Error(`Bot Screen input helper exited with status ${status}`));
   }
 
@@ -78,6 +79,7 @@ export class WaylandVirtualInput {
     binary: string,
     outputName: string,
     launcherEnvironment: Record<string, string>,
+    generation: number,
     provision: BotScreenProvision,
     commandPrefix: string[],
   ): Promise<WaylandVirtualInput> {
@@ -86,7 +88,7 @@ export class WaylandVirtualInput {
       binary,
       outputName,
       provision.surfaceId,
-      String(provision.generation),
+      String(generation),
       String(provision.geometryGeneration),
       String(provision.logicalWidth),
       String(provision.logicalHeight),
@@ -96,7 +98,7 @@ export class WaylandVirtualInput {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const input = new WaylandVirtualInput(process, provision);
+    const input = new WaylandVirtualInput(process, generation, provision);
     const ready = await Promise.race([
       input.#responses.next(),
       process.exited.then(async (status) => {

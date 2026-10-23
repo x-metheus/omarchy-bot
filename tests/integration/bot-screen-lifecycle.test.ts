@@ -13,7 +13,7 @@ import {
   waitThreadIdle,
   type Harness,
 } from "./helpers/harness.ts";
-import { createScriptedSwayFixture } from "./helpers/swayBotScreen.ts";
+import { createScriptedSwayFixture, type ScriptedSwayFixture } from "./helpers/swayBotScreen.ts";
 
 async function bot(h: Harness, botId: string): Promise<BotDto> {
   return api(h, "GET", `/api/bots/${botId}`);
@@ -44,6 +44,20 @@ async function activateScreen(
   );
   expect(snapshot.status).toBe(200);
   return waitForState(h, owner, "ready");
+}
+
+/** The Bot Computer generation the fixture's live computer runs under. */
+function computerGeneration(fixture: ScriptedSwayFixture): string {
+  const generation = readdirSync(path.join(fixture.runtimeRoot, "computer"))
+    .find((entry) => /^\d+$/.test(entry));
+  if (generation === undefined) throw new Error("Bot Computer runtime is missing");
+  return generation;
+}
+
+/** Bot Computer generations retained on disk for one Screen. */
+function screenGenerations(fixture: ScriptedSwayFixture, surfaceId: string): string[] {
+  const surfaceDir = path.join(fixture.runtimeRoot, surfaceId);
+  return existsSync(surfaceDir) ? readdirSync(surfaceDir).filter((entry) => /^\d+$/.test(entry)) : [];
 }
 
 describe("Bot Screen lifecycle", () => {
@@ -98,7 +112,7 @@ describe("Bot Screen lifecycle", () => {
     expect(adapter.starts.filter((start) => start.surfaceId === owner.surfaceId)).toHaveLength(1);
   });
 
-  test("daemon restart cleans an invalid runtime tree and reprovisions a new generation", async () => {
+  test("daemon restart cleans an invalid runtime tree and reattaches at the computer generation", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const owner = await bot(h, await makeBot(h, "Recreate Screen"));
@@ -110,13 +124,12 @@ describe("Bot Screen lifecycle", () => {
     h = await startDaemon(home, { botScreenAdapter: adapter });
 
     await waitForState(h, owner, "ready");
-    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 2 });
+    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
     expect(adapter.stops).toContainEqual({ surfaceId: owner.surfaceId, runtimeGeneration: 1 });
-    expect(adapter.starts.filter((start) => start.surfaceId === owner.surfaceId).map((start) => start.generation))
-      .toEqual([1, 2]);
+    expect(adapter.starts.filter((start) => start.surfaceId === owner.surfaceId)).toHaveLength(2);
   });
 
-  test("a recovered failed Screen retries at a fresh generation without disturbing its sibling or deletion", async () => {
+  test("a recovered failed Screen retries at the computer generation without disturbing its sibling or deletion", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const failed = await bot(h, await makeBot(h, "Failed Lifecycle"));
@@ -147,7 +160,7 @@ describe("Bot Screen lifecycle", () => {
     expect(adapter.starts).toHaveLength(startsBeforeRestart);
 
     await activateScreen(h, failed);
-    expect(adapter.running(failed.surfaceId)).toEqual({ generation: 2 });
+    expect(adapter.running(failed.surfaceId)).toEqual({ generation: 1 });
     expect(await waitForState(h, unaffected, "ready")).toMatchObject({
       botId: unaffected.id,
       surfaceId: unaffected.surfaceId,
@@ -200,26 +213,32 @@ describe("Bot Screen lifecycle", () => {
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(affected.id)}&surfaceId=${encodeURIComponent(affected.surfaceId)}`,
     )).status).toBe(200);
 
+    // A failed component restarts that Screen under the same Bot Computer; only a
+    // compositor exit replaces the computer and therefore its generation.
     const failures = [
       {
         type: "desktop-exited" as const,
         fail: () => adapter.exitDesktop(affected.surfaceId),
         message: "Bot Desktop failed: fake Bot Desktop exited",
+        newComputer: false,
       },
       {
         type: "input-helper-exited" as const,
         fail: () => adapter.exitInputHelper(affected.surfaceId),
         message: "Bot Screen input helper failed: fake Bot Screen input helper exited",
+        newComputer: false,
       },
       {
         type: "computer-worker-exited" as const,
         fail: () => adapter.exitComputerWorker(affected.surfaceId),
         message: "Bot Screen computer worker failed: fake Bot Screen computer worker exited",
+        newComputer: false,
       },
       {
         type: "compositor-exited" as const,
         fail: () => adapter.exitCompositor(affected.surfaceId),
         message: "Bot Computer compositor failed: fake Bot Screen compositor exited",
+        newComputer: true,
       },
     ];
 
@@ -246,7 +265,7 @@ describe("Bot Screen lifecycle", () => {
       )).status).toBe(200);
 
       await activateScreen(h, affected);
-      generation += 1;
+      if (failure.newComputer) generation += 1;
       const replacement = await h.svc.screens.projectionSource({
         botId: affected.id,
         surfaceId: affected.surfaceId,
@@ -323,7 +342,7 @@ describe("Bot Screen lifecycle", () => {
     )).status).toBe(200);
   });
 
-  test("reprovision invalidates queued input, controller authority, geometry, streams, and worker generation", async () => {
+  test("reprovision invalidates queued input, controller authority, geometry, and streams", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const owner = await bot(h, await makeBot(h, "Stale runtime bindings"));
@@ -372,7 +391,7 @@ describe("Bot Screen lifecycle", () => {
     const replacement = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
     expect(replacement).toMatchObject({
       surfaceId: owner.surfaceId,
-      runtimeGeneration: 2,
+      runtimeGeneration: 1,
       geometryGeneration: 1,
     });
     await replacement!.setInputAuthority(1);
@@ -388,7 +407,7 @@ describe("Bot Screen lifecycle", () => {
     });
     expect(adapter.inputEvents.at(-1)).toMatchObject({
       surfaceId: owner.surfaceId,
-      runtimeGeneration: 2,
+      runtimeGeneration: 1,
     });
   });
 
@@ -529,7 +548,6 @@ describe("Bot Screen lifecycle", () => {
       expect(adapter.starts).toEqual([
         {
           surfaceId: owner.surfaceId,
-          generation: 1,
           geometryGeneration: 1,
           logicalWidth: 1280,
           logicalHeight: 720,
@@ -556,7 +574,6 @@ describe("Bot Screen lifecycle", () => {
 
       expect(adapter.starts.at(-1)).toEqual({
         surfaceId: owner.surfaceId,
-        generation: 2,
         geometryGeneration: 1,
         logicalWidth: 1280,
         logicalHeight: 720,
@@ -597,7 +614,7 @@ describe("Bot Screen lifecycle", () => {
     const firstUse = await sendToThread(h, first.threadId, "computer:observe");
     await waitThreadIdle(h, firstUse.threadId);
     expect(adapter.starts).toEqual([
-      expect.objectContaining({ surfaceId: owner.surfaceId, generation: 1 }),
+      expect.objectContaining({ surfaceId: owner.surfaceId }),
     ]);
     expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
     expect(await waitForState(h, owner, "ready")).toMatchObject({
@@ -633,7 +650,7 @@ describe("Bot Screen lifecycle", () => {
     expect((await view).status).toBe(200);
     await expect(action).resolves.toMatchObject({ text: "fake-open#1:fixture.desktop" });
     expect(adapter.starts).toEqual([
-      expect.objectContaining({ surfaceId: owner.surfaceId, generation: 1 }),
+      expect.objectContaining({ surfaceId: owner.surfaceId }),
     ]);
     expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
     expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
@@ -724,7 +741,7 @@ describe("Bot Screen lifecycle", () => {
 
     await activateScreen(h, sibling);
     expect(adapter.starts).toEqual([
-      expect.objectContaining({ surfaceId: sibling.surfaceId, generation: 1 }),
+      expect.objectContaining({ surfaceId: sibling.surfaceId }),
     ]);
     expect(adapter.running(sibling.surfaceId)).toEqual({ generation: 1 });
     expect(adapter.running(failed.surfaceId)).toBeUndefined();
@@ -796,14 +813,14 @@ describe("Bot Screen lifecycle", () => {
     expect(adapter.running(sibling.surfaceId)).toEqual({ generation: 1 });
 
     await activateScreen(h, affected);
-    expect(adapter.running(affected.surfaceId)).toEqual({ generation: 2 });
+    expect(adapter.running(affected.surfaceId)).toEqual({ generation: 1 });
     expect((await apiStatus(h, "GET", computerPath(affected))).body).toMatchObject({
       state: "ready",
       takeover: "unavailable",
     });
   });
 
-  test("recovery of an invalid runtime uses a fresh generation and rejects stale input", async () => {
+  test("recovery of an invalid runtime keeps the computer generation and fences stale input", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const owner = await bot(h, await makeBot(h, "Recover stale input"));
@@ -820,20 +837,20 @@ describe("Bot Screen lifecycle", () => {
     await h.disconnectForRestart();
     h = await startDaemon(home, { botScreenAdapter: adapter });
 
-    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 2 });
-    expect(adapter.starts.filter((start) => start.surfaceId === owner.surfaceId).map((start) => start.generation))
-      .toEqual([1, 2]);
+    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
+    expect(adapter.stops).toContainEqual({ surfaceId: owner.surfaceId, runtimeGeneration: 1 });
+    expect(adapter.starts.filter((start) => start.surfaceId === owner.surfaceId)).toHaveLength(2);
     expect(readFileSync(sentinel, "utf8")).toBe("shared work");
     const replacement = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
     expect(replacement).toMatchObject({
       surfaceId: owner.surfaceId,
-      runtimeGeneration: 2,
+      runtimeGeneration: 1,
       geometryGeneration: 1,
     });
     await replacement!.setInputAuthority(1);
     await expect(replacement!.input({
       surfaceId: replacement!.surfaceId,
-      runtimeGeneration: 1,
+      runtimeGeneration: replacement!.runtimeGeneration + 1,
       geometryGeneration: replacement!.geometryGeneration,
       controllerEpoch: 1,
       sequence: 1,
@@ -853,7 +870,7 @@ describe("Bot Screen lifecycle", () => {
     });
     expect(adapter.inputEvents.at(-1)).toMatchObject({
       surfaceId: owner.surfaceId,
-      runtimeGeneration: 2,
+      runtimeGeneration: 1,
     });
   });
 
@@ -951,7 +968,7 @@ describe("Bot Screen lifecycle", () => {
     const replacement = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
     expect(replacement).toMatchObject({
       surfaceId: owner.surfaceId,
-      runtimeGeneration: 2,
+      runtimeGeneration: 1,
     });
     const next = await replacement!.acquireExpandedView();
     await next.send(rfbBanner);
@@ -1010,9 +1027,9 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
         state: "ready",
       });
       expect(fixture.starts).toEqual([
-        expect.objectContaining({ surfaceId: owner.surfaceId, generation: 1 }),
+        expect.objectContaining({ surfaceId: owner.surfaceId }),
       ]);
-      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(screenGenerations(fixture, owner.surfaceId)).toEqual([computerGeneration(fixture)]);
       expect(existsSync(path.join(fixture.runtimeRoot, other.surfaceId))).toBeFalse();
       expect(h.svc.screens.status({ botId: other.id, surfaceId: other.surfaceId })).toEqual({ state: "stopped" });
     } finally {
@@ -1038,13 +1055,12 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       expect(first.status).toBe(200);
       expect(second.status).toBe(200);
       expect(fixture.starts.filter((start) => start.surfaceId === owner.surfaceId)).toHaveLength(1);
-      expect(fixture.starts[0]?.generation).toBe(1);
       expect(await waitForState(h, owner, "ready")).toMatchObject({
         botId: owner.id,
         surfaceId: owner.surfaceId,
       });
-      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
-      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "2"))).toBeFalse();
+      // One Screen under the one shared computer: exactly one runtime directory.
+      expect(screenGenerations(fixture, owner.surfaceId)).toEqual([computerGeneration(fixture)]);
     } finally {
       await h?.stop();
       h = undefined;
@@ -1077,7 +1093,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
 
       await activateScreen(h, sibling);
       expect(h.svc.screens.status({ botId: sibling.id, surfaceId: sibling.surfaceId })).toEqual({ state: "ready" });
-      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "1"))).toBeTrue();
+      expect(screenGenerations(fixture, sibling.surfaceId)).toEqual([computerGeneration(fixture)]);
       expect(existsSync(path.join(fixture.runtimeRoot, failed.surfaceId))).toBeFalse();
     } finally {
       await h?.stop();
@@ -1096,16 +1112,17 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
       const owner = await bot(h, await makeBot(h, "Sway viewer close keeps desktop"));
       await activateScreen(h, owner);
+      const generation = Number(computerGeneration(fixture));
       const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
-      expect(source?.runtimeGeneration).toBe(1);
+      expect(source?.runtimeGeneration).toBe(generation);
       const stream = await source!.openCaptureStream();
       await stream.close();
 
       await h.svc.projections.closeSurface(owner.surfaceId);
 
       expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
-      expect(source!.runtimeGeneration).toBe(1);
-      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(source!.runtimeGeneration).toBe(generation);
+      expect(screenGenerations(fixture, owner.surfaceId)).toEqual([computerGeneration(fixture)]);
       expect(fixture.stops).toEqual([]);
       expect(h.svc.projections.surfaceMedia(owner.surfaceId)).toMatchObject({
         viewers: 0,
@@ -1120,7 +1137,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       );
       expect(shot).toMatchObject({
         image: { mediaType: "image/png" },
-        desktopSession: { botId: owner.id, surfaceId: owner.surfaceId, runtimeGeneration: 1 },
+        desktopSession: { botId: owner.id, surfaceId: owner.surfaceId, runtimeGeneration: generation },
       });
       expect(await waitForState(h, owner, "ready")).toMatchObject({
         botId: owner.id,
@@ -1158,7 +1175,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       expect(listed.desktopSession).toEqual({
         botId: owner.id,
         surfaceId: owner.surfaceId,
-        runtimeGeneration: 1,
+        runtimeGeneration: Number(computerGeneration(fixture)),
       });
       expect(listed.windowList).toEqual([
         expect.objectContaining({
@@ -1174,7 +1191,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       expect(observed.windowList).toEqual(listed.windowList);
       expect(observed.image?.mediaType).toBe("image/png");
       expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
-      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(screenGenerations(fixture, owner.surfaceId)).toEqual([computerGeneration(fixture)]);
       expect(fixture.stops).toEqual([]);
     } finally {
       await h?.stop();
@@ -1226,7 +1243,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       expect(fixture.inputCommands().some((line) => line.startsWith("release "))).toBeTrue();
       expect(fixture.stops).toEqual([]);
       expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
-      expect(source!.runtimeGeneration).toBe(1);
+      expect(source!.runtimeGeneration).toBe(Number(computerGeneration(fixture)));
     } finally {
       await h?.stop();
       h = undefined;
@@ -1274,7 +1291,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       expect((await apiStatus(h, "GET", computerPath(owner))).body).toMatchObject({
         takeover: "available",
       });
-      expect(source!.runtimeGeneration).toBe(1);
+      expect(source!.runtimeGeneration).toBe(Number(computerGeneration(fixture)));
       expect(fixture.stops).toEqual([]);
       expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
 
@@ -1288,7 +1305,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       await expect(h.svc.computer.imDone({ botId: owner.id, surfaceId: owner.surfaceId }))
         .resolves.toMatchObject({});
       await expect(pending).resolves.toMatchObject({
-        desktopSession: { runtimeGeneration: 1 },
+        desktopSession: { runtimeGeneration: Number(computerGeneration(fixture)) },
       });
     } finally {
       await h?.stop();
@@ -1309,11 +1326,9 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       const sibling = await bot(h, await makeBot(h, "Sway restart sibling"));
       await Promise.all([activateScreen(h, broken), activateScreen(h, sibling)]);
       const stale = await h.svc.screens.projectionSource({ botId: broken.id, surfaceId: broken.surfaceId });
-      expect(stale?.runtimeGeneration).toBe(1);
-      const computerGeneration = readdirSync(path.join(fixture.runtimeRoot, "computer"))
-        .find((entry) => /^\d+$/.test(entry));
-      expect(computerGeneration).toBeDefined();
-      unlinkSync(path.join(fixture.runtimeRoot, "computer", computerGeneration!, "wayland-0"));
+      const replaced = computerGeneration(fixture);
+      expect(stale?.runtimeGeneration).toBe(Number(replaced));
+      unlinkSync(path.join(fixture.runtimeRoot, "computer", replaced, "wayland-0"));
       const home = h.home;
 
       await h.disconnectForRestart();
@@ -1323,24 +1338,25 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
         botId: broken.id,
         surfaceId: broken.surfaceId,
       });
-      expect(fixture.starts.filter((start) => start.surfaceId === broken.surfaceId).map((start) => start.generation))
-        .toEqual([1, 2]);
-      expect(existsSync(path.join(fixture.runtimeRoot, broken.surfaceId, "1"))).toBeFalse();
-      expect(existsSync(path.join(fixture.runtimeRoot, broken.surfaceId, "2"))).toBeTrue();
+      // A replaced computer is a new generation for every Screen attached to it.
+      const replacement = computerGeneration(fixture);
+      expect(replacement).not.toBe(replaced);
+      expect(fixture.starts.filter((start) => start.surfaceId === broken.surfaceId)).toHaveLength(2);
+      expect(existsSync(path.join(fixture.runtimeRoot, broken.surfaceId, replaced))).toBeFalse();
+      expect(existsSync(path.join(fixture.runtimeRoot, broken.surfaceId, replacement))).toBeTrue();
       expect(await waitForState(h, sibling, "ready")).toMatchObject({
         botId: sibling.id,
         surfaceId: sibling.surfaceId,
       });
-      expect(fixture.starts.filter((start) => start.surfaceId === sibling.surfaceId).map((start) => start.generation))
-        .toEqual([1, 2]);
-      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "1"))).toBeFalse();
-      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "2"))).toBeTrue();
-      const replacement = await h.svc.screens.projectionSource({ botId: broken.id, surfaceId: broken.surfaceId });
-      expect(replacement).toMatchObject({
+      expect(fixture.starts.filter((start) => start.surfaceId === sibling.surfaceId)).toHaveLength(2);
+      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, replaced))).toBeFalse();
+      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, replacement))).toBeTrue();
+      const current = await h.svc.screens.projectionSource({ botId: broken.id, surfaceId: broken.surfaceId });
+      expect(current).toMatchObject({
         surfaceId: broken.surfaceId,
-        runtimeGeneration: 2,
+        runtimeGeneration: Number(replacement),
       });
-      expect(stale!.runtimeGeneration).toBe(1);
+      expect(stale!.runtimeGeneration).toBe(Number(replaced));
     } finally {
       await h?.stop();
       h = undefined;
@@ -1371,7 +1387,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       expect(existsSync(path.join(fixture.runtimeRoot, second.surfaceId))).toBeFalse();
       expect(existsSync(path.join(fixture.profileRoot, second.surfaceId))).toBeFalse();
       expect(fixture.wayvncStarts()).toBe(0);
-      expect(existsSync(path.join(fixture.runtimeRoot, first.surfaceId, "1"))).toBeTrue();
+      expect(screenGenerations(fixture, first.surfaceId)).toEqual([computerGeneration(fixture)]);
     } finally {
       await h?.stop();
       h = undefined;
@@ -1406,7 +1422,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       expect(result).toMatchObject({ status: "deleted", removed: { surface: true } });
       expect(existsSync(path.join(fixture.runtimeRoot, deleted.surfaceId))).toBeFalse();
       expect(readFileSync(sharedProfile, "utf8")).toBe("shared profile");
-      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "1"))).toBeTrue();
+      expect(screenGenerations(fixture, sibling.surfaceId)).toEqual([computerGeneration(fixture)]);
       expect(h.svc.screens.status({ botId: sibling.id, surfaceId: sibling.surfaceId })).toEqual({ state: "ready" });
       expect(readFileSync(sentinel, "utf8")).toBe("shared work");
       expect(readFileSync(leftoverProfile, "utf8")).toBe("old profile residue");
@@ -1445,9 +1461,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
         surfaceId: owner.surfaceId,
       });
       expect(fixture.starts.filter((start) => start.surfaceId === owner.surfaceId)).toHaveLength(1);
-      expect(fixture.starts[0]?.generation).toBe(1);
-      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
-      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "2"))).toBeFalse();
+      expect(screenGenerations(fixture, owner.surfaceId)).toEqual([computerGeneration(fixture)]);
       expect((await fetch(
         `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
       )).status).toBe(200);
@@ -1458,7 +1472,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       expect(after.desktopSession).toEqual({
         botId: owner.id,
         surfaceId: owner.surfaceId,
-        runtimeGeneration: 1,
+        runtimeGeneration: Number(computerGeneration(fixture)),
       });
       expect(after.windowList).toEqual([
         expect.objectContaining({ id: "10" }),
@@ -1485,10 +1499,10 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       await Bun.sleep(1_000);
 
       expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
-      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(screenGenerations(fixture, owner.surfaceId)).toEqual([computerGeneration(fixture)]);
       expect(fixture.stops).toEqual([]);
       const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
-      expect(source?.runtimeGeneration).toBe(1);
+      expect(source?.runtimeGeneration).toBe(Number(computerGeneration(fixture)));
     } finally {
       await h?.stop();
       h = undefined;

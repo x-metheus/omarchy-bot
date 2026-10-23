@@ -311,7 +311,7 @@ for await (const chunk of Bun.stdin.stream()) {
         const runtime = await inner.start(provision);
         const stop = runtime.stop.bind(runtime);
         runtime.stop = async () => {
-          stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: provision.generation });
+          stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: runtime.generation });
           await stop();
         };
         return runtime;
