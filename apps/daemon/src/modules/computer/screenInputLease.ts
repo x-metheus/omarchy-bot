@@ -68,6 +68,8 @@ export class ScreenInputLease {
   #generation = new Map<SurfaceId, number>();
   #tools = new Map<SurfaceId, AgentTool>();
   #holder: SeatHolder | undefined;
+  /** Releases in flight, so a second drop of one holder waits for the first. */
+  #releases = new Map<SeatHolder, Promise<void>>();
   /** One shared-seat queue: call order is grant order for Bot input and Web Control. */
   #seatChain: Promise<void> = Promise.resolve();
   #waiting = 0;
@@ -192,7 +194,10 @@ export class ScreenInputLease {
     if (phase === "running") tool.phase = "takeover-requested";
     await tool.actionDone;
     // Settling during the wait removes the tool, so this request has nothing to take over.
-    if (this.#tools.get(surfaceId) !== tool || tool.phase !== "takeover-requested") return { ok: false };
+    if (this.#tools.get(surfaceId) !== tool) return { ok: false };
+    // Another request may have held the same tool while this one waited.
+    if (tool.phase === "held" || tool.phase === "completing" || tool.phase === "waiting") return { ok: true };
+    if (tool.phase !== "takeover-requested") return { ok: false };
     tool.phase = "held";
     tool.resolveActivated();
     return { ok: true };
@@ -333,18 +338,29 @@ export class ScreenInputLease {
     return holder;
   }
 
-  async #drop(holder: SeatHolder): Promise<void> {
-    if (this.#holder !== holder) return;
+  /**
+   * Releases the holder's authority and then hands the seat on. A second drop of the
+   * same holder waits for the release already in flight instead of letting the next
+   * acquirer type while held keys are still down.
+   */
+  #drop(holder: SeatHolder): Promise<void> {
+    const inFlight = this.#releases.get(holder);
+    if (inFlight !== undefined) return inFlight;
+    if (this.#holder !== holder) return Promise.resolve();
     this.#holder = undefined;
     const held: HeldInput = holder.keys.size === 0 && holder.buttons.size === 0
       ? EMPTY_HELD
       : { keys: holder.keys, buttons: holder.buttons };
-    try {
-      await this.delivery.release(holder.surfaceId, holder.epoch, held, holder.sequence + 1);
-    } finally {
-      // The seat changes hands only after the release lands.
-      holder.turn();
-    }
+    const release = (async (): Promise<void> => {
+      try {
+        await this.delivery.release(holder.surfaceId, holder.epoch, held, holder.sequence + 1);
+      } finally {
+        this.#releases.delete(holder);
+        holder.turn();
+      }
+    })();
+    this.#releases.set(holder, release);
+    return release;
   }
 
   /** Drops the seat without a release: the runtime never accepted this grant. */

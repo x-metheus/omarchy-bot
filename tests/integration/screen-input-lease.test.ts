@@ -341,6 +341,78 @@ describe("ScreenInputLease", () => {
     expect(lease.screenUse(SURFACE_A)).toBe("idle");
   });
 
+  test("a settle during the run keeps the seat until the release lands", async () => {
+    const grants: string[] = [];
+    const releaseStarted = Promise.withResolvers<void>();
+    const releaseGate = Promise.withResolvers<void>();
+    const lease = new ScreenInputLease({
+      grant: async (surfaceId, epoch) => {
+        grants.push(`grant:${surfaceId}:${epoch}`);
+        return epoch;
+      },
+      deliver: async () => {},
+      release: async (surfaceId, epoch) => {
+        grants.push(`release:${surfaceId}:${epoch}`);
+        releaseStarted.resolve();
+        await releaseGate.promise;
+        grants.push(`released:${surfaceId}:${epoch}`);
+      },
+      capture: async (surfaceId) => ({ surfaceId }),
+    });
+    lease.beginAgentTool(SURFACE_A, { turnId: "turn-a", toolCallId: "call-a" });
+    const runGate = Promise.withResolvers<void>();
+    const first = lease.performBotInput(target(SURFACE_A), {
+      turnId: "turn-a",
+      signal: new AbortController().signal,
+      run: async () => {
+        await runGate.promise;
+      },
+    });
+    await lease.seatHeld();
+
+    const settling = lease.settleAgentTool(SURFACE_A, "call-a");
+    await releaseStarted.promise;
+    const second = lease.performBotInput(target(SURFACE_B), {
+      turnId: "turn-b",
+      signal: new AbortController().signal,
+      run: async () => "second",
+    });
+    await lease.seatQueued();
+    runGate.resolve();
+    // Flush so the finished run reaches the release it has to wait for: granting B here
+    // would mean the seat changed hands before A's held input was released.
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    expect(grants).toEqual([`grant:${SURFACE_A}:1`, `release:${SURFACE_A}:1`]);
+
+    releaseGate.resolve();
+    expect(await second).toBe("second");
+    await settling;
+    await first;
+    expect(grants).toEqual([
+      `grant:${SURFACE_A}:1`,
+      `release:${SURFACE_A}:1`,
+      `released:${SURFACE_A}:1`,
+      `grant:${SURFACE_B}:1`,
+      `release:${SURFACE_B}:1`,
+      `released:${SURFACE_B}:1`,
+    ]);
+  });
+
+  test("a second Takeover request for the same pending tool reports Takeover", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    const actionDone = Promise.withResolvers<void>();
+    const tool = lease.beginAgentTool(SURFACE_A, { turnId: "turn-1", toolCallId: "call-1" });
+    const first = lease.requestTakeover(SURFACE_A);
+    const second = lease.requestTakeover(SURFACE_A);
+    actionDone.resolve();
+    await tool.actionFinished(actionDone.promise);
+    expect(await first).toEqual({ ok: true });
+    expect(await second).toEqual({ ok: true });
+    expect(lease.takeover(SURFACE_A)).toBe("active");
+    await lease.settleAgentTool(SURFACE_A, "call-1");
+  });
+
   test("a grant for a different runtime generation is rejected", async () => {
     const sink = delivery();
     const lease = new ScreenInputLease(sink.adapter);
