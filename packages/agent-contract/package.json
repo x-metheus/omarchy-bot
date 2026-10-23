@@ -3,5 +3,5 @@
   "version": "0.1.0",
   "type": "module",
   "exports": { ".": "./src/index.ts", "./native-mcp-revision": "./src/native-mcp-revision.ts" },
-  "dependencies": { "@omarchy-bot/domain": "workspace:*" }
+  "dependencies": { "@omarchy-bot/domain": "workspace:*", "typebox": "1.3.7" }
 }

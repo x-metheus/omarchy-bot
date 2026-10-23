@@ -343,7 +343,7 @@ export class TurnService {
       workerSessionId: opened.sessionId,
       surfaceId: surface.surface_id,
       botMessage: createToolChannelDaemon({
-        tools: [{ name: "send_bot_message", schema: SEND_BOT_MESSAGE_SCHEMA, repeatable: true }],
+        tools: [{ name: "send_bot_message", schema: SEND_BOT_MESSAGE_SCHEMA }],
         execute: (params, context) => this.#sendBotMessage(agentId, context, params),
       }),
       local: createToolChannelDaemon({

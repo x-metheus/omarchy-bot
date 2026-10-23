@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 
 export interface ToolChannelContext {
   botId: string;
@@ -9,8 +11,7 @@ export interface ToolChannelContext {
 
 export interface ToolChannelTool {
   name: string;
-  schema: Record<string, unknown>;
-  repeatable?: boolean;
+  schema: TSchema;
 }
 
 export type ToolChannelFrame =
@@ -32,56 +33,6 @@ export interface ToolChannelWorker {
   receive(frame: ToolChannelFrame | undefined): void;
   /** Rejects every pending call, or only one worker session's when given. */
   close(workerSessionId?: string): void;
-}
-
-// shortcut: JSON Schema keywords these tools don't emit fail closed, switch to a full validator when a tool schema needs one.
-const SCHEMA_KEYS: Record<string, true> = {
-  type: true, properties: true, required: true, additionalProperties: true, items: true,
-  minLength: true, maxLength: true, pattern: true, minimum: true, maximum: true,
-  exclusiveMinimum: true, exclusiveMaximum: true, minItems: true, maxItems: true,
-  uniqueItems: true, multipleOf: true, enum: true, const: true, anyOf: true, allOf: true, oneOf: true, not: true,
-  description: true, title: true, default: true, examples: true, $schema: true, $id: true, $comment: true, deprecated: true,
-};
-
-export function schemaMatches(schema: Record<string, unknown>, value: unknown): boolean {
-  if (Object.keys(schema).some((key) => !Object.hasOwn(SCHEMA_KEYS, key))) return false;
-  if (schema.anyOf !== undefined && !branches(schema.anyOf).some((branch) => schemaMatches(branch, value))) return false;
-  if (schema.allOf !== undefined && !branches(schema.allOf).every((branch) => schemaMatches(branch, value))) return false;
-  if (schema.oneOf !== undefined && branches(schema.oneOf).filter((branch) => schemaMatches(branch, value)).length !== 1) return false;
-  if (schema.not !== undefined && schemaMatches(asSchema(schema.not), value)) return false;
-  if (schema.enum !== undefined && !(Array.isArray(schema.enum) && schema.enum.some((entry) => Object.is(entry, value)))) return false;
-  if (schema.const !== undefined && !Object.is(schema.const, value)) return false;
-  if (schema.type !== undefined && !typeMatches(schema.type, value)) return false;
-  if (typeof value === "string") {
-    if (typeof schema.minLength === "number" && value.length < schema.minLength) return false;
-    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) return false;
-    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value)) return false;
-  }
-  if (typeof value === "number") {
-    if (typeof schema.minimum === "number" && value < schema.minimum) return false;
-    if (typeof schema.maximum === "number" && value > schema.maximum) return false;
-    if (typeof schema.exclusiveMinimum === "number" && value <= schema.exclusiveMinimum) return false;
-    if (typeof schema.exclusiveMaximum === "number" && value >= schema.exclusiveMaximum) return false;
-    if (typeof schema.multipleOf === "number" && schema.multipleOf !== 0 && !Number.isInteger(value / schema.multipleOf)) return false;
-  }
-  if (Array.isArray(value)) {
-    if (typeof schema.minItems === "number" && value.length < schema.minItems) return false;
-    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) return false;
-    if (schema.uniqueItems === true && new Set(value.map((entry) => JSON.stringify(entry))).size !== value.length) return false;
-    if (schema.items !== undefined && !value.every((entry) => schemaMatches(asSchema(schema.items), entry))) return false;
-  }
-  if (isObject(value)) {
-    const required = Array.isArray(schema.required) ? schema.required : [];
-    if (required.some((key) => typeof key !== "string" || !Object.hasOwn(value, key))) return false;
-    const properties = isObject(schema.properties) ? schema.properties : {};
-    for (const [key, property] of Object.entries(properties)) {
-      if (Object.hasOwn(value, key) && !schemaMatches(asSchema(property), value[key])) return false;
-    }
-    const extra = Object.keys(value).filter((key) => !Object.hasOwn(properties, key));
-    if (schema.additionalProperties === false && extra.length > 0) return false;
-    if (isObject(schema.additionalProperties) && extra.some((key) => !schemaMatches(schema.additionalProperties as Record<string, unknown>, value[key]))) return false;
-  }
-  return true;
 }
 
 export function createToolChannelDaemon(options: {
@@ -108,8 +59,8 @@ export function createToolChannelDaemon(options: {
       seen.add(frame.requestId);
       if (!started.has(frame.context.toolCallId)) return fail("tool call has not started");
       const tool = tools.get(frame.name);
-      if (tool === undefined || !schemaMatches(tool.schema, frame.params)) return fail(`tool params do not match ${frame.name}`);
-      if (!tool.repeatable && dispatched.has(frame.context.toolCallId)) return fail("tool call was already dispatched");
+      if (tool === undefined || !Value.Check(tool.schema, frame.params)) return fail(`tool params do not match ${frame.name}`);
+      if (dispatched.has(frame.context.toolCallId)) return fail("tool call was already dispatched");
       dispatched.add(frame.context.toolCallId);
       const controller = new AbortController();
       running.set(frame.requestId, controller);
@@ -165,30 +116,4 @@ export function createToolChannelWorker(): ToolChannelWorker {
     },
   };
   return worker;
-}
-
-function branches(value: unknown): Record<string, unknown>[] {
-  return Array.isArray(value) ? value.filter(isObject) : [];
-}
-
-function asSchema(value: unknown): Record<string, unknown> {
-  return isObject(value) ? value : {};
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function typeMatches(type: unknown, value: unknown): boolean {
-  const types = Array.isArray(type) ? type : [type];
-  return types.some((entry) => {
-    if (entry === "object") return isObject(value);
-    if (entry === "array") return Array.isArray(value);
-    if (entry === "string") return typeof value === "string";
-    if (entry === "number") return typeof value === "number" && Number.isFinite(value);
-    if (entry === "integer") return typeof value === "number" && Number.isInteger(value);
-    if (entry === "boolean") return typeof value === "boolean";
-    if (entry === "null") return value === null;
-    return false;
-  });
 }

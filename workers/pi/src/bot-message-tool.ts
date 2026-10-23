@@ -5,7 +5,6 @@ import {
   type AgentBotMessageToolOutput,
   type AgentBotMessageTurnContext,
 } from "@omarchy-bot/agent-contract";
-import { Type } from "typebox";
 
 export interface PiBotMessageBridge {
   request(
@@ -30,12 +29,16 @@ export function createBotMessageTool(
       "Use send_bot_message only when handing work or information to a distinct Bot ID.",
       "After a successful queued acknowledgement, conclude your response; the target Bot's later output is not returned to this Turn.",
     ],
-    parameters: Type.Unsafe<{ targetBotId: string; text: string }>(SEND_BOT_MESSAGE_SCHEMA),
+    parameters: SEND_BOT_MESSAGE_SCHEMA,
     executionMode: "sequential",
     execute: async (toolCallId, params, signal) => {
       const active = turnContext();
       if (active === undefined) {
         throw new Error("send_bot_message tool has no active Omarchy turn binding");
+      }
+      // The native tool call reaches this adapter unvalidated; extra fields never dispatch.
+      if (Object.keys(params).some((key) => key !== "targetBotId" && key !== "text")) {
+        throw new Error("Bot mail accepts only targetBotId and text");
       }
       signal?.throwIfAborted();
       const output = await bridge.request(

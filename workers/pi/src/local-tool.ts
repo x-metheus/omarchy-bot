@@ -7,8 +7,6 @@ import {
   type AgentLocalTurnContext,
   type LocalActionName,
 } from "@omarchy-bot/agent-contract";
-import { isDeviceId } from "@omarchy-bot/domain";
-import { Type } from "typebox";
 
 export interface PiLocalBridge {
   request(
@@ -37,16 +35,7 @@ export function createLocalTool(
     description: AGENT_LOCAL_TOOL.description,
     promptSnippet: AGENT_LOCAL_TOOL.systemPrompt.summary,
     promptGuidelines: [...AGENT_LOCAL_TOOL.systemPrompt.guidelines],
-    parameters: Type.Unsafe<{
-      action: LocalActionName;
-      target?: string;
-      command?: string;
-      path?: string;
-      destination?: string;
-      query?: string;
-      contents?: string;
-      direction?: "to-workspace" | "from-workspace";
-    }>(LOCAL_SCHEMA),
+    parameters: LOCAL_SCHEMA,
     executionMode: "sequential",
     execute: async (toolCallId, params, signal) => {
       const active = turnContext();
@@ -55,9 +44,6 @@ export function createLocalTool(
       }
       signal?.throwIfAborted();
       const target = params.target;
-      if (target !== undefined && target !== "this-device" && !isDeviceId(target)) {
-        throw new Error("local target must be this-device or an explicit online device identity");
-      }
       const output = await bridge.request(
         { ...active, toolCallId },
         params.action,

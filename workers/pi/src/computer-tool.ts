@@ -7,7 +7,6 @@ import {
   type AgentComputerTurnContext,
 } from "@omarchy-bot/agent-contract";
 import type { ComputerAction, ComputerActionName } from "@omarchy-bot/domain";
-import { Type } from "typebox";
 
 export interface PiComputerBridge {
   request(
@@ -27,10 +26,7 @@ export function createComputerTool(
     description: AGENT_COMPUTER_TOOL.description,
     promptSnippet: AGENT_COMPUTER_TOOL.systemPrompt.summary,
     promptGuidelines: [...AGENT_COMPUTER_TOOL.systemPrompt.guidelines],
-    parameters: Type.Unsafe<{
-      action: ComputerActionName;
-      args?: Record<string, unknown>;
-    }>(COMPUTER_TOOL_SCHEMA),
+    parameters: COMPUTER_TOOL_SCHEMA,
     executionMode: "sequential",
     execute: async (toolCallId, params, signal) => {
       const active = turnContext();

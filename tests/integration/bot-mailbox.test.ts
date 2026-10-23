@@ -153,7 +153,7 @@ describe("durable Bot mailbox", () => {
     h = undefined;
   });
 
-  test("a Turn-bound fake worker receives one durable idempotent acknowledgement and creates one visible target exchange", async () => {
+  test("a Turn-bound fake worker receives one durable acknowledgement, refuses a repeated send, and creates one visible target exchange", async () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Release coordinator");
     const targetBotId = await makeBot(h, "Verification partner");
@@ -170,9 +170,11 @@ describe("durable Bot mailbox", () => {
     const acknowledgement = sourceTranscript.find(
       (message) => message.kind === "response" && message.text?.startsWith("Bot message acknowledgements:"),
     )?.text;
+    // The repeated Tool Call is refused before the mailbox, so the retry adds no delivery.
     expect(acknowledgement).toMatch(
-      /^Bot message acknowledgements: (delivery_[a-f0-9]{32}) queued; \1 queued\.$/,
+      /^Bot message acknowledgements: (delivery_[a-f0-9]{32}) queued\.$/,
     );
+    expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM bot_mail_deliveries`).get()).toEqual({ count: 1 });
     expect(sourceTranscript).toContainEqual(
       expect.objectContaining({
         author: { kind: "bot" },

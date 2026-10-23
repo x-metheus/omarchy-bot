@@ -15,7 +15,8 @@
  *   computer:<action> invokes the daemon-owned Bot Screen tool bridge
  *   local.run:<command> invokes the daemon-owned Local Sidecar tool bridge
  *
- *   send_bot_message:<targetBotId>:<text>[:retry] invokes the daemon-owned mailbox bridge
+ *   send_bot_message:<targetBotId>:<text>[:retry] invokes the daemon-owned mailbox bridge;
+ *                    :retry re-sends the same Tool Call, which the channel must refuse
  *   send_bot_message_after_release:<file>:<targetBotId>:<text> delays that bridge for readiness tests
  * Stays alive until stdin closes (daemon lifecycle contract).
  */
@@ -209,6 +210,8 @@ interface FakeSession {
   aborted: boolean;
   streaming: boolean;
   directive?: string | undefined;
+  /** One turn's tool-bridge signal: turn.abort aborts every bridge waiting on it. */
+  turnAbort?: AbortController;
   computerAbort?: AbortController;
   steerReply?: ((text: string) => void) | undefined;
 }
@@ -233,9 +236,10 @@ function requestBotMessage(
   toolCallId: string,
   targetBotId: string,
   text: string,
+  signal: AbortSignal,
 ): Promise<{ deliveryId: string; queued: true }> {
   return toolChannel
-    .call("send_bot_message", { targetBotId, text }, { ...context, toolCallId }, new AbortController().signal)
+    .call("send_bot_message", { targetBotId, text }, { ...context, toolCallId }, signal)
     .then((result) => result as { deliveryId: string; queued: true });
 }
 
@@ -267,9 +271,10 @@ function requestLocal(
     contents?: string;
     direction?: "to-workspace" | "from-workspace";
   } = {},
+  signal: AbortSignal,
 ): Promise<{ deviceId: string; hostname: string; text: string; exitCode?: number }> {
   return toolChannel
-    .call("local", { action, ...args }, { ...context, toolCallId }, new AbortController().signal)
+    .call("local", { action, ...args }, { ...context, toolCallId }, signal)
     .then((result) => result as { deviceId: string; hostname: string; text: string; exitCode?: number });
 }
 
@@ -461,6 +466,8 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       s.aborted = false;
       s.directive = undefined;
       s.steerReply = undefined;
+      const turnAbort = new AbortController();
+      s.turnAbort = turnAbort;
       void (async () => {
         let mailboxReleasePath: string | undefined;
         if (text.startsWith("send_bot_message_after_release:")) {
@@ -505,12 +512,16 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               ? { ...binding, botId: targetBotId }
               : binding;
             const acknowledgements = [
-              await requestBotMessage(requestBinding, toolCallId, targetBotId, body),
+              await requestBotMessage(requestBinding, toolCallId, targetBotId, body, turnAbort.signal),
             ];
             if (retry) {
-              acknowledgements.push(
-                await requestBotMessage(binding, toolCallId, targetBotId, body),
-              );
+              // The channel dispatches a Tool Call once, so a repeated send must be
+              // refused and leave the delivery the first attempt acknowledged.
+              const refusal = await requestBotMessage(binding, toolCallId, targetBotId, body, turnAbort.signal)
+                .then(() => "", (error: unknown) => (error instanceof Error ? error.message : String(error)));
+              if (refusal !== "tool call was already dispatched") {
+                throw new Error(`expected a refused duplicate dispatch, got ${refusal === "" ? "an acknowledgement" : refusal}`);
+              }
             }
             if (mailboxReleasePath !== undefined) {
               appendFileSync(`${mailboxReleasePath}.ack`, "");
@@ -649,7 +660,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
           try {
             if (binding === undefined) throw new Error("local tool binding missing");
             const { action, ...args } = localDirective;
-            const result = await requestLocal(binding, toolCallId, action, args);
+            const result = await requestLocal(binding, toolCallId, action, args, turnAbort.signal);
             write({
               type: "event",
               event: {
@@ -1237,6 +1248,8 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         const s = sessions.get(sessionId);
         if (!s?.streaming) return;
         s.aborted = true;
+        s.turnAbort?.abort();
+        delete s.turnAbort;
         if (s.computerAbort !== undefined) {
           s.computerAbort.abort();
           delete s.computerAbort;
@@ -1273,9 +1286,13 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         ],
       });
       break;
-    case "session.close":
+    case "session.close": {
+      // Every pending bridge call for this session settles here; others keep working.
+      const { sessionId } = msg as unknown as { sessionId: string };
+      toolChannel.close(sessionId);
       respond(msg.requestId!, {});
       break;
+    }
     default:
       if (msg.requestId) respondError(msg.requestId, `unknown command ${msg.type}`);
   }
