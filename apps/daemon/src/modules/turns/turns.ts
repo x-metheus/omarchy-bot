@@ -9,9 +9,11 @@ import {
   LOCAL_SCHEMA,
   COMPUTER_TOOL_SCHEMA,
   AGENT_COMPUTER_TOOL,
+  AGENT_LOCAL_TOOL,
   type AgentBotMessageToolOutput,
   createToolChannelDaemon,
   type ToolChannelDaemon,
+  type ToolChannelTool,
   type ToolChannelContext,
   type ToolChannelFrame,
   type AgentComputerToolOutput,
@@ -43,10 +45,8 @@ interface TurnContext {
   agentId: AgentId;
   workerSessionId: string;
   surfaceId: SurfaceId;
-  botMessage?: ToolChannelDaemon;
-  local?: ToolChannelDaemon;
-  computer?: ToolChannelDaemon;
-  plugin?: ToolChannelDaemon;
+  /** Static tools plus this Turn's leased plugin tools; one channel for every reverse tool call. */
+  toolChannel: ToolChannelDaemon;
   pluginLease?: PluginLease;
   closeSession(): void;
   turnTimeout: ReturnType<typeof setTimeout>;
@@ -60,6 +60,13 @@ interface TerminalTurnWaiter {
   resolve: (turn: TurnDto) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
+
+/** Tools every Turn offers its Agent; plugin tools are appended from the Turn's lease snapshot. */
+const STATIC_TOOLS: readonly ToolChannelTool[] = [
+  { name: "send_bot_message", schema: SEND_BOT_MESSAGE_SCHEMA },
+  { name: AGENT_LOCAL_TOOL.name, schema: LOCAL_SCHEMA },
+  { name: AGENT_COMPUTER_TOOL.name, schema: COMPUTER_TOOL_SCHEMA },
+];
 
 /** Local title from the first user message — no extra Agent call. */
 export function deriveTitle(text: string): string {
@@ -335,6 +342,10 @@ export class TurnService {
     }, this.cfg.turnTimeoutMs);
     turnTimeout.unref?.();
 
+    const tools = [
+      ...STATIC_TOOLS,
+      ...(pluginLease?.snapshot.tools ?? []).map((tool) => ({ name: tool.name, schema: tool.inputSchema })),
+    ];
     const ctx: TurnContext = {
       turnId,
       threadId,
@@ -342,25 +353,16 @@ export class TurnService {
       agentId,
       workerSessionId: opened.sessionId,
       surfaceId: surface.surface_id,
-      botMessage: createToolChannelDaemon({
-        tools: [{ name: "send_bot_message", schema: SEND_BOT_MESSAGE_SCHEMA }],
-        execute: (params, context) => this.#sendBotMessage(agentId, context, params),
+      toolChannel: createToolChannelDaemon({
+        tools,
+        execute: (params, context, signal, name) => {
+          if (name === "send_bot_message") return this.#sendBotMessage(agentId, context, params);
+          if (name === AGENT_LOCAL_TOOL.name) return this.#runLocal(agentId, context, params, signal);
+          if (name === AGENT_COMPUTER_TOOL.name) return this.#runComputer(agentId, context, params, signal);
+          return this.#callPlugin(agentId, context, params, signal, name);
+        },
       }),
-      local: createToolChannelDaemon({
-        tools: [{ name: "local", schema: LOCAL_SCHEMA }],
-        execute: (params, context, signal) => this.#runLocal(agentId, context, params, signal),
-      }),
-      computer: createToolChannelDaemon({
-        tools: [{ name: AGENT_COMPUTER_TOOL.name, schema: COMPUTER_TOOL_SCHEMA }],
-        execute: (params, context, signal) => this.#runComputer(agentId, context, params, signal),
-      }),
-      ...(pluginLease ? {
-        pluginLease,
-        plugin: createToolChannelDaemon({
-          tools: pluginLease.snapshot.tools.map((tool) => ({ name: tool.name, schema: tool.inputSchema })),
-          execute: (params, context, signal, name) => this.#callPlugin(agentId, context, params, signal, name),
-        }),
-      } : {}),
+      ...(pluginLease ? { pluginLease } : {}),
       closeSession: () => {
         if (worker.alive) void worker.request({ type: "session.close", sessionId: opened.sessionId }, 5_000).catch(() => {
           this.events.append("agent", agentId, "agent.error", { agentId, message: "Could not close an idle native session", retryable: false });
@@ -496,10 +498,7 @@ export class TurnService {
       // A cancel carries no turn identity, so only the sending Agent's turns may answer it.
       for (const turn of this.#turns.values()) {
         if (turn.agentId !== agentId) continue;
-        void turn.botMessage?.receive(frame);
-        void turn.local?.receive(frame);
-        void turn.computer?.receive(frame);
-        void turn.plugin?.receive(frame);
+        void turn.toolChannel.receive(frame);
       }
       return Promise.resolve(undefined);
     }
@@ -508,14 +507,7 @@ export class TurnService {
     if (turn === undefined || turn.agentId !== agentId) {
       return Promise.resolve({ type: "tool.result", requestId: frame.requestId, ok: false, error: `${frame.name} tool context is stale or mismatched` });
     }
-    const channel = frame.name === "local" ? turn.local
-      : frame.name === AGENT_COMPUTER_TOOL.name ? turn.computer
-      : frame.name === "send_bot_message" ? turn.botMessage
-      : turn.plugin;
-    if (channel === undefined) {
-      return Promise.resolve({ type: "tool.result", requestId: frame.requestId, ok: false, error: `${frame.name} tool context is stale or mismatched` });
-    }
-    return channel.receive(frame);
+    return turn.toolChannel.receive(frame);
   }
 
   /** Dispatch one Turn-bound computer action to this Bot's own Computer Surface. */
@@ -803,12 +795,8 @@ export class TurnService {
           turnId: ctx.turnId,
           toolCall,
         });
-        if (event.name === "send_bot_message") ctx.botMessage?.start(event.id);
-        if (event.name === "local") ctx.local?.start(event.id);
-        if (event.name === AGENT_COMPUTER_TOOL.name) ctx.computer?.start(event.id);
-        if (ctx.pluginLease?.snapshot.tools.some((tool) => tool.name === event.name)) {
-          ctx.plugin?.start(event.id);
-        }
+        // The channel rejects names it does not own, so every started call can be recorded here.
+        ctx.toolChannel.start(event.id);
         break;
       }
       case "tool.updated":
@@ -870,10 +858,7 @@ export class TurnService {
     ctx.pluginLease?.release();
     // Every finished Turn — completed, cancelled, failed, or crashed worker —
     // stops accepting tool calls.
-    ctx.botMessage?.close();
-    ctx.local?.close();
-    ctx.computer?.close();
-    ctx.plugin?.close();
+    ctx.toolChannel.close();
     ctx.closeSession();
     const removedIncompleteBlocks = this.threads.removeIncompleteAgentBlocks(ctx.turnId);
     if (removedIncompleteBlocks.responses > 0) {

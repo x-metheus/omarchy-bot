@@ -1,7 +1,75 @@
+import { Type } from "typebox";
+import type { Static, TSchema } from "typebox";
+
+/** Provider ids shared by the plugin API and the Agent-facing tool schema. */
+export const PLUGIN_PROVIDER_IDS = [
+  "google", "microsoft", "notion", "github", "linear", "asana", "dropbox", "hubspot", "intercom", "miro",
+] as const;
+
+export const MANAGE_PLUGINS_ACTIONS = [
+  "list", "inspect", "inspect_skill", "search_skills", "install_skill", "enable_skill", "remove_skill",
+  "update_skills", "authorize_service", "enable_service", "remove_service", "update_service",
+  "label_account", "disconnect_account", "save_mcp", "update_mcp", "enable_mcp", "remove_mcp",
+  "check_mcp", "authorize_mcp",
+] as const;
+
+const text = (maxLength: number) => Type.String({ minLength: 1, maxLength });
+
+const SAVE_MCP_SCHEMA = Type.Union([
+  Type.Object({
+    name: text(120),
+    enabled: Type.Optional(Type.Boolean()),
+    transport: Type.Union([
+      Type.Object({
+        type: Type.Literal("stdio"),
+        command: text(4096),
+        args: Type.Optional(Type.Array(Type.String(), { maxItems: 128 })),
+        env: Type.Optional(Type.Record(Type.String(), Type.String())),
+      }, { additionalProperties: false }),
+      Type.Object({
+        type: Type.Literal("http"),
+        url: Type.String({ minLength: 1, pattern: "^https?://" }),
+        headers: Type.Optional(Type.Record(Type.String(), Type.String())),
+      }, { additionalProperties: false }),
+    ]),
+  }, { additionalProperties: false }),
+  Type.Object({
+    name: text(120),
+    enabled: Type.Optional(Type.Boolean()),
+    package: Type.Object({
+      name: text(214),
+      bin: Type.Optional(text(120)),
+      args: Type.Optional(Type.Array(Type.String(), { maxItems: 126 })),
+      env: Type.Optional(Type.Record(Type.String(), Type.String())),
+    }, { additionalProperties: false }),
+  }, { additionalProperties: false }),
+], {
+  description: "SaveMcpBody: name, enabled, and either transport {type:stdio,command,args?,env?} / {type:http,url,headers?}, or package {name: exact public npm package,bin?,args?,env?}. Managed npm packages update automatically; arbitrary native commands remain user-owned. Credential fields are write-only.",
+});
+
+/** The one parameter schema for `manage_plugins`; the ToolChannel validates every call against it. */
+export const MANAGE_PLUGINS_SCHEMA = Type.Object({
+  action: Type.Union(MANAGE_PLUGINS_ACTIONS.map((action) => Type.Literal(action))),
+  id: Type.Optional(Type.String()),
+  query: Type.Optional(Type.String()),
+  cursor: Type.Optional(Type.String()),
+  source: Type.Optional(Type.String()),
+  skillPath: Type.Optional(Type.String()),
+  ref: Type.Optional(Type.String()),
+  enabled: Type.Optional(Type.Boolean()),
+  providerId: Type.Optional(Type.Union(PLUGIN_PROVIDER_IDS.map((id) => Type.Literal(id)))),
+  serviceId: Type.Optional(Type.String()),
+  label: Type.Optional(Type.String()),
+  connection: Type.Optional(SAVE_MCP_SCHEMA),
+  redirectUrl: Type.Optional(Type.String()),
+}, { additionalProperties: false });
+
+export type ManagePluginsInput = Static<typeof MANAGE_PLUGINS_SCHEMA>;
+
 export interface AgentPluginToolDefinition {
   name: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  inputSchema: TSchema;
 }
 
 /** Immutable configuration selected before a turn opens its native session. No credentials. */

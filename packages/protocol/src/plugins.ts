@@ -1,8 +1,7 @@
 import { z } from "zod";
+import { PLUGIN_PROVIDER_IDS } from "@omarchy-bot/agent-contract";
 
-export const PluginProviderId = z.enum([
-  "google", "microsoft", "notion", "github", "linear", "asana", "dropbox", "hubspot", "intercom", "miro",
-]);
+export const PluginProviderId = z.enum(PLUGIN_PROVIDER_IDS);
 export type PluginProviderId = z.infer<typeof PluginProviderId>;
 
 export interface PluginServiceDto {
