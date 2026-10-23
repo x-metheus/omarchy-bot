@@ -6,6 +6,7 @@ import {
   isAgentToolCallEvent,
   toolCallSummaryFromEvent,
   SEND_BOT_MESSAGE_SCHEMA,
+  LOCAL_SCHEMA,
   type AgentBotMessageToolOutput,
   createToolChannelDaemon,
   type ToolChannelContext,
@@ -16,7 +17,6 @@ import {
   type WorkerUserMessage,
   type AgentPluginToolRequest,
   type AgentPluginToolOutput,
-  type AgentLocalToolRequest,
   type AgentLocalToolOutput,
 } from "@omarchy-bot/agent-contract";
 import type { SendResultDto, TurnDto } from "@omarchy-bot/protocol";
@@ -44,11 +44,10 @@ interface TurnContext {
   computerToolSurfaces: Map<string, SurfaceId>;
   startedComputerToolCalls: Set<string>;
   botMessage?: ReturnType<typeof createToolChannelDaemon>;
-  startedLocalToolCalls: Set<string>;
+  local?: ReturnType<typeof createToolChannelDaemon>;
   pluginLease?: PluginLease;
   startedPluginToolCalls: Map<string, string>;
   dispatchedPluginToolCalls: Set<string>;
-  dispatchedLocalToolCalls: Set<string>;
   closeSession(): void;
   turnTimeout: ReturnType<typeof setTimeout>;
   /** Present only when cancellation came from the explicit abort path. */
@@ -347,11 +346,13 @@ export class TurnService {
         tools: [{ name: "send_bot_message", schema: SEND_BOT_MESSAGE_SCHEMA, repeatable: true }],
         execute: (params, context) => this.#sendBotMessage(agentId, context, params),
       }),
-      startedLocalToolCalls: new Set(),
+      local: createToolChannelDaemon({
+        tools: [{ name: "local", schema: LOCAL_SCHEMA }],
+        execute: (params, context, signal) => this.#runLocal(agentId, context, params, signal),
+      }),
       ...(pluginLease ? { pluginLease } : {}),
       startedPluginToolCalls: new Map(),
       dispatchedPluginToolCalls: new Set(),
-      dispatchedLocalToolCalls: new Set(),
       closeSession: () => {
         if (worker.alive) void worker.request({ type: "session.close", sessionId: opened.sessionId }, 5_000).catch(() => {
           this.events.append("agent", agentId, "agent.error", { agentId, message: "Could not close an idle native session", retryable: false });
@@ -513,13 +514,17 @@ export class TurnService {
     this.#mailbox = mailbox;
     void agentId;
     if (frame.type === "tool.cancel") {
-      for (const turn of this.#turns.values()) void turn.botMessage?.receive(frame);
+      for (const turn of this.#turns.values()) {
+        void turn.botMessage?.receive(frame);
+        void turn.local?.receive(frame);
+      }
       return Promise.resolve(undefined);
     }
     if (frame.type !== "tool.request") return Promise.resolve(undefined);
-    const channel = this.#turns.get(frame.context.workerSessionId)?.botMessage;
+    const turn = this.#turns.get(frame.context.workerSessionId);
+    const channel = frame.name === "local" ? turn?.local : turn?.botMessage;
     if (channel === undefined) {
-      return Promise.resolve({ type: "tool.result", requestId: frame.requestId, ok: false, error: "Bot message tool context is stale or mismatched" });
+      return Promise.resolve({ type: "tool.result", requestId: frame.requestId, ok: false, error: "tool context is stale or mismatched" });
     }
     return channel.receive(frame);
   }
@@ -540,34 +545,13 @@ export class TurnService {
   }
 
   /** Fan a Turn-bound `local` request to one online Sidecar; never execute it here. */
-  async onAgentLocalRequest(
-    agentId: AgentId,
-    request: AgentLocalToolRequest,
-    devices: DeviceRoster,
-    signal: AbortSignal,
-  ): Promise<AgentLocalToolOutput> {
-    const requested = request.context;
-    const active = this.#turns.get(requested.workerSessionId);
-    if (
-      active === undefined
-      || active.agentId !== agentId
-      || active.botId !== requested.botId
-      || active.turnId !== requested.turnId
-      || active.workerSessionId !== requested.workerSessionId
-    ) {
+  async #runLocal(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal): Promise<AgentLocalToolOutput> {
+    const request = params as { action: "run" | "search" | "read" | "write" | "transfer"; target?: string; command?: string; path?: string; destination?: string; query?: string; contents?: string; direction?: "to-workspace" | "from-workspace" };
+    const active = this.#turns.get(context.workerSessionId);
+    if (active === undefined || active.agentId !== agentId || active.botId !== context.botId || active.turnId !== context.turnId) {
       throw new Error("local tool context is stale or mismatched");
     }
-    if (requested.toolCallId.length === 0) {
-      throw new Error("local tool context has no tool-call identity");
-    }
-    if (!active.startedLocalToolCalls.has(requested.toolCallId)) {
-      throw new Error("local tool context has no active native tool call");
-    }
-    if (active.dispatchedLocalToolCalls.has(requested.toolCallId)) {
-      throw new Error("local tool call was already dispatched");
-    }
-    signal.throwIfAborted();
-    const device = devices.resolve(request.target);
+    const device = this.devices.resolve(request.target);
     const needed =
       request.action === "run" ? "shell"
       : request.action === "search" ? "search"
@@ -581,8 +565,7 @@ export class TurnService {
     }
     const job = this.#workspaceTransfer(request);
     signal.throwIfAborted();
-    active.dispatchedLocalToolCalls.add(requested.toolCallId);
-    const result = await devices.dispatch({
+    const result = await this.devices.dispatch({
       deviceId: device.id,
       action: request.action,
       botId: active.botId,
@@ -611,7 +594,7 @@ export class TurnService {
     };
   }
 
-  #workspaceTransfer(request: AgentLocalToolRequest): { contents?: string } {
+  #workspaceTransfer(request: { action: string; direction?: string; path?: string; destination?: string; contents?: string }): { contents?: string } {
     if (request.action !== "transfer" || request.direction !== "from-workspace") {
       return request.contents === undefined ? {} : { contents: request.contents };
     }
@@ -808,9 +791,7 @@ export class TurnService {
           ctx.startedComputerToolCalls.add(event.id);
         }
         if (event.name === "send_bot_message") ctx.botMessage?.start(event.id);
-        if (event.name === "local") {
-          ctx.startedLocalToolCalls.add(event.id);
-        }
+        if (event.name === "local") ctx.local?.start(event.id);
         if (ctx.pluginLease?.snapshot.tools.some((tool) => tool.name === event.name)) {
           ctx.startedPluginToolCalls.set(event.id, event.name);
         }
@@ -830,8 +811,6 @@ export class TurnService {
         }
         if (event.type === "tool.completed") {
           ctx.startedComputerToolCalls.delete(event.id);
-          ctx.startedLocalToolCalls.delete(event.id);
-          ctx.dispatchedLocalToolCalls.delete(event.id);
           ctx.startedPluginToolCalls.delete(event.id);
         }
         break;

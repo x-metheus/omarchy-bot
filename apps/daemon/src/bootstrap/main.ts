@@ -73,8 +73,6 @@ export async function main(options: MainOptions = {}): Promise<{
         turns.onAgentBotMessageFrame(agentId, frame, mailbox),
       onAgentPluginRequest: (agentId, request, signal) =>
         turns.onAgentPluginRequest(agentId, request, signal),
-      onAgentLocalRequest: (agentId, request, signal) =>
-        turns.onAgentLocalRequest(agentId, request, devices, signal),
     },
     {
       agents: agentsDir,

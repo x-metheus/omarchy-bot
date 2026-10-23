@@ -1,6 +1,7 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import {
   AGENT_LOCAL_TOOL,
+  LOCAL_SCHEMA,
   type AgentLocalToolContext,
   type AgentLocalToolOutput,
   type AgentLocalTurnContext,
@@ -8,14 +9,6 @@ import {
 } from "@omarchy-bot/agent-contract";
 import { isDeviceId } from "@omarchy-bot/domain";
 import { Type } from "typebox";
-
-const LOCAL_ACTION = Type.Union([
-  Type.Literal("run"),
-  Type.Literal("search"),
-  Type.Literal("read"),
-  Type.Literal("write"),
-  Type.Literal("transfer"),
-]);
 
 export interface PiLocalBridge {
   request(
@@ -44,19 +37,16 @@ export function createLocalTool(
     description: AGENT_LOCAL_TOOL.description,
     promptSnippet: AGENT_LOCAL_TOOL.systemPrompt.summary,
     promptGuidelines: [...AGENT_LOCAL_TOOL.systemPrompt.guidelines],
-    parameters: Type.Object({
-      action: LOCAL_ACTION,
-      target: Type.Optional(Type.String()),
-      command: Type.Optional(Type.String()),
-      path: Type.Optional(Type.String()),
-      destination: Type.Optional(Type.String()),
-      query: Type.Optional(Type.String()),
-      contents: Type.Optional(Type.String()),
-      direction: Type.Optional(Type.Union([
-        Type.Literal("to-workspace"),
-        Type.Literal("from-workspace"),
-      ])),
-    }),
+    parameters: Type.Unsafe<{
+      action: LocalActionName;
+      target?: string;
+      command?: string;
+      path?: string;
+      destination?: string;
+      query?: string;
+      contents?: string;
+      direction?: "to-workspace" | "from-workspace";
+    }>(LOCAL_SCHEMA),
     executionMode: "sequential",
     execute: async (toolCallId, params, signal) => {
       const active = turnContext();

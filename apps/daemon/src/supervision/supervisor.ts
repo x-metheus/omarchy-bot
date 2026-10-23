@@ -8,8 +8,6 @@ import type {
   ComputerCommand,
   AgentPluginToolRequest,
   AgentPluginToolOutput,
-  AgentLocalToolRequest,
-  AgentLocalToolOutput,
 } from "@omarchy-bot/agent-contract";
 import { isSurfaceId, type AgentId, type SurfaceId } from "@omarchy-bot/domain";
 import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
@@ -31,11 +29,6 @@ export interface SupervisorHooks {
     request: AgentPluginToolRequest,
     signal: AbortSignal,
   ) => Promise<AgentPluginToolOutput>;
-  onAgentLocalRequest: (
-    agentId: AgentId,
-    request: AgentLocalToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentLocalToolOutput>;
 }
 
 type ComputerActCommand = Extract<ComputerCommand, { type: "act" }>;
@@ -100,8 +93,6 @@ export class Supervisor {
         this.hooks.onAgentBotMessageFrame(agentId, frame),
       onPluginRequest: (request, signal) =>
         this.hooks.onAgentPluginRequest(agentId, request, signal),
-      onLocalRequest: (request, signal) =>
-        this.hooks.onAgentLocalRequest(agentId, request, signal),
       onExit: (code) => {
         this.hooks.onWorkerCrash(
           agentId,

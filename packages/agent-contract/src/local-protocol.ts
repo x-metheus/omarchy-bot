@@ -125,3 +125,27 @@ export interface AgentLocalToolOutput {
 export type AgentLocalToolResult =
   | { type: "local.result"; requestId: string; ok: true; payload: AgentLocalToolOutput }
   | { type: "local.result"; requestId: string; ok: false; error: string };
+
+const localText = (maxLength: number) => ({ type: "string", minLength: 1, maxLength });
+
+export const LOCAL_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    action: { enum: ["run", "search", "read", "write", "transfer"] },
+    target: { type: "string", minLength: 1 },
+    command: localText(COMMAND_MAX_LENGTH),
+    path: localText(4_096),
+    destination: localText(4_096),
+    query: localText(1_024),
+    contents: { type: "string", maxLength: 65_536 },
+    direction: { enum: ["to-workspace", "from-workspace"] },
+  },
+  oneOf: [
+    { required: ["action", "command"], properties: { action: { const: "run" } } },
+    { required: ["action", "query"], properties: { action: { const: "search" } } },
+    { required: ["action", "path"], properties: { action: { const: "read" } } },
+    { required: ["action", "path"], properties: { action: { const: "write" } } },
+    { required: ["action", "path", "destination", "direction"], properties: { action: { const: "transfer" } } },
+  ],
+};

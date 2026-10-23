@@ -38,7 +38,6 @@ import {
   type AgentLocalTurnContext,
   type AgentLocalToolContext,
   type AgentLocalToolOutput,
-  type AgentLocalToolResult,
   type LocalActionName,
   type AgentPluginToolResult,
   type SessionOpenedPayload,
@@ -143,14 +142,8 @@ function requestBotMessage(
 }
 
 
-interface PendingLocalRequest {
-  resolve: (output: AgentLocalToolOutput) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-}
-
-const localRequests = new Map<string, PendingLocalRequest>();
+const localChannel = createToolChannelWorker();
+localChannel.send = (frame) => writeJsonl(frame);
 
 function requestLocal(
   context: AgentLocalToolContext,
@@ -166,40 +159,13 @@ function requestLocal(
   },
   signal: AbortSignal | undefined,
 ): Promise<AgentLocalToolOutput> {
-  signal?.throwIfAborted();
-  const requestId = crypto.randomUUID();
-  return new Promise<AgentLocalToolOutput>((resolve, reject) => {
-    const pending: PendingLocalRequest = { resolve, reject };
-    if (signal !== undefined) {
-      pending.signal = signal;
-      pending.onAbort = () => {
-        if (localRequests.delete(requestId)) {
-          writeJsonl({ type: "local.cancel", requestId });
-          reject(new Error("local tool call cancelled"));
-        }
-      };
-      signal.addEventListener("abort", pending.onAbort, { once: true });
-    }
-    localRequests.set(requestId, pending);
-    writeJsonl({
-      type: "local.request",
-      requestId,
-      context,
-      action,
-      ...args,
-    });
-  });
-}
-
-function handleLocalResult(result: AgentLocalToolResult): void {
-  const pending = localRequests.get(result.requestId);
-  if (pending === undefined) return;
-  localRequests.delete(result.requestId);
-  if (pending.signal !== undefined && pending.onAbort !== undefined) {
-    pending.signal.removeEventListener("abort", pending.onAbort);
+  const controller = new AbortController();
+  if (signal !== undefined) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
-  if (result.ok === true) pending.resolve(result.payload);
-  else pending.reject(new Error(result.error));
+  return localChannel.call("local", { action, ...args }, context, controller.signal)
+    .then((result) => result as AgentLocalToolOutput);
 }
 
 let authAvailable: boolean | undefined;
@@ -547,6 +513,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       case "session.close": {
         const entry = sessionEntry(cmd.sessionId);
         botMessageChannel.close();
+        localChannel.close();
         disposePluginCalls(cmd.sessionId);
         sessions.delete(cmd.sessionId);
         entry.unsubscribe?.();
@@ -581,9 +548,8 @@ async function shutdown(): Promise<void> {
   disposePluginCalls();
   for (const pending of computerRequests.values()) pending.reject(new Error("daemon connection closed during computer tool call"));
   botMessageChannel.close();
-  for (const pending of localRequests.values()) pending.reject(new Error("daemon connection closed during local tool call"));
+  localChannel.close();
   computerRequests.clear();
-  localRequests.clear();
   const controlsClosed = mcpControls.dispose();
   await Promise.allSettled(commands);
   await Promise.allSettled([...sessions.values()].map((entry) => {
@@ -605,10 +571,9 @@ await readJsonl(
         handleComputerResult(msg as AgentComputerToolResult);
       } else if (msg.type === "tool.result") {
         botMessageChannel.receive(msg as ToolChannelFrame);
+        localChannel.receive(msg as ToolChannelFrame);
       } else if (msg.type === "plugin.result") {
         handlePluginResult(msg as AgentPluginToolResult);
-      } else if (msg.type === "local.result") {
-        handleLocalResult(msg as AgentLocalToolResult);
       } else {
         const command = handleMessage(msg as AgentCommand);
         commands.add(command);

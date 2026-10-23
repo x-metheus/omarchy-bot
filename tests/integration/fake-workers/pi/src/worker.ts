@@ -291,11 +291,11 @@ function requestLocal(
   const pending = Promise.withResolvers<{ deviceId: string; hostname: string; text: string; exitCode?: number }>();
   localRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
   write({
-    type: "local.request",
+    type: "tool.request",
     requestId,
+    name: "local",
+    params: { action, ...args },
     context: { ...context, toolCallId },
-    action,
-    ...args,
   });
   return pending.promise;
 }
@@ -399,23 +399,24 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       else pending.reject(new Error(String(msg.error)));
       break;
     }
-    case "local.request": {
+    // Relay an inbound tool.request the worker did not originate, so a test can
+    // inject a duplicate frame the daemon reads back as if the worker sent it.
+    case "tool.request": {
       write(msg);
       break;
     }
-
-    case "local.result": {
-      const pending = msg.requestId === undefined ? undefined : localRequests.get(msg.requestId);
-      if (pending === undefined) break;
-      localRequests.delete(msg.requestId!);
-      if (msg.ok === true) pending.resolve(msg.payload as { deviceId: string; hostname: string; text: string; exitCode?: number });
-      else pending.reject(new Error(String(msg.error)));
-      break;
-    }
     case "tool.result": {
-      const pending = msg.requestId === undefined ? undefined : botMessageRequests.get(msg.requestId);
+      if (msg.requestId === undefined) break;
+      const local = localRequests.get(msg.requestId);
+      if (local !== undefined) {
+        localRequests.delete(msg.requestId);
+        if (msg.ok === true) local.resolve(msg.result as { deviceId: string; hostname: string; text: string; exitCode?: number });
+        else local.reject(new Error(String(msg.error)));
+        break;
+      }
+      const pending = botMessageRequests.get(msg.requestId);
       if (pending === undefined) break;
-      botMessageRequests.delete(msg.requestId!);
+      botMessageRequests.delete(msg.requestId);
       if (msg.ok === true) pending.resolve(msg.result as { deliveryId: string; queued: true });
       else pending.reject(new Error(String(msg.error)));
       break;
