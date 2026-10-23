@@ -480,4 +480,105 @@ describe("ScreenInputLease", () => {
     await first;
     expect(entered).toEqual([SURFACE_A, SURFACE_B, SURFACE_A]);
   });
+
+  test("the authoritative runtime generation advances and fences the previous target", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    await lease.runtimeReady(SURFACE_A, 1);
+    const holder = await lease.acquireWebControl(target(SURFACE_A, 1));
+    expect(holder.epoch).toBe(1);
+
+    // A new runtime generation replaces the old one: the old grant is revoked.
+    await lease.runtimeReady(SURFACE_A, 2);
+    expect(sink.events.filter((event) => event.kind === "release")).toEqual([
+      { surfaceId: SURFACE_A, epoch: 1, kind: "release" },
+    ]);
+
+    await expect(lease.performBotInput(target(SURFACE_A, 1), {
+      turnId: "turn-stale",
+      signal: new AbortController().signal,
+      run: async () => "ran",
+    })).rejects.toThrow(/generation/i);
+    expect(sink.events.filter((event) => event.kind === "grant")).toHaveLength(1);
+
+    const ran = await lease.performBotInput(target(SURFACE_A, 2), {
+      turnId: "turn-new",
+      signal: new AbortController().signal,
+      run: async (send) => {
+        await send({ type: "motion", x: 1, y: 1 });
+        return "ran";
+      },
+    });
+    expect(ran).toBe("ran");
+    expect(sink.events.filter((event) => event.kind === "grant")).toEqual([
+      { surfaceId: SURFACE_A, epoch: 1, kind: "grant" },
+      { surfaceId: SURFACE_A, epoch: 2, kind: "grant" },
+    ]);
+    expect(sink.events.filter((event) => event.kind === "motion")).toEqual([
+      { surfaceId: SURFACE_A, epoch: 2, kind: "motion" },
+    ]);
+  });
+
+  test("an acquisition target never overwrites the authoritative generation", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    await lease.runtimeReady(SURFACE_A, 1);
+    await expect(lease.acquireWebControl(target(SURFACE_A, 5))).rejects.toThrow(/generation/i);
+    expect(sink.events.filter((event) => event.kind === "grant")).toEqual([]);
+    const holder = await lease.acquireWebControl(target(SURFACE_A, 1));
+    expect(holder.epoch).toBe(1);
+  });
+
+  test("a queued target for the previous generation is rejected after the generation advances", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    await lease.runtimeReady(SURFACE_A, 1);
+    const holder = await lease.acquireWebControl(target(SURFACE_A, 1));
+    expect(holder.epoch).toBe(1);
+    let ran = false;
+    const queued = lease.performBotInput(target(SURFACE_A, 1), {
+      turnId: "turn-queued",
+      signal: new AbortController().signal,
+      run: async () => {
+        ran = true;
+        return "ran";
+      },
+    });
+    await lease.seatQueued();
+    await lease.runtimeReady(SURFACE_A, 2);
+    await expect(queued).rejects.toThrow(/generation/i);
+    expect(ran).toBeFalse();
+    expect(sink.events.filter((event) => event.kind === "grant")).toHaveLength(1);
+  });
+
+  test("a grant in flight cannot complete after the runtime generation advances", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    await lease.runtimeReady(SURFACE_A, 1);
+    const gate = sink.blockGrant();
+    let ran = false;
+    const pending = lease.performBotInput(target(SURFACE_A, 1), {
+      turnId: "turn-inflight",
+      signal: new AbortController().signal,
+      run: async (send) => {
+        ran = true;
+        await send({ type: "motion", x: 1, y: 1 });
+        return "ran";
+      },
+    });
+    await lease.seatHeld();
+    await lease.runtimeReady(SURFACE_A, 2);
+    gate.release();
+    await expect(pending).rejects.toThrow(/generation|stale/i);
+    expect(ran).toBeFalse();
+    expect(sink.events.filter((event) => event.kind === "motion")).toEqual([]);
+
+    // The fenced grant leaves the seat free for the new generation.
+    const after = await lease.performBotInput(target(SURFACE_A, 2), {
+      turnId: "turn-after",
+      signal: new AbortController().signal,
+      run: async () => "after",
+    });
+    expect(after).toBe("after");
+  });
 });

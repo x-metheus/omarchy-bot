@@ -109,6 +109,17 @@ describe("Bot-bound Pi computer tool", () => {
     expect(firstText).not.toContain(otherSurfaceId);
     expect(first.content.some((item) => item.type === "image")).toBeTrue();
 
+    // A real click on the first runtime proves the input authority of generation 1.
+    const firstClick = await tool.execute(
+      "identity-click-1",
+      { action: "click", args: { x: 3, y: 4 } },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    expect(firstClick.details.desktopSession).toEqual({ ...owner, runtimeGeneration: 1 });
+    expect(adapter.inputEvents.filter((event) => event.runtimeGeneration === 1)).toHaveLength(3);
+
     // Only a new Bot Computer advances the generation the tool reports.
     adapter.exitCompositor(surfaceId);
     await until(
@@ -122,6 +133,26 @@ describe("Bot-bound Pi computer tool", () => {
     expect(secondText).toContain(JSON.stringify({ ...owner, runtimeGeneration: 2 }));
     expect(secondText).not.toContain(otherSurfaceId);
     expect(second.content.some((item) => item.type === "image")).toBeTrue();
+
+    // A real click on the replacement runtime must get its own input authority.
+    const secondClick = await tool.execute(
+      "identity-click-2",
+      { action: "click", args: { x: 3, y: 4 } },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    expect(secondClick.details.desktopSession).toEqual({ ...owner, runtimeGeneration: 2 });
+    expect(adapter.inputEvents.filter((event) => event.runtimeGeneration === 1)).toHaveLength(3);
+    expect(adapter.inputEvents.filter((event) => event.runtimeGeneration === 2)).toHaveLength(3);
+    expect(adapter.inputEvents.map((event) => event.surfaceId)).toEqual([
+      surfaceId,
+      surfaceId,
+      surfaceId,
+      surfaceId,
+      surfaceId,
+      surfaceId,
+    ]);
 
     expect(h.svc.screens.status({ botId: otherBotId, surfaceId: otherSurfaceId })).toEqual({ state: "stopped" });
   });

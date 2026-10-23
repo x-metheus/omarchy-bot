@@ -14,9 +14,9 @@ export type HeldInput = Readonly<{
 
 /** Runtime delivery. The lease decides who may type; the adapter only delivers. */
 export interface ScreenInputDelivery {
-  grant(surfaceId: SurfaceId, epoch: number): Promise<number>;
-  deliver(surfaceId: SurfaceId, epoch: number, event: BotScreenInputAction, sequence?: number): Promise<void>;
-  release(surfaceId: SurfaceId, epoch: number, held: HeldInput, nextSequence?: number): Promise<void>;
+  grant(surfaceId: SurfaceId, epoch: number, generation?: number): Promise<number>;
+  deliver(surfaceId: SurfaceId, epoch: number, event: BotScreenInputAction, sequence?: number, generation?: number): Promise<void>;
+  release(surfaceId: SurfaceId, epoch: number, held: HeldInput, nextSequence?: number, generation?: number): Promise<void>;
   capture(surfaceId: SurfaceId): Promise<unknown>;
 }
 
@@ -39,6 +39,10 @@ interface SeatHolder {
   surfaceId: SurfaceId;
   epoch: number;
   kind: "web" | "bot";
+  /** The runtime generation this holder was granted for. */
+  runtimeGeneration: number;
+  /** True once the runtime accepted the grant. */
+  granted: boolean;
   /** Frees this holder's place in the shared-seat queue. Idempotent. */
   turn: () => void;
   keys: Set<number>;
@@ -212,6 +216,24 @@ export class ScreenInputLease {
     if (this.#holder?.surfaceId === surfaceId) await this.revoke(surfaceId);
   }
 
+  /**
+   * Publishes the authoritative runtime generation for a Surface. The Screen manager
+   * calls this when a runtime becomes ready, before any input is granted. A change of
+   * generation revokes the previous holder so held keys never reach the new compositor.
+   * A release failure rejects: the caller reports it.
+   */
+  async runtimeReady(surfaceId: SurfaceId, generation: number): Promise<void> {
+    const current = this.#generation.get(surfaceId);
+    this.#generation.set(surfaceId, generation);
+    if (current === undefined || current === generation) return;
+    const holder = this.#holder;
+    if (holder === undefined || holder.surfaceId !== surfaceId) return;
+    // A grant still in flight was never accepted by the runtime: the post-grant
+    // generation check rejects it and frees the seat.
+    if (!holder.granted) return;
+    await this.revoke(surfaceId);
+  }
+
   async acquireWebControl(
     target: ScreenInputTarget,
     options?: { epoch?: number },
@@ -228,18 +250,20 @@ export class ScreenInputLease {
       const epoch = requested ?? current + 1;
       if (epoch <= current) throw new Error(`stale controller epoch ${epoch}`);
       this.#requireGeneration(target);
-      const holder = this.#hold(target.surfaceId, epoch, "web", turn);
+      const holder = this.#hold(target.surfaceId, epoch, "web", turn, target.runtimeGeneration);
       this.#grantStarted.resolve();
       let accepted: number;
       try {
-        accepted = await this.delivery.grant(target.surfaceId, epoch);
+        accepted = await this.delivery.grant(target.surfaceId, epoch, target.runtimeGeneration);
         if (accepted !== epoch) throw new Error(`stale controller epoch ${accepted}`);
+        // The runtime may have been replaced while the grant was in flight.
+        this.#requireGeneration(target);
       } catch (error) {
         this.#abandon(holder);
         throw error;
       }
+      holder.granted = true;
       this.#epoch.set(target.surfaceId, epoch);
-      this.#generation.set(target.surfaceId, target.runtimeGeneration);
       return {
         epoch,
         input: (event) => this.#deliver(holder, event),
@@ -289,17 +313,19 @@ export class ScreenInputLease {
       if (input.signal.aborted) throw abortError(input.signal);
       this.#requireGeneration(target);
       const epoch = (this.#epoch.get(target.surfaceId) ?? 0) + 1;
-      const holder = this.#hold(target.surfaceId, epoch, "bot", turn);
-      this.#generation.set(target.surfaceId, target.runtimeGeneration);
+      const holder = this.#hold(target.surfaceId, epoch, "bot", turn, target.runtimeGeneration);
       this.#held.resolve();
       let accepted: number;
       try {
-        accepted = await this.delivery.grant(target.surfaceId, epoch);
+        accepted = await this.delivery.grant(target.surfaceId, epoch, target.runtimeGeneration);
         if (accepted !== epoch) throw new Error(`stale controller epoch ${accepted}`);
+        // The runtime may have been replaced while the grant was in flight.
+        this.#requireGeneration(target);
       } catch (error) {
         this.#abandon(holder);
         throw error;
       }
+      holder.granted = true;
       this.#epoch.set(target.surfaceId, epoch);
       try {
         return await input.run((event) => this.#deliver(holder, event));
@@ -313,6 +339,10 @@ export class ScreenInputLease {
 
   async #deliver(holder: SeatHolder, event: BotScreenInputAction): Promise<void> {
     if (this.#holder !== holder) throw new Error("stale controller epoch");
+    // The runtime was replaced: the old holder's keys must not reach the new compositor.
+    if (this.#generation.get(holder.surfaceId) !== holder.runtimeGeneration) {
+      throw new Error(`stale runtime generation ${holder.runtimeGeneration}`);
+    }
     if (event.type === "key") {
       if (event.state === "pressed") holder.keys.add(event.keyCode);
       else holder.keys.delete(event.keyCode);
@@ -321,14 +351,22 @@ export class ScreenInputLease {
       else holder.buttons.delete(event.button);
     }
     const sequence = ++holder.sequence;
-    await this.delivery.deliver(holder.surfaceId, holder.epoch, event, sequence);
+    await this.delivery.deliver(holder.surfaceId, holder.epoch, event, sequence, holder.runtimeGeneration);
   }
 
-  #hold(surfaceId: SurfaceId, epoch: number, kind: "web" | "bot", turn: () => void): SeatHolder {
+  #hold(
+    surfaceId: SurfaceId,
+    epoch: number,
+    kind: "web" | "bot",
+    turn: () => void,
+    runtimeGeneration: number,
+  ): SeatHolder {
     const holder: SeatHolder = {
       surfaceId,
       epoch,
       kind,
+      runtimeGeneration,
+      granted: false,
       turn,
       keys: new Set(),
       buttons: new Set(),
@@ -353,7 +391,13 @@ export class ScreenInputLease {
       : { keys: holder.keys, buttons: holder.buttons };
     const release = (async (): Promise<void> => {
       try {
-        await this.delivery.release(holder.surfaceId, holder.epoch, held, holder.sequence + 1);
+        await this.delivery.release(
+          holder.surfaceId,
+          holder.epoch,
+          held,
+          holder.sequence + 1,
+          holder.runtimeGeneration,
+        );
       } finally {
         this.#releases.delete(holder);
         holder.turn();
@@ -420,7 +464,12 @@ export class ScreenInputLease {
 
   #requireGeneration(target: ScreenInputTarget): void {
     const current = this.#generation.get(target.surfaceId);
-    if (current !== undefined && current !== target.runtimeGeneration) {
+    if (current === undefined) {
+      // The Screen manager publishes the fence; a standalone lease adopts the first one.
+      this.#generation.set(target.surfaceId, target.runtimeGeneration);
+      return;
+    }
+    if (current !== target.runtimeGeneration) {
       throw new Error(`stale runtime generation ${target.runtimeGeneration}`);
     }
   }

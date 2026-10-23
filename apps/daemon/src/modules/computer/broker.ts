@@ -92,6 +92,15 @@ export class ComputerBroker {
     this.#unsubscribeScreens = this.screens.subscribe((transition) => {
       const owner = this.#ownerForSurface(transition.surfaceId);
       if (owner !== undefined) this.#lifecycleEvent(owner, transition);
+      if (transition.state === "ready") {
+        // The Screen manager owns the runtime generation; publish it before any input.
+        void this.lease.runtimeReady(transition.surfaceId, transition.runtimeGeneration).catch((error: unknown) => {
+          console.error(
+            `Computer Surface ${transition.surfaceId} runtime generation ${transition.runtimeGeneration} could not be published`,
+            error,
+          );
+        });
+      }
       if (transition.state === "failed") {
         this.#clearSurface(transition.surfaceId, "Bot Screen became unavailable during pending tool");
       } else if (transition.state === "stopped") {

@@ -147,14 +147,20 @@ export async function main(options: MainOptions = {}): Promise<{
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices);
   mailbox = new MailboxService(db, events, threads, agents, turns);
   const lease = new ScreenInputLease({
-    grant: async (surfaceId, epoch) => {
+    grant: async (surfaceId, epoch, generation) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));
       if (source === undefined) throw new Error("Bot Screen is unavailable");
+      // A grant for a replaced runtime must not arm the new compositor.
+      if (generation !== undefined && source.runtimeGeneration !== generation) {
+        throw new Error(`stale runtime generation ${generation}`);
+      }
       return source.setInputAuthority(epoch);
     },
-    deliver: async (surfaceId, epoch, event, sequence = 1) => {
+    deliver: async (surfaceId, epoch, event, sequence = 1, generation) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));
       if (source === undefined) throw new Error("Bot Screen is unavailable");
+      // A replaced runtime must not receive the old holder's keys.
+      if (generation !== undefined && source.runtimeGeneration !== generation) return;
       await source.input({
         surfaceId,
         runtimeGeneration: source.runtimeGeneration,
@@ -164,9 +170,11 @@ export async function main(options: MainOptions = {}): Promise<{
         sequence,
       });
     },
-    release: async (surfaceId, epoch, held, nextSequence = 1) => {
+    release: async (surfaceId, epoch, held, nextSequence = 1, generation) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));
       if (source === undefined) return;
+      // The old compositor is gone: its held keys die with it.
+      if (generation !== undefined && source.runtimeGeneration !== generation) return;
       let sequence = nextSequence;
       const context = {
         surfaceId,
