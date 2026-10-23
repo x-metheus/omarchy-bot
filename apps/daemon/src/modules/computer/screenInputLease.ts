@@ -267,7 +267,7 @@ export class ScreenInputLease {
       return {
         epoch,
         input: (event) => this.#deliver(holder, event),
-        release: () => this.revoke(target.surfaceId),
+        release: () => this.#holder === holder ? this.revoke(target.surfaceId) : this.#drop(holder),
       };
     } catch (error) {
       turn();

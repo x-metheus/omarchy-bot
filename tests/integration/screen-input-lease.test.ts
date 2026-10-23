@@ -500,6 +500,10 @@ describe("ScreenInputLease", () => {
       run: async () => "ran",
     })).rejects.toThrow(/generation/i);
     expect(sink.events.filter((event) => event.kind === "grant")).toHaveLength(1);
+    const replacement = await lease.acquireWebControl(target(SURFACE_A, 2));
+    await holder.release();
+    await replacement.input({ type: "motion", x: 1, y: 1 });
+    await replacement.release();
 
     const ran = await lease.performBotInput(target(SURFACE_A, 2), {
       turnId: "turn-new",
@@ -513,9 +517,11 @@ describe("ScreenInputLease", () => {
     expect(sink.events.filter((event) => event.kind === "grant")).toEqual([
       { surfaceId: SURFACE_A, epoch: 1, kind: "grant" },
       { surfaceId: SURFACE_A, epoch: 2, kind: "grant" },
+      { surfaceId: SURFACE_A, epoch: 3, kind: "grant" },
     ]);
     expect(sink.events.filter((event) => event.kind === "motion")).toEqual([
       { surfaceId: SURFACE_A, epoch: 2, kind: "motion" },
+      { surfaceId: SURFACE_A, epoch: 3, kind: "motion" },
     ]);
   });
 

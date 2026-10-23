@@ -159,8 +159,9 @@ export async function main(options: MainOptions = {}): Promise<{
     deliver: async (surfaceId, epoch, event, sequence = 1, generation) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));
       if (source === undefined) throw new Error("Bot Screen is unavailable");
-      // A replaced runtime must not receive the old holder's keys.
-      if (generation !== undefined && source.runtimeGeneration !== generation) return;
+      if (generation !== undefined && source.runtimeGeneration !== generation) {
+        throw new Error(`stale runtime generation ${generation}`);
+      }
       await source.input({
         surfaceId,
         runtimeGeneration: source.runtimeGeneration,

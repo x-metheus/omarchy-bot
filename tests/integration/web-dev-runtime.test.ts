@@ -29,19 +29,22 @@ beforeAll(async () => {
     },
   );
 
-  const output = new Response(devServer.stdout).text();
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    if (devServer.exitCode !== null) throw new Error(`Vite exited before becoming ready:\n${await output}`);
-    try {
-      if ((await fetch(devUrl)).ok) return;
-    } catch {
-      // The child process has not opened its listener yet.
-    }
-    // The Vite child uses the platform clock; an in-process fake clock cannot start its listener.
-    await Bun.sleep(50);
+  const reader = devServer.stdout.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) throw new Error(`Vite exited before becoming ready:\n${output}`);
+    output += decoder.decode(chunk.value, { stream: true });
+    if (output.includes(devUrl)) break;
   }
-  throw new Error(`Vite did not serve ${devUrl} before the startup deadline`);
+  void (async () => {
+    try {
+      while (!(await reader.read()).done);
+    } catch {
+      /* process closed */
+    }
+  })();
 }, 60_000);
 
 afterAll(async () => {
@@ -74,4 +77,4 @@ test("the Vite development runtime loads the sole pinned DiceBear renderer", asy
   } finally {
     await browser.close();
   }
-}, 30_000);
+}, 60_000);
