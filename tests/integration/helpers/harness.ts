@@ -135,13 +135,19 @@ export async function makeBot(h: Harness, name = "Test Bot", instructions = ""):
 }
 
 /** First send against a Bot: atomically creates the thread. */
-export async function sendToBot(h: Harness, botId: string, text: string): Promise<{ threadId: string; messageId: string; turnId: string; action: string }> {
-  return api(h, "POST", `/api/bots/${botId}/messages`, { text });
+export async function sendToBot(
+  h: Harness,
+  botId: string,
+  text: string,
+  deviceId?: string,
+): Promise<{ threadId: string; messageId: string; turnId: string; action: string }> {
+  return api(h, "POST", `/api/bots/${botId}/messages`, { text, ...(deviceId !== undefined ? { deviceId } : {}) });
 }
 
 /** Send into an existing thread (send when idle, steer when a turn is active). */
-export async function sendToThread(h: Harness, threadId: string, text: string): Promise<{ threadId: string; messageId: string; turnId: string; action: string }> {
-  return api(h, "POST", `/api/threads/${threadId}/messages`, { text });
+export async function sendToThread(h: Harness, threadId: string, text: string, deviceId?: string): Promise<{ threadId: string; messageId: string; turnId: string; action: string }> {
+  return api(h, "POST", `/api/threads/${threadId}/messages`, { text, ...(deviceId !== undefined ? { deviceId } : {}) });
+
 }
 
 /** Poll a thread until it has no active turn. */

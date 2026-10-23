@@ -6,6 +6,7 @@ import {
 import {
   AGENT_IDS,
   TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH,
+  isDeviceId,
   isSurfaceId,
   type SurfaceId,
 } from "@omarchy-bot/domain";
@@ -621,6 +622,7 @@ export const SendMessageBody = z.object({
   attachmentIds: z.array(z.string()).optional(),
   attachmentDraftToken: AttachmentDraftToken.optional(),
   clientTag: z.string().optional(),
+  deviceId: z.string().refine(isDeviceId, "invalid Local Sidecar device identity").optional(),
 }).superRefine((body, ctx) => {
   if ((body.attachmentIds?.length ?? 0) > 0 && body.attachmentDraftToken === undefined) {
     ctx.addIssue({

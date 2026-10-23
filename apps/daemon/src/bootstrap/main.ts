@@ -21,7 +21,7 @@ import { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { PluginsService } from "../modules/plugins/plugins.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
-import { DeviceRoster } from "../modules/devices/deviceRoster.ts";
+import { SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
@@ -143,7 +143,9 @@ export async function main(options: MainOptions = {}): Promise<{
     if (origin.hostname === "[::]") origin.hostname = "[::1]";
     return origin.origin;
   });
-  const devices = new DeviceRoster();
+  const devices = new SidecarBroker(cfg.sharedWorkspaceDir);
+  const deviceLiveness = setInterval(() => devices.expire(), 5_000);
+  deviceLiveness.unref?.();
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices);
   mailbox = new MailboxService(db, events, threads, agents, turns);
   const computer = new ComputerBroker(
@@ -242,6 +244,8 @@ export async function main(options: MainOptions = {}): Promise<{
     removeSignalHandlers();
     // Safe shutdown order: stop new work before revoking shared resources.
     clearInterval(statusTimer);
+    clearInterval(deviceLiveness);
+    devices.close();
     await dictation.shutdown();
     computer.shutdown();
     await projections.shutdown();
@@ -258,6 +262,8 @@ export async function main(options: MainOptions = {}): Promise<{
     stopping = true;
     removeSignalHandlers();
     clearInterval(statusTimer);
+    clearInterval(deviceLiveness);
+    devices.close();
     await dictation.shutdown();
     computer.shutdown();
     await projections.shutdown();

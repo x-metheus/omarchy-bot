@@ -24,7 +24,7 @@ describe("local dispatch once per tool call", () => {
       capabilities: ["shell"],
     });
     const botId = await makeBot(h, "Dispatch once Bot");
-    const pending = sendToBot(h, botId, "local.run:echo once");
+    const pending = sendToBot(h, botId, "local.run:echo once", DEVICE_A);
     const first = await sidecar.waitForJob();
     const sent = await pending;
     const row = h.svc.db.query(

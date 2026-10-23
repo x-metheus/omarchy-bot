@@ -5,6 +5,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { NpmMcpPackage, type SaveMcpBody, type McpConnectionDto } from "@omarchy-bot/protocol";
+import { confinedPath } from "@omarchy-bot/domain";
 import { redactToolErrorSummary } from "@omarchy-bot/agent-contract";
 import { HttpError } from "../bots/bots.ts";
 import { NativeMcpStore } from "./nativeMcp.ts";
@@ -26,8 +27,12 @@ const Lease = z.object({ pid: z.number().int().positive(), startTime: z.string()
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function within(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  try {
+    confinedPath(target, root);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function atomicJson(file: string, value: unknown): void {

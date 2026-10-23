@@ -41,7 +41,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
     });
     writeFileSync(sidecar.sandboxPath("from-laptop.txt"), "sidecar-sentinel");
     const botId = await makeBot(h, "Transfer in Bot");
-    const pending = sendToBot(h, botId, "local.transfer:to-workspace:from-laptop.txt:inbox/from-laptop.txt");
+    const pending = sendToBot(h, botId, "local.transfer:to-workspace:from-laptop.txt:inbox/from-laptop.txt", DEVICE_A);
     const job = await sidecar.waitForJob();
     expect(job).toMatchObject({
       action: "transfer",
@@ -70,12 +70,12 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
     writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "plugin-note.txt"), "workspace-sentinel");
     const botId = await makeBot(h, "Transfer out Bot");
 
-    const missing = await sendToBot(h, botId, "local.transfer:from-workspace:plugin-note.txt:");
+    const missing = await sendToBot(h, botId, "local.transfer:from-workspace:plugin-note.txt:", DEVICE_A);
     await waitThreadIdle(h, missing.threadId);
     expect((await messages(h, missing.threadId)).some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "error")).toBeTrue();
     expect(existsSync(sidecar.sandboxPath("plugin-note.txt"))).toBeFalse();
 
-    const pending = sendToBot(h, botId, "local.transfer:from-workspace:plugin-note.txt:downloads/plugin-note.txt");
+    const pending = sendToBot(h, botId, "local.transfer:from-workspace:plugin-note.txt:downloads/plugin-note.txt", DEVICE_A);
     const job = await sidecar.waitForJob();
     expect(job.destination).toBe("downloads/plugin-note.txt");
     expect(job.hostname).toBe("laptop");
@@ -96,7 +96,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
     });
     writeFileSync(sidecar.sandboxPath("from-laptop.txt"), "sidecar-sentinel");
     const botId = await makeBot(h, "Denied transfer Bot");
-    const pending = sendToBot(h, botId, "local.transfer:to-workspace:from-laptop.txt:inbox/denied.txt");
+    const pending = sendToBot(h, botId, "local.transfer:to-workspace:from-laptop.txt:inbox/denied.txt", DEVICE_A);
     await sidecar.waitForJob();
     await sidecar.denyOnce();
     const sent = await pending;
@@ -143,7 +143,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
       await Bun.sleep(20);
     }
     const botId = await makeBot(h, "Large transfer Bot");
-    const pending = sendToBot(h, botId, "local.transfer:to-workspace:big.txt:inbox/big.txt");
+    const pending = sendToBot(h, botId, "local.transfer:to-workspace:big.txt:inbox/big.txt", DEVICE_A);
     const askDeadline = Date.now() + 8_000;
     while (!stdout.includes('"type":"ask"')) {
       if (Date.now() > askDeadline) throw new Error("production Sidecar did not ask");

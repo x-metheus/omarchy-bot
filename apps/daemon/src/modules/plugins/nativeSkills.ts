@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import { ResourceFingerprint } from "./resourceFingerprint.ts";
 import type { CatalogSkillDto, InstalledSkillDto } from "@omarchy-bot/protocol";
+import { confinedPath } from "@omarchy-bot/domain";
 import { HttpError } from "../bots/bots.ts";
 import { skillFrontmatter } from "./skillInstaller.ts";
 
@@ -27,8 +28,11 @@ const Transaction = z.object({
 });
 
 function inside(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  try {
+    return confinedPath(target, root) !== path.resolve(root);
+  } catch {
+    return false;
+  }
 }
 
 /** Native files are authoritative; this registry retains origin and update baselines only. */

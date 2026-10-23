@@ -1,5 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import {
@@ -34,15 +33,16 @@ import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "../bots/bots.ts";
 import type { ComputerBroker } from "../computer/broker.ts";
 import type { MailboxService } from "../mailbox/mailbox.ts";
-import { confinedWorkspacePath, resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
+import { resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
 import type { PluginsService, PluginLease } from "../plugins/plugins.ts";
-import type { DeviceRoster } from "../devices/deviceRoster.ts";
+import type { SidecarBroker } from "../devices/sidecarBroker.ts";
 
 interface TurnContext {
   turnId: string;
   threadId: string;
   botId: string;
   agentId: AgentId;
+  deviceId?: string;
   workerSessionId: string;
   surfaceId: SurfaceId;
   /** Static tools plus this Turn's leased plugin tools; one channel for every reverse tool call. */
@@ -106,7 +106,7 @@ export class TurnService {
     private readonly supervisor: Supervisor,
     private readonly cfg: { turnTimeoutMs: number; sharedWorkspaceDir: string },
     private readonly plugins: PluginsService,
-    private readonly devices: DeviceRoster,
+    private readonly devices: SidecarBroker,
   ) {}
 
   #turnDto(id: string): TurnDto | undefined {
@@ -155,7 +155,7 @@ export class TurnService {
     text: string,
     attachmentIds: string[] = [],
     attachmentDraftToken?: string,
-    opts: { cwd?: string } = {},
+    opts: { cwd?: string; deviceId?: string } = {},
   ): Promise<SendResultDto> {
     const bot = this.db.query(`SELECT * FROM bots WHERE id = ?`).get(botId) as { id: string; agent_id: string; instructions: string } | undefined;
     if (!bot) throw new HttpError(404, `unknown bot ${botId}`);
@@ -229,7 +229,7 @@ export class TurnService {
     this.events.append("turn", turnId, "turn.created", { turnId, threadId: result.threadId, botId });
     this.bots.recordActivityStatus(botId, result.threadId, turnId);
     this.bots.recordUserMessage(botId, result.threadId);
-    const start = this.#startTurn(turnId, result.threadId, botId, agentId, text, result.workerAttachments);
+    const start = this.#startTurn(turnId, result.threadId, botId, agentId, text, result.workerAttachments, opts.deviceId === undefined ? {} : { deviceId: opts.deviceId });
     this.#turnStarts.set(turnId, start);
     void start
       .catch((err: unknown) => {
@@ -307,6 +307,7 @@ export class TurnService {
       freshSession?: boolean;
       awaitAcceptance?: boolean;
       acceptanceFailureReason?: string;
+      deviceId?: string;
     } = {},
   ): Promise<TurnContext> {
     const botRow = this.db.query(`SELECT instructions FROM bots WHERE id = ?`).get(botId) as { instructions: string } | undefined;
@@ -351,13 +352,17 @@ export class TurnService {
       threadId,
       botId,
       agentId,
+      ...(startOptions.deviceId !== undefined ? { deviceId: startOptions.deviceId } : {}),
       workerSessionId: opened.sessionId,
       surfaceId: surface.surface_id,
       toolChannel: createToolChannelDaemon({
         tools,
         execute: (params, context, signal, name) => {
           if (name === "send_bot_message") return this.#sendBotMessage(agentId, context, params);
-          if (name === AGENT_LOCAL_TOOL.name) return this.#runLocal(agentId, context, params, signal);
+          if (name === AGENT_LOCAL_TOOL.name) {
+            const deviceId = this.#turns.get(context.workerSessionId)?.deviceId;
+            return this.devices.execute(params as Parameters<SidecarBroker["execute"]>[0], { botId: context.botId, turnId: context.turnId, ...(deviceId !== undefined ? { deviceId } : {}) }, signal);
+          }
           if (name === AGENT_COMPUTER_TOOL.name) return this.#runComputer(agentId, context, params, signal);
           return this.#callPlugin(agentId, context, params, signal, name);
         },
@@ -547,66 +552,6 @@ export class TurnService {
     );
   }
 
-  /** Fan a Turn-bound `local` request to one online Sidecar; never execute it here. */
-  async #runLocal(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal): Promise<AgentLocalToolOutput> {
-    const request = params as { action: "run" | "search" | "read" | "write" | "transfer"; target?: string; command?: string; path?: string; destination?: string; query?: string; contents?: string; direction?: "to-workspace" | "from-workspace" };
-    const active = this.#turns.get(context.workerSessionId);
-    if (active === undefined || active.agentId !== agentId || active.botId !== context.botId || active.turnId !== context.turnId) {
-      throw new Error("local tool context is stale or mismatched");
-    }
-    const device = this.devices.resolve(request.target);
-    const needed =
-      request.action === "run" ? "shell"
-      : request.action === "search" ? "search"
-      : request.action === "transfer" ? "transfer"
-      : "files";
-    if (!device.capabilities.includes(needed)) {
-      throw new Error(`Local Sidecar ${device.hostname} cannot ${request.action}`);
-    }
-    if (request.action === "search" && (request.query === "/" || request.path === "/")) {
-      throw new Error("Local Sidecar search cannot scan /");
-    }
-    const job = this.#workspaceTransfer(request);
-    signal.throwIfAborted();
-    const result = await this.devices.dispatch({
-      deviceId: device.id,
-      action: request.action,
-      botId: active.botId,
-      turnId: active.turnId,
-      ...(request.command !== undefined ? { command: request.command } : {}),
-      ...(request.path !== undefined ? { path: request.path } : {}),
-      ...(request.destination !== undefined ? { destination: request.destination } : {}),
-      ...(request.query !== undefined ? { query: request.query } : {}),
-      ...(job.contents !== undefined ? { contents: job.contents } : {}),
-      ...(request.direction !== undefined ? { direction: request.direction } : {}),
-    });
-    signal.throwIfAborted();
-    if (request.action === "transfer" && request.direction === "to-workspace") {
-      if (request.destination === undefined) {
-        throw new Error("transfer into Shared Workspace requires an explicit destination path");
-      }
-      const dest = confinedWorkspacePath(request.destination, this.cfg.sharedWorkspaceDir);
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, result.text);
-    }
-    return {
-      deviceId: result.deviceId,
-      hostname: result.hostname,
-      text: result.text,
-      ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
-    };
-  }
-
-  #workspaceTransfer(request: { action: string; direction?: string; path?: string; destination?: string; contents?: string }): { contents?: string } {
-    if (request.action !== "transfer" || request.direction !== "from-workspace") {
-      return request.contents === undefined ? {} : { contents: request.contents };
-    }
-    if (request.path === undefined || request.destination === undefined) {
-      throw new Error("transfer onto a Sidecar requires an explicit destination path");
-    }
-    const source = confinedWorkspacePath(request.path, this.cfg.sharedWorkspaceDir);
-    return { contents: readFileSync(source, "utf8") };
-  }
 
   /** Runs one plugin tool of the lease this Turn holds; the channel owns schema and dispatch checks. */
   async #callPlugin(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal, name: string): Promise<AgentPluginToolOutput> {

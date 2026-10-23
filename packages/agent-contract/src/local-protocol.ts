@@ -1,4 +1,5 @@
 import { Type } from "typebox";
+import { Value } from "typebox/value";
 
 export const LOCAL_ACTIONS = ["run", "search", "read", "write", "transfer"] as const;
 export type LocalActionName = (typeof LOCAL_ACTIONS)[number];
@@ -44,3 +45,18 @@ export const LOCAL_SCHEMA = Type.Object({
     { required: ["action", "path", "destination", "direction"], properties: { action: Type.Literal("transfer") } },
   ],
 });
+
+export interface LocalJob {
+  action: "run" | "search" | "read" | "write" | "transfer";
+  target?: string;
+  command?: string;
+  path?: string;
+  destination?: string;
+  query?: string;
+  contents?: string;
+  direction?: "to-workspace" | "from-workspace";
+}
+
+export function isLocalJob(value: unknown): value is LocalJob {
+  return Value.Check(LOCAL_SCHEMA, value);
+}

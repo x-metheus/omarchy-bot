@@ -1,7 +1,7 @@
 # 04: SidecarBroker for `local` jobs
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** claimed
 **Blocked by:** 03
 
 **What to build:** Give `local` a deep `SidecarBroker` mirroring `ComputerBroker`, and register it as the `local` executor on the ToolChannel. It owns This Device resolution, capability checks, job ids, cancel, liveness, output bounds and redaction, and Shared Workspace transfer I/O behind one signal-aware call. `TurnService` stops doing file I/O for `local`.

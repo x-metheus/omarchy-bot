@@ -163,7 +163,7 @@ describe("approved local.run on this-device", () => {
       capabilities: ["shell"],
     });
     const botId = await makeBot(h, "Local run Bot");
-    const pending = sendToBot(h, botId, "local.run:echo sidecar-sentinel; pwd");
+    const pending = sendToBot(h, botId, "local.run:echo sidecar-sentinel; pwd", DEVICE_A);
     const job = await sidecar.waitForJob();
     expect(job).toMatchObject({
       type: "local.job",
@@ -226,7 +226,7 @@ describe("approved local.run on this-device", () => {
       capabilities: ["shell"],
     });
     const botId = await makeBot(h, "Redacted local Bot");
-    const pending = sendToBot(h, botId, "local.run:echo token=supersecret");
+    const pending = sendToBot(h, botId, "local.run:echo token=supersecret", DEVICE_A);
     await sidecar.waitForJob();
     await sidecar.allowOnce();
     const sent = await pending;
