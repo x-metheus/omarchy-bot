@@ -1,3 +1,4 @@
+import type { NativeMcpRuntimeStatus } from "./native-mcp-config.ts";
 export interface AgentPluginToolDefinition {
   name: string;
   description: string;
@@ -34,7 +35,7 @@ export type AgentPluginToolResult =
 export interface NativeMcpStatus {
   name: string;
   configurationRevision: string;
-  status: "connected" | "cached" | "failed" | "needs-auth" | "not-connected" | "disabled";
+  status: NativeMcpRuntimeStatus;
   toolCount: number;
   disabled: boolean;
 }

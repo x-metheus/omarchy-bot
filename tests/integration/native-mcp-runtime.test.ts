@@ -6,6 +6,7 @@ import path from "node:path";
 import { PluginsService } from "../../apps/daemon/src/modules/plugins/plugins.ts";
 import { WorkerClient } from "../../apps/daemon/src/supervision/workerClient.ts";
 import type { NativeMcpControlResult } from "../../packages/agent-contract/src/index.ts";
+import { nativeMcpPrivateDir } from "../../packages/agent-contract/src/native-mcp-config.ts";
 
 test("a native project adapter connects without model credentials, retains private env across edits and releases removed idle children", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "native-mcp-runtime-"));
@@ -41,7 +42,7 @@ await server.connect(new StdioServerTransport());
       return originalFetch(input, init);
     }, { preconnect: originalFetch.preconnect });
     await worker.start();
-    service = new PluginsService(path.join(home, "plugins"), workspace,
+    service = new PluginsService(nativeMcpPrivateDir({ OMARCHY_BOT_HOME: home }), workspace,
       () => worker.request({ type: "resources.list", cwd: workspace }, 15_000),
       (input) => worker.request({ type: "mcp.control", cwd: workspace, ...input }, 30_000));
     service.configure("https://native-runtime-catalog.invalid");
