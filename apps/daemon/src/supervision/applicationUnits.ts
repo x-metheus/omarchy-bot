@@ -5,7 +5,6 @@ export type ApplicationUnitRole =
   | "compositor"
   | "application"
   | "input"
-  | "worker"
   | "capture"
   | `capture-${string}`
   | "wayvnc";

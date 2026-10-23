@@ -1,17 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import nodePath from "node:path";
 import { ApiClient } from "../../packages/api-client/src/index.ts";
 import { handleComputerRequest } from "../../apps/daemon/src/api/computerRoutes.ts";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
-import type {
-  BotScreenCapture,
-  BotScreenProvision,
-  BotScreenRuntime,
-  BotScreenRuntimeOutcome,
-  BotScreenRuntimeAdapter,
-} from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
-import { WorkerClient, sanitizedEnv } from "../../apps/daemon/src/supervision/workerClient.ts";
 import { api, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 async function computerRequest<T>(h: Harness, method: string, path: string): Promise<{ response: Response; body: T }> {
@@ -82,134 +73,6 @@ async function waitForComputerState(
     }
   }
 }
-
-const CONCURRENCY_TEST_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-  "base64",
-);
-
-class ControlledRuntimeAdapter implements BotScreenRuntimeAdapter {
-  #blockedSurface?: SurfaceOwner["surfaceId"];
-  #captureStarts = new Map<SurfaceOwner["surfaceId"], number>();
-  #capturesInFlight = new Map<SurfaceOwner["surfaceId"], number>();
-  #maxCapturesInFlight = new Map<SurfaceOwner["surfaceId"], number>();
-  #failRuntime = new Map<SurfaceOwner["surfaceId"], (error: Error) => void>();
-  #blockedStarted?: () => void;
-  #releaseBlocked?: () => void;
-  #blockedStartedPromise = new Promise<void>((resolve) => {
-    this.#blockedStarted = resolve;
-  });
-  #releaseBlockedPromise = new Promise<void>((resolve) => {
-    this.#releaseBlocked = resolve;
-  });
-
-  blockFirstCapture(surfaceId: SurfaceOwner["surfaceId"]): void {
-    this.#blockedSurface = surfaceId;
-  }
-
-  captureStarts(surfaceId: SurfaceOwner["surfaceId"]): number {
-    return this.#captureStarts.get(surfaceId) ?? 0;
-  }
-
-  maxConcurrentCaptures(surfaceId: SurfaceOwner["surfaceId"]): number {
-    return this.#maxCapturesInFlight.get(surfaceId) ?? 0;
-  }
-
-  waitForBlockedCapture(): Promise<void> {
-    return this.#blockedStartedPromise;
-  }
-
-  releaseBlockedCapture(): void {
-    this.#releaseBlocked?.();
-  }
-
-
-  fail(surfaceId: SurfaceOwner["surfaceId"], message: string): void {
-    const fail = this.#failRuntime.get(surfaceId);
-    if (fail === undefined) throw new Error("test Screen was not started");
-    fail(new Error(message));
-  }
-
-  async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
-    let stopped = false;
-    const outcome = Promise.withResolvers<BotScreenRuntimeOutcome>();
-    const videoWidth = Math.round(provision.logicalWidth * provision.scale);
-    const videoHeight = Math.round(provision.logicalHeight * provision.scale);
-    const rawFrame = new Uint8Array(videoWidth * videoHeight * 4);
-    this.#failRuntime.set(provision.surfaceId, (error) => {
-      outcome.resolve({ type: "computer-worker-exited", error });
-    });
-    return {
-      readiness: {
-        compositor: "ready",
-        waylandSocket: "private",
-        output: {
-          geometryGeneration: provision.geometryGeneration,
-          logicalWidth: provision.logicalWidth,
-          logicalHeight: provision.logicalHeight,
-          scale: provision.scale,
-          refreshRate: provision.refreshRate,
-        },
-        desktopSurface: "ready",
-        capture: "ready",
-        input: "ready",
-        computerWorker: "ready",
-      },
-      capture: async (): Promise<BotScreenCapture> => {
-        if (stopped) throw new Error("test Screen is stopped");
-        const count = this.captureStarts(provision.surfaceId) + 1;
-        const inFlight = (this.#capturesInFlight.get(provision.surfaceId) ?? 0) + 1;
-        this.#captureStarts.set(provision.surfaceId, count);
-        this.#capturesInFlight.set(provision.surfaceId, inFlight);
-        this.#maxCapturesInFlight.set(
-          provision.surfaceId,
-          Math.max(inFlight, this.#maxCapturesInFlight.get(provision.surfaceId) ?? 0),
-        );
-        try {
-          if (provision.surfaceId === this.#blockedSurface && count === 1) {
-            this.#blockedStarted?.();
-            await this.#releaseBlockedPromise;
-          }
-          return { mediaType: "image/png", bytes: CONCURRENCY_TEST_PNG };
-        } finally {
-          this.#capturesInFlight.set(provision.surfaceId, inFlight - 1);
-        }
-      },
-      openCaptureStream: async () => ({
-        next: async () => ({
-          pixelFormat: "rgba",
-          width: videoWidth,
-          height: videoHeight,
-          bytes: rawFrame,
-          capturedAt: new Date(),
-        }),
-        close: async () => {},
-      }),
-      acquireExpandedView: async () => {
-        throw new Error("test Bot Screen does not provide an expanded-view stream");
-      },
-      act: async (action) => {
-        if (stopped) throw new Error("test Screen is stopped");
-        return { text: `test-${action.name}` };
-      },
-      setInputAuthority: async (epoch) => {
-        if (stopped) throw new Error("test Screen is stopped");
-        return epoch;
-      },
-      input: async () => {
-        if (stopped) throw new Error("test Screen is stopped");
-      },
-      releaseInput: async () => {
-        if (stopped) throw new Error("test Screen is stopped");
-      },
-      outcome: outcome.promise,
-      stop: async () => {
-        stopped = true;
-      },
-    };
-  }
-}
-
 
 describe("contextual computer control", () => {
   let h: Harness;
@@ -396,7 +259,7 @@ describe("contextual computer control", () => {
 
   test("different Bot Screens capture concurrently while one Screen serializes its requests", async () => {
     await h.stop();
-    const adapter = new ControlledRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const first = await ownerFor(h, await makeBot(h, "First concurrent screen"));
     const second = await ownerFor(h, await makeBot(h, "Second concurrent screen"));
@@ -420,7 +283,7 @@ describe("contextual computer control", () => {
 
   test("one failed Screen runtime leaves another Screen ready and capturable", async () => {
     await h.stop();
-    const adapter = new ControlledRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const failed = await ownerFor(h, await makeBot(h, "Failed screen"));
     const unaffected = await ownerFor(h, await makeBot(h, "Unaffected screen"));
@@ -432,7 +295,7 @@ describe("contextual computer control", () => {
       waitForComputerState(h, unaffected, "ready"),
     ]);
 
-    adapter.fail(failed.surfaceId, "test worker failed");
+    adapter.exitDesktop(failed.surfaceId, "test worker failed");
     expect(await waitForComputerState(h, failed, "unavailable")).toMatchObject(failed);
     const snapshot = await computerRequest<ArrayBuffer>(
       h,
@@ -517,93 +380,6 @@ describe("contextual computer control", () => {
       });
     expect(recoveredLifecycle).toContain("ready");
   }, 15_000);
-
-  test("restarting one Surface worker does not stop another Surface worker", async () => {
-    const first = await ownerFor(h, await makeBot(h, "First worker"));
-    const second = await ownerFor(h, await makeBot(h, "Second worker"));
-    const workerEnv = { PATH: process.env.PATH ?? "" };
-    const firstWorker = await h.svc.supervisor.startComputerWorker({
-      surfaceId: first.surfaceId,
-      runtimeGeneration: 1,
-      env: workerEnv,
-    });
-    const secondWorker = await h.svc.supervisor.startComputerWorker({
-      surfaceId: second.surfaceId,
-      runtimeGeneration: 1,
-      env: workerEnv,
-    });
-
-    await expect(firstWorker.act({ name: "observe", args: { crash: true } })).rejects.toThrow("worker exited");
-    await expect(firstWorker.exited).resolves.toThrow("Computer worker exited (17)");
-    await expect(secondWorker.act({ name: "observe", args: {} })).resolves.toMatchObject({
-      text: "fake-observe#1",
-    });
-
-    const restarted = await h.svc.supervisor.startComputerWorker({
-      surfaceId: first.surfaceId,
-      runtimeGeneration: 2,
-      env: workerEnv,
-    });
-    await expect(firstWorker.act({ name: "observe", args: {} })).rejects.toThrow("context is no longer active");
-    await expect(restarted.act(
-      { name: "observe", args: {} },
-      { surfaceId: second.surfaceId, botId: first.botId, turnId: "turn-wrong-surface" },
-    )).rejects.toThrow("mismatched input authority Surface");
-    await expect(Promise.all([
-      restarted.act({ name: "observe", args: {} }),
-      secondWorker.act({ name: "observe", args: {} }),
-    ])).resolves.toHaveLength(2);
-  });
-
-  test("computer worker protocol rejects another Surface, stale generation, and invalid input authority", async () => {
-    const first = await ownerFor(h, await makeBot(h, "Worker protocol owner"));
-    const second = await ownerFor(h, await makeBot(h, "Worker protocol other"));
-    const worker = new WorkerClient({
-      name: "computer-protocol-test",
-      script: nodePath.resolve(import.meta.dir, "../../workers/computer/src/worker.ts"),
-      env: {
-        ...sanitizedEnv(),
-        OMARCHY_BOT_SURFACE_ID: first.surfaceId,
-        OMARCHY_BOT_RUNTIME_GENERATION: "7",
-      },
-      onEvent: () => {},
-    });
-    await worker.start();
-    try {
-      const action = { name: "observe", args: {} };
-      await expect(worker.request({
-        type: "act",
-        surfaceId: second.surfaceId,
-        runtimeGeneration: 7,
-        action,
-      }, 1_000)).rejects.toThrow("command Surface does not match worker context");
-      await expect(worker.request({
-        type: "act",
-        surfaceId: first.surfaceId,
-        runtimeGeneration: 6,
-        action,
-      }, 1_000)).rejects.toThrow("runtime generation does not match worker context");
-      await expect(worker.request({
-        type: "act",
-        surfaceId: first.surfaceId,
-        runtimeGeneration: 7,
-        action: { name: "click", args: { x: 1, y: 1 } },
-      }, 1_000)).rejects.toThrow("input action requires explicit Bot Screen authority");
-      await expect(worker.request({
-        type: "act",
-        surfaceId: first.surfaceId,
-        runtimeGeneration: 7,
-        action,
-        inputAuthority: {
-          surfaceId: second.surfaceId,
-          botId: first.botId,
-          turnId: "turn-wrong-surface",
-        },
-      }, 1_000)).rejects.toThrow("input authority Surface does not match command Surface");
-    } finally {
-      await worker.stop();
-    }
-  });
 
 
   test("an active turn without a pending computer tool cannot enter Takeover", async () => {

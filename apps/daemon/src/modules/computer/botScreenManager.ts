@@ -1,6 +1,9 @@
 import type { Database } from "bun:sqlite";
 import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
-import type { AgentComputerToolOutput, ComputerInputAuthority } from "@omarchy-bot/agent-contract";
+import type {
+  AgentComputerToolOutput,
+  ComputerWindowListItem,
+} from "@omarchy-bot/agent-contract";
 import type { ComputerSurfaceOwner } from "./broker.ts";
 
 export type BotScreenLifecycleState = "stopped" | "starting" | "ready" | "failed";
@@ -71,7 +74,6 @@ export class BotScreenInputRejectedError extends Error {
 
 export interface BotScreenProvision {
   surfaceId: SurfaceId;
-  generation: number;
   geometryGeneration: number;
   logicalWidth: number;
   logicalHeight: number;
@@ -96,7 +98,6 @@ export interface BotScreenRuntimeReadiness {
   desktopSurface: "ready";
   capture: "ready";
   input: "ready";
-  computerWorker: "ready";
 }
 
 export type BotScreenRuntimeOutcome =
@@ -104,7 +105,6 @@ export type BotScreenRuntimeOutcome =
   | { type: "session-bus-exited"; error: Error }
   | { type: "desktop-exited"; error: Error }
   | { type: "input-helper-exited"; error: Error }
-  | { type: "computer-worker-exited"; error: Error };
 
 
 export interface BotScreenProjectionSource {
@@ -126,18 +126,32 @@ export interface BotScreenProjectionSource {
   releaseInput(controllerEpoch?: number): Promise<void>;
 }
 
+export interface BotScreenLaunchRequest {
+  app?: string;
+  url?: string;
+}
+
 /**
  * Internal platform seam. A runtime is returned only after its readiness
  * evidence is complete; process trees, sockets, and compositor commands remain
- * private to the adapter.
+ * private to the adapter. Every adapter delivers the same input events, captures,
+ * routes the same windows, and owns only its own lifecycle.
  */
 export interface BotScreenRuntime {
+  /** The Bot Computer generation this Screen attached under. */
+  readonly generation: number;
   readonly readiness: BotScreenRuntimeReadiness;
+  readonly sessionEnv: Record<string, string>;
   readonly expandedProjection?: "rfb";
   capture(): Promise<BotScreenCapture>;
   openCaptureStream(): Promise<BotScreenCaptureStream>;
   acquireExpandedView(): Promise<BotScreenExpandedView>;
-  act(action: ComputerAction, inputAuthority?: ComputerInputAuthority): Promise<BotScreenActionResult>;
+  /** Windows this Screen routes to its workspace, in Screen coordinates. */
+  listWindows(): Promise<ComputerWindowListItem[]>;
+  /** Focuses one window this Screen returned. */
+  focusWindow(window: ComputerWindowListItem): Promise<void>;
+  /** Opens an application or URL on this Screen. */
+  launch(request: BotScreenLaunchRequest): Promise<{ text?: string }>;
   setInputAuthority(controllerEpoch: number): Promise<number>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
@@ -152,6 +166,193 @@ export interface BotScreenRuntimeAdapter {
   reconcile?(provision: BotScreenProvision): Promise<BotScreenRuntime | undefined>;
   /** Removes retained runtime/profile resources for permanent Bot deletion. */
   destroy?(surfaceId: SurfaceId): Promise<void>;
+}
+
+/**
+ * Screen-input policy every adapter shares: the action vocabulary, the evdev key
+ * table, and the event shapes. Adapters never see a `ComputerAction`.
+ */
+async function runBotScreenAction(
+  runtime: BotScreenRuntime,
+  action: ComputerAction,
+  send?: (event: BotScreenInputAction) => Promise<void>,
+): Promise<BotScreenActionResult> {
+  switch (action.name) {
+    case "screenshot":
+      return { image: await runtime.capture() };
+    case "list_windows":
+      return { windowList: await runtime.listWindows() };
+    case "observe": {
+      const windowList = await runtime.listWindows();
+      return { image: await runtime.capture(), windowList };
+    }
+    case "focus_window": {
+      const matches = resolveFocusMatches(await runtime.listWindows(), action.args);
+      if (matches.length === 0) throw new Error("focus_window did not match a window");
+      if (matches.length > 1) throw new Error("focus_window matched multiple windows");
+      await runtime.focusWindow(matches[0]!);
+      return {};
+    }
+    case "click":
+    case "scroll":
+    case "key":
+    case "type":
+      await deliverScreenInput(action, send);
+      return {};
+    case "open_app":
+      return runtime.launch({ app: launchTarget(action.args.app, "open_app requires args.app") });
+    case "open_url":
+      return runtime.launch({ url: launchTarget(action.args.url, "open_url requires args.url") });
+  }
+}
+
+async function deliverScreenInput(
+  action: ComputerAction,
+  send?: (event: BotScreenInputAction) => Promise<void>,
+): Promise<void> {
+  if (send === undefined) throw new Error("Bot Screen input requires the input lease");
+  switch (action.name) {
+    case "click": {
+      const x = requireCoordinate(action.args.x, "click x");
+      const y = requireCoordinate(action.args.y, "click y");
+      const button = pointerButton(action.args.button);
+      await send({ type: "motion", x, y });
+      await send({ type: "button", x, y, button, state: "pressed" });
+      await send({ type: "button", x, y, button, state: "released" });
+      return;
+    }
+    case "scroll":
+      await send({
+        type: "scroll",
+        x: optionalCoordinate(action.args.x, 0),
+        y: optionalCoordinate(action.args.y, 0),
+        deltaX: requireCoordinate(action.args.deltaX, "scroll deltaX"),
+        deltaY: requireCoordinate(action.args.deltaY, "scroll deltaY"),
+      });
+      return;
+    case "key": {
+      const keyCodes = linuxKeyChord(action.args.key);
+      for (const keyCode of keyCodes) await send({ type: "key", keyCode, state: "pressed" });
+      for (const keyCode of keyCodes.toReversed()) await send({ type: "key", keyCode, state: "released" });
+      return;
+    }
+    case "type":
+      if (typeof action.args.text !== "string") throw new Error("type requires args.text");
+      await send({ type: "paste", text: action.args.text });
+      return;
+    default:
+      throw new Error(`${action.name} does not deliver input events`);
+  }
+}
+
+const LINUX_KEY_CODES: Record<string, number> = {
+  Esc: 1,
+  Escape: 1,
+  Tab: 15,
+  Return: 28,
+  Enter: 28,
+  LeftCtrl: 29,
+  Control: 29,
+  Ctrl: 29,
+  LeftShift: 42,
+  Shift: 42,
+  LeftAlt: 56,
+  Alt: 56,
+  Space: 57,
+  Backspace: 14,
+  RightShift: 54,
+  RightCtrl: 97,
+  RightAlt: 100,
+  LeftMeta: 125,
+  Super: 125,
+  Meta: 125,
+  Win: 125,
+  Up: 103,
+  Down: 108,
+  Left: 105,
+  Right: 106,
+  Home: 102,
+  End: 107,
+  PageUp: 104,
+  PageDown: 109,
+  Delete: 111,
+  Insert: 110,
+  CapsLock: 58,
+  F1: 59,
+  F2: 60,
+  F3: 61,
+  F4: 62,
+  F5: 63,
+  F6: 64,
+  F7: 65,
+  F8: 66,
+  F9: 67,
+  F10: 68,
+  F11: 87,
+  F12: 88,
+};
+
+const LINUX_LETTER_KEY_CODES: Readonly<Record<string, number>> = {
+  q: 16, w: 17, e: 18, r: 19, t: 20, y: 21, u: 22, i: 23, o: 24, p: 25,
+  a: 30, s: 31, d: 32, f: 33, g: 34, h: 35, j: 36, k: 37, l: 38,
+  z: 44, x: 45, c: 46, v: 47, b: 48, n: 49, m: 50,
+};
+
+function linuxKeyCode(key: string): number {
+  const name = key.trim();
+  if (name === "") throw new Error("key requires a known key name");
+  const keyCode = LINUX_KEY_CODES[name]
+    ?? LINUX_LETTER_KEY_CODES[name.toLowerCase()]
+    ?? (/^[0-9]$/.test(name) ? (name === "0" ? 11 : Number(name) + 1) : undefined);
+  if (keyCode === undefined) throw new Error(`unknown key: ${name}`);
+  return keyCode;
+}
+
+function linuxKeyChord(value: unknown): number[] {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error("key requires a known key name");
+  }
+  const keys = value.split("+").map((key) => key.trim());
+  if (keys.some((key) => key === "")) throw new Error(`unknown key chord: ${value}`);
+  return keys.map(linuxKeyCode);
+}
+
+function requireCoordinate(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a number`);
+  return value;
+}
+
+function optionalCoordinate(value: unknown, fallback: number): number {
+  return value === undefined ? fallback : requireCoordinate(value, "coordinate");
+}
+
+function pointerButton(value: unknown): "left" | "middle" | "right" {
+  if (value === undefined || value === "left") return "left";
+  if (value === "middle" || value === "right") return value;
+  throw new Error("click button must be left, middle, or right");
+}
+
+function launchTarget(value: unknown, message: string): string {
+  const target = typeof value === "string" ? value : "";
+  if (target === "") throw new Error(message);
+  return target;
+}
+
+function resolveFocusMatches(
+  windows: ComputerWindowListItem[],
+  args: Record<string, unknown>,
+): ComputerWindowListItem[] {
+  if (args.id !== undefined && args.id !== null && args.id !== "") {
+    const id = String(args.id);
+    return windows.filter((window) => window.id === id);
+  }
+  if (typeof args.title === "string") {
+    return windows.filter((window) => window.title === args.title);
+  }
+  if (typeof args.appId === "string") {
+    return windows.filter((window) => window.appId === args.appId);
+  }
+  throw new Error("focus_window requires id, title, or appId");
 }
 
 export interface BotScreenLifecycle {
@@ -182,7 +383,6 @@ interface SurfaceRow {
 
 interface RuntimeEntry {
   start: Promise<BotScreenRuntime>;
-  provision: BotScreenProvision;
   runtime?: BotScreenRuntime;
 }
 
@@ -246,7 +446,7 @@ export class BotScreenManager {
 
     for (const row of rows) {
       await this.#serialize(row.surface_id, async () => {
-        const provision = this.#provision(row.surface_id, row.runtime_generation, row);
+        const provision = this.#provision(row.surface_id, row);
         const runtime = await this.adapter.reconcile?.(provision).catch(() => undefined);
         if (row.lifecycle_state === "failed") {
           await runtime?.releaseInput().catch(() => {});
@@ -261,7 +461,7 @@ export class BotScreenManager {
           return;
         }
         if (runtime !== undefined) {
-          this.#install(row.surface_id, provision, Promise.resolve(runtime), runtime);
+          this.#install(row.surface_id, Promise.resolve(runtime), runtime);
           return;
         }
         this.#transition(row.surface_id, "stopped", null);
@@ -433,28 +633,32 @@ export class BotScreenManager {
     });
   }
 
+  /**
+   * Runs one Bot action above the platform seam. The action vocabulary, the evdev key
+   * table, and the event shapes are the same for every adapter; input events go out
+   * through `send`, which carries the lease's authority and sequence numbering.
+   */
   async act(
     owner: ComputerSurfaceOwner,
     action: ComputerAction,
-    inputAuthority?: ComputerInputAuthority,
+    send?: (event: BotScreenInputAction) => Promise<void>,
   ): Promise<BotScreenBoundActionResult> {
-    if (inputAuthority !== undefined && inputAuthority.surfaceId !== owner.surfaceId) {
-      throw new Error("input authority does not belong to this Computer Surface");
-    }
-    return this.#serialize(owner.surfaceId, async () => {
+    const prepared = await this.#serialize(owner.surfaceId, async () => {
       const runtime = await this.#readyRuntime(owner);
       const entry = this.#entries.get(owner.surfaceId);
       if (runtime === undefined || entry?.runtime !== runtime) {
         throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
-      const runtimeGeneration = this.#row(owner.surfaceId).runtime_generation;
-      const result = await runtime.act(action, inputAuthority);
-      if (this.#entries.get(owner.surfaceId) !== entry || entry.runtime !== runtime) {
+      return { runtime, entry, runtimeGeneration: this.#row(owner.surfaceId).runtime_generation };
+    });
+    const result = await runBotScreenAction(prepared.runtime, action, send);
+    return this.#serialize(owner.surfaceId, async () => {
+      if (this.#entries.get(owner.surfaceId) !== prepared.entry || prepared.entry.runtime !== prepared.runtime) {
         throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
       return {
         ...result,
-        desktopSession: { botId: owner.botId, surfaceId: owner.surfaceId, runtimeGeneration },
+        desktopSession: { botId: owner.botId, surfaceId: owner.surfaceId, runtimeGeneration: prepared.runtimeGeneration },
       };
     });
   }
@@ -498,15 +702,14 @@ export class BotScreenManager {
           logical_height: this.options.logicalHeight,
         }
       : existingRow;
-    const generation = row.runtime_generation + 1;
     this.db
       .query(
         `UPDATE bot_surfaces
-         SET runtime_generation = ?, logical_width = ?, logical_height = ?
+         SET logical_width = ?, logical_height = ?
          WHERE surface_id = ?`,
       )
-      .run(generation, row.logical_width, row.logical_height, owner.surfaceId);
-    const provision = this.#provision(owner.surfaceId, generation, row);
+      .run(row.logical_width, row.logical_height, owner.surfaceId);
+    const provision = this.#provision(owner.surfaceId, row);
     const cleanupRuntime = this.#cleanupRuntimes.get(owner.surfaceId);
     const start = Promise.resolve().then(async () => {
       if (cleanupRuntime !== undefined) {
@@ -518,7 +721,7 @@ export class BotScreenManager {
       }
       return this.adapter.start(provision);
     });
-    const entry: RuntimeEntry = { provision, start };
+    const entry: RuntimeEntry = { start };
     this.#entries.set(owner.surfaceId, entry);
     this.#transition(owner.surfaceId, "starting", null);
     try {
@@ -528,7 +731,7 @@ export class BotScreenManager {
         await runtime.stop();
         return;
       }
-      this.#install(owner.surfaceId, provision, start, runtime);
+      this.#install(owner.surfaceId, start, runtime);
     } catch (error) {
       if (this.#entries.get(owner.surfaceId) !== entry) return;
       this.#entries.delete(owner.surfaceId);
@@ -538,12 +741,14 @@ export class BotScreenManager {
 
   #install(
     surfaceId: SurfaceId,
-    provision: BotScreenProvision,
     start: Promise<BotScreenRuntime>,
     runtime: BotScreenRuntime,
   ): void {
-    const entry: RuntimeEntry = { provision, start, runtime };
+    const entry: RuntimeEntry = { start, runtime };
     this.#entries.set(surfaceId, entry);
+    this.db
+      .query(`UPDATE bot_surfaces SET runtime_generation = ? WHERE surface_id = ?`)
+      .run(runtime.generation, surfaceId);
     this.#transition(surfaceId, "ready", null);
     void runtime.outcome.then((outcome) =>
       this.#failRuntime(surfaceId, entry, this.#outcomeFailure(outcome))
@@ -622,10 +827,9 @@ export class BotScreenManager {
   }
 
 
-  #provision(surfaceId: SurfaceId, generation: number, row: SurfaceRow): BotScreenProvision {
+  #provision(surfaceId: SurfaceId, row: SurfaceRow): BotScreenProvision {
     return {
       surfaceId,
-      generation,
       geometryGeneration: 1,
       logicalWidth: row.logical_width,
       logicalHeight: row.logical_height,
@@ -703,7 +907,6 @@ export class BotScreenManager {
       "session-bus-exited": "Bot Computer session bus",
       "desktop-exited": "Bot Desktop",
       "input-helper-exited": "Bot Screen input helper",
-      "computer-worker-exited": "Bot Screen computer worker",
     }[outcome.type];
     return new Error(`${component} failed: ${this.#failure(outcome.error)}`);
   }

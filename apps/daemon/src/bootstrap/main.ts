@@ -7,11 +7,10 @@ import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
-import { ComputerBroker } from "../modules/computer/broker.ts";
+import { ComputerBroker, type ComputerSurfaceOwner } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
-import { BOT_DESKTOP_ROLLOUT } from "../modules/computer/botDesktopRollout.ts";
-import { prepareSwayProductionCutover } from "../modules/computer/leftoverCage.ts";
 import { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
+import { ScreenInputLease } from "../modules/computer/screenInputLease.ts";
 import { SwayBotScreenRuntimeAdapter } from "../modules/computer/swayBotScreenRuntime.ts";
 import { PortableSwayRuntimeSupply } from "../modules/computer/swayRuntimeSupply.ts";
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
@@ -25,6 +24,7 @@ import { DeviceRoster } from "../modules/devices/deviceRoster.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
+import type { SurfaceId } from "@omarchy-bot/domain";
 
 function writeStatusAtomic(statusPath: string, data: unknown): void {
   const tmp = `${statusPath}.tmp`;
@@ -78,16 +78,11 @@ export async function main(options: MainOptions = {}): Promise<{
     },
     {
       agents: agentsDir,
-      computer: process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR ?? path.resolve(agentsDir, "computer"),
     },
   );
-  if (options.botScreenAdapter === undefined) {
-    await prepareSwayProductionCutover(cfg.botScreenRuntimeDir);
-  }
   const productionScreenAdapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
-    computerWorkers: supervisor,
     capacity: cfg.botScreenCapacity,
     applicationCwd: prepareSharedWorkspace(cfg.sharedWorkspaceDir),
     runtimeSupply: new PortableSwayRuntimeSupply({ rootDir: cfg.botScreenSwayRuntimeSupplyDir }),
@@ -126,7 +121,6 @@ export async function main(options: MainOptions = {}): Promise<{
       logicalHeight: cfg.botScreenLogicalHeight,
     },
   );
-  let projections!: ScreenProjectionService;
 
   const events = new EventLog(db);
   const dictation = new DictationService(cfg.dictationDir, cfg.voxtypeBin ?? "voxtype", events);
@@ -152,21 +146,59 @@ export async function main(options: MainOptions = {}): Promise<{
   const devices = new DeviceRoster();
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices);
   mailbox = new MailboxService(db, events, threads, agents, turns);
-  const computer = new ComputerBroker(
-    db,
-    events,
-    screens,
-    cfg.artifactsDir,
-    (surfaceId) => projections.revokeControl(surfaceId),
-    (surfaceId) => projections.restoreControl(surfaceId),
-  );
-  projections = new ScreenProjectionService(
-    screens,
-    new InputDiagnostics(db),
-    (owner) => computer.canAcceptWebControl(owner),
-    (owner) => computer.webControlClaimed(owner),
-    (owner) => computer.webControlReleased(owner),
-  );
+  const lease = new ScreenInputLease({
+    grant: async (surfaceId, epoch) => {
+      const source = await screens.projectionSource(ownerFor(surfaceId));
+      if (source === undefined) throw new Error("Bot Screen is unavailable");
+      return source.setInputAuthority(epoch);
+    },
+    deliver: async (surfaceId, epoch, event, sequence = 1) => {
+      const source = await screens.projectionSource(ownerFor(surfaceId));
+      if (source === undefined) throw new Error("Bot Screen is unavailable");
+      await source.input({
+        surfaceId,
+        runtimeGeneration: source.runtimeGeneration,
+        geometryGeneration: source.geometryGeneration,
+        controllerEpoch: epoch,
+        ...event,
+        sequence,
+      });
+    },
+    release: async (surfaceId, epoch, held, nextSequence = 1) => {
+      const source = await screens.projectionSource(ownerFor(surfaceId));
+      if (source === undefined) return;
+      let sequence = nextSequence;
+      const context = {
+        surfaceId,
+        runtimeGeneration: source.runtimeGeneration,
+        geometryGeneration: source.geometryGeneration,
+        controllerEpoch: epoch,
+      };
+      for (const keyCode of held.keys) {
+        await source.input({ ...context, sequence: sequence++, type: "key", keyCode, state: "released" });
+      }
+      for (const button of held.buttons) {
+        await source.input({
+          ...context,
+          sequence: sequence++,
+          type: "button",
+          x: 0,
+          y: 0,
+          button,
+          state: "released",
+        });
+      }
+      await source.releaseInput(epoch);
+    },
+    capture: (surfaceId) => screens.capture(ownerFor(surfaceId)),
+  });
+  const projections = new ScreenProjectionService(screens, new InputDiagnostics(db), lease);
+  const computer = new ComputerBroker(db, events, screens, cfg.artifactsDir, lease, projections);
+  function ownerFor(surfaceId: SurfaceId): ComputerSurfaceOwner {
+    const row = db.query(`SELECT bot_id FROM bot_surfaces WHERE surface_id = ?`).get(surfaceId) as { bot_id: string } | null;
+    if (row === null) throw new Error("unknown Computer Surface");
+    return { botId: row.bot_id, surfaceId };
+  }
   const botDeletions = new BotDeletionService(
     db,
     events,
@@ -214,7 +246,6 @@ export async function main(options: MainOptions = {}): Promise<{
       ts: new Date().toISOString(),
       agents: agents.list().map((a) => ({ id: a.id, status: a.status })),
       computer: computer.states(),
-      botDesktopRollout: BOT_DESKTOP_ROLLOUT,
     });
   };
   try {

@@ -4,11 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { SwayBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/swayBotScreenRuntime.ts";
 import { listApplicationToplevels } from "../../apps/daemon/src/modules/computer/swayIpc.ts";
-import type { BotScreenRuntime } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
-import type { ComputerAction } from "../../packages/domain/src/computer.ts";
-import type { ComputerInputAuthority } from "../../packages/agent-contract/src/computer-protocol.ts";
+import type { BotScreenInputAction, BotScreenRuntime } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
-import type { ComputerWorkerScope, SurfaceComputerWorker } from "../../apps/daemon/src/supervision/supervisor.ts";
 import {
   readFakeSwayCommands,
   writeFakeSwayIpcMode,
@@ -175,14 +172,6 @@ function executable(directory: string, name: string, body: string): string {
   return target;
 }
 
-function authority(surfaceId: SurfaceId = SURFACE_ID): ComputerInputAuthority {
-  return {
-    surfaceId,
-    botId: "bot_33333333333333333333333333333333",
-    turnId: "turn_33333333333333333333333333333333",
-  };
-}
-
 async function startControlRuntime(options?: {
   tree?: unknown;
   failPastePath?: string;
@@ -192,8 +181,6 @@ async function startControlRuntime(options?: {
   controlDir: string;
   inputLog: string;
   failPastePath: string;
-  workerActions: ComputerAction[];
-  workerScope: ComputerWorkerScope | undefined;
   expandedViewCalls: number;
   application: string;
   applicationMarker: string;
@@ -294,8 +281,6 @@ await Promise.withResolvers<void>().promise;
     ].join("\n"),
   );
 
-  const workerActions: ComputerAction[] = [];
-  let workerScope: ComputerWorkerScope | undefined;
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "profiles"),
@@ -315,26 +300,10 @@ await Promise.withResolvers<void>().promise;
       "while :; do sleep 60; done",
       "",
     ].join("\n")),
-    computerWorkers: {
-      startComputerWorker: async (scope): Promise<SurfaceComputerWorker> => {
-        workerScope = scope;
-        return {
-          surfaceId: scope.surfaceId,
-          runtimeGeneration: scope.runtimeGeneration,
-          exited: new Promise<Error>(() => {}),
-          act: async (action) => {
-            workerActions.push(action);
-            return { done: true, text: `worker-${action.name}` };
-          },
-          stop: async () => {},
-        };
-      },
-    },
   });
 
   const runtime = await adapter.start({
     surfaceId: SURFACE_ID,
-    generation: 1,
     geometryGeneration: 7,
     logicalWidth: 2,
     logicalHeight: 1,
@@ -348,122 +317,90 @@ await Promise.withResolvers<void>().promise;
     return originalExpanded();
   };
   writeFileSync(path.join(controlDir, "commands.log"), "");
-  const swaySock = workerScope?.env.SWAYSOCK;
   return {
     adapter,
     runtime,
     controlDir,
     inputLog,
     failPastePath,
-    workerActions,
     application,
     applicationMarker,
-    workerScope,
     get expandedViewCalls() {
       return expandedViewCalls;
     },
-    unlinkIpc: () => rmSync(swaySock!, { force: true }),
+    unlinkIpc: () => {
+      const socket = runtime.sessionEnv.SWAYSOCK;
+      if (socket === undefined) throw new Error("Bot Computer socket is missing");
+      rmSync(socket, { force: true });
+    },
   };
 }
 
-test("list_windows returns ordinary and floating toplevels without a Screen Projection", async () => {
+test("listWindows returns ordinary and floating toplevels without a Screen Projection", async () => {
   const fixture = await startControlRuntime();
   try {
-    const result = await fixture.runtime.act({ name: "list_windows", args: {} });
-    expect(result.windowList).toEqual(EXPECTED_WINDOWS);
+    const windowList = await fixture.runtime.listWindows();
+    expect(windowList).toEqual(EXPECTED_WINDOWS);
     expect(fixture.expandedViewCalls).toBe(0);
-    expect(fixture.workerActions).toEqual([]);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([]);
   } finally {
     await fixture.runtime.stop();
   }
 });
 
-test("observe returns the native window list and a PNG without a Screen Projection", async () => {
+test("capture and window routing compose without a Screen Projection", async () => {
   const fixture = await startControlRuntime();
   try {
-    const result = await fixture.runtime.act({ name: "observe", args: {} });
-    expect(result.windowList).toEqual(EXPECTED_WINDOWS);
-    expect(result.image?.mediaType).toBe("image/png");
-    expect(result.image?.bytes.slice(0, 8)).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const windowList = await fixture.runtime.listWindows();
+    const image = await fixture.runtime.capture();
+    expect(windowList).toEqual(EXPECTED_WINDOWS);
+    expect(image.mediaType).toBe("image/png");
+    expect(image.bytes.slice(0, 8)).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     expect(fixture.expandedViewCalls).toBe(0);
-    expect(fixture.workerActions).toEqual([]);
   } finally {
     await fixture.runtime.stop();
   }
 });
 
-test("observe throws when the private Sway IPC socket is missing", async () => {
+test("listing windows throws when the private Sway IPC socket is missing", async () => {
   const fixture = await startControlRuntime();
   try {
     fixture.unlinkIpc();
-    await expect(fixture.runtime.act({ name: "observe", args: {} })).rejects.toThrow(/Sway IPC/);
+    await expect(fixture.runtime.listWindows()).rejects.toThrow(/Sway IPC/);
   } finally {
     await fixture.runtime.stop();
   }
 });
 
-test("focus_window sends a private focus command and succeeds only after the tree confirms it", async () => {
+test("focusWindow sends a private focus command and succeeds only after the tree confirms it", async () => {
   const fixture = await startControlRuntime();
   try {
-    await fixture.runtime.act({ name: "focus_window", args: { id: "10" } }, authority());
+    await fixture.runtime.focusWindow(EXPECTED_WINDOWS[0]!);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
       "[con_id=10] focus",
     ]);
-    const listed = await fixture.runtime.act({ name: "list_windows", args: {} });
-    expect(listed.windowList).toEqual([
-      { ...EXPECTED_WINDOWS[0], focused: true },
-      { ...EXPECTED_WINDOWS[1], focused: false },
+    const listed = await fixture.runtime.listWindows();
+    expect(listed).toEqual([
+      { ...EXPECTED_WINDOWS[0]!, focused: true },
+      { ...EXPECTED_WINDOWS[1]!, focused: false },
     ]);
   } finally {
     await fixture.runtime.stop();
   }
 });
 
-test("focus_window throws for stale ids, ambiguous titles, refusals, unconfirmed focus, and hung IPC", async () => {
+test("focusWindow throws for refusals, unconfirmed focus, and hung IPC", async () => {
   const fixture = await startControlRuntime();
   try {
-    await expect(fixture.runtime.act({ name: "focus_window", args: { id: "999" } }, authority()))
-      .rejects.toThrow(/did not match/);
-    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([]);
-
-    const output = TWO_TOPLEVEL_TREE.nodes[0]!;
-    const workspace = output.nodes[0]!;
-    writeFakeSwayTree(fixture.controlDir, {
-      ...TWO_TOPLEVEL_TREE,
-      nodes: [
-        {
-          ...output,
-          nodes: [
-            {
-              ...workspace,
-              floating_nodes: [
-                {
-                  ...workspace.floating_nodes[0]!,
-                  name: "Firefox",
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    });
-    await expect(fixture.runtime.act({ name: "focus_window", args: { title: "Firefox" } }, authority()))
-      .rejects.toThrow(/multiple/);
-    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([]);
-
-    writeFakeSwayTree(fixture.controlDir, TWO_TOPLEVEL_TREE);
     writeFakeSwayIpcMode(fixture.controlDir, "refuse");
-    await expect(fixture.runtime.act({ name: "focus_window", args: { id: "10" } }, authority()))
-      .rejects.toThrow(/refused/);
+    await expect(fixture.runtime.focusWindow(EXPECTED_WINDOWS[0]!)).rejects.toThrow(/refused/);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
     ]);
 
     writeFakeSwayIpcMode(fixture.controlDir, "ack");
-    await expect(fixture.runtime.act({ name: "focus_window", args: { id: "10" } }, authority()))
-      .rejects.toThrow(/not confirmed/);
+    await expect(fixture.runtime.focusWindow(EXPECTED_WINDOWS[0]!)).rejects.toThrow(/not confirmed/);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
       `workspace bot-${SURFACE_ID}`,
@@ -471,8 +408,7 @@ test("focus_window throws for stale ids, ambiguous titles, refusals, unconfirmed
     ]);
 
     writeFakeSwayIpcMode(fixture.controlDir, "hang");
-    await expect(fixture.runtime.act({ name: "focus_window", args: { id: "10" } }, authority()))
-      .rejects.toThrow(/timed out/);
+    await expect(fixture.runtime.focusWindow(EXPECTED_WINDOWS[0]!)).rejects.toThrow(/timed out/);
   } finally {
     await fixture.runtime.stop();
   }
@@ -490,32 +426,65 @@ function pasteTexts(logPath: string): string[] {
   });
 }
 
-test("pointer, key, and type actions reject missing authority before mutating the input helper", async () => {
+function inputEnvelope(
+  runtime: BotScreenRuntime,
+  epoch: number,
+  sequence: number,
+  event: BotScreenInputAction,
+): Parameters<BotScreenRuntime["input"]>[0] {
+  return {
+    surfaceId: SURFACE_ID,
+    runtimeGeneration: runtime.generation,
+    geometryGeneration: 7,
+    controllerEpoch: epoch,
+    sequence,
+    ...event,
+  };
+}
+
+test("input without the input lease is rejected before the helper is touched", async () => {
   const fixture = await startControlRuntime();
   try {
-    await expect(fixture.runtime.act({ name: "click", args: { x: 4, y: 5 } })).rejects.toThrow(/authority/);
-    await expect(fixture.runtime.act({ name: "scroll", args: { deltaX: 0, deltaY: -120 } })).rejects.toThrow(/authority/);
-    await expect(fixture.runtime.act({ name: "key", args: { key: "Return" } })).rejects.toThrow(/authority/);
-    await expect(fixture.runtime.act({ name: "type", args: { text: "你好, world" } })).rejects.toThrow(/authority/);
-    await expect(fixture.runtime.act({ name: "focus_window", args: { id: "10" } })).rejects.toThrow(/authority/);
-    await expect(fixture.runtime.act({
-      name: "click",
-      args: { x: 4, y: 5 },
-    }, authority("surf_44444444444444444444444444444444" as SurfaceId))).rejects.toThrow(/authority/);
+    await expect(
+      fixture.runtime.input(inputEnvelope(fixture.runtime, 1, 1, { type: "motion", x: 4, y: 5 })),
+    ).rejects.toThrow();
     expect(inputHelperLines(fixture.inputLog)).toEqual([]);
-    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([]);
   } finally {
     await fixture.runtime.stop();
   }
 });
 
-test("authorized click, scroll, key, and type drive the private virtual-input helper", async () => {
+test("leased pointer, key, and paste events drive the private virtual-input helper", async () => {
   const fixture = await startControlRuntime();
   try {
-    await fixture.runtime.act({ name: "click", args: { x: 4, y: 5 } }, authority());
-    await fixture.runtime.act({ name: "scroll", args: { x: 4, y: 5, deltaX: 1, deltaY: -120 } }, authority());
-    await fixture.runtime.act({ name: "key", args: { key: "Return" } }, authority());
-    await fixture.runtime.act({ name: "type", args: { text: "你好, world" } }, authority());
+    const epoch = await fixture.runtime.setInputAuthority(1);
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 1, { type: "motion", x: 4, y: 5 }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 2, {
+      type: "button",
+      x: 4,
+      y: 5,
+      button: "left",
+      state: "pressed",
+    }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 3, {
+      type: "button",
+      x: 4,
+      y: 5,
+      button: "left",
+      state: "released",
+    }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 4, {
+      type: "scroll",
+      x: 4,
+      y: 5,
+      deltaX: 1,
+      deltaY: -120,
+    }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 5, { type: "key", keyCode: 28, state: "pressed" }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 6, { type: "key", keyCode: 28, state: "released" }));
+    await fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 7, { type: "paste", text: "你好, world" }));
+    await fixture.runtime.releaseInput(epoch);
+
     const lines = inputHelperLines(fixture.inputLog);
     expect(lines.some((line) => line.startsWith("motion ") && line.endsWith(" 4 5"))).toBeTrue();
     expect(lines.some((line) => line.startsWith("button ") && line.includes(" 4 5 272 1"))).toBeTrue();
@@ -524,9 +493,8 @@ test("authorized click, scroll, key, and type drive the private virtual-input he
     expect(lines.some((line) => line.startsWith("key ") && line.endsWith(" 28 1"))).toBeTrue();
     expect(lines.some((line) => line.startsWith("key ") && line.endsWith(" 28 0"))).toBeTrue();
     expect(pasteTexts(fixture.inputLog)).toEqual(["你好, world"]);
-    expect(lines.filter((line) => line.startsWith("authority ")).length).toBe(4);
-    expect(lines.filter((line) => line.startsWith("release ")).length).toBe(4);
-    expect(fixture.workerActions).toEqual([]);
+    expect(lines.filter((line) => line.startsWith("authority ")).length).toBe(1);
+    expect(lines.filter((line) => line.startsWith("release ")).length).toBe(1);
   } finally {
     await fixture.runtime.stop();
   }
@@ -536,7 +504,6 @@ test("human input authority serializes the shared seat across Screen workspaces"
   const fixture = await startControlRuntime();
   const second = await fixture.adapter.start({
     surfaceId: SURFACE_B,
-    generation: 2,
     geometryGeneration: 7,
     logicalWidth: 2,
     logicalHeight: 1,
@@ -568,12 +535,10 @@ test("human input authority serializes the shared seat across Screen workspaces"
   let firstEpoch: number | undefined;
   let secondEpoch: number | undefined;
   try {
-    await expect(second.act({ name: "list_windows", args: {} })).resolves.toMatchObject({
-      windowList: [{
-        title: "Second Screen",
-        bounds: { x: 100, y: 80, width: 400, height: 300 },
-      }],
-    });
+    await expect(second.listWindows()).resolves.toMatchObject([{
+      title: "Second Screen",
+      bounds: { x: 100, y: 80, width: 400, height: 300 },
+    }]);
     firstEpoch = await fixture.runtime.setInputAuthority(1);
     const secondAuthority = second.setInputAuthority(1).then((epoch) => {
       secondEpoch = epoch;
@@ -597,30 +562,14 @@ test("human input authority serializes the shared seat across Screen workspaces"
   }
 });
 
-test("Agent key chords press in order and release in reverse order", async () => {
-  const fixture = await startControlRuntime();
-  try {
-    await fixture.runtime.act({ name: "key", args: { key: "Ctrl+L" } }, authority());
-    expect(inputHelperLines(fixture.inputLog)
-      .filter((line) => line.startsWith("key "))
-      .map((line) => line.split(" ").slice(-2).join(" ")))
-      .toEqual([
-        "29 1",
-        "38 1",
-        "38 0",
-        "29 0",
-      ]);
-  } finally {
-    await fixture.runtime.stop();
-  }
-});
-
-test("type throws when the private helper cannot paste exact Unicode", async () => {
+test("a paste the private helper cannot perform fails the Screen input", async () => {
   const fixture = await startControlRuntime();
   writeFileSync(fixture.failPastePath, "1\n");
   try {
-    await expect(fixture.runtime.act({ name: "type", args: { text: "你好, world" } }, authority()))
-      .rejects.toThrow();
+    const epoch = await fixture.runtime.setInputAuthority(1);
+    await expect(
+      fixture.runtime.input(inputEnvelope(fixture.runtime, epoch, 1, { type: "paste", text: "你好, world" })),
+    ).rejects.toThrow();
     expect(pasteTexts(fixture.inputLog)).toEqual(["你好, world"]);
   } finally {
     await fixture.runtime.stop();
@@ -630,19 +579,15 @@ test("type throws when the private helper cannot paste exact Unicode", async () 
 test("shared runtime launches applications into the requesting Screen workspace", async () => {
   const fixture = await startControlRuntime();
   try {
-    const shot = await fixture.runtime.act({ name: "screenshot", args: {} });
-    expect(shot.image?.bytes.slice(0, 8)).toEqual(
+    const shot = await fixture.runtime.capture();
+    expect(shot.bytes.slice(0, 8)).toEqual(
       new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     );
-    const observed = await fixture.runtime.act({ name: "observe", args: {} });
-    expect(observed.windowList).toEqual(EXPECTED_WINDOWS);
-    const listed = await fixture.runtime.act({ name: "list_windows", args: {} });
-    expect(listed.windowList).toEqual(EXPECTED_WINDOWS);
+    expect(await fixture.runtime.listWindows()).toEqual(EXPECTED_WINDOWS);
 
     await expect(
-      fixture.runtime.act({ name: "open_app", args: { app: fixture.application } }, authority()),
+      fixture.runtime.launch({ app: fixture.application }),
     ).resolves.toEqual({ text: `launched ${fixture.application}` });
-    expect(fixture.workerActions).toEqual([]);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
       "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",
@@ -654,8 +599,8 @@ test("shared runtime launches applications into the requesting Screen workspace"
       path.join(root!, "profiles", "computer", "config"),
       path.join(root!, "workspace"),
     ].join("|"));
-    expect(fixture.workerScope?.env.WAYLAND_DISPLAY).toBe("wayland-0");
-    expect(fixture.workerScope?.env.SWAYSOCK).toContain(path.join(root!, "runtime", "computer"));
+    expect(fixture.runtime.sessionEnv.WAYLAND_DISPLAY).toBe("wayland-0");
+    expect(fixture.runtime.sessionEnv.SWAYSOCK).toContain(path.join(root!, "runtime", "computer"));
     expect(fixture.expandedViewCalls).toBe(0);
   } finally {
     await fixture.runtime.stop();
@@ -667,9 +612,8 @@ test("open_url reuses the shared browser profile and routes its new window", asy
   const url = "https://example.com/shared";
   try {
     await expect(
-      fixture.runtime.act({ name: "open_url", args: { url } }, authority()),
+      fixture.runtime.launch({ url }),
     ).resolves.toEqual({ text: `opened ${url}` });
-    expect(fixture.workerActions).toEqual([]);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
       "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",

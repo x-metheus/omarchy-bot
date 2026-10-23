@@ -81,7 +81,7 @@ function deployedArchivelessDatabase(): { dbPath: string; home: string } {
 
 describe("integration: deployed schema convergence", () => {
   test("keeps Bot Screen and divergent-ledger migrations in dependency order", () => {
-    expect(MIGRATIONS.slice(-13).map((migration) => migration.name)).toEqual([
+    expect(MIGRATIONS.slice(-14).map((migration) => migration.name)).toEqual([
       "0010-bot-computer-surfaces",
       "0011-redacted-input-diagnostics",
       "0012-bot-screen-contract",
@@ -95,6 +95,7 @@ describe("integration: deployed schema convergence", () => {
       "0017-ordered-transcript-repair",
       "0018-durable-bot-mail",
       "0019-legacy-tool-call-summaries",
+      "0020-drop-controller-epoch",
     ]);
   });
 
@@ -156,11 +157,11 @@ describe("integration: deployed schema convergence", () => {
       ).toBeNull();
       expect(
         db.query(
-          `SELECT authority_kind, controller_epoch
+          `SELECT authority_kind
            FROM computer_surface_coordination
            WHERE surface_id = 'surf_11111111111111111111111111111111'`,
         ).get(),
-      ).toEqual({ authority_kind: "idle", controller_epoch: 0 });
+      ).toEqual({ authority_kind: "idle" });
       expect(() => db.query(
         `UPDATE computer_surface_coordination SET authority_kind = 'unknown'
          WHERE surface_id = 'surf_11111111111111111111111111111111'`,
@@ -178,8 +179,14 @@ describe("integration: deployed schema convergence", () => {
       expect(adapter.starts).toHaveLength(1);
       expect(adapter.starts[0]).toMatchObject({
         surfaceId: "surf_11111111111111111111111111111111",
-        generation: 5,
       });
+      // Recovery records the attached Bot Computer generation, not a Screen counter.
+      expect(
+        db.query(
+          `SELECT runtime_generation FROM bot_surfaces
+           WHERE surface_id = 'surf_11111111111111111111111111111111'`,
+        ).get(),
+      ).toEqual({ runtime_generation: adapter.generation });
     } finally {
       await screens.shutdown();
       db.close();
@@ -194,12 +201,11 @@ describe("integration: deployed schema convergence", () => {
     try {
       firstDaemon = await startDaemon(home);
       const coordination = firstDaemon.svc.db.query(
-        `SELECT authority_kind, controller_epoch
+        `SELECT authority_kind
          FROM computer_surface_coordination
          WHERE surface_id = 'surf_11111111111111111111111111111111'`,
-      ).get() as { authority_kind: string; controller_epoch: number };
+      ).get() as { authority_kind: string };
       expect(coordination.authority_kind).toBe("idle");
-      expect(Number.isSafeInteger(coordination.controller_epoch)).toBeTrue();
       await firstDaemon.stop();
       firstDaemon = undefined;
 

@@ -8,7 +8,7 @@
 - WebRTC removal: true
 - human acceptance: pending
 
-Computer ADR 0009 is authoritative. Production provisions Sway only, without a compositor selector or Cage fallback. The one-shot leftover-Cage guard is migration safety, not a second runtime. Projection v3 uses separate control/preview and view-only RFB WebSockets; SDP/ICE, RTC data channels, `node-datachannel`, and the obsolete UDP listener are gone.
+Computer ADR 0009 is authoritative. Production provisions Sway only, without a compositor selector or Cage fallback. The one-shot leftover-Cage guard has been deleted. Projection v3 uses separate control/preview and view-only RFB WebSockets; SDP/ICE, RTC data channels, `node-datachannel`, and the obsolete UDP listener are gone.
 
 The current conformance report proves exact browser/terminal Unicode, private URL launch, real noVNC pixels and Broker input, retained live state, isolated failures, and targeted cleanup. Admission limits are conservative configuration, not a historical Cage performance approval.
 

@@ -60,13 +60,14 @@ export class WaylandVirtualInput {
 
   private constructor(
     private readonly process: PointerProcess,
+    generation: number,
     provision: BotScreenProvision,
   ) {
     this.#responses = new ProcessLineReader(
       process.stdout,
       "Bot Screen input helper closed its protocol stream",
     );
-    this.#context = `${provision.surfaceId} ${provision.generation} ${provision.geometryGeneration}`;
+    this.#context = `${provision.surfaceId} ${generation} ${provision.geometryGeneration}`;
     this.exited = process.exited.then((status) => new Error(`Bot Screen input helper exited with status ${status}`));
   }
 
@@ -78,6 +79,7 @@ export class WaylandVirtualInput {
     binary: string,
     outputName: string,
     launcherEnvironment: Record<string, string>,
+    generation: number,
     provision: BotScreenProvision,
     commandPrefix: string[],
   ): Promise<WaylandVirtualInput> {
@@ -86,7 +88,7 @@ export class WaylandVirtualInput {
       binary,
       outputName,
       provision.surfaceId,
-      String(provision.generation),
+      String(generation),
       String(provision.geometryGeneration),
       String(provision.logicalWidth),
       String(provision.logicalHeight),
@@ -96,7 +98,7 @@ export class WaylandVirtualInput {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const input = new WaylandVirtualInput(process, provision);
+    const input = new WaylandVirtualInput(process, generation, provision);
     const ready = await Promise.race([
       input.#responses.next(),
       process.exited.then(async (status) => {
@@ -472,16 +474,6 @@ export function isSocket(candidate: string): boolean {
   }
 }
 
-export function processAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** PID reuse protection: Linux boot + start ticks, bound to private runtime ownership. */
 export interface OwnedProcessIdentity {
   pid: number;
@@ -520,6 +512,27 @@ export function ownedProcessRunning(identity: OwnedProcessIdentity | undefined):
   if (identity === undefined) return false;
   const current = ownedProcessIdentity(identity.pid, identity.runtimeDir, identity.unitName);
   return current !== undefined && current.startTime === identity.startTime && current.bootId === identity.bootId;
+}
+
+/** Validates a serialized identity against the private runtime directory that must own it. */
+export function readOwnedIdentity(
+  value: unknown,
+  pid: number | undefined,
+  runtimeDir: string,
+): OwnedProcessIdentity | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const identity = value as Partial<OwnedProcessIdentity>;
+  if (
+    identity.pid !== pid
+    || identity.runtimeDir !== runtimeDir
+    || typeof identity.startTime !== "string"
+    || !/^\d+$/.test(identity.startTime)
+    || typeof identity.bootId !== "string"
+    || (identity.unitName !== undefined && typeof identity.unitName !== "string")
+  ) {
+    return undefined;
+  }
+  return identity as OwnedProcessIdentity;
 }
 
 export function privateRuntimeProcesses(runtimeDir: string): OwnedProcessIdentity[] {
@@ -567,6 +580,39 @@ export class ProcessLineReader {
       if (chunk.done) throw new Error(this.eofMessage);
       this.#buffer += this.#decoder.decode(chunk.value, { stream: true });
     }
+  }
+}
+
+/** Waits until a child binds its private socket, failing fast if it exits first. */
+export async function waitForSocket(
+  socketPath: string,
+  child: DetachedProcess,
+  label: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (isSocket(socketPath)) return;
+    if (child.exitCode !== null) {
+      throw new Error(`${label} exited before binding its private socket with status ${child.exitCode}`);
+    }
+    await Bun.sleep(20);
+  }
+  throw new Error(`${label} did not create its private socket`);
+}
+
+export async function watchOwnedProcess(identity: OwnedProcessIdentity | undefined): Promise<number> {
+  while (ownedProcessRunning(identity)) await Bun.sleep(100);
+  return 0;
+}
+
+export async function terminateProcess(
+  child: DetachedProcess | undefined,
+  identity: OwnedProcessIdentity | undefined,
+): Promise<void> {
+  if (child !== undefined) {
+    await terminateDetachedProcess(child);
+  } else {
+    await terminateOwnedProcess(identity);
   }
 }
 

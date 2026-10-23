@@ -5,22 +5,12 @@ import {
   type AgentComputerToolOutput,
   type AgentComputerTurnContext,
 } from "@omarchy-bot/agent-contract";
-import type { ComputerAction } from "@omarchy-bot/domain";
+import { COMPUTER_ACTION_NAMES, type ComputerAction } from "@omarchy-bot/domain";
 import { Type } from "typebox";
 
-const COMPUTER_ACTION = Type.Union([
-  Type.Literal("observe"),
-  Type.Literal("screenshot"),
-  Type.Literal("list_windows"),
-  Type.Literal("focus_window"),
-  Type.Literal("click"),
-  Type.Literal("type"),
-  Type.Literal("key"),
-  Type.Literal("scroll"),
-  Type.Literal("open_app"),
-  Type.Literal("open_url"),
-  Type.Literal("notify"),
-]);
+const COMPUTER_ACTION = Type.Union(
+  COMPUTER_ACTION_NAMES.map((name) => Type.Literal(name)),
+);
 
 export interface PiComputerBridge {
   request(

@@ -966,6 +966,25 @@ CREATE INDEX idx_bot_mail_deliveries_dispatch
       }
     },
   },
+  {
+    // Controller epochs live in the Screen input lease. Restarts are fenced by
+    // runtime generation, so the persisted counter is unused.
+    name: "0020-drop-controller-epoch",
+    migrate: (db) => {
+      if (!columnNames(db, "computer_surface_coordination").has("controller_epoch")) return;
+      db.exec(`
+CREATE TABLE computer_surface_coordination_next (
+  surface_id TEXT PRIMARY KEY REFERENCES bot_surfaces(surface_id) ON DELETE CASCADE,
+  authority_kind TEXT NOT NULL CHECK (authority_kind IN ('idle', 'agent', 'web', 'takeover')),
+  updated_at TEXT NOT NULL
+);
+INSERT INTO computer_surface_coordination_next (surface_id, authority_kind, updated_at)
+SELECT surface_id, authority_kind, updated_at FROM computer_surface_coordination;
+DROP TABLE computer_surface_coordination;
+ALTER TABLE computer_surface_coordination_next RENAME TO computer_surface_coordination;
+`);
+    },
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });

@@ -10,24 +10,23 @@ import {
 } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
-import { isInputAction, type ComputerAction, type SurfaceId } from "@omarchy-bot/domain";
-import type { ComputerInputAuthority, ComputerWindowListItem } from "@omarchy-bot/agent-contract";
-import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
-import { ensureCaptureHelper } from "../../../native/capture-helper/build.ts";
-import { ensureInputHelper } from "../../../native/pointer-helper/build.ts";
-import { ensureBotDesktop } from "../../../native/bot-desktop/build.ts";
+import type { SurfaceId } from "@omarchy-bot/domain";
+import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
 import {
   ApplicationUnits,
   applicationUnitName,
-  botComputerUnitName,
 } from "../../supervision/applicationUnits.ts";
 import {
+  BotComputerRuntime,
+  type BotComputer,
+  type BotComputerOptions,
+} from "./botComputer.ts";
+import {
   BotScreenInputRejectedError,
-  type BotScreenActionResult,
   type BotScreenCapture,
   type BotScreenCaptureStream,
   type BotScreenExpandedView,
-  type BotScreenInputAction,
+  type BotScreenLaunchRequest,
   type BotScreenProvision,
   type BotScreenRuntime,
   type BotScreenRuntimeAdapter,
@@ -36,97 +35,47 @@ import {
 import {
   command,
   executable,
-  explicitEnvironment,
-  isSocket,
   ownedProcessIdentity,
   ownedProcessRunning,
-  privateRuntimeProcesses,
+  readOwnedIdentity,
   type OwnedProcessIdentity,
   ProcessLineReader,
   terminateDetachedProcess,
   terminateOwnedProcess,
+  terminateProcess,
+  waitForSocket,
+  watchOwnedProcess,
   WaylandCaptureStream,
   WaylandVirtualInput,
   type DetachedProcess,
 } from "./botScreenWaylandHelpers.ts";
 import { BOT_DESKTOP_APP_ID, listApplicationToplevels, SwayIpcClient } from "./swayIpc.ts";
-import {
-  resolveSwayRuntimeBinaries,
-  type SwayRuntimeSupply,
-} from "./swayRuntimeSupply.ts";
+import { resolveSwayRuntimeBinaries } from "./swayRuntimeSupply.ts";
 
-export interface SwayAdapterOptions {
-  runtimeRoot: string;
-  profileRoot: string;
-  hostRuntimeDir?: string;
-  swayBin?: string;
-  swaymsgBin?: string;
-  wlrRandrBin?: string;
-  grimBin?: string;
-  inputHelperBin?: string;
-  captureHelperBin?: string;
-  botDesktopBin?: string;
-  wayvncBin?: string;
-  dbusDaemonBin?: string;
-  runtimeSupply?: SwayRuntimeSupply;
-  computerWorkers: Pick<Supervisor, "startComputerWorker">;
-  capacity?: number;
+export interface SwayAdapterOptions extends BotComputerOptions {
+  /** Test hook. The scripted fixture blocks here so an in-flight launch stays pending. */
+  onLaunch?: () => Promise<void>;
   applicationCwd?: string;
 }
 
 type SwayProcess = DetachedProcess;
-type ApplicationProcess = Bun.Subprocess<"ignore", "ignore", "ignore">;
 
-const COMPUTER_STATE_FILE = "computer.json";
 const SURFACE_STATE_FILE = "surface.json";
 const BOT_DESKTOP_SWAY_CRITERIA = `[app_id="^${BOT_DESKTOP_APP_ID.replaceAll(".", "[.]")}$"]`;
 const OUTPUT_SLOT_WIDTH = 8_192;
 
-interface SharedComputerState {
-  generation: number;
-  waylandDisplay: string;
-  swaySockName: string;
-  swayPid?: number;
-  dbusPid?: number;
-  swayIdentity?: OwnedProcessIdentity | undefined;
-  dbusIdentity?: OwnedProcessIdentity | undefined;
-}
-
 interface SwaySurfaceState {
+  /** The Bot Computer generation this Screen attached under. */
   generation: number;
-  computerGeneration: number;
   outputName: string;
   workspaceName: string;
   desktopPid?: number;
   desktopIdentity?: OwnedProcessIdentity | undefined;
 }
 
-interface SharedComputerSession {
-  generation: number;
-  runtimeComputerDir: string;
-  runtimeDir: string;
-  profileDir: string;
-  childEnv: Record<string, string>;
-  sockets: { waylandDisplay: string; swaySock: string };
-  swayProcess?: SwayProcess;
-  dbusProcess?: SwayProcess;
-  swayPid?: number;
-  dbusPid?: number;
-  swayIdentity?: OwnedProcessIdentity | undefined;
-  dbusIdentity?: OwnedProcessIdentity | undefined;
-  grim: string;
-  inputHelper: string;
-  captureHelper: string;
-  botDesktop: string;
-  wlrRandr: string;
-  surfaceIds: Set<SurfaceId>;
-  applicationProcesses: Set<ApplicationProcess>;
-  applicationSequence: number;
-}
-
 interface SwaySession {
   provision: BotScreenProvision;
-  computer: SharedComputerSession;
+  computer: BotComputer;
   runtimeSurfaceDir: string;
   runtimeDir: string;
   outputName: string;
@@ -137,172 +86,7 @@ interface SwaySession {
   desktopPid?: number;
   desktopIdentity?: OwnedProcessIdentity | undefined;
   virtualInput?: WaylandVirtualInput;
-  computerWorker?: SurfaceComputerWorker;
   cleanup?: (() => Promise<void>) | undefined;
-}
-
-const LINUX_KEY_CODES: Record<string, number> = {
-  Esc: 1,
-  Escape: 1,
-  Tab: 15,
-  Return: 28,
-  Enter: 28,
-  LeftCtrl: 29,
-  Control: 29,
-  Ctrl: 29,
-  LeftShift: 42,
-  Shift: 42,
-  LeftAlt: 56,
-  Alt: 56,
-  Space: 57,
-  Backspace: 14,
-  RightShift: 54,
-  RightCtrl: 97,
-  RightAlt: 100,
-  LeftMeta: 125,
-  Super: 125,
-  Meta: 125,
-  Win: 125,
-  Up: 103,
-  Down: 108,
-  Left: 105,
-  Right: 106,
-  Home: 102,
-  End: 107,
-  PageUp: 104,
-  PageDown: 109,
-  Delete: 111,
-  Insert: 110,
-  CapsLock: 58,
-  F1: 59,
-  F2: 60,
-  F3: 61,
-  F4: 62,
-  F5: 63,
-  F6: 64,
-  F7: 65,
-  F8: 66,
-  F9: 67,
-  F10: 68,
-  F11: 87,
-  F12: 88,
-};
-
-const LINUX_LETTER_KEY_CODES: Readonly<Record<string, number>> = {
-  q: 16,
-  w: 17,
-  e: 18,
-  r: 19,
-  t: 20,
-  y: 21,
-  u: 22,
-  i: 23,
-  o: 24,
-  p: 25,
-  a: 30,
-  s: 31,
-  d: 32,
-  f: 33,
-  g: 34,
-  h: 35,
-  j: 36,
-  k: 37,
-  l: 38,
-  z: 44,
-  x: 45,
-  c: 46,
-  v: 47,
-  b: 48,
-  n: 49,
-  m: 50,
-};
-
-function linuxKeyCode(key: string): number {
-  const name = key.trim();
-  if (name === "") throw new Error("key requires a known key name");
-  const keyCode = LINUX_KEY_CODES[name]
-    ?? LINUX_LETTER_KEY_CODES[name.toLowerCase()]
-    ?? (/^[0-9]$/.test(name) ? (name === "0" ? 11 : Number(name) + 1) : undefined);
-  if (keyCode === undefined) throw new Error(`unknown key: ${name}`);
-  return keyCode;
-}
-
-function linuxKeyChord(value: unknown): number[] {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error("key requires a known key name");
-  }
-  const keys = value.split("+").map((key) => key.trim());
-  if (keys.some((key) => key === "")) throw new Error(`unknown key chord: ${value}`);
-  return keys.map(linuxKeyCode);
-}
-
-function requireCoordinate(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a number`);
-  return value;
-}
-
-function optionalCoordinate(value: unknown, fallback: number): number {
-  if (value === undefined) return fallback;
-  return requireCoordinate(value, "coordinate");
-}
-
-function pointerButton(value: unknown): "left" | "middle" | "right" {
-  if (value === undefined || value === "left") return "left";
-  if (value === "middle" || value === "right") return value;
-  throw new Error("click button must be left, middle, or right");
-}
-
-function resolveFocusMatches(
-  windows: ComputerWindowListItem[],
-  args: Record<string, unknown>,
-): ComputerWindowListItem[] {
-  if (args.id !== undefined && args.id !== null && args.id !== "") {
-    const id = String(args.id);
-    return windows.filter((window) => window.id === id);
-  }
-  if (typeof args.title === "string") {
-    return windows.filter((window) => window.title === args.title);
-  }
-  if (typeof args.appId === "string") {
-    return windows.filter((window) => window.appId === args.appId);
-  }
-  throw new Error("focus_window requires id, title, or appId");
-}
-
-function writeSwayConfig(configHome: string): string {
-  const swayDir = path.join(configHome, "sway");
-  mkdirSync(swayDir, { recursive: true, mode: 0o700 });
-  chmodSync(swayDir, 0o700);
-  const configPath = path.join(swayDir, "config");
-  writeFileSync(
-    configPath,
-    [
-      "xwayland enable",
-      "default_border none",
-      "",
-    ].join("\n"),
-    { mode: 0o600 },
-  );
-  return configPath;
-}
-
-function sessionEnvironment(input: {
-  runtimeDir: string;
-  waylandDisplay: string;
-  homeDir: string;
-  configHome: string;
-  dataHome: string;
-  stateHome: string;
-  cacheHome: string;
-  swaySock: string;
-  dbusAddress: string;
-}): Record<string, string> {
-  return {
-    ...explicitEnvironment(input),
-    SWAYSOCK: input.swaySock,
-    DBUS_SESSION_BUS_ADDRESS: input.dbusAddress,
-    XDG_CURRENT_DESKTOP: "sway",
-  };
 }
 
 function parseDesktopExec(value: string): string[] {
@@ -416,14 +200,14 @@ async function hideBotDesktop(
 
 
 /**
- * One private, headless Sway Bot Computer with a persistent application
- * profile. Each Bot Screen owns an output/workspace view into that computer.
+ * Bot Screens over one shared Bot Computer. Each Screen owns an
+ * output/workspace view into that computer.
  */
 export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #units: ApplicationUnits;
+  #computer: BotComputerRuntime;
   #runtimes = new Map<SurfaceId, BotScreenRuntime>();
   #sessions = new Map<SurfaceId, SwaySession>();
-  #computer: SharedComputerSession | undefined;
   #lifecycleOperation: Promise<void> = Promise.resolve();
   #inputTail: Promise<void> = Promise.resolve();
   #inputLeaseOwner: SurfaceId | undefined;
@@ -432,16 +216,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   constructor(private readonly options: SwayAdapterOptions) {
     this.#units = new ApplicationUnits(options.hostRuntimeDir);
-    if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {
-      throw new Error("Bot Computer output capacity must be a positive integer");
-    }
-    if (this.#capacity > 32) {
-      throw new Error("Bot Computer output capacity cannot exceed 32");
-    }
-  }
-
-  get #capacity(): number {
-    return this.options.capacity ?? 8;
+    this.#computer = new BotComputerRuntime(options);
   }
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
@@ -453,7 +228,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       }
       await this.#units.stop(provision.surfaceId);
       this.#validateProvision(provision);
-      const computer = await this.#ensureComputer();
+      const computer = await this.#computer.ensure();
       return this.#startSurface(computer, provision);
     });
   }
@@ -465,7 +240,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (
         current !== undefined
         && currentRuntime !== undefined
-        && current.provision.generation === provision.generation
         && await this.#liveSurfaceValid(current)
       ) {
         await this.#ensureHelpers(current);
@@ -475,12 +249,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         await this.#stopSession(current, currentRuntime);
       }
       this.#validateProvision(provision);
-      let computer = this.#computer;
-      if (computer !== undefined && !this.#computerRunning(computer)) {
-        await this.#stopComputer(computer).catch(() => {});
-        computer = undefined;
-      }
-      computer ??= await this.#reattachComputer();
+      const computer = await this.#computer.reattach();
       if (computer === undefined) {
         await this.#discardSurfaceFromDisk(provision.surfaceId);
         return undefined;
@@ -500,16 +269,16 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const runtime = this.#runtimes.get(surfaceId);
       const retained = this.#latestSurfaceState(surfaceId);
       const workspaceName = session?.workspaceName ?? retained?.state.workspaceName;
-      const computerGeneration = session?.computer.generation ?? retained?.state.computerGeneration;
+      const computerGeneration = session?.computer.generation ?? retained?.state.generation;
       if (session !== undefined && runtime !== undefined) {
         await this.#stopSession(session, runtime);
       }
-      const computer = this.#computer;
+      const computer = this.#computer.current();
       if (
         workspaceName !== undefined
         && computer !== undefined
         && computerGeneration === computer.generation
-        && this.#computerRunning(computer)
+        && computer.running()
       ) {
         const swayIpc = new SwayIpcClient(computer.sockets.swaySock);
         await swayIpc.runCommand(`${workspaceCriteria(workspaceName)} kill`).catch(() => {});
@@ -520,14 +289,14 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   async #startSurface(
-    computer: SharedComputerSession,
+    computer: BotComputer,
     provision: BotScreenProvision,
   ): Promise<BotScreenRuntime> {
     const outputName = this.#allocateOutput();
     const outputIndex = Number(outputName.slice("HEADLESS-".length));
     const workspaceName = surfaceWorkspace(provision.surfaceId);
     const runtimeSurfaceDir = path.join(this.options.runtimeRoot, provision.surfaceId);
-    const runtimeDir = path.join(runtimeSurfaceDir, String(provision.generation));
+    const runtimeDir = path.join(runtimeSurfaceDir, String(computer.generation));
     rmSync(runtimeSurfaceDir, { recursive: true, force: true });
     for (const directory of [this.options.runtimeRoot, runtimeSurfaceDir, runtimeDir]) {
       mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -536,8 +305,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const videoWidth = Math.round(provision.logicalWidth * provision.scale);
     const videoHeight = Math.round(provision.logicalHeight * provision.scale);
     let desktopProcess: SwayProcess | undefined;
-    let virtualInput: WaylandVirtualInput | undefined;
-    let computerWorker: SurfaceComputerWorker | undefined;
+    let session: SwaySession | undefined;
     try {
       await this.#configureOutput(
         computer.wlrRandr,
@@ -554,7 +322,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       await swayIpc.runCommand(`workspace ${workspaceName}`);
       await swayIpc.runCommand(`move workspace to output ${outputName}`);
       desktopProcess = Bun.spawn([
-        ...this.#units.command(provision.surfaceId, provision.generation, "application", computer.childEnv),
+        ...this.#units.command(provision.surfaceId, computer.generation, "application", computer.childEnv),
         computer.botDesktop,
         String(provision.logicalWidth),
         String(provision.logicalHeight),
@@ -574,28 +342,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         provision.logicalHeight,
       );
       await this.#capture(computer.grim, computer.childEnv, outputName, videoWidth, videoHeight);
-      virtualInput = await WaylandVirtualInput.start(
-        computer.inputHelper,
-        outputName,
-        this.#units.launcherEnvironment(computer.childEnv),
-        provision,
-        this.#units.command(provision.surfaceId, provision.generation, "input", computer.childEnv),
-      );
-      computerWorker = await this.options.computerWorkers.startComputerWorker({
-        surfaceId: provision.surfaceId,
-        runtimeGeneration: provision.generation,
-        env: computer.childEnv,
-        wrapCommand: (targetEnvironment) => ({
-          commandPrefix: this.#units.command(
-            provision.surfaceId,
-            provision.generation,
-            "worker",
-            targetEnvironment,
-          ),
-          launcherEnvironment: this.#units.launcherEnvironment(targetEnvironment),
-        }),
-      });
-      const session: SwaySession = {
+      session = {
         provision,
         computer,
         runtimeSurfaceDir,
@@ -609,11 +356,10 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         desktopIdentity: ownedProcessIdentity(
           desktopProcess.pid,
           computer.runtimeDir,
-          applicationUnitName(provision.surfaceId, provision.generation, "application"),
+          applicationUnitName(provision.surfaceId, computer.generation, "application"),
         ),
-        virtualInput,
-        computerWorker,
       };
+      await this.#startHelpers(session);
       computer.surfaceIds.add(provision.surfaceId);
       const runtime = this.#bindRuntime(session);
       this.#sessions.set(provision.surfaceId, session);
@@ -621,71 +367,41 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       this.#writeSurfaceState(session);
       return runtime;
     } catch (error) {
-      await computerWorker?.stop().catch(() => {});
-      await virtualInput?.stop().catch(() => {});
+      await session?.virtualInput?.stop().catch(() => {});
       if (desktopProcess !== undefined) await terminateDetachedProcess(desktopProcess).catch(() => {});
-      await this.#units.stop(provision.surfaceId, provision.generation).catch(() => {});
+      await this.#units.stop(provision.surfaceId, computer.generation).catch(() => {});
       rmSync(runtimeSurfaceDir, { recursive: true, force: true });
-      if (computer.surfaceIds.size === 0) await this.#stopComputer(computer).catch(() => {});
+      if (computer.surfaceIds.size === 0) await computer.stop().catch(() => {});
       throw error;
     }
   }
 
   async #reattachSurface(
-    computer: SharedComputerSession,
+    computer: BotComputer,
     provision: BotScreenProvision,
   ): Promise<BotScreenRuntime | undefined> {
     const runtimeSurfaceDir = path.join(this.options.runtimeRoot, provision.surfaceId);
-    const runtimeDir = path.join(runtimeSurfaceDir, String(provision.generation));
+    const runtimeDir = path.join(runtimeSurfaceDir, String(computer.generation));
     const state = this.#readSurfaceState(runtimeDir);
     if (
       state === undefined
-      || state.generation !== provision.generation
-      || state.computerGeneration !== computer.generation
+      || state.generation !== computer.generation
       || !/^HEADLESS-[1-9]\d*$/.test(state.outputName)
-      || this.#outputClaimed(state.outputName)
+      || this.#outputClaimed(state.outputName, provision.surfaceId)
       || !ownedProcessRunning(state.desktopIdentity)
     ) {
       return undefined;
     }
     const outputIndex = Number(state.outputName.slice("HEADLESS-".length));
-    if (outputIndex > this.#capacity) return undefined;
+    if (outputIndex > this.#computer.capacity) return undefined;
     const videoWidth = Math.round(provision.logicalWidth * provision.scale);
     const videoHeight = Math.round(provision.logicalHeight * provision.scale);
     await this.#capture(computer.grim, computer.childEnv, state.outputName, videoWidth, videoHeight);
     await Promise.all([
-      this.#units.stopRole(provision.surfaceId, provision.generation, "input").catch(() => {}),
-      this.#units.stopRole(provision.surfaceId, provision.generation, "worker").catch(() => {}),
-      this.#units.stopRole(provision.surfaceId, provision.generation, "wayvnc").catch(() => {}),
+      this.#units.stopRole(provision.surfaceId, computer.generation, "input").catch(() => {}),
+      this.#units.stopRole(provision.surfaceId, computer.generation, "wayvnc").catch(() => {}),
     ]);
     rmSync(path.join(runtimeDir, "wayvnc.sock"), { force: true });
-    const virtualInput = await WaylandVirtualInput.start(
-      computer.inputHelper,
-      state.outputName,
-      this.#units.launcherEnvironment(computer.childEnv),
-      provision,
-      this.#units.command(provision.surfaceId, provision.generation, "input", computer.childEnv),
-    );
-    let computerWorker: SurfaceComputerWorker | undefined;
-    try {
-      computerWorker = await this.options.computerWorkers.startComputerWorker({
-        surfaceId: provision.surfaceId,
-        runtimeGeneration: provision.generation,
-        env: computer.childEnv,
-        wrapCommand: (targetEnvironment) => ({
-          commandPrefix: this.#units.command(
-            provision.surfaceId,
-            provision.generation,
-            "worker",
-            targetEnvironment,
-          ),
-          launcherEnvironment: this.#units.launcherEnvironment(targetEnvironment),
-        }),
-      });
-    } catch (error) {
-      await virtualInput.stop().catch(() => {});
-      throw error;
-    }
     const session: SwaySession = {
       provision,
       computer,
@@ -697,9 +413,13 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       videoHeight,
       ...(state.desktopPid === undefined ? {} : { desktopPid: state.desktopPid }),
       desktopIdentity: state.desktopIdentity,
-      virtualInput,
-      computerWorker,
     };
+    try {
+      await this.#startHelpers(session);
+    } catch (error) {
+      await session.virtualInput?.stop().catch(() => {});
+      throw error;
+    }
     computer.surfaceIds.add(provision.surfaceId);
     const runtime = this.#bindRuntime(session);
     this.#sessions.set(provision.surfaceId, session);
@@ -707,273 +427,36 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     return runtime;
   }
 
-  async #ensureComputer(): Promise<SharedComputerSession> {
-    if (this.#computer !== undefined && this.#computerRunning(this.#computer)) {
-      return this.#computer;
+  /** Starts whichever Screen helpers are missing; true when any restarted. */
+  async #startHelpers(session: SwaySession): Promise<boolean> {
+    const { provision, computer } = session;
+    let started = false;
+    if (session.virtualInput === undefined || !session.virtualInput.running) {
+      session.virtualInput = await WaylandVirtualInput.start(
+        computer.inputHelper,
+        session.outputName,
+        this.#units.launcherEnvironment(computer.childEnv),
+        computer.generation,
+        provision,
+        this.#units.command(provision.surfaceId, computer.generation, "input", computer.childEnv),
+      );
+      started = true;
     }
-    if (this.#computer !== undefined) await this.#stopComputer(this.#computer).catch(() => {});
-    const recovered = await this.#reattachComputer();
-    if (recovered !== undefined) return recovered;
-    return this.#startComputer();
-  }
-
-  async #startComputer(): Promise<SharedComputerSession> {
-    await this.#discardComputerFromDisk();
-    const tools = await this.#resolveTools();
-    const generation = Date.now();
-    const runtimeComputerDir = path.join(this.options.runtimeRoot, "computer");
-    const runtimeDir = path.join(runtimeComputerDir, String(generation));
-    const profileDir = path.join(this.options.profileRoot, "computer");
-    const homeDir = path.join(profileDir, "home");
-    const configHome = path.join(profileDir, "config");
-    const dataHome = path.join(profileDir, "data");
-    const stateHome = path.join(profileDir, "state");
-    const cacheHome = path.join(profileDir, "cache");
-    for (const directory of [
-      this.options.runtimeRoot,
-      runtimeComputerDir,
-      runtimeDir,
-      this.options.profileRoot,
-      profileDir,
-      homeDir,
-      configHome,
-      dataHome,
-      stateHome,
-      cacheHome,
-    ]) {
-      mkdirSync(directory, { recursive: true, mode: 0o700 });
-      chmodSync(directory, 0o700);
-    }
-    const expectedWaylandPath = path.join(runtimeDir, "wayland-0");
-    if (Buffer.byteLength(expectedWaylandPath) > 107) {
-      throw new Error(`Bot Computer runtime path is too long for a private Wayland socket: ${runtimeDir}`);
-    }
-    const configPath = writeSwayConfig(path.join(runtimeDir, "compositor-config"));
-    const bootstrapEnv = {
-      ...explicitEnvironment({
-        runtimeDir,
-        waylandDisplay: "wayland-0",
-        homeDir,
-        configHome,
-        dataHome,
-        stateHome,
-        cacheHome,
-      }),
-      XDG_CURRENT_DESKTOP: "sway",
-      WLR_BACKENDS: "headless",
-      WLR_HEADLESS_OUTPUTS: String(this.#capacity),
-      WLR_LIBINPUT_NO_DEVICES: "1",
-      WLR_RENDERER_ALLOW_SOFTWARE: "1",
-      WLR_RENDERER: "pixman",
-    };
-    await this.#units.stopComputer();
-    const swayProcess = Bun.spawn([
-      ...this.#units.computerCommand(generation, "compositor", bootstrapEnv),
-      tools.sway,
-      "-c",
-      configPath,
-    ], {
-      env: this.#units.launcherEnvironment(bootstrapEnv),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: true,
-    });
-    let dbusProcess: SwayProcess | undefined;
-    try {
-      const sockets = await this.#discoverSockets(runtimeDir, swayProcess);
-      const dbusPath = path.join(runtimeDir, "bus");
-      const childEnv = sessionEnvironment({
-        runtimeDir,
-        waylandDisplay: sockets.waylandDisplay,
-        homeDir,
-        configHome,
-        dataHome,
-        stateHome,
-        cacheHome,
-        swaySock: sockets.swaySock,
-        dbusAddress: `unix:path=${dbusPath}`,
-      });
-      dbusProcess = Bun.spawn([
-        ...this.#units.computerCommand(generation, "session-bus", childEnv),
-        tools.dbusDaemon,
-        "--session",
-        "--nofork",
-        "--nopidfile",
-        `--address=unix:path=${dbusPath}`,
-      ], {
-        env: this.#units.launcherEnvironment(childEnv),
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-        detached: true,
-      });
-      await this.#waitForSocket(dbusPath, dbusProcess, "Bot Computer session bus");
-      const computer: SharedComputerSession = {
-        generation,
-        runtimeComputerDir,
-        runtimeDir,
-        profileDir,
-        childEnv,
-        sockets,
-        swayProcess,
-        dbusProcess,
-        swayPid: swayProcess.pid,
-        dbusPid: dbusProcess.pid,
-        swayIdentity: ownedProcessIdentity(
-          swayProcess.pid,
-          runtimeDir,
-          botComputerUnitName(generation, "compositor"),
-        ),
-        dbusIdentity: ownedProcessIdentity(
-          dbusProcess.pid,
-          runtimeDir,
-          botComputerUnitName(generation, "session-bus"),
-        ),
-        grim: tools.grim,
-        inputHelper: tools.inputHelper,
-        captureHelper: tools.captureHelper,
-        botDesktop: tools.botDesktop,
-        wlrRandr: tools.wlrRandr,
-        surfaceIds: new Set(),
-        applicationProcesses: new Set(),
-        applicationSequence: 0,
-      };
-      this.#computer = computer;
-      this.#writeComputerState(computer);
-      return computer;
-    } catch (error) {
-      if (dbusProcess !== undefined) await terminateDetachedProcess(dbusProcess).catch(() => {});
-      await terminateDetachedProcess(swayProcess).catch(() => {});
-      await this.#units.stopComputer(generation).catch(() => {});
-      await Promise.all(privateRuntimeProcesses(runtimeDir).map(terminateOwnedProcess));
-      rmSync(runtimeComputerDir, { recursive: true, force: true });
-      throw error;
-    }
-  }
-
-  async #reattachComputer(): Promise<SharedComputerSession | undefined> {
-    const runtimeComputerDir = path.join(this.options.runtimeRoot, "computer");
-    const state = this.#readComputerState(runtimeComputerDir);
-    if (state === undefined) {
-      if (existsSync(runtimeComputerDir)) await this.#discardComputerFromDisk();
-      return undefined;
-    }
-    const runtimeDir = path.join(runtimeComputerDir, String(state.generation));
-    const sockets = this.#liveSockets(runtimeDir);
-    const dbusPath = path.join(runtimeDir, "bus");
-    if (
-      sockets === undefined
-      || sockets.waylandDisplay !== state.waylandDisplay
-      || path.basename(sockets.swaySock) !== state.swaySockName
-      || !isSocket(dbusPath)
-      || !ownedProcessRunning(state.swayIdentity)
-      || !ownedProcessRunning(state.dbusIdentity)
-    ) {
-      await this.#discardComputerFromDisk();
-      return undefined;
-    }
-    const tools = await this.#resolveTools();
-    const profileDir = path.join(this.options.profileRoot, "computer");
-    const homeDir = path.join(profileDir, "home");
-    const configHome = path.join(profileDir, "config");
-    const dataHome = path.join(profileDir, "data");
-    const stateHome = path.join(profileDir, "state");
-    const cacheHome = path.join(profileDir, "cache");
-    if ([homeDir, configHome, dataHome, stateHome, cacheHome].some((directory) => !existsSync(directory))) {
-      await this.#discardComputerFromDisk();
-      return undefined;
-    }
-    const childEnv = sessionEnvironment({
-      runtimeDir,
-      waylandDisplay: sockets.waylandDisplay,
-      homeDir,
-      configHome,
-      dataHome,
-      stateHome,
-      cacheHome,
-      swaySock: sockets.swaySock,
-      dbusAddress: `unix:path=${dbusPath}`,
-    });
-    const computer: SharedComputerSession = {
-      generation: state.generation,
-      runtimeComputerDir,
-      runtimeDir,
-      profileDir,
-      childEnv,
-      sockets,
-      ...(state.swayPid === undefined ? {} : { swayPid: state.swayPid }),
-      ...(state.dbusPid === undefined ? {} : { dbusPid: state.dbusPid }),
-      swayIdentity: state.swayIdentity,
-      dbusIdentity: state.dbusIdentity,
-      grim: tools.grim,
-      inputHelper: tools.inputHelper,
-      captureHelper: tools.captureHelper,
-      botDesktop: tools.botDesktop,
-      wlrRandr: tools.wlrRandr,
-      surfaceIds: new Set(),
-      applicationProcesses: new Set(),
-      applicationSequence: 0,
-    };
-    this.#computer = computer;
-    return computer;
+    return started;
   }
 
   async #ensureHelpers(session: SwaySession): Promise<void> {
-    let rebound = false;
-    if (session.virtualInput === undefined || !session.virtualInput.running) {
-      session.virtualInput = await WaylandVirtualInput.start(
-        session.computer.inputHelper,
-        session.outputName,
-        this.#units.launcherEnvironment(session.computer.childEnv),
-        session.provision,
-        this.#units.command(
-          session.provision.surfaceId,
-          session.provision.generation,
-          "input",
-          session.computer.childEnv,
-        ),
-      );
-      rebound = true;
-    }
-    if (session.computerWorker === undefined || !await this.#workerPending(session.computerWorker)) {
-      session.computerWorker = await this.options.computerWorkers.startComputerWorker({
-        surfaceId: session.provision.surfaceId,
-        runtimeGeneration: session.provision.generation,
-        env: session.computer.childEnv,
-        wrapCommand: (targetEnvironment) => ({
-          commandPrefix: this.#units.command(
-            session.provision.surfaceId,
-            session.provision.generation,
-            "worker",
-            targetEnvironment,
-          ),
-          launcherEnvironment: this.#units.launcherEnvironment(targetEnvironment),
-        }),
-      });
-      rebound = true;
-    }
-    if (!rebound) return;
+    if (!await this.#startHelpers(session)) return;
     const runtime = this.#bindRuntime(session);
     this.#runtimes.set(session.provision.surfaceId, runtime);
   }
 
-  async #workerPending(worker: SurfaceComputerWorker): Promise<boolean> {
-    let settled = false;
-    void worker.exited.then(
-      () => { settled = true; },
-      () => { settled = true; },
-    );
-    await Promise.resolve();
-    return !settled;
-  }
 
   #bindRuntime(session: SwaySession): BotScreenRuntime {
     const { provision, computer } = session;
     const virtualInput = session.virtualInput;
-    const computerWorker = session.computerWorker;
-    if (virtualInput === undefined || computerWorker === undefined) {
-      throw new Error("Sway Bot Screen helpers are required before binding a runtime");
+    if (virtualInput === undefined) {
+      throw new Error("Sway Bot Screen input helper is required before binding a runtime");
     }
     const swayIpc = new SwayIpcClient(computer.sockets.swaySock);
     const outputX = (Number(session.outputName.slice("HEADLESS-".length)) - 1) * OUTPUT_SLOT_WIDTH;
@@ -988,35 +471,12 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           },
         });
     let lastInputEpoch = 0;
-    const sendAgentInput = async (
-      deliver: (send: (event: BotScreenInputAction) => Promise<void>) => Promise<void>,
-    ): Promise<void> => {
-      await this.#withInputLease(session, async () => {
-        const epoch = ++lastInputEpoch;
-        await virtualInput.setInputAuthority(epoch);
-        let sequence = 0;
-        try {
-          await deliver(async (event) => {
-            await virtualInput.input({
-              surfaceId: provision.surfaceId,
-              runtimeGeneration: provision.generation,
-              geometryGeneration: provision.geometryGeneration,
-              controllerEpoch: epoch,
-              sequence: ++sequence,
-              ...event,
-            });
-          });
-        } finally {
-          await virtualInput.release(epoch);
-        }
-      });
-    };
     const outcome = Promise.race<BotScreenRuntimeOutcome>([
-      this.#computerExited(computer).then((status) => ({
+      computer.exited().then((status) => ({
         type: "compositor-exited",
         error: new Error(`shared Sway compositor exited with status ${status}`),
       })),
-      this.#sessionBusExited(computer).then((status) => ({
+      computer.busExited().then((status) => ({
         type: "session-bus-exited",
         error: new Error(`shared D-Bus session exited with status ${status}`),
       })),
@@ -1024,7 +484,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         type: "desktop-exited",
         error: new Error(`Bot Desktop exited with status ${status}`),
       })),
-      computerWorker.exited.then((error) => ({ type: "computer-worker-exited", error })),
       virtualInput.exited.then((error) => ({ type: "input-helper-exited", error })),
     ]);
     let stopped = false;
@@ -1055,7 +514,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (sharedWayvnc === shared) sharedWayvnc = undefined;
         await this.#units.stopRole(
           provision.surfaceId,
-          provision.generation,
+          computer.generation,
           "wayvnc",
         ).catch(() => {});
         await terminateDetachedProcess(shared.process);
@@ -1076,7 +535,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const starting = (async (): Promise<SharedWayvnc> => {
         const socketPath = path.join(session.runtimeDir, "wayvnc.sock");
         const wayvncProcess = Bun.spawn([
-          ...this.#units.command(provision.surfaceId, provision.generation, "wayvnc", computer.childEnv),
+          ...this.#units.command(provision.surfaceId, computer.generation, "wayvnc", computer.childEnv),
           wayvnc,
           "--unix-socket",
           "--output",
@@ -1092,7 +551,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         });
         const wayvncStderr = new Response(wayvncProcess.stderr).text();
         try {
-          await this.#waitForSocket(socketPath, wayvncProcess, "WayVNC");
+          await waitForSocket(socketPath, wayvncProcess, "WayVNC");
           chmodSync(socketPath, 0o600);
           const shared: SharedWayvnc = {
             process: wayvncProcess,
@@ -1124,7 +583,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       }
     };
     const capture = async (): Promise<BotScreenCapture> => {
-      if (stopped || !this.#computerRunning(computer)) throw new Error("Bot Computer compositor is not running");
+      if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
       if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
       return this.#capture(
         computer.grim,
@@ -1135,7 +594,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       );
     };
     const openCaptureStream = async (): Promise<BotScreenCaptureStream> => {
-      if (stopped || !this.#computerRunning(computer)) throw new Error("Bot Computer compositor is not running");
+      if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
       if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
       const opening = Promise.withResolvers<void>();
       captureStreamStarts.add(opening.promise);
@@ -1148,12 +607,12 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           session.videoHeight,
           this.#units.command(
             provision.surfaceId,
-            provision.generation,
+            computer.generation,
             `capture-${++captureStreamSequence}`,
             computer.childEnv,
           ),
         );
-        if (stopped || !this.#computerRunning(computer)) {
+        if (stopped || !computer.running()) {
           await stream.close();
           throw new Error("Bot Computer compositor is not running");
         }
@@ -1183,92 +642,23 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         captureStreamStarts.delete(opening.promise);
       }
     };
-    const act = async (
-      action: ComputerAction,
-      inputAuthority?: ComputerInputAuthority,
-    ): Promise<BotScreenActionResult> => {
-      if (isInputAction(action.name)) {
-        if (inputAuthority === undefined || inputAuthority.surfaceId !== provision.surfaceId) {
-          throw new Error("Bot Screen input authority does not match this Surface");
-        }
-      }
-      if (action.name === "screenshot") return { image: await capture() };
-      if (action.name === "list_windows") return { windowList: await listWindows() };
-      if (action.name === "observe") {
-        const windowList = await listWindows();
-        return { image: await capture(), windowList };
-      }
-      if (action.name === "focus_window") {
-        const matches = resolveFocusMatches(await listWindows(), action.args);
-        if (matches.length === 0) throw new Error("focus_window did not match a window");
-        if (matches.length > 1) throw new Error("focus_window matched multiple windows");
-        const target = matches[0]!;
-        await this.#withInputLease(session, async () => {
-          await swayIpc.runCommand(`[con_id=${target.id}] focus`);
-          const confirmed = (await listWindows()).find((window) => window.id === target.id);
-          if (confirmed?.focused !== true) throw new Error("Sway window focus was not confirmed");
-        });
-        return {};
-      }
-      if (action.name === "click") {
-        const x = requireCoordinate(action.args.x, "click x");
-        const y = requireCoordinate(action.args.y, "click y");
-        const button = pointerButton(action.args.button);
-        await sendAgentInput(async (send) => {
-          await send({ type: "motion", x, y });
-          await send({ type: "button", x, y, button, state: "pressed" });
-          await send({ type: "button", x, y, button, state: "released" });
-        });
-        return {};
-      }
-      if (action.name === "scroll") {
-        const x = optionalCoordinate(action.args.x, 0);
-        const y = optionalCoordinate(action.args.y, 0);
-        const deltaX = requireCoordinate(action.args.deltaX, "scroll deltaX");
-        const deltaY = requireCoordinate(action.args.deltaY, "scroll deltaY");
-        await sendAgentInput(async (send) => {
-          await send({ type: "scroll", x, y, deltaX, deltaY });
-        });
-        return {};
-      }
-      if (action.name === "key") {
-        const keyCodes = linuxKeyChord(action.args.key);
-        await sendAgentInput(async (send) => {
-          for (const keyCode of keyCodes) await send({ type: "key", keyCode, state: "pressed" });
-          for (const keyCode of keyCodes.toReversed()) await send({ type: "key", keyCode, state: "released" });
-        });
-        return {};
-      }
-      if (action.name === "type") {
-        if (typeof action.args.text !== "string") throw new Error("type requires args.text");
-        await sendAgentInput(async (send) => {
-          await send({ type: "paste", text: action.args.text as string });
-        });
-        return {};
-      }
-      if (action.name === "open_app" || action.name === "open_url") {
-        return this.#withInputLease(session, async () => {
-          const result = await this.#launchApplication(session, action);
-          await hideBotDesktop(swayIpc, session.workspaceName);
-          return result;
-        });
-      }
-      const result = await computerWorker.act(action, inputAuthority);
-      const workerImage = result.image === undefined
-        ? undefined
-        : {
-            mediaType: result.image.mediaType,
-            bytes: new Uint8Array(Buffer.from(result.image.base64, "base64")),
-          };
-      return {
-        ...(result.text === undefined ? {} : { text: result.text }),
-        ...(result.windowList === undefined ? {} : {
-          windowList: result.windowList.filter((window) =>
-            window.workspace === undefined || window.workspace === session.workspaceName
-          ),
-        }),
-        ...(workerImage === undefined ? {} : { image: workerImage }),
-      };
+    const focusWindow = async (window: ComputerWindowListItem): Promise<void> => {
+      if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
+      if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
+      await this.#withInputLease(session, async () => {
+        await swayIpc.runCommand(`[con_id=${window.id}] focus`);
+        const confirmed = (await listWindows()).find((candidate) => candidate.id === window.id);
+        if (confirmed?.focused !== true) throw new Error("Sway window focus was not confirmed");
+      });
+    };
+    const launch = async (request: BotScreenLaunchRequest): Promise<{ text?: string }> => {
+      if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
+      if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
+      return this.#withInputLease(session, async () => {
+        const result = await this.#launchApplication(session, request);
+        await hideBotDesktop(swayIpc, session.workspaceName);
+        return result;
+      });
     };
     const cleanupSurface = async (): Promise<void> => {
       stopped = true;
@@ -1283,9 +673,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         await Promise.allSettled([...captureStreams].map((stream) => stream.close()));
         await Promise.allSettled([...expandedViews].map((view) => view.close()));
         await Promise.allSettled([
-          computerWorker.stop(),
           this.#stopDesktop(session),
-          this.#units.stop(provision.surfaceId, provision.generation),
+          this.#units.stop(provision.surfaceId, computer.generation),
         ]);
       })();
       cleanupInFlight = cleanup;
@@ -1298,6 +687,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     };
     session.cleanup = cleanupSurface;
     const runtime: BotScreenRuntime = {
+      generation: computer.generation,
+      sessionEnv: computer.childEnv,
       readiness: {
         compositor: "ready",
         waylandSocket: "private",
@@ -1311,28 +702,20 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         desktopSurface: "ready",
         capture: "ready",
         input: "ready",
-        computerWorker: "ready",
       },
       expandedProjection: "rfb",
       capture,
       openCaptureStream,
       acquireExpandedView: async () => {
-        if (stopped || !this.#computerRunning(computer)) throw new Error("Bot Computer compositor is not running");
+        if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
         if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
-        if (this.#resolvedWayvnc === undefined && this.options.runtimeSupply !== undefined) {
-          await this.#resolveTools();
-        }
-        const wayvnc = this.#resolvedWayvnc
-          ?? (this.options.wayvncBin === undefined
-            ? undefined
-            : executable(this.options.wayvncBin, this.options.wayvncBin));
-        if (wayvnc === undefined) throw new Error("WayVNC executable is unavailable");
+        const wayvnc = await this.#resolveWayvnc();
         const opening = Promise.withResolvers<void>();
         expandedViewStarts.add(opening.promise);
         pendingExpandedAcquires += 1;
         try {
           const shared = await ensureSharedWayvnc(wayvnc);
-          if (stopped || !this.#computerRunning(computer)) {
+          if (stopped || !computer.running()) {
             throw new Error("Bot Computer compositor is not running");
           }
           const inbound: Uint8Array[] = [];
@@ -1400,7 +783,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
               failLease(cause instanceof Error ? cause : new Error(String(cause)));
             }
           };
-          if (stopped || !this.#computerRunning(computer)) {
+          if (stopped || !computer.running()) {
             try { socket.end(); } catch { /* already closed */ }
             throw new Error("Bot Computer compositor is not running");
           }
@@ -1469,27 +852,34 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           expandedViewStarts.delete(opening.promise);
         }
       },
-      act,
+      listWindows,
+      focusWindow,
+      launch,
       setInputAuthority: async (controllerEpoch) => {
+        if (!Number.isSafeInteger(controllerEpoch) || controllerEpoch <= lastInputEpoch) {
+          throw new BotScreenInputRejectedError("stale controller epoch");
+        }
         const acquired = await this.#acquireInputLease(provision.surfaceId);
         try {
           await this.#focusWorkspace(session);
-          const epoch = Math.max(controllerEpoch, lastInputEpoch + 1);
-          lastInputEpoch = epoch;
-          await virtualInput.setInputAuthority(epoch);
-          return epoch;
+          lastInputEpoch = controllerEpoch;
+          await virtualInput.setInputAuthority(controllerEpoch);
+          return controllerEpoch;
         } catch (error) {
           if (acquired) this.#releaseInputLease(provision.surfaceId);
           throw error;
         }
       },
       input: async (event) => {
-        if (this.#inputLeaseOwner !== provision.surfaceId) {
-          throw new BotScreenInputRejectedError("Bot Screen does not own the shared input seat");
+        if (event.controllerEpoch !== lastInputEpoch || this.#inputLeaseOwner !== provision.surfaceId) {
+          throw new BotScreenInputRejectedError("stale controller epoch");
         }
         await virtualInput.input(event);
       },
       releaseInput: async (controllerEpoch) => {
+        if (controllerEpoch !== undefined && controllerEpoch !== lastInputEpoch) {
+          throw new BotScreenInputRejectedError("stale controller epoch");
+        }
         try {
           await virtualInput.release(controllerEpoch);
         } finally {
@@ -1504,8 +894,9 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   async #launchApplication(
     session: SwaySession,
-    action: ComputerAction,
-  ): Promise<BotScreenActionResult> {
+    request: BotScreenLaunchRequest,
+  ): Promise<{ text?: string }> {
+    await this.options.onLaunch?.();
     const cwd = this.options.applicationCwd;
     if (cwd === undefined || cwd === "" || !existsSync(cwd)) {
       throw new Error("Shared Workspace is unavailable for application launch");
@@ -1514,19 +905,10 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const before = new Set(
       listApplicationToplevels(await swayIpc.getTree()).map((window) => window.id),
     );
-    let argv: string[];
-    let text: string;
-    if (action.name === "open_app") {
-      const application = String(action.args.app ?? "");
-      if (application === "") throw new Error("open_app requires args.app");
-      argv = desktopApplicationCommand(application, session.computer.childEnv);
-      text = `launched ${application}`;
-    } else {
-      const url = String(action.args.url ?? "");
-      if (url === "") throw new Error("open_url requires args.url");
-      argv = browserCommand(url, session.computer.childEnv);
-      text = `opened ${url}`;
-    }
+    const argv = request.app !== undefined
+      ? desktopApplicationCommand(request.app, session.computer.childEnv)
+      : browserCommand(request.url!, session.computer.childEnv);
+    const text = request.app !== undefined ? `launched ${request.app}` : `opened ${request.url}`;
     const role = `application-${++session.computer.applicationSequence}` as const;
     const application = Bun.spawn([
       ...this.#units.computerCommand(
@@ -1547,7 +929,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     session.computer.applicationProcesses.add(application);
     void application.exited.then(() => session.computer.applicationProcesses.delete(application));
     const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline && this.#computerRunning(session.computer)) {
+    while (Date.now() < deadline && session.computer.running()) {
       const windows = listApplicationToplevels(await swayIpc.getTree());
       const created = windows.filter((window) => !before.has(window.id));
       if (created.length > 0) {
@@ -1598,7 +980,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   async #focusWorkspace(session: SwaySession): Promise<void> {
-    if (!this.#computerRunning(session.computer)) {
+    if (!session.computer.running()) {
       throw new Error("Bot Computer compositor is not running");
     }
     await new SwayIpcClient(session.computer.sockets.swaySock)
@@ -1621,32 +1003,13 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       await session.virtualInput?.release().catch(() => {});
       await Promise.allSettled([
         session.virtualInput?.stop(),
-        session.computerWorker?.stop(),
         this.#stopDesktop(session),
-        this.#units.stop(session.provision.surfaceId, session.provision.generation),
+        this.#units.stop(session.provision.surfaceId, session.computer.generation),
       ]);
     }
     rmSync(session.runtimeSurfaceDir, { recursive: true, force: true });
     session.computer.surfaceIds.delete(session.provision.surfaceId);
-    if (session.computer.surfaceIds.size === 0) await this.#stopComputer(session.computer);
-  }
-
-  async #stopComputer(computer: SharedComputerSession): Promise<void> {
-    if (this.#computer !== computer) return;
-    this.#computer = undefined;
-    await this.#units.stopComputer(computer.generation).catch(() => {});
-    await Promise.allSettled(
-      [...computer.applicationProcesses].map((application) =>
-        this.#stopApplicationProcess(application)
-      ),
-    );
-    computer.applicationProcesses.clear();
-    await Promise.allSettled([
-      this.#stopProcess(computer.dbusProcess, computer.dbusIdentity),
-      this.#stopProcess(computer.swayProcess, computer.swayIdentity),
-    ]);
-    await Promise.all(privateRuntimeProcesses(computer.runtimeDir).map(terminateOwnedProcess));
-    rmSync(computer.runtimeComputerDir, { recursive: true, force: true });
+    if (session.computer.surfaceIds.size === 0) await session.computer.stop();
   }
 
   async #discardSurfaceFromDisk(surfaceId: SurfaceId): Promise<void> {
@@ -1658,29 +1021,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     rmSync(path.join(this.options.runtimeRoot, surfaceId), { recursive: true, force: true });
   }
 
-  async #discardComputerFromDisk(): Promise<void> {
-    const runtimeComputerDir = path.join(this.options.runtimeRoot, "computer");
-    const state = this.#readComputerState(runtimeComputerDir);
-    await this.#units.stopComputer(state?.generation).catch(() => {});
-    if (state !== undefined) {
-      await Promise.all([
-        terminateOwnedProcess(state.dbusIdentity),
-        terminateOwnedProcess(state.swayIdentity),
-      ]);
-    }
-    if (existsSync(runtimeComputerDir)) {
-      const generations = readdirSync(runtimeComputerDir)
-        .filter((entry) => /^\d+$/.test(entry));
-      await Promise.all(generations.flatMap((generation) =>
-        privateRuntimeProcesses(path.join(runtimeComputerDir, generation))
-          .map(terminateOwnedProcess)
-      ));
-    }
-    rmSync(runtimeComputerDir, { recursive: true, force: true });
-  }
-
   async #liveSurfaceValid(session: SwaySession): Promise<boolean> {
-    if (!this.#computerRunning(session.computer) || !this.#desktopRunning(session)) return false;
+    if (!session.computer.running() || !this.#desktopRunning(session)) return false;
     try {
       await this.#capture(
         session.computer.grim,
@@ -1695,19 +1037,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     }
   }
 
-  #computerRunning(computer: SharedComputerSession): boolean {
-    const swayRunning = computer.swayProcess !== undefined
-      ? computer.swayProcess.exitCode === null && computer.swayProcess.signalCode === null
-      : ownedProcessRunning(computer.swayIdentity);
-    const dbusRunning = computer.dbusProcess !== undefined
-      ? computer.dbusProcess.exitCode === null && computer.dbusProcess.signalCode === null
-      : ownedProcessRunning(computer.dbusIdentity);
-    return swayRunning
-      && dbusRunning
-      && isSocket(path.join(computer.runtimeDir, computer.sockets.waylandDisplay))
-      && isSocket(computer.sockets.swaySock);
-  }
-
   #desktopRunning(session: SwaySession): boolean {
     if (session.desktopProcess !== undefined) {
       return session.desktopProcess.exitCode === null && session.desktopProcess.signalCode === null;
@@ -1715,71 +1044,49 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     return ownedProcessRunning(session.desktopIdentity);
   }
 
-  #computerExited(computer: SharedComputerSession): Promise<number> {
-    if (computer.swayProcess !== undefined) return computer.swayProcess.exited;
-    return this.#watchPid(computer.swayIdentity);
-  }
-
-  #sessionBusExited(computer: SharedComputerSession): Promise<number> {
-    if (computer.dbusProcess !== undefined) return computer.dbusProcess.exited;
-    return this.#watchPid(computer.dbusIdentity);
-  }
-
   #desktopExited(session: SwaySession): Promise<number> {
     if (session.desktopProcess !== undefined) return session.desktopProcess.exited;
-    return this.#watchPid(session.desktopIdentity);
-  }
-
-  async #watchPid(identity: OwnedProcessIdentity | undefined): Promise<number> {
-    while (ownedProcessRunning(identity)) await Bun.sleep(100);
-    return 0;
-  }
-
-  async #stopApplicationProcess(application: ApplicationProcess): Promise<void> {
-    if (application.exitCode !== null || application.signalCode !== null) return;
-    try {
-      process.kill(-application.pid, "SIGTERM");
-    } catch {
-      application.kill("SIGTERM");
-    }
-    const stopped = await Promise.race([
-      application.exited.then(() => true),
-      Bun.sleep(3_000).then(() => false),
-    ]);
-    if (stopped) return;
-    try {
-      process.kill(-application.pid, "SIGKILL");
-    } catch {
-      application.kill("SIGKILL");
-    }
-    await application.exited;
-  }
-
-  async #stopProcess(
-    process: SwayProcess | undefined,
-    identity: OwnedProcessIdentity | undefined,
-  ): Promise<void> {
-    if (process !== undefined) {
-      await terminateDetachedProcess(process);
-    } else {
-      await terminateOwnedProcess(identity);
-    }
+    return watchOwnedProcess(session.desktopIdentity);
   }
 
   async #stopDesktop(session: SwaySession): Promise<void> {
-    await this.#stopProcess(session.desktopProcess, session.desktopIdentity);
+    await terminateProcess(session.desktopProcess, session.desktopIdentity);
   }
 
   #allocateOutput(): string {
-    for (let index = 1; index <= this.#capacity; index += 1) {
+    for (let index = 1; index <= this.#computer.capacity; index += 1) {
       const outputName = `HEADLESS-${index}`;
       if (!this.#outputClaimed(outputName)) return outputName;
     }
     throw new Error("Bot Computer has no unassigned output");
   }
 
-  #outputClaimed(outputName: string): boolean {
-    return [...this.#sessions.values()].some((session) => session.outputName === outputName);
+  /**
+   * An output is claimed by a live session or by a retained Screen whose desktop is
+   * still running and has not been reattached yet; starting over it would strand that Screen.
+   */
+  #outputClaimed(outputName: string, exceptSurfaceId?: SurfaceId): boolean {
+    if ([...this.#sessions.values()].some((session) =>
+      session.outputName === outputName && session.provision.surfaceId !== exceptSurfaceId
+    )) return true;
+    return this.#retainedOutputs(exceptSurfaceId).has(outputName);
+  }
+
+  /** Outputs a not-yet-reattached Screen still owns through a live desktop. */
+  #retainedOutputs(exceptSurfaceId?: SurfaceId): Set<string> {
+    const claimed = new Set<string>();
+    const runtimeRoot = this.options.runtimeRoot;
+    if (!existsSync(runtimeRoot)) return claimed;
+    for (const entry of readdirSync(runtimeRoot)) {
+      if (entry === "computer" || entry === exceptSurfaceId) continue;
+      const surfaceId = entry as SurfaceId;
+      if (this.#sessions.has(surfaceId)) continue;
+      const retained = this.#latestSurfaceState(surfaceId);
+      if (retained !== undefined && ownedProcessRunning(retained.state.desktopIdentity)) {
+        claimed.add(retained.state.outputName);
+      }
+    }
+    return claimed;
   }
 
   #validateProvision(provision: BotScreenProvision): void {
@@ -1788,77 +1095,29 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     }
   }
 
-  async #resolveTools(): Promise<{
-    sway: string;
-    wlrRandr: string;
-    grim: string;
-    inputHelper: string;
-    captureHelper: string;
-    botDesktop: string;
-    dbusDaemon: string;
-  }> {
-    let sway: string | undefined;
-    let wlrRandr: string | undefined;
-    if (this.options.runtimeSupply !== undefined) {
-      const binaries = await resolveSwayRuntimeBinaries({
+  async #resolveWayvnc(): Promise<string> {
+    if (this.#resolvedWayvnc === undefined && this.options.runtimeSupply !== undefined) {
+      this.#resolvedWayvnc = (await resolveSwayRuntimeBinaries({
         ...(this.options.swayBin === undefined ? {} : { swayOverride: this.options.swayBin }),
         ...(this.options.swaymsgBin === undefined ? {} : { swaymsgOverride: this.options.swaymsgBin }),
         ...(this.options.wayvncBin === undefined ? {} : { wayvncOverride: this.options.wayvncBin }),
         ...(this.options.wlrRandrBin === undefined ? {} : { wlrRandrOverride: this.options.wlrRandrBin }),
         supply: this.options.runtimeSupply,
-      });
-      sway = binaries.swayBin;
-      wlrRandr = binaries.wlrRandrBin;
-      this.#resolvedWayvnc = binaries.wayvncBin;
-    } else {
-      sway = executable(this.options.swayBin, "sway");
-      wlrRandr = executable(this.options.wlrRandrBin, "wlr-randr");
+      })).wayvncBin;
     }
-    const grim = executable(this.options.grimBin, "grim");
-    const dbusDaemon = executable(this.options.dbusDaemonBin, "dbus-daemon");
-    const [inputHelper, captureHelper, botDesktop] = await Promise.all([
-      this.options.inputHelperBin === undefined
-        ? ensureInputHelper()
-        : Promise.resolve(executable(this.options.inputHelperBin, this.options.inputHelperBin)),
-      this.options.captureHelperBin === undefined
-        ? ensureCaptureHelper()
-        : Promise.resolve(executable(this.options.captureHelperBin, this.options.captureHelperBin)),
-      this.options.botDesktopBin === undefined
-        ? ensureBotDesktop()
-        : Promise.resolve(executable(this.options.botDesktopBin, this.options.botDesktopBin)),
-    ]);
-    if (sway === undefined) throw new Error("Sway executable is unavailable");
-    if (wlrRandr === undefined) throw new Error("wlr-randr is required for the Sway Bot Computer runtime");
-    if (grim === undefined) throw new Error("grim is required for the Sway Bot Computer runtime");
-    if (dbusDaemon === undefined) throw new Error("dbus-daemon is required for the Sway Bot Computer runtime");
-    if (inputHelper === undefined || captureHelper === undefined || botDesktop === undefined) {
-      throw new Error("Bot Desktop and the Bot Screen capture/input helpers are required for Sway");
-    }
-    return { sway, wlrRandr, grim, inputHelper, captureHelper, botDesktop, dbusDaemon };
-  }
-
-  #writeComputerState(computer: SharedComputerSession): void {
-    writeFileSync(
-      path.join(computer.runtimeComputerDir, COMPUTER_STATE_FILE),
-      JSON.stringify({
-        generation: computer.generation,
-        waylandDisplay: computer.sockets.waylandDisplay,
-        swaySockName: path.basename(computer.sockets.swaySock),
-        ...(computer.swayPid === undefined ? {} : { swayPid: computer.swayPid }),
-        ...(computer.dbusPid === undefined ? {} : { dbusPid: computer.dbusPid }),
-        swayIdentity: computer.swayIdentity,
-        dbusIdentity: computer.dbusIdentity,
-      } satisfies SharedComputerState),
-      { mode: 0o600 },
-    );
+    const wayvnc = this.#resolvedWayvnc
+      ?? (this.options.wayvncBin === undefined
+        ? undefined
+        : executable(this.options.wayvncBin, this.options.wayvncBin));
+    if (wayvnc === undefined) throw new Error("WayVNC executable is unavailable");
+    return wayvnc;
   }
 
   #writeSurfaceState(session: SwaySession): void {
     writeFileSync(
       path.join(session.runtimeDir, SURFACE_STATE_FILE),
       JSON.stringify({
-        generation: session.provision.generation,
-        computerGeneration: session.computer.generation,
+        generation: session.computer.generation,
         outputName: session.outputName,
         workspaceName: session.workspaceName,
         ...(session.desktopPid === undefined ? {} : { desktopPid: session.desktopPid }),
@@ -1866,39 +1125,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       } satisfies SwaySurfaceState),
       { mode: 0o600 },
     );
-  }
-
-  #readComputerState(runtimeComputerDir: string): SharedComputerState | undefined {
-    try {
-      const parsed = JSON.parse(
-        readFileSync(path.join(runtimeComputerDir, COMPUTER_STATE_FILE), "utf8"),
-      ) as Partial<SharedComputerState>;
-      if (
-        typeof parsed.generation !== "number"
-        || !Number.isSafeInteger(parsed.generation)
-        || typeof parsed.waylandDisplay !== "string"
-        || parsed.waylandDisplay.includes("/")
-        || typeof parsed.swaySockName !== "string"
-        || parsed.swaySockName.includes("/")
-      ) {
-        return undefined;
-      }
-      const runtimeDir = path.join(runtimeComputerDir, String(parsed.generation));
-      const swayIdentity = this.#readIdentity(parsed.swayIdentity, parsed.swayPid, runtimeDir);
-      const dbusIdentity = this.#readIdentity(parsed.dbusIdentity, parsed.dbusPid, runtimeDir);
-      if (swayIdentity === undefined || dbusIdentity === undefined) return undefined;
-      return {
-        generation: parsed.generation,
-        waylandDisplay: parsed.waylandDisplay,
-        swaySockName: parsed.swaySockName,
-        ...(typeof parsed.swayPid === "number" ? { swayPid: parsed.swayPid } : {}),
-        ...(typeof parsed.dbusPid === "number" ? { dbusPid: parsed.dbusPid } : {}),
-        swayIdentity,
-        dbusIdentity,
-      };
-    } catch {
-      return undefined;
-    }
   }
 
   #readSurfaceState(runtimeDir: string): SwaySurfaceState | undefined {
@@ -1909,8 +1135,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (
         typeof parsed.generation !== "number"
         || !Number.isSafeInteger(parsed.generation)
-        || typeof parsed.computerGeneration !== "number"
-        || !Number.isSafeInteger(parsed.computerGeneration)
         || typeof parsed.outputName !== "string"
         || typeof parsed.workspaceName !== "string"
       ) {
@@ -1919,9 +1143,9 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const computerRuntimeDir = path.join(
         this.options.runtimeRoot,
         "computer",
-        String(parsed.computerGeneration),
+        String(parsed.generation),
       );
-      const desktopIdentity = this.#readIdentity(
+      const desktopIdentity = readOwnedIdentity(
         parsed.desktopIdentity,
         parsed.desktopPid,
         computerRuntimeDir,
@@ -1929,7 +1153,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (desktopIdentity === undefined) return undefined;
       return {
         generation: parsed.generation,
-        computerGeneration: parsed.computerGeneration,
         outputName: parsed.outputName,
         workspaceName: parsed.workspaceName,
         ...(typeof parsed.desktopPid === "number" ? { desktopPid: parsed.desktopPid } : {}),
@@ -1957,77 +1180,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     return undefined;
   }
 
-  #readIdentity(
-    value: unknown,
-    pid: number | undefined,
-    runtimeDir: string,
-  ): OwnedProcessIdentity | undefined {
-    if (typeof value !== "object" || value === null) return undefined;
-    const identity = value as Partial<OwnedProcessIdentity>;
-    if (
-      identity.pid !== pid
-      || identity.runtimeDir !== runtimeDir
-      || typeof identity.startTime !== "string"
-      || !/^\d+$/.test(identity.startTime)
-      || typeof identity.bootId !== "string"
-      || (identity.unitName !== undefined && typeof identity.unitName !== "string")
-    ) {
-      return undefined;
-    }
-    return identity as OwnedProcessIdentity;
-  }
-
-  #liveSockets(runtimeDir: string): { waylandDisplay: string; swaySock: string } | undefined {
-    if (!existsSync(runtimeDir)) return undefined;
-    const waylandDisplay = readdirSync(runtimeDir).find((entry) =>
-      /^wayland-\d+$/.test(entry) && isSocket(path.join(runtimeDir, entry))
-    );
-    const swaySock = readdirSync(runtimeDir)
-      .filter((entry) => entry.startsWith("sway-ipc") && isSocket(path.join(runtimeDir, entry)))
-      .map((entry) => path.join(runtimeDir, entry))[0];
-    if (waylandDisplay === undefined || swaySock === undefined) return undefined;
-    return { waylandDisplay, swaySock };
-  }
-
-  async #discoverSockets(
-    runtimeDir: string,
-    swayProcess: SwayProcess,
-  ): Promise<{ waylandDisplay: string; swaySock: string }> {
-    const stderr = new Response(swayProcess.stderr).text();
-    const exited = swayProcess.exited.then(async (status) => {
-      const detail = (await stderr).trim().split("\n").slice(-3).join(" ");
-      throw new Error(
-        `Sway exited before readiness with status ${status}${detail === "" ? "" : `: ${detail}`}`,
-      );
-    });
-    const socketReady = (async (): Promise<{ waylandDisplay: string; swaySock: string }> => {
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const sockets = this.#liveSockets(runtimeDir);
-        if (sockets !== undefined) return sockets;
-        await Bun.sleep(20);
-      }
-      throw new Error("Sway did not create its private Wayland and IPC sockets");
-    })();
-    return Promise.race([socketReady, exited]);
-  }
-
-  async #waitForSocket(
-    socketPath: string,
-    process: SwayProcess,
-    label: string,
-  ): Promise<void> {
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline) {
-      if (isSocket(socketPath)) return;
-      if (process.exitCode !== null) {
-        throw new Error(`${label} exited before binding its private socket with status ${process.exitCode}`);
-      }
-      await Bun.sleep(20);
-    }
-    throw new Error(`${label} did not create its private socket`);
-  }
-
   async #configureOutput(
     wlrRandr: string,
     environment: Record<string, string>,
@@ -2037,7 +1189,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     refreshRate: number,
     scale: number,
     positionX: number,
-    computer: SharedComputerSession,
+    computer: BotComputer,
   ): Promise<void> {
     const argv = [
       wlrRandr,
@@ -2056,7 +1208,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const deadline = Date.now() + 5_000;
     let lastError = "Sway output configuration failed";
     while (Date.now() < deadline) {
-      if (!this.#computerRunning(computer)) {
+      if (!computer.running()) {
         throw new Error("Bot Computer exited before output configuration");
       }
       const configured = await command(argv, environment);

@@ -12,7 +12,7 @@ WayVNC remains an on-demand **view-only** RFB projection. Remote input and clipb
 
 The Host Session is never used as the Bot Computer. Child environment is explicit and private; production transient units do not mutate the global user-manager or D-Bus activation environment. Cleanup targets verified private-runtime processes and named transient units. Invalid retained state is discarded without trusting stale PIDs.
 
-Computer ADRs 0007 and 0008 remain historical evidence. Their per-Bot compositor, private per-Bot profile, and independent-seat requirements are superseded. Cage remains removed and has no automatic fallback. The one-shot leftover-Cage cleanup is migration safety only.
+Computer ADRs 0007 and 0008 remain historical evidence. Their per-Bot compositor, private per-Bot profile, and independent-seat requirements are superseded. Cage remains removed and has no automatic fallback; the one-shot leftover-Cage cleanup guard has been deleted too.
 
 Automated real-Sway conformance passed on 2026-09-08 for two routed Screens, shared profile/runtime markers, Agent control, selected-view projection, browser URL reuse, deletion/reprovision, and host environment isolation. Human top-bar, shortcut, and ordinary Host Session acceptance remains pending.
 

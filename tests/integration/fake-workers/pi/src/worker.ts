@@ -764,13 +764,10 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               ? ""
               : toolCallId;
             const action = parts[1] === "click"
-              ? { name: "click", args: { marker: parts[2] ?? "" } }
+              ? { name: "click", args: { x: 4, y: 5 } }
               : parts[1] === "screenshot"
                 ? { name: "screenshot", args: {} }
-                : {
-                    name: "observe",
-                    args: parts[2] === "fail" ? { fail: true } : {},
-                  };
+                : { name: "observe", args: {} };
             s.streaming = true;
             const result = await requestComputer(
               context,

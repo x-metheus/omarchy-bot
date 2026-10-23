@@ -9,7 +9,6 @@ import {
   PortableSwayRuntimeSupply,
   SWAY_RUNTIME_RELEASE,
 } from "../../apps/daemon/src/modules/computer/swayRuntimeSupply.ts";
-import type { Supervisor } from "../../apps/daemon/src/supervision/supervisor.ts";
 import type { ComputerWindowListItem } from "../../packages/agent-contract/src/computer-protocol.ts";
 import type { ComputerAction } from "../../packages/domain/src/computer.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
@@ -108,7 +107,8 @@ async function act(
   action: ComputerAction,
   turnId: string,
 ): Promise<BotScreenActionResult> {
-  return harness!.svc.screens.act(owner, action, { ...owner, turnId });
+  // Input actions go through the input lease (svc.computer.agentToolAct); act() is for the rest.
+  return harness!.svc.screens.act(owner, action);
 }
 
 async function screenshotBytes(owner: Owner): Promise<Uint8Array> {
@@ -169,7 +169,13 @@ async function focusFixtureEditor(owner: Owner, label: string): Promise<void> {
   const window = isolationWindow(await listedWindows(owner), label);
   if (window === undefined) throw new Error(`missing ${label} browser fixture`);
   await act(owner, { name: "focus_window", args: { id: window.id } }, `focus-editor-${label}`);
-  await act(owner, { name: "key", args: { key: "Tab" } }, `inspect-editor-${label}`);
+  await harness!.svc.computer.agentToolAct(
+    owner,
+    `conformance-key-${label}`,
+    `conformance-key-${label}`,
+    { name: "key", args: { key: "Tab" } },
+    new AbortController().signal,
+  );
   await until(() => browserFixtureState(owner, label), 8_000, `${label} editor focus`);
 }
 
@@ -271,7 +277,6 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     mkdirSync(applicationCwd, { recursive: true, mode: 0o700 });
     const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
     process.env.OMARCHY_BOT_SCREEN_PROFILE = process.env.OMARCHY_BOT_SCREEN_PROFILE ?? "720p";
-    let supervisor: Pick<Supervisor, "startComputerWorker"> | undefined;
     const adapter = new SwayBotScreenRuntimeAdapter({
       runtimeRoot: path.join(daemonHome, "r"),
       profileRoot: path.join(daemonHome, "screens"),
@@ -281,25 +286,17 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       wayvncBin: binaries.wayvncBin,
       wlrRandrBin: binaries.wlrRandrBin,
       grimBin: grim,
-      computerWorkers: {
-        startComputerWorker: (scope) => {
-          if (supervisor === undefined) throw new Error("computer worker supervisor is not bound");
-          return supervisor.startComputerWorker(scope);
-        },
-      },
     });
 
     try {
       harness = await startDaemon(daemonHome, {
         botScreenAdapter: adapter,
-        useProductionComputerWorker: true,
         botScreenCapacity: 2,
       });
     } finally {
       if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
       else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
     }
-    supervisor = harness.svc.supervisor;
 
     const zeroGraphical = await measureSwayCosts([], RESOURCE_WINDOW_MS);
     resourceScenarios.zeroGraphicalUse = {

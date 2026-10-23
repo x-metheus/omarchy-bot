@@ -13,7 +13,7 @@ Design system:         Astryx through an omarchy-bot semantic adapter
 Styling:               Astryx tokens with product-owned layout styles
 Frontend data:         TanStack Router + Query + Virtual where needed
 Desktop integration:   systemd user service + localhost API
-Computer backend:      computer-use-linux behind computer-worker
+Computer backend:      daemon Sway runtime; no computer worker
 Bot Screen runtime:    one on-demand pure-headless Sway Bot Computer; output/workspace per Screen
 Screen Projection:     selected-view PNG preview + Broker control and view-only RFB over separate WebSockets
 Voice input:           Voxtype through the localhost daemon
