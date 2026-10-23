@@ -152,9 +152,14 @@ describe("ScreenInputLease", () => {
     expect(lease.agentToolPhase(SURFACE_A)).toBe("held");
     expect(lease.screenUse(SURFACE_A)).toBe("human");
 
-    lease.setAgentToolPhase(SURFACE_A, "call-1", "completing");
+    expect(lease.beginCompletion(SURFACE_A, "call-1")).toBeTrue();
     expect(lease.takeover(SURFACE_A)).toBe("active");
-    lease.setAgentToolPhase(SURFACE_A, "call-1", "held");
+    lease.failCompletion(SURFACE_A, "call-1", "held");
+    expect(lease.agentToolPhase(SURFACE_A)).toBe("held");
+    // A completion that never began cannot jump phases.
+    lease.failCompletion(SURFACE_A, "call-1", "waiting");
+    expect(lease.agentToolPhase(SURFACE_A)).toBe("held");
+    expect(lease.beginCompletion(SURFACE_A, "other-call")).toBeFalse();
     expect(lease.agentToolPhase(SURFACE_A)).toBe("held");
 
     const holder = await lease.acquireWebControl(target(SURFACE_A));
@@ -272,6 +277,68 @@ describe("ScreenInputLease", () => {
     await holder.release();
     await bot;
     expect(started).toBeTrue();
+  });
+
+  test("a queued Bot is not overtaken by a Web Control grant that asked later", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    const holder = await lease.acquireWebControl(target(SURFACE_A));
+    const bot = lease.performBotInput(target(SURFACE_B), {
+      turnId: "turn-b",
+      signal: new AbortController().signal,
+      run: async (send) => {
+        await send({ type: "motion", x: 1, y: 1 });
+      },
+    });
+    await lease.seatQueued();
+    const web = lease.acquireWebControl(target(SURFACE_B));
+    await holder.release();
+    await bot;
+    const grant = await web;
+    expect(sink.events.filter((event) => event.kind === "grant")).toEqual([
+      { surfaceId: SURFACE_A, epoch: 1, kind: "grant" },
+      { surfaceId: SURFACE_B, epoch: 1, kind: "grant" },
+      { surfaceId: SURFACE_B, epoch: 2, kind: "grant" },
+    ]);
+    await grant.release();
+  });
+
+  test("settling a requested Takeover leaves the waiting request empty-handed", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease(sink.adapter);
+    const actionDone = Promise.withResolvers<void>();
+    const tool = lease.beginAgentTool(SURFACE_A, { turnId: "turn-1", toolCallId: "call-1" });
+    const requesting = lease.requestTakeover(SURFACE_A);
+    expect(lease.agentToolPhase(SURFACE_A)).toBe("takeover-requested");
+    await lease.settleAgentTool(SURFACE_A, "call-1");
+    actionDone.resolve();
+    await tool.actionFinished(actionDone.promise);
+    expect(await requesting).toEqual({ ok: false });
+    expect(lease.takeover(SURFACE_A)).toBe("unavailable");
+    expect(lease.canAcceptWebControl(SURFACE_A)).toBeTrue();
+  });
+
+  test("settling a Takeover drops the tool even when the held-input release fails", async () => {
+    const sink = delivery();
+    const lease = new ScreenInputLease({
+      ...sink.adapter,
+      release: async () => {
+        throw new Error("release failed");
+      },
+    });
+    const tool = lease.beginAgentTool(SURFACE_A, { turnId: "turn-1", toolCallId: "call-1" });
+    const actionDone = Promise.withResolvers<void>();
+    const requesting = lease.requestTakeover(SURFACE_A);
+    actionDone.resolve();
+    await tool.actionFinished(actionDone.promise);
+    expect(await requesting).toEqual({ ok: true });
+    const holder = await lease.acquireWebControl(target(SURFACE_A));
+    await holder.input({ type: "key", keyCode: KEY_A, state: "pressed" });
+
+    await expect(lease.settleAgentTool(SURFACE_A, "call-1")).rejects.toThrow(/release failed/);
+    expect(lease.agentToolPhase(SURFACE_A)).toBeUndefined();
+    expect(lease.takeover(SURFACE_A)).toBe("unavailable");
+    expect(lease.screenUse(SURFACE_A)).toBe("idle");
   });
 
   test("a grant for a different runtime generation is rejected", async () => {

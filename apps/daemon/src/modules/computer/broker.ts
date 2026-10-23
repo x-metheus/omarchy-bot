@@ -205,10 +205,9 @@ export class ComputerBroker {
   async imDone(input: ComputerSurfaceOwner): Promise<{ observation?: string }> {
     const owner = this.#requireOwner(input);
     const pending = this.#pendingAgentTools.get(owner.surfaceId);
-    if (pending === undefined || this.lease.agentToolPhase(owner.surfaceId) !== "held") {
+    if (pending === undefined || !this.lease.beginCompletion(owner.surfaceId, pending.toolCallId)) {
       throw new Error("Takeover is not active");
     }
-    this.lease.setAgentToolPhase(owner.surfaceId, pending.toolCallId, "completing");
     this.#event(owner);
     try {
       await this.lease.revoke(owner.surfaceId);
@@ -235,7 +234,7 @@ export class ComputerBroker {
         try {
           await this.projections.restoreInput(owner.surfaceId);
         } catch (restoreError) {
-          this.lease.setAgentToolPhase(owner.surfaceId, pending.toolCallId, "waiting");
+          this.lease.failCompletion(owner.surfaceId, pending.toolCallId, "waiting");
           this.#transitionAuthority(owner, "idle");
           this.#event(owner);
           throw new AggregateError(
@@ -243,7 +242,7 @@ export class ComputerBroker {
             "Bot Screen observation failed and Web Control could not be restored",
           );
         }
-        this.lease.setAgentToolPhase(owner.surfaceId, pending.toolCallId, "held");
+        this.lease.failCompletion(owner.surfaceId, pending.toolCallId, "held");
         this.#transitionAuthority(owner, "takeover");
         this.#event(owner);
       }
@@ -375,6 +374,8 @@ export class ComputerBroker {
           signal.throwIfAborted();
         } catch (error) {
           pending.actionError = error;
+          // The action is dead, so the lease must stop offering Takeover; the action error is the one to report.
+          await this.lease.settleAgentTool(owner.surfaceId, toolCallId).catch(() => {});
           throw error;
         } finally {
           pending.actionDone.resolve();
@@ -462,12 +463,21 @@ export class ComputerBroker {
       || this.#pendingAgentTools.get(pending.owner.surfaceId) !== pending
     ) return;
     pending.cancellation = error;
-    // The lease owns the phase machine: settle it here or Takeover stays active after the turn dies.
-    await this.lease.settleAgentTool(pending.owner.surfaceId, pending.toolCallId);
-    this.#transitionAuthority(pending.owner, "idle");
-    pending.activated.reject(error);
-    pending.completion.reject(error);
-    this.#event(pending.owner);
+    let releaseError: unknown;
+    try {
+      // The lease owns the phase machine: settle it here or Takeover stays active after the turn dies.
+      await this.lease.settleAgentTool(pending.owner.surfaceId, pending.toolCallId);
+    } catch (caught) {
+      releaseError = caught;
+    } finally {
+      this.#transitionAuthority(pending.owner, "idle");
+      const failure = releaseError === undefined
+        ? error
+        : new AggregateError([error, releaseError], "Bot Screen held input could not be released");
+      pending.activated.reject(failure);
+      pending.completion.reject(failure);
+      this.#event(pending.owner);
+    }
   }
 
   async #serializeSurfaceOperation<T>(
