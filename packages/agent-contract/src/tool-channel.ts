@@ -4,11 +4,13 @@ export interface ToolChannelContext {
   botId: string;
   turnId: string;
   toolCallId: string;
+  workerSessionId: string;
 }
 
 export interface ToolChannelTool {
   name: string;
   schema: Record<string, unknown>;
+  repeatable?: boolean;
 }
 
 export type ToolChannelFrame =
@@ -104,7 +106,7 @@ export function createToolChannelDaemon(options: {
       if (!started.has(frame.context.toolCallId)) return fail("tool call has not started");
       const tool = tools.get(frame.name);
       if (tool === undefined || !schemaMatches(tool.schema, frame.params)) return fail(`tool params do not match ${frame.name}`);
-      if (dispatched.has(frame.context.toolCallId)) return fail("tool call was already dispatched");
+      if (!tool.repeatable && dispatched.has(frame.context.toolCallId)) return fail("tool call was already dispatched");
       dispatched.add(frame.context.toolCallId);
       const controller = new AbortController();
       running.set(frame.requestId, controller);

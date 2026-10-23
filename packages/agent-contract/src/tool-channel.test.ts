@@ -5,6 +5,7 @@ const context = {
   botId: "bot_0123456789abcdef0123456789abcdef",
   turnId: "turn_0123456789abcdef0123456789abcdef",
   toolCallId: "call-1",
+  workerSessionId: "s_session",
 };
 
 const echo = {

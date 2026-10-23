@@ -23,8 +23,9 @@ import {
   type AgentCommand,
   type AgentBotMessageToolContext,
   type AgentBotMessageToolOutput,
-  type AgentBotMessageToolResult,
   type AgentBotMessageTurnContext,
+  createToolChannelWorker,
+  type ToolChannelFrame,
   type AgentComputerToolContext,
   type AgentComputerToolOutput,
   type AgentComputerToolResult,
@@ -119,14 +120,8 @@ function handleComputerResult(result: AgentComputerToolResult): void {
   else pending.reject(new Error(result.error));
 }
 
-interface PendingBotMessageRequest {
-  resolve: (output: AgentBotMessageToolOutput) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-}
-
-const botMessageRequests = new Map<string, PendingBotMessageRequest>();
+const botMessageChannel = createToolChannelWorker();
+botMessageChannel.send = (frame) => writeJsonl(frame);
 
 function requestBotMessage(
   context: AgentBotMessageToolContext,
@@ -134,34 +129,17 @@ function requestBotMessage(
   text: string,
   signal: AbortSignal | undefined,
 ): Promise<AgentBotMessageToolOutput> {
-  signal?.throwIfAborted();
-  const requestId = crypto.randomUUID();
-  return new Promise<AgentBotMessageToolOutput>((resolve, reject) => {
-    const pending: PendingBotMessageRequest = { resolve, reject };
-    if (signal !== undefined) {
-      pending.signal = signal;
-      pending.onAbort = () => {
-        if (botMessageRequests.delete(requestId)) {
-          writeJsonl({ type: "bot-message.cancel", requestId });
-          reject(new Error("Bot message tool call cancelled"));
-        }
-      };
-      signal.addEventListener("abort", pending.onAbort, { once: true });
-    }
-    botMessageRequests.set(requestId, pending);
-    writeJsonl({ type: "bot-message.request", requestId, context, targetBotId, text });
-  });
-}
-
-function handleBotMessageResult(result: AgentBotMessageToolResult): void {
-  const pending = botMessageRequests.get(result.requestId);
-  if (pending === undefined) return;
-  botMessageRequests.delete(result.requestId);
-  if (pending.signal !== undefined && pending.onAbort !== undefined) {
-    pending.signal.removeEventListener("abort", pending.onAbort);
+  const controller = new AbortController();
+  if (signal !== undefined) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
-  if (result.ok === true) pending.resolve(result.payload);
-  else pending.reject(new Error(result.error));
+  return botMessageChannel.call(
+    "send_bot_message",
+    { targetBotId, text },
+    context,
+    controller.signal,
+  ).then((result) => result as AgentBotMessageToolOutput);
 }
 
 
@@ -568,6 +546,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       }
       case "session.close": {
         const entry = sessionEntry(cmd.sessionId);
+        botMessageChannel.close();
         disposePluginCalls(cmd.sessionId);
         sessions.delete(cmd.sessionId);
         entry.unsubscribe?.();
@@ -601,10 +580,9 @@ async function shutdown(): Promise<void> {
   shuttingDown = true;
   disposePluginCalls();
   for (const pending of computerRequests.values()) pending.reject(new Error("daemon connection closed during computer tool call"));
-  for (const pending of botMessageRequests.values()) pending.reject(new Error("daemon connection closed during Bot message tool call"));
+  botMessageChannel.close();
   for (const pending of localRequests.values()) pending.reject(new Error("daemon connection closed during local tool call"));
   computerRequests.clear();
-  botMessageRequests.clear();
   localRequests.clear();
   const controlsClosed = mcpControls.dispose();
   await Promise.allSettled(commands);
@@ -625,8 +603,8 @@ await readJsonl(
     if (msg && typeof msg === "object" && "type" in msg) {
       if (msg.type === "computer.result") {
         handleComputerResult(msg as AgentComputerToolResult);
-      } else if (msg.type === "bot-message.result") {
-        handleBotMessageResult(msg as AgentBotMessageToolResult);
+      } else if (msg.type === "tool.result") {
+        botMessageChannel.receive(msg as ToolChannelFrame);
       } else if (msg.type === "plugin.result") {
         handlePluginResult(msg as AgentPluginToolResult);
       } else if (msg.type === "local.result") {

@@ -69,8 +69,8 @@ export async function main(options: MainOptions = {}): Promise<{
       },
       onAgentComputerRequest: (agentId, request, signal) =>
         turns.onAgentComputerRequest(agentId, request, computer, signal),
-      onAgentBotMessageRequest: (agentId, request) =>
-        turns.onAgentBotMessageRequest(agentId, request, mailbox),
+      onAgentBotMessageFrame: (agentId, frame) =>
+        turns.onAgentBotMessageFrame(agentId, frame, mailbox),
       onAgentPluginRequest: (agentId, request, signal) =>
         turns.onAgentPluginRequest(agentId, request, signal),
       onAgentLocalRequest: (agentId, request, signal) =>

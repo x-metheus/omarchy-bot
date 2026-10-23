@@ -361,11 +361,11 @@ describe("durable Bot mailbox", () => {
       },
       {
         command: "send_bot_message:../../private/key:raw path",
-        error: "invalid Bot message tool request",
+        error: "target Bot ID is invalid",
       },
       {
         command: `send_bot_message:${targetBotId}:${"x".repeat(32_001)}`,
-        error: "invalid Bot message tool request",
+        error: "tool params do not match send_bot_message",
       },
     ];
 

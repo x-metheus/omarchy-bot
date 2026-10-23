@@ -1,7 +1,6 @@
 import path from "node:path";
 import type {
-  AgentBotMessageToolOutput,
-  AgentBotMessageToolRequest,
+  ToolChannelFrame,
   AgentComputerToolOutput,
   AgentComputerToolRequest,
   AgentEvent,
@@ -23,11 +22,10 @@ export interface SupervisorHooks {
     request: AgentComputerToolRequest,
     signal: AbortSignal,
   ) => Promise<AgentComputerToolOutput>;
-  onAgentBotMessageRequest: (
+  onAgentBotMessageFrame: (
     agentId: AgentId,
-    request: AgentBotMessageToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentBotMessageToolOutput>;
+    frame: ToolChannelFrame,
+  ) => Promise<ToolChannelFrame | undefined>;
   onAgentPluginRequest: (
     agentId: AgentId,
     request: AgentPluginToolRequest,
@@ -98,8 +96,8 @@ export class Supervisor {
       onEvent: (e) => this.hooks.onAgentEvent(agentId, e),
       onRequest: (request, signal) =>
         this.hooks.onAgentComputerRequest(agentId, request, signal),
-      onBotMessageRequest: (request, signal) =>
-        this.hooks.onAgentBotMessageRequest(agentId, request, signal),
+      onBotMessageFrame: (frame) =>
+        this.hooks.onAgentBotMessageFrame(agentId, frame),
       onPluginRequest: (request, signal) =>
         this.hooks.onAgentPluginRequest(agentId, request, signal),
       onLocalRequest: (request, signal) =>

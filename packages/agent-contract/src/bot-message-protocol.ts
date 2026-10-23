@@ -84,3 +84,13 @@ export interface AgentBotMessageToolOutput {
 export type AgentBotMessageToolResult =
   | { type: "bot-message.result"; requestId: string; ok: true; payload: AgentBotMessageToolOutput }
   | { type: "bot-message.result"; requestId: string; ok: false; error: string };
+
+export const SEND_BOT_MESSAGE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["targetBotId", "text"],
+  properties: {
+    targetBotId: { type: "string", minLength: 1 },
+    text: { type: "string", minLength: 1, maxLength: PEER_MAIL_TEXT_MAX_LENGTH },
+  },
+};

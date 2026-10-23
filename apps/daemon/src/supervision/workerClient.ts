@@ -2,9 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   HEARTBEAT_MS,
   readJsonl,
-  type AgentBotMessageToolOutput,
-  isAgentBotMessageToolRequest,
-  type AgentBotMessageToolRequest,
+  type ToolChannelFrame,
   type AgentComputerToolOutput,
   type AgentComputerToolRequest,
   isAgentPluginToolRequest,
@@ -30,10 +28,7 @@ export interface WorkerClientOptions {
     request: AgentComputerToolRequest,
     signal: AbortSignal,
   ) => Promise<AgentComputerToolOutput>;
-  onBotMessageRequest?: (
-    request: AgentBotMessageToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentBotMessageToolOutput>;
+  onBotMessageFrame?: (frame: ToolChannelFrame) => Promise<ToolChannelFrame | undefined>;
   onPluginRequest?: (
     request: AgentPluginToolRequest,
     signal: AbortSignal,
@@ -156,19 +151,8 @@ export class WorkerClient {
       void this.#handleComputerRequest(msg as AgentComputerToolRequest);
       return;
     }
-    if (msg?.type === "bot-message.request") {
-      if (!isAgentBotMessageToolRequest(msg)) {
-        if (typeof msg.requestId === "string" && this.alive) {
-          this.write({
-            type: "bot-message.result",
-            requestId: msg.requestId,
-            ok: false,
-            error: "invalid Bot message tool request",
-          });
-        }
-        return;
-      }
-      void this.#handleBotMessageRequest(msg);
+    if (msg?.type === "tool.request" || msg?.type === "tool.cancel") {
+      void this.#handleBotMessageFrame(msg);
       return;
     }
     if (msg?.type === "local.request") {
@@ -247,28 +231,15 @@ export class WorkerClient {
     }
   }
 
-  async #handleBotMessageRequest(request: AgentBotMessageToolRequest): Promise<void> {
-    const controller = new AbortController();
-    this.#incoming.set(request.requestId, controller);
-    try {
-      if (this.opts.onBotMessageRequest === undefined) {
-        throw new Error(`${this.opts.name} cannot route Bot messages`);
+  async #handleBotMessageFrame(frame: ToolChannelFrame): Promise<void> {
+    if (this.opts.onBotMessageFrame === undefined) {
+      if (frame.type === "tool.request" && this.alive) {
+        this.write({ type: "tool.result", requestId: frame.requestId, ok: false, error: `${this.opts.name} cannot route Bot messages` });
       }
-      const payload = await this.opts.onBotMessageRequest(request, controller.signal);
-      if (controller.signal.aborted) throw new Error("Bot message tool call cancelled");
-      if (this.alive) {
-        this.write({ type: "bot-message.result", requestId: request.requestId, ok: true, payload });
-      }
-    } catch (error) {
-      if (this.alive) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.write({ type: "bot-message.result", requestId: request.requestId, ok: false, error: message });
-      }
-    } finally {
-      if (this.#incoming.get(request.requestId) === controller) {
-        this.#incoming.delete(request.requestId);
-      }
+      return;
     }
+    const result = await this.opts.onBotMessageFrame(frame);
+    if (result !== undefined && this.alive) this.write(result);
   }
 
   async #handlePluginRequest(request: AgentPluginToolRequest): Promise<void> {

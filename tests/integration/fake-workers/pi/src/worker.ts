@@ -244,11 +244,11 @@ function requestBotMessage(
   const pending = Promise.withResolvers<{ deliveryId: string; queued: true }>();
   botMessageRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
   write({
-    type: "bot-message.request",
+    type: "tool.request",
     requestId,
+    name: "send_bot_message",
+    params: { targetBotId, text },
     context: { ...context, toolCallId },
-    targetBotId,
-    text,
   });
   return pending.promise;
 }
@@ -412,15 +412,12 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       else pending.reject(new Error(String(msg.error)));
       break;
     }
-    case "bot-message.result": {
+    case "tool.result": {
       const pending = msg.requestId === undefined ? undefined : botMessageRequests.get(msg.requestId);
       if (pending === undefined) break;
       botMessageRequests.delete(msg.requestId!);
-      if (msg.ok === true) {
-        pending.resolve(msg.payload as { deliveryId: string; queued: true });
-      } else {
-        pending.reject(new Error(String(msg.error)));
-      }
+      if (msg.ok === true) pending.resolve(msg.result as { deliveryId: string; queued: true });
+      else pending.reject(new Error(String(msg.error)));
       break;
     }
     case "probe": {

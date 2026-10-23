@@ -5,8 +5,11 @@ import type { Database } from "bun:sqlite";
 import {
   isAgentToolCallEvent,
   toolCallSummaryFromEvent,
+  SEND_BOT_MESSAGE_SCHEMA,
   type AgentBotMessageToolOutput,
-  type AgentBotMessageToolRequest,
+  createToolChannelDaemon,
+  type ToolChannelContext,
+  type ToolChannelFrame,
   type AgentComputerToolOutput,
   type AgentComputerToolRequest,
   type AgentEvent,
@@ -40,7 +43,7 @@ interface TurnContext {
   workerSessionId: string;
   computerToolSurfaces: Map<string, SurfaceId>;
   startedComputerToolCalls: Set<string>;
-  startedBotMessageToolCalls: Set<string>;
+  botMessage?: ReturnType<typeof createToolChannelDaemon>;
   startedLocalToolCalls: Set<string>;
   pluginLease?: PluginLease;
   startedPluginToolCalls: Map<string, string>;
@@ -81,6 +84,7 @@ function agentEventFamily(event: AgentEvent): string {
  */
 export class TurnService {
   #turns = new Map<string, TurnContext>(); // workerSessionId -> ctx
+  #mailbox: MailboxService | undefined;
   #turnStarts = new Map<string, Promise<TurnContext>>();
   #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
   #timeoutQueues = new Map<AgentId, Promise<void>>();
@@ -339,7 +343,10 @@ export class TurnService {
       workerSessionId: opened.sessionId,
       computerToolSurfaces: new Map(),
       startedComputerToolCalls: new Set(),
-      startedBotMessageToolCalls: new Set(),
+      botMessage: createToolChannelDaemon({
+        tools: [{ name: "send_bot_message", schema: SEND_BOT_MESSAGE_SCHEMA, repeatable: true }],
+        execute: (params, context) => this.#sendBotMessage(agentId, context, params),
+      }),
       startedLocalToolCalls: new Set(),
       ...(pluginLease ? { pluginLease } : {}),
       startedPluginToolCalls: new Map(),
@@ -502,41 +509,33 @@ export class TurnService {
     return computer.agentToolAct(owner, context.turnId, context.toolCallId, request.action, signal);
   }
 
-  /** Authenticate a reverse Bot-message request against one active native Tool Call. */
-  async onAgentBotMessageRequest(
-    agentId: AgentId,
-    request: AgentBotMessageToolRequest,
-    mailbox: MailboxService,
-  ): Promise<AgentBotMessageToolOutput> {
-    const requested = request.context;
-    const active = this.#turns.get(requested.workerSessionId);
-    if (
-      active === undefined
-      || active.agentId !== agentId
-      || active.botId !== requested.botId
-      || active.turnId !== requested.turnId
-      || active.workerSessionId !== requested.workerSessionId
-    ) {
+  onAgentBotMessageFrame(agentId: AgentId, frame: ToolChannelFrame, mailbox: MailboxService): Promise<ToolChannelFrame | undefined> {
+    this.#mailbox = mailbox;
+    void agentId;
+    if (frame.type === "tool.cancel") {
+      for (const turn of this.#turns.values()) void turn.botMessage?.receive(frame);
+      return Promise.resolve(undefined);
+    }
+    if (frame.type !== "tool.request") return Promise.resolve(undefined);
+    const channel = this.#turns.get(frame.context.workerSessionId)?.botMessage;
+    if (channel === undefined) {
+      return Promise.resolve({ type: "tool.result", requestId: frame.requestId, ok: false, error: "Bot message tool context is stale or mismatched" });
+    }
+    return channel.receive(frame);
+  }
+
+  async #sendBotMessage(agentId: AgentId, context: ToolChannelContext, params: unknown): Promise<AgentBotMessageToolOutput> {
+    const mailbox = this.#mailbox;
+    const active = this.#turns.get(context.workerSessionId);
+    if (mailbox === undefined || active === undefined || active.agentId !== agentId || active.botId !== context.botId || active.turnId !== context.turnId) {
       throw new Error("Bot message tool context is stale or mismatched");
     }
-    if (!this.agents.capabilityInventory(agentId)?.botMail) {
-      throw new Error(`Bot mail is not supported by ${agentId}`);
-    }
-    if (requested.toolCallId.length === 0) {
-      throw new Error("Bot message tool context has no tool-call identity");
-    }
-    if (!active.startedBotMessageToolCalls.has(requested.toolCallId)) {
-      throw new Error("Bot message tool context has no active native tool call");
-    }
+    if (!this.agents.capabilityInventory(agentId)?.botMail) throw new Error(`Bot mail is not supported by ${agentId}`);
+    const message = params as { targetBotId: string; text: string };
     return mailbox.enqueue(
-      {
-        botId: active.botId,
-        turnId: active.turnId,
-        workerSessionId: active.workerSessionId,
-        toolCallId: requested.toolCallId,
-      },
-      request.targetBotId,
-      request.text,
+      { botId: active.botId, turnId: active.turnId, workerSessionId: active.workerSessionId, toolCallId: context.toolCallId },
+      message.targetBotId,
+      message.text,
     );
   }
 
@@ -808,9 +807,7 @@ export class TurnService {
         if (event.name === "computer") {
           ctx.startedComputerToolCalls.add(event.id);
         }
-        if (event.name === "send_bot_message") {
-          ctx.startedBotMessageToolCalls.add(event.id);
-        }
+        if (event.name === "send_bot_message") ctx.botMessage?.start(event.id);
         if (event.name === "local") {
           ctx.startedLocalToolCalls.add(event.id);
         }
@@ -833,7 +830,6 @@ export class TurnService {
         }
         if (event.type === "tool.completed") {
           ctx.startedComputerToolCalls.delete(event.id);
-          ctx.startedBotMessageToolCalls.delete(event.id);
           ctx.startedLocalToolCalls.delete(event.id);
           ctx.dispatchedLocalToolCalls.delete(event.id);
           ctx.startedPluginToolCalls.delete(event.id);
