@@ -13,8 +13,8 @@ const echo = {
   schema: { type: "object", required: ["n"], properties: { n: { type: "number" } } },
 };
 
-function request(requestId: string, params: unknown, toolCallId = context.toolCallId): ToolChannelFrame {
-  return { type: "tool.request", requestId, name: "echo", params, context: { ...context, toolCallId } };
+function request(requestId: string, params: unknown, toolCallId = context.toolCallId, name = "echo"): ToolChannelFrame {
+  return { type: "tool.request", requestId, name, params, context: { ...context, toolCallId } };
 }
 
 describe("ToolChannel", () => {
@@ -27,12 +27,27 @@ describe("ToolChannel", () => {
     expect(result).toEqual({ type: "tool.result", requestId: "req-1", ok: false, error: "tool call has not started" });
   });
 
+  test("rejects a request whose tool name differs from the one that started the call", async () => {
+    let runs = 0;
+    const daemon = createToolChannelDaemon({
+      tools: [echo, { name: "send_bot_message", schema: { type: "object", properties: { text: { type: "string" } } } }],
+      execute: () => {
+        runs += 1;
+        return { ok: true };
+      },
+    });
+    daemon.start(context.toolCallId, "echo");
+    const result = await daemon.receive(request("req-1", { text: "hi" }, context.toolCallId, "send_bot_message"));
+    expect(result).toEqual({ type: "tool.result", requestId: "req-1", ok: false, error: "tool request does not match the started tool call" });
+    expect(runs).toBe(0);
+  });
+
   test("rejects a second dispatch of a tool call that already ran", async () => {
     const daemon = createToolChannelDaemon({
       tools: [echo],
       execute: () => ({ value: 1 }),
     });
-    daemon.start(context.toolCallId);
+    daemon.start(context.toolCallId, "echo");
     expect(await daemon.receive(request("req-1", { n: 1 }))).toMatchObject({ ok: true });
     const again = await daemon.receive(request("req-2", { n: 1 }));
     expect(again).toEqual({ type: "tool.result", requestId: "req-2", ok: false, error: "tool call was already dispatched" });
@@ -47,7 +62,7 @@ describe("ToolChannel", () => {
         return { value: 1 };
       },
     });
-    daemon.start(context.toolCallId);
+    daemon.start(context.toolCallId, "echo");
     await daemon.receive(request("req-1", { n: 1 }));
     const replay = await daemon.receive(request("req-1", { n: 1 }));
     expect(replay).toEqual({ type: "tool.result", requestId: "req-1", ok: false, error: "duplicate tool request" });
@@ -63,7 +78,7 @@ describe("ToolChannel", () => {
         return {};
       },
     });
-    daemon.start(context.toolCallId);
+    daemon.start(context.toolCallId, "echo");
     const result = await daemon.receive(request("req-1", { n: "x" }));
     expect(result).toEqual({ type: "tool.result", requestId: "req-1", ok: false, error: "tool params do not match echo" });
     expect(runs).toBe(0);
@@ -80,7 +95,7 @@ describe("ToolChannel", () => {
         signal.addEventListener("abort", () => reject(new Error("aborted")));
       }),
     });
-    daemon.start(context.toolCallId);
+    daemon.start(context.toolCallId, "echo");
     worker.send = (frame) => { void daemon.receive(frame).then((result) => worker.receive(result)); };
     const pending = worker.call("echo", { n: 1 }, context, turn.signal);
     turn.abort();
@@ -148,7 +163,7 @@ describe("ToolChannel", () => {
         return gate.promise;
       },
     });
-    daemon.start(context.toolCallId);
+    daemon.start(context.toolCallId, "echo");
     worker.send = (frame) => { void daemon.receive(frame).then((result) => worker.receive(result)); };
     const pending = worker.call("echo", { n: 1 }, context, new AbortController().signal);
     daemon.close();

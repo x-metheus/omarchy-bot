@@ -13,7 +13,13 @@ export const MANAGE_PLUGINS_ACTIONS = [
   "check_mcp", "authorize_mcp",
 ] as const;
 
-const text = (maxLength: number) => Type.String({ minLength: 1, maxLength });
+const text = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: "\\S" });
+
+// Same constraints as SaveMcpBody in @omarchy-bot/protocol: an http(s) URL with
+// a host, and an exact public npm package name or bin.
+const httpUrl = Type.String({ minLength: 1, pattern: "^[Hh][Tt][Tt][Pp][Ss]?://[^/\\s?#]+(?:[/?#][^\\s]*)?$" });
+const npmName = Type.String({ minLength: 1, maxLength: 214, pattern: "^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$" });
+const npmBin = Type.String({ minLength: 1, maxLength: 120, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" });
 
 const SAVE_MCP_SCHEMA = Type.Union([
   Type.Object({
@@ -28,7 +34,7 @@ const SAVE_MCP_SCHEMA = Type.Union([
       }, { additionalProperties: false }),
       Type.Object({
         type: Type.Literal("http"),
-        url: Type.String({ minLength: 1, pattern: "^https?://" }),
+        url: httpUrl,
         headers: Type.Optional(Type.Record(Type.String(), Type.String())),
       }, { additionalProperties: false }),
     ]),
@@ -37,8 +43,8 @@ const SAVE_MCP_SCHEMA = Type.Union([
     name: text(120),
     enabled: Type.Optional(Type.Boolean()),
     package: Type.Object({
-      name: text(214),
-      bin: Type.Optional(text(120)),
+      name: npmName,
+      bin: Type.Optional(npmBin),
       args: Type.Optional(Type.Array(Type.String(), { maxItems: 126 })),
       env: Type.Optional(Type.Record(Type.String(), Type.String())),
     }, { additionalProperties: false }),

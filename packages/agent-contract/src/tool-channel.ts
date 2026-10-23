@@ -21,7 +21,7 @@ export type ToolChannelFrame =
   | { type: "tool.result"; requestId: string; ok: false; error: string };
 
 export interface ToolChannelDaemon {
-  start(toolCallId: string): void;
+  start(toolCallId: string, name: string): void;
   receive(frame: ToolChannelFrame): Promise<ToolChannelFrame | undefined>;
   /** Aborts every running executor; the worker that owns this channel is gone and can no longer cancel. */
   close(): void;
@@ -39,14 +39,14 @@ export function createToolChannelDaemon(options: {
   tools: readonly ToolChannelTool[];
   execute(params: unknown, context: ToolChannelContext, signal: AbortSignal, name: string): Promise<unknown> | unknown;
 }): ToolChannelDaemon {
-  const started = new Set<string>();
+  const started = new Map<string, string>();
   const dispatched = new Set<string>();
   const seen = new Set<string>();
   const running = new Map<string, AbortController>();
   const tools = new Map(options.tools.map((tool) => [tool.name, tool]));
   return {
-    start(toolCallId) {
-      started.add(toolCallId);
+    start(toolCallId, name) {
+      started.set(toolCallId, name);
     },
     async receive(frame) {
       if (frame.type === "tool.cancel") {
@@ -57,7 +57,9 @@ export function createToolChannelDaemon(options: {
       const fail = (error: string): ToolChannelFrame => ({ type: "tool.result", requestId: frame.requestId, ok: false, error });
       if (seen.has(frame.requestId)) return fail("duplicate tool request");
       seen.add(frame.requestId);
-      if (!started.has(frame.context.toolCallId)) return fail("tool call has not started");
+      const startedName = started.get(frame.context.toolCallId);
+      if (startedName === undefined) return fail("tool call has not started");
+      if (startedName !== frame.name) return fail("tool request does not match the started tool call");
       const tool = tools.get(frame.name);
       if (tool === undefined || !Value.Check(tool.schema, frame.params)) return fail(`tool params do not match ${frame.name}`);
       if (dispatched.has(frame.context.toolCallId)) return fail("tool call was already dispatched");

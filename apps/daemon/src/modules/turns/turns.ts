@@ -795,8 +795,8 @@ export class TurnService {
           turnId: ctx.turnId,
           toolCall,
         });
-        // The channel rejects names it does not own, so every started call can be recorded here.
-        ctx.toolChannel.start(event.id);
+        // A request is accepted only for the tool this call started as.
+        ctx.toolChannel.start(event.id, event.name);
         break;
       }
       case "tool.updated":
