@@ -1,7 +1,7 @@
 import { z, type ZodTypeAny } from "zod";
 import {
   AuthorizePluginBody, InstallSkillBody, PLUGIN_OPERATIONS, PluginAccountBody, PluginEnabledBody, PluginServiceBody, SaveMcpBody,
-  type PluginAction,
+  type PluginAction, type PluginOperation,
 } from "@omarchy-bot/protocol";
 import { HttpError } from "../bots/bots.ts";
 import type { PluginsService } from "./plugins.ts";
@@ -31,9 +31,10 @@ type Handler = (plugins: PluginsService, call: PluginCall) => Promise<unknown> |
 
 interface DispatchRow {
   action: PluginAction;
-  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  method: PluginOperation["method"];
   path: string;
   body?: ZodTypeAny;
+  upstream?: string;
   tool: boolean;
   empty: boolean;
   created: boolean;
@@ -45,45 +46,62 @@ const text = (value: string | undefined, message: string): string => {
   return value;
 };
 
-/** One row per daemon route. HTTP matching and manage_plugins both call `handler`. */
-export const PLUGIN_DISPATCH: DispatchRow[] = [
-  { action: "list", method: "GET", path: "/api/plugins", tool: true, empty: false, created: false, handler: (plugins) => plugins.state() },
-  { action: "inspect", method: "GET", path: "/api/plugins/inspect", tool: true, empty: false, created: false, handler: async (plugins, call) => {
+const handlers: Record<PluginAction, Handler> = {
+  list: (plugins) => plugins.state(),
+  inspect: async (plugins, call) => {
     const state = await plugins.state();
     const found = [...state.skills, ...state.mcp, ...state.accounts].find((entry) => entry.id === text(call.id, "Select an exact plugin id from list or search"));
     if (!found) throw new HttpError(404, "Plugin not found");
     return found;
-  } },
-  { action: "inspect_skill", method: "GET", path: "/api/plugins/catalog/detail", tool: true, empty: false, created: false, handler: (plugins, call) => plugins.detail(text(call.id, "Select an exact plugin id from list or search")) },
-  { action: "search_skills", method: "GET", path: "/api/plugins/catalog", tool: true, empty: false, created: false, handler: (plugins, call) => plugins.catalog(call.query ?? "", call.cursor, call.view ?? "trending") },
-  { action: "install_skill", method: "POST", path: "/api/plugins/skills", body: InstallSkillBody, tool: true, empty: false, created: true, handler: (plugins, call) => {
+  },
+  inspect_skill: (plugins, call) => plugins.detail(text(call.id, "Select an exact plugin id from list or search")),
+  search_skills: (plugins, call) => plugins.catalog(call.query ?? "", call.cursor, call.view ?? "trending"),
+  install_skill: (plugins, call) => {
     const parsed = InstallSkillBody.parse(call.source ? { source: call.source, ...(call.skillPath === undefined ? {} : { skillPath: call.skillPath }), ...(call.ref === undefined ? {} : { ref: call.ref }) } : { id: text(call.id, "Select an exact plugin id from list or search") });
     return plugins.installSkill(parsed);
-  } },
-  { action: "enable_skill", method: "PATCH", path: "/api/plugins/skills/:id", body: PluginEnabledBody, tool: true, empty: true, created: false, handler: (plugins, call) => { const id = text(call.id, "Select an exact plugin id from list or search"); plugins.enableSkill(id, enabled(call)); return plugins.skills.list().find((entry) => entry.id === id); } },
-  { action: "remove_skill", method: "DELETE", path: "/api/plugins/skills/:id", tool: true, empty: true, created: false, handler: (plugins, call) => { plugins.removeSkill(text(call.id, "Select an exact plugin id from list or search")); return { removed: true }; } },
-  { action: "update_skills", method: "POST", path: "/api/plugins/skills/update", body: z.object({}).strict(), tool: true, empty: true, created: false, handler: async (plugins) => { await plugins.updateSkills(); return plugins.state(); } },
-  { action: "authorize_service", method: "POST", path: "/api/plugins/authorize", body: AuthorizePluginBody, tool: true, empty: false, created: false, handler: async (plugins, call) => {
+  },
+  enable_skill: (plugins, call) => { const id = text(call.id, "Select an exact plugin id from list or search"); plugins.enableSkill(id, enabled(call)); return plugins.skills.list().find((entry) => entry.id === id); },
+  remove_skill: (plugins, call) => { plugins.removeSkill(text(call.id, "Select an exact plugin id from list or search")); return { removed: true }; },
+  update_skills: async (plugins) => { await plugins.updateSkills(); return plugins.state(); },
+  authorize_service: async (plugins, call) => {
     if (!call.providerId || !call.returnUrl) throw new HttpError(400, "Specify the provider id");
     const authorization = await plugins.authorize({ providerId: call.providerId, returnUrl: call.returnUrl, ...(call.accountId === undefined ? {} : { accountId: call.accountId }), ...(call.serviceId === undefined ? {} : { serviceId: call.serviceId }) });
     return call.tool ? { ...authorization, pendingAuthorization: true } : authorization;
-  } },
-  { action: "enable_service", method: "PATCH", path: "/api/plugins/accounts/:id/services", body: PluginServiceBody, tool: true, empty: false, created: false, handler: (plugins, call) => {
+  },
+  enable_service: (plugins, call) => {
     const parsed = PluginServiceBody.parse({ serviceId: text(call.serviceId, "Select an exact Service id from list"), enabled: enabled(call) });
     return plugins.enableService(text(call.id, "Select an exact plugin id from list or search"), parsed.serviceId, parsed.enabled);
-  } },
-  { action: "remove_service", method: "DELETE", path: "/api/plugins/accounts/:id/services/:serviceId", tool: true, empty: true, created: false, handler: async (plugins, call) => { await plugins.removeService(text(call.id, "Select an exact plugin id from list or search"), text(call.serviceId, "Select an exact Service id from list")); return { removed: true }; } },
-  { action: "update_service", method: "POST", path: "/api/plugins/accounts/:id/services/:serviceId/update", body: z.object({}).strict(), tool: true, empty: true, created: false, handler: async (plugins, call) => { await plugins.updateService(text(call.id, "Select an exact plugin id from list or search"), text(call.serviceId, "Select an exact Service id from list")); return { completed: true, state: await plugins.state() }; } },
-  { action: "label_account", method: "PATCH", path: "/api/plugins/accounts/:id", body: PluginAccountBody, tool: true, empty: true, created: false, handler: async (plugins, call) => { plugins.labelAccount(text(call.id, "Select an exact plugin id from list or search"), text(call.label?.trim(), "Specify a nonblank account label")); return (await plugins.state()).accounts.find((entry) => entry.id === call.id); } },
-  { action: "disconnect_account", method: "DELETE", path: "/api/plugins/accounts/:id", tool: true, empty: true, created: false, handler: (plugins, call) => { plugins.disconnectAccount(text(call.id, "Select an exact plugin id from list or search")); return { disconnected: true }; } },
-  { action: "save_mcp", method: "POST", path: "/api/plugins/mcp", body: SaveMcpBody, tool: true, empty: false, created: true, handler: (plugins, call) => { if (!call.connection) throw new HttpError(400, "Provide a complete connection definition"); return plugins.saveMcp(call.id ?? null, call.connection, call.signal); } },
-  { action: "save_mcp", method: "PUT", path: "/api/plugins/mcp/:id", body: SaveMcpBody, tool: false, empty: false, created: false, handler: (plugins, call) => plugins.saveMcp(text(call.id, "Select an exact plugin id from list or search"), SaveMcpBody.parse(call.connection), call.signal) },
-  { action: "update_mcp", method: "POST", path: "/api/plugins/mcp/:id/update", body: z.object({}).strict(), tool: true, empty: false, created: false, handler: (plugins, call) => plugins.updateMcp(text(call.id, "Select an exact plugin id from list or search"), call.signal) },
-  { action: "enable_mcp", method: "PATCH", path: "/api/plugins/mcp/:id", body: PluginEnabledBody, tool: true, empty: true, created: false, handler: (plugins, call) => { const id = text(call.id, "Select an exact plugin id from list or search"); plugins.enableMcp(id, enabled(call)); return plugins.packages.list().find((entry) => entry.id === id); } },
-  { action: "remove_mcp", method: "DELETE", path: "/api/plugins/mcp/:id", tool: true, empty: true, created: false, handler: (plugins, call) => { plugins.removeMcp(text(call.id, "Select an exact plugin id from list or search")); return { removed: true }; } },
-  { action: "check_mcp", method: "POST", path: "/api/plugins/mcp/:id/check", tool: true, empty: false, created: false, handler: (plugins, call) => plugins.checkMcp(text(call.id, "Select an exact plugin id from list or search")) },
-  { action: "authorize_mcp", method: "POST", path: "/api/plugins/mcp/:id/authorize", body: z.object({ redirectUrl: z.string().url().max(8192).optional() }).strict(), tool: true, empty: false, created: false, handler: (plugins, call) => plugins.authorizeMcp(text(call.id, "Select an exact plugin id from list or search"), call.redirectUrl) },
-];
+  },
+  remove_service: async (plugins, call) => { await plugins.removeService(text(call.id, "Select an exact plugin id from list or search"), text(call.serviceId, "Select an exact Service id from list")); return { removed: true }; },
+  update_service: async (plugins, call) => { await plugins.updateService(text(call.id, "Select an exact plugin id from list or search"), text(call.serviceId, "Select an exact Service id from list")); return { completed: true, state: await plugins.state() }; },
+  label_account: async (plugins, call) => { plugins.labelAccount(text(call.id, "Select an exact plugin id from list or search"), text(call.label?.trim(), "Specify a nonblank account label")); return (await plugins.state()).accounts.find((entry) => entry.id === call.id); },
+  disconnect_account: (plugins, call) => { plugins.disconnectAccount(text(call.id, "Select an exact plugin id from list or search")); return { disconnected: true }; },
+  save_mcp: (plugins, call) => { if (!call.connection) throw new HttpError(400, "Provide a complete connection definition"); return plugins.saveMcp(call.id ?? null, call.connection, call.signal); },
+  update_mcp: (plugins, call) => plugins.updateMcp(text(call.id, "Select an exact plugin id from list or search"), call.signal),
+  enable_mcp: (plugins, call) => { const id = text(call.id, "Select an exact plugin id from list or search"); plugins.enableMcp(id, enabled(call)); return plugins.packages.list().find((entry) => entry.id === id); },
+  remove_mcp: (plugins, call) => { plugins.removeMcp(text(call.id, "Select an exact plugin id from list or search")); return { removed: true }; },
+  check_mcp: (plugins, call) => plugins.checkMcp(text(call.id, "Select an exact plugin id from list or search")),
+  authorize_mcp: (plugins, call) => plugins.authorizeMcp(text(call.id, "Select an exact plugin id from list or search"), call.redirectUrl),
+};
+
+const response: Partial<Record<PluginAction, { empty?: boolean; created?: boolean }>> = {
+  install_skill: { created: true },
+  enable_skill: { empty: true }, remove_skill: { empty: true }, update_skills: { empty: true },
+  remove_service: { empty: true }, update_service: { empty: true },
+  label_account: { empty: true }, disconnect_account: { empty: true },
+  save_mcp: { created: true }, enable_mcp: { empty: true }, remove_mcp: { empty: true },
+};
+
+/** Contract rows plus the daemon handler. HTTP and manage_plugins both use this list. */
+export const PLUGIN_DISPATCH: DispatchRow[] = PLUGIN_OPERATIONS.map((operation) => ({
+  ...operation,
+  tool: !("tool" in operation),
+  empty: operation.method === "PUT" ? false : response[operation.action]?.empty ?? false,
+  created: operation.method === "PUT" ? false : response[operation.action]?.created ?? false,
+  handler: operation.method === "PUT"
+    ? (plugins, call) => plugins.saveMcp(text(call.id, "Select an exact plugin id from list or search"), SaveMcpBody.parse(call.connection), call.signal)
+    : handlers[operation.action],
+}));
 
 function enabled(call: PluginCall): boolean {
   if (call.enabled === undefined) throw new HttpError(400, "Specify enabled explicitly");
@@ -113,12 +131,3 @@ export function matchPluginDispatch(method: string, pathname: string): { row: Di
 export function toolOperation(action: string): DispatchRow | undefined {
   return PLUGIN_DISPATCH.find((row) => row.action === action && row.tool);
 }
-
-export function assertDispatchCoversContract(): void {
-  for (const operation of PLUGIN_OPERATIONS) {
-    const row = PLUGIN_DISPATCH.find((entry) => entry.action === operation.action && entry.method === operation.method && entry.path === operation.path);
-    if (!row) throw new Error(`Plugin dispatch is missing ${operation.method} ${operation.path}`);
-  }
-}
-
-assertDispatchCoversContract();

@@ -17,7 +17,6 @@ import { Grant, ProviderAccounts } from "./providerAccounts.ts";
 import { toolOperation } from "./pluginDispatch.ts";
 import { SkillInstalls } from "./skillInstall.ts";
 import { ServiceBundles } from "./serviceBundles.ts";
-import { materializeSkill, materializeSkillSource } from "./skillInstaller.ts";
 import { NativeSkills } from "./nativeSkills.ts";
 import { NativeMcpStore } from "./nativeMcp.ts";
 import { McpPackages } from "./mcpPackages.ts";
@@ -144,10 +143,10 @@ export class PluginsService {
       cloudUrl: () => this.#cloudUrl(),
       ready: () => this.#ready,
       persist: (changed) => this.#persist(changed ?? false),
-      provision: (account, service, enabled) => this.#provisionService(account, service, enabled),
-      serviceName: (account, serviceId) => this.#serviceName(account, serviceId),
+      provision: (account, service, enabled) => this.bundles.provision(account, service, enabled),
+      serviceName: (account, serviceId) => this.bundles.serviceName(account, serviceId),
       change: (account, serviceId) => this.bundles.change(account, serviceId),
-      release: (providerId, serviceId) => this.#releaseBundle(providerId, serviceId),
+      release: (providerId, serviceId) => this.bundles.release(providerId, serviceId),
       authorizeMcp: (id) => this.authorizeMcp(id),
       checkMcp: (id) => this.checkMcp(id),
     });
@@ -194,7 +193,7 @@ export class PluginsService {
     const connections = this.mcp.serviceConnections(account.id);
     const skills = this.skills.list();
     const components = PLUGIN_PROVIDERS[account.providerId].services.map((service) => {
-      const connection = connections.find((item) => item.name === this.#serviceName(account, service.id));
+      const connection = connections.find((item) => item.name === this.bundles.serviceName(account, service.id));
       const ownedSkills = skills.filter((skill) => skill.serviceId === `${account.providerId}/${service.id}`);
       const missing = account.enabledServices.includes(service.id) && (service.skillSources?.length ?? 0) !== ownedSkills.filter((skill) => skill.enabled).length;
       const endpointChanged = connection?.transport.type === "http" && connection.transport.url !== service.mcpUrl;
@@ -320,15 +319,6 @@ export class PluginsService {
     return candidates.filter((skill, index) => candidates.findIndex((other) => other.command === skill.command) === index);
   }
 
-  #serviceName(account: Account, serviceId: string): string { return this.bundles.serviceName(account, serviceId); }
-
-  async #ensureBundle(account: Account, service: PluginServiceDefinition, update = false): Promise<void> {
-    return this.bundles.ensure(account, service, update);
-  }
-
-  async #provisionService(account: Account, service: PluginServiceDefinition, enabled: boolean): Promise<void> {
-    return this.bundles.provision(account, service, enabled);
-  }
 
   async #initializeServices(): Promise<void> {
     for (const account of this.#state.accounts) {
@@ -343,7 +333,7 @@ export class PluginsService {
       }
       try {
         for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
-          if (account.enabledServices.includes(service.id)) await this.#provisionService(account, service, true);
+          if (account.enabledServices.includes(service.id)) await this.bundles.provision(account, service, true);
         }
         account.nativeManaged = true;
         this.#persist();
@@ -358,8 +348,8 @@ export class PluginsService {
       try {
         const token = await this.accounts.token(account.providerId, account.grant);
         for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
-          if (account.enabledServices.includes(service.id) && service.mcpUrl && this.mcp.serviceConnections(account.id).some((entry) => entry.name === this.#serviceName(account, service.id))) {
-            this.mcp.setServiceToken(this.#serviceName(account, service.id), service.mcpUrl, token);
+          if (account.enabledServices.includes(service.id) && service.mcpUrl && this.mcp.serviceConnections(account.id).some((entry) => entry.name === this.bundles.serviceName(account, service.id))) {
+            this.mcp.setServiceToken(this.bundles.serviceName(account, service.id), service.mcpUrl, token);
           }
         }
       } catch (error) { account.error = redactToolErrorSummary(error instanceof Error ? error.message : error); this.#persist(); }
@@ -383,9 +373,6 @@ export class PluginsService {
   enableService(id: string, serviceId: string, enabled: boolean): Promise<PluginAccountDto> {
     return this.bundles.enable(id, serviceId, enabled);
   }
-  #releaseBundle(providerId: PluginProviderId, serviceId: string): void {
-    this.bundles.release(providerId, serviceId);
-  }
   removeService(id: string, serviceId: string): Promise<void> {
     return this.bundles.remove(id, serviceId);
   }
@@ -398,7 +385,7 @@ export class PluginsService {
     for (const connection of this.mcp.serviceConnections(id)) this.mcp.remove(connection.id, true);
     this.#state.accounts = this.#state.accounts.filter((entry) => entry.id !== id);
     this.bundles.forget(id);
-    for (const service of PLUGIN_PROVIDERS[account.providerId].services) this.#releaseBundle(account.providerId, service.id);
+    for (const service of PLUGIN_PROVIDERS[account.providerId].services) this.bundles.release(account.providerId, service.id);
     this.#persist(true);
   }
 
@@ -424,7 +411,7 @@ export class PluginsService {
     const snapshot: AgentPluginSnapshot = {
       revision: this.#state.revision,
       diagnostics: [...this.mcp.errors, ...this.skills.list().filter((skill) => skill.error).map((skill) => `${skill.name}: ${skill.error}`),
-        ...this.#state.accounts.map((account) => `Service account ${account.id}: ${account.label}; ${account.identity}. Native MCP server names are ${account.enabledServices.map((serviceId) => this.#serviceName(account, serviceId)).join(", ") || "none enabled"}.${account.error ? ` Needs attention: ${account.error}` : ""}`)],
+        ...this.#state.accounts.map((account) => `Service account ${account.id}: ${account.label}; ${account.identity}. Native MCP server names are ${account.enabledServices.map((serviceId) => this.bundles.serviceName(account, serviceId)).join(", ") || "none enabled"}.${account.error ? ` Needs attention: ${account.error}` : ""}`)],
       tools: [{
         name: "manage_plugins",
         description: "Inspect shared Services, native MCP connections and Skills. inspect reads installed inventory; inspect_skill reads catalog source and content. Search and install complete independent Skills from the catalog or explicit sources; update Skills, and enable, disable or remove Skills and custom MCPs without a product approval gate. Authorize, enable, disable, remove or update Services; label or disconnect exact account ids. Updates preserve local modifications. Changes affect subsequent native resource reloads; actual reload and native/provider authorization still apply. authorize_service returns a real URL pending user authorization, never completed consent. Never claim an unprobed MCP is connected. Use Pi's native mcp tool for provider business operations, and the default official skill-creator for local authoring.",

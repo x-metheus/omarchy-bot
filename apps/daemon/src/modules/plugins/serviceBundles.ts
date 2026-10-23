@@ -3,20 +3,12 @@ import path from "node:path";
 import { redactToolErrorSummary } from "@omarchy-bot/agent-contract";
 import { PLUGIN_PROVIDERS, type PluginAccountDto, type PluginProviderId, type PluginServiceDefinition } from "@omarchy-bot/protocol";
 import { HttpError } from "../bots/bots.ts";
-import { hasScopes } from "./providerAccounts.ts";
+import { Grant, hasScopes } from "./providerAccounts.ts";
 import { materializeSkillSource, type MaterializedSkillSource } from "./skillInstaller.ts";
 import type { NativeMcpStore } from "./nativeMcp.ts";
 import type { NativeSkills } from "./nativeSkills.ts";
 
-interface BundleGrant {
-  generation: string;
-  scopes: string[];
-  accessToken: string;
-  refreshToken?: string | undefined;
-  expiresAt?: number | undefined;
-  cloudUrl: string;
-  metadata: Record<string, unknown>;
-}
+type BundleGrant = Grant;
 
 export interface BundleAccount {
   id: string;

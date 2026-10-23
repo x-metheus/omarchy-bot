@@ -2,10 +2,15 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { mkdir } from "node:fs/promises";
 import { PLUGIN_OPERATIONS, PLUGIN_PROVIDERS } from "../../packages/protocol/src/index.ts";
 import { PluginsService } from "../../apps/daemon/src/modules/plugins/plugins.ts";
 import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
-import { identifyAccount } from "../../apps/daemon/src/modules/plugins/providerAccounts.ts";
+import { identifyAccount, ProviderAccounts, type ProviderAccount } from "../../apps/daemon/src/modules/plugins/providerAccounts.ts";
+import { ServiceBundles, type BundleAccount } from "../../apps/daemon/src/modules/plugins/serviceBundles.ts";
+import { NativeMcpStore } from "../../apps/daemon/src/modules/plugins/nativeMcp.ts";
+import { NativeSkills } from "../../apps/daemon/src/modules/plugins/nativeSkills.ts";
+import type { CatalogClient } from "../../apps/daemon/src/modules/plugins/catalogClient.ts";
 
 test("microsoft and miro identity lookup refuses before any fetch", async () => {
   const seen: string[] = [];
@@ -98,6 +103,60 @@ test("manage_plugins publishes each action once and accepts view", async () => {
     lease.release();
   } finally {
     await service.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+test("native authorize never calls the publisher token endpoint", async () => {
+  const routes: string[] = [];
+  const accounts: ProviderAccount[] = [];
+  const accountsApi = new ProviderAccounts({
+    cwd: "/", mcp: { serviceConnections: () => [{ id: "mcp_workiq", name: `service-${accounts[0]?.id ?? "pending"}-workiq` }] } as unknown as NativeMcpStore,
+    publisher: { request: async (route: string) => { routes.push(route); throw new Error(route); } } as unknown as CatalogClient,
+    accounts: () => accounts, cloudUrl: () => "https://publisher.example", ready: async () => undefined, persist: () => undefined,
+    provision: async () => undefined, serviceName: (account, serviceId) => `service-${account.id}-${serviceId}`, change: () => 1, release: () => undefined,
+    authorizeMcp: async () => ({ authorizationUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?client_id=fixture" }),
+    checkMcp: async () => undefined,
+  });
+  const started = await accountsApi.authorize({ providerId: "microsoft", returnUrl: "https://client.example/", serviceId: "workiq" });
+  expect(started.url).toContain("login.microsoftonline.com");
+  expect(routes).toEqual([]);
+  expect(accounts).toHaveLength(1);
+  expect(accounts[0]!.grant).toBeUndefined();
+});
+
+test("bundle enable remove and update mutate the account store", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bundle-module-"));
+  const workspace = path.join(root, "workspace");
+  const source = path.join(root, "miro-skill");
+  await mkdir(path.join(source, "scripts"), { recursive: true });
+  await Bun.write(path.join(source, "SKILL.md"), "---\nname: miro-fixture\ndescription: Fixture board skill\n---\nUse the bundled script.\n");
+  const published = PLUGIN_PROVIDERS.miro.services;
+  PLUGIN_PROVIDERS.miro.services = [{ ...published[0]!, skillSources: [source] }];
+  const account: BundleAccount = { id: "account_miro", providerId: "miro", enabledServices: [], status: "connected", bundleErrors: {}, native: { serviceId: "miro", name: "service-account_miro-miro" } };
+  const accounts = [account];
+  const persisted: boolean[] = [];
+  const mcp = new NativeMcpStore(workspace, root);
+  const skills = new NativeSkills(workspace, root);
+  const bundles = new ServiceBundles({
+    rootDir: root, mcp, skills, accounts: () => accounts, stopping: () => false, ready: async () => undefined,
+    token: async () => { throw new Error("native bundle must not refresh a publisher token"); },
+    persist: (changed) => { persisted.push(changed ?? false); }, clearNative: () => undefined,
+    removeUnused: async () => undefined,
+    accountDto: (entry) => ({ id: entry.id, providerId: entry.providerId, label: entry.id, identity: entry.id, enabledServices: entry.enabledServices, grantedScopes: [], status: entry.status }),
+  });
+  try {
+    const enabled = await bundles.enable(account.id, "miro", true);
+    expect(enabled.enabledServices).toEqual(["miro"]);
+    expect(mcp.serviceConnections(account.id).map((connection) => connection.name)).toEqual(["service-account_miro-miro"]);
+    expect(skills.list().some((skill) => skill.serviceId === "miro/miro" && skill.enabled)).toBe(true);
+    await bundles.update(account.id, "miro");
+    await bundles.remove(account.id, "miro");
+    expect(account.enabledServices).toEqual([]);
+    expect(mcp.serviceConnections(account.id)).toEqual([]);
+    expect(skills.list().some((skill) => skill.serviceId === "miro/miro")).toBe(false);
+    expect(persisted.some(Boolean)).toBe(true);
+  } finally {
+    PLUGIN_PROVIDERS.miro.services = published;
     await rm(root, { recursive: true, force: true });
   }
 });
