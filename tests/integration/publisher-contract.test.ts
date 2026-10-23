@@ -100,7 +100,7 @@ test("manage_plugins publishes each action once and accepts view", async () => {
     const actions = schema.properties.action.enum ?? schema.properties.action.anyOf?.map((item) => item.const) ?? [];
     expect(new Set(actions).size).toBe(actions.length);
     expect(actions).toHaveLength(20);
-    expect(schema.properties.view).toBeDefined();
+    expect(schema.properties.view).toEqual({ type: "string" });
     lease.release();
   } finally {
     await service.shutdown();

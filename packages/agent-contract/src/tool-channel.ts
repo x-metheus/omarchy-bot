@@ -89,7 +89,13 @@ export function createToolChannelWorker(): ToolChannelWorker {
     call(name, params, context, signal) {
       if (signal.aborted) return Promise.reject(new Error("tool call aborted"));
       const requestId = crypto.randomUUID();
-      const result = Promise.withResolvers<unknown>();
+      let resolve!: (value: unknown) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<unknown>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      const result = { promise, resolve, reject };
       pending.set(requestId, { workerSessionId: context.workerSessionId, resolve: result.resolve, reject: result.reject });
       // An aborted call settles here, so its late result is dropped instead of
       // resolving a promise the caller already gave up on.
