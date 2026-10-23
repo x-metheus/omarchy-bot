@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 
@@ -7,6 +6,7 @@ export interface ToolChannelContext {
   turnId: string;
   toolCallId: string;
   workerSessionId: string;
+  surfaceId?: string;
 }
 
 export interface ToolChannelTool {
@@ -88,7 +88,7 @@ export function createToolChannelWorker(): ToolChannelWorker {
     send() {},
     call(name, params, context, signal) {
       if (signal.aborted) return Promise.reject(new Error("tool call aborted"));
-      const requestId = randomUUID();
+      const requestId = crypto.randomUUID();
       const result = Promise.withResolvers<unknown>();
       pending.set(requestId, { workerSessionId: context.workerSessionId, resolve: result.resolve, reject: result.reject });
       // An aborted call settles here, so its late result is dropped instead of

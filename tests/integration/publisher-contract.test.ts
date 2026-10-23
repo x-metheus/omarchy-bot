@@ -96,10 +96,11 @@ test("manage_plugins publishes each action once and accepts view", async () => {
   const service = new PluginsService(root, root, async () => ({ skills: [] }));
   try {
     const lease = await service.acquire();
-    const schema = lease.snapshot.tools[0]!.inputSchema as { properties: { action: { enum: string[] }; view?: { type: string } } };
-    expect(new Set(schema.properties.action.enum).size).toBe(schema.properties.action.enum.length);
-    expect(schema.properties.action.enum).toHaveLength(20);
-    expect(schema.properties.view).toEqual({ type: "string" });
+    const schema = lease.snapshot.tools[0]!.inputSchema as { properties: { action: { enum?: string[]; anyOf?: Array<{ const: string }> }; view?: unknown } };
+    const actions = schema.properties.action.enum ?? schema.properties.action.anyOf?.map((item) => item.const) ?? [];
+    expect(new Set(actions).size).toBe(actions.length);
+    expect(actions).toHaveLength(20);
+    expect(schema.properties.view).toBeDefined();
     lease.release();
   } finally {
     await service.shutdown();

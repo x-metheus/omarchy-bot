@@ -82,6 +82,7 @@ export const MANAGE_PLUGINS_SCHEMA = Type.Object({
   label: Type.Optional(Type.String()),
   connection: Type.Optional(SAVE_MCP_SCHEMA),
   redirectUrl: Type.Optional(Type.String()),
+  view: Type.Optional(Type.String()),
 }, { additionalProperties: false });
 
 export type ManagePluginsInput = Static<typeof MANAGE_PLUGINS_SCHEMA>;

@@ -533,6 +533,7 @@ export class TurnService {
       || active.botId !== context.botId
       || active.turnId !== context.turnId
       || active.workerSessionId !== context.workerSessionId
+      || (context.surfaceId !== undefined && context.surfaceId !== active.surfaceId)
     ) {
       throw new Error("computer tool context is stale or mismatched");
     }
