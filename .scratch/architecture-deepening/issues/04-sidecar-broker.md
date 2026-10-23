@@ -1,7 +1,7 @@
 # 04: SidecarBroker for `local` jobs
 
 **Type:** task
-**Status:** resolved
+**Status:** claimed
 **Blocked by:** 03
 
 **What to build:** Give `local` a deep `SidecarBroker` mirroring `ComputerBroker`, and register it as the `local` executor on the ToolChannel. It owns This Device resolution, capability checks, job ids, cancel, liveness, output bounds and redaction, and Shared Workspace transfer I/O behind one signal-aware call. `TurnService` stops doing file I/O for `local`.
@@ -24,6 +24,9 @@ Decisions (settled):
 
 ## Comments
 
-## Answer
+The previous resolution used ticket 03's stale approval. Fresh review of `d305ec1..389a2be` requires four fixes:
 
-`SidecarBroker` is the `local` executor. This Device is the device id on the user message that started the Turn; no tag fails closed, and an explicit target can still name another online Sidecar. Cancel sends `local.cancel`, dismisses Ask, and a late Allow does not run. A Sidecar with no heartbeat for 30 seconds goes offline and its job fails. The real Sidecar handler owns policy and execution, the test fixture is an adapter over it, and `confinedPath` is the shared path check. Review approved `5e86ada`.
+- [ ] Keep executing remembered-Always jobs cancellable until completion.
+- [ ] Cancel the command's private process group, including descendants and bounded escalation.
+- [ ] Validate assembled workspace-transfer frames before dispatch.
+- [ ] Validate the active Turn identity before dispatching `local`.

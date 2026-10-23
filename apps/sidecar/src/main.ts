@@ -114,6 +114,15 @@ async function main(): Promise<void> {
 
   const { promise: closed, resolve: resolveClosed } = Promise.withResolvers<void>();
   ws.addEventListener("close", () => resolveClosed());
+  let teardown: Promise<void> | undefined;
+  const beginTeardown = (): Promise<void> => {
+    // handler.close() aborts and dismisses synchronously; the teardown itself is awaited later.
+    const pending = teardown ?? handler.close();
+    teardown = pending;
+    // The rejection is rethrown by the await below; this keeps it from being unhandled in between.
+    void pending.catch(() => undefined);
+    return pending;
+  };
   void readDecisions((decision) => {
     const id = decision.jobId ?? [...asks.keys()].at(-1);
     const ask = id === undefined ? undefined : asks.get(id);
@@ -124,13 +133,14 @@ async function main(): Promise<void> {
 
   const stop = (): void => {
     clearInterval(heartbeat);
-    handler.close();
+    void beginTeardown();
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   await closed;
   clearInterval(heartbeat);
+  await beginTeardown();
   process.exit(0);
 }
 

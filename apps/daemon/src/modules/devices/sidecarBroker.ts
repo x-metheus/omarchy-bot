@@ -5,12 +5,14 @@ import {
   LOCAL_RESULT_TEXT_MAX,
   DeviceLocalResultFrame,
   DeviceRegisterFrame,
+  DeviceServerFrameSchema,
   type DeviceCapability,
   type DeviceDto,
   type DeviceLocalJobFrame,
   type DeviceServerFrame,
   type LocalJob,
 } from "@omarchy-bot/protocol";
+import { LOCAL_CONTENTS_MAX_LENGTH } from "@omarchy-bot/agent-contract";
 import { confinedPath } from "@omarchy-bot/domain";
 
 /** One outbound Local Sidecar connection: the WebSocket in production, a recorder in tests. */
@@ -170,6 +172,16 @@ export class SidecarBroker {
       ...(params.direction !== undefined ? { direction: params.direction } : {}),
     };
 
+    if (contents !== undefined && contents.length > LOCAL_CONTENTS_MAX_LENGTH) {
+      throw new Error(`Local Sidecar job rejected before dispatch: contents is ${contents.length} characters, limit is ${LOCAL_CONTENTS_MAX_LENGTH}`);
+    }
+
+    // Canonical device schema (LOCAL_SCHEMA) must accept the assembled frame before dispatch.
+    const canonical = DeviceServerFrameSchema.safeParse(frame);
+    if (!canonical.success) {
+      throw new Error("Local Sidecar job rejected before dispatch: frame does not match the canonical local-job schema");
+    }
+
     const port = device.port;
     const { promise, resolve, reject } = Promise.withResolvers<{ text: string; exitCode?: number }>();
     const onAbort = (): void => {
@@ -181,7 +193,7 @@ export class SidecarBroker {
     this.#jobs.set(jobId, { port, deviceId: device.id, action: params.action, resolve, reject });
     signal.addEventListener("abort", onAbort, { once: true });
     try {
-      port.send(frame);
+      port.send(canonical.data);
     } catch (error) {
       this.#jobs.delete(jobId);
       signal.removeEventListener("abort", onAbort);

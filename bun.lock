@@ -39,6 +39,7 @@
         "omarchy-bot-sidecar": "./src/main.ts",
       },
       "dependencies": {
+        "@omarchy-bot/agent-contract": "workspace:*",
         "@omarchy-bot/domain": "workspace:*",
         "@omarchy-bot/protocol": "workspace:*",
       },

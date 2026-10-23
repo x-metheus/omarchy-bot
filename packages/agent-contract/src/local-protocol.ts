@@ -21,19 +21,19 @@ export interface AgentLocalToolOutput {
   text: string;
   exitCode?: number;
 }
-
-const COMMAND_MAX_LENGTH = 8_192;
+export const LOCAL_COMMAND_MAX_LENGTH = 8_192;
+export const LOCAL_CONTENTS_MAX_LENGTH = 65_536;
 
 const localText = (maxLength: number) => Type.String({ minLength: 1, maxLength });
 
 export const LOCAL_SCHEMA = Type.Object({
   action: Type.Union(LOCAL_ACTIONS.map((action) => Type.Literal(action))),
   target: Type.Optional(Type.String({ minLength: 1 })),
-  command: Type.Optional(localText(COMMAND_MAX_LENGTH)),
+  command: Type.Optional(localText(LOCAL_COMMAND_MAX_LENGTH)),
   path: Type.Optional(localText(4_096)),
   destination: Type.Optional(localText(4_096)),
   query: Type.Optional(localText(1_024)),
-  contents: Type.Optional(Type.String({ maxLength: 65_536 })),
+  contents: Type.Optional(Type.String({ maxLength: LOCAL_CONTENTS_MAX_LENGTH })),
   direction: Type.Optional(Type.Union([Type.Literal("to-workspace"), Type.Literal("from-workspace")])),
 }, {
   additionalProperties: false,

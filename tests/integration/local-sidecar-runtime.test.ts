@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -7,6 +7,42 @@ import { api, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Ha
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const sidecarMain = path.resolve(import.meta.dir, "../../apps/sidecar/src/main.ts");
+
+/** A detached descendant that ignores SIGTERM and only writes its marker once released. */
+const DESCENDANT_COMMAND = `sh -c 'trap "" TERM; echo $$ > descendant.pid; while [ ! -f release ]; do sleep 0.05; done; printf survived > marker.txt' & wait`;
+
+const processAlive = (pid: number): boolean => {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return fields[0] !== "Z" && fields[0] !== "X";
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Real child processes run on real time: fake timers cannot advance a live
+ * process's liveness, so the test polls OS state instead of guessing delays.
+ */
+const until = async (probe: () => boolean, message: string, timeoutMs = 15_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (probe()) return;
+    if (Date.now() >= deadline) throw new Error(message);
+    await Bun.sleep(20);
+  }
+};
+
+/** Fail if the probe ever becomes true inside the window. */
+const never = async (probe: () => boolean, message: string, timeoutMs = 1_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (probe()) throw new Error(message);
+    if (Date.now() >= deadline) return;
+    await Bun.sleep(20);
+  }
+};
 
 describe("plugin-runtime Bun Local Sidecar", () => {
   let h: Harness | undefined;
@@ -157,4 +193,66 @@ describe("plugin-runtime Bun Local Sidecar", () => {
     expect(tool?.toolCall?.status).toBe("error");
     expect(existsSync(path.join(root, ".omarchy-bot-local-policy.json"))).toBeFalse();
   }, 70_000);
+
+  test("a Sidecar killed while a descendant job runs leaves no survivor behind", async () => {
+    h = await startDaemon();
+    const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sidecar-shutdown-"));
+    // The remembered Always rule lets the job run without an Ask card.
+    writeFileSync(
+      path.join(root, ".omarchy-bot-local-policy.json"),
+      JSON.stringify({ always: [`run:${DESCENDANT_COMMAND}`], never: [] }),
+    );
+    let stdout = "";
+    const sidecar = Bun.spawn({
+      cmd: [process.execPath, sidecarMain],
+      cwd: path.resolve(import.meta.dir, "../.."),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        OMARCHY_BOT_DAEMON_PORT: String(h.port),
+        OMARCHY_BOT_DEVICE_ID: DEVICE_A,
+        OMARCHY_BOT_HOSTNAME: "shutdown-laptop",
+        OMARCHY_BOT_SIDECAR_ROOT: root,
+      },
+    });
+    child = sidecar;
+    const stdoutStream = sidecar.stdout;
+    if (stdoutStream === undefined || typeof stdoutStream === "number") throw new Error("stdout is not a pipe");
+    const decoder = new TextDecoder();
+    void (async () => {
+      const reader = stdoutStream.getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        stdout += decoder.decode(value);
+      }
+    })();
+    await until(() => stdout.includes('"type":"registered"'), "production Local Sidecar never registered");
+
+    const botId = await makeBot(h, "Shutdown Sidecar Bot");
+    await sendToBot(h, botId, `local.run:${DESCENDANT_COMMAND}`, DEVICE_A);
+    const pidFile = path.join(root, "descendant.pid");
+    await until(() => existsSync(pidFile), "Sidecar descendant never became ready");
+    const pid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+    expect(Number.isSafeInteger(pid)).toBeTrue();
+    expect(processAlive(pid)).toBeTrue();
+
+    try {
+      // SIGTERM starts the shutdown path: the Sidecar must tear the job down before it exits.
+      sidecar.kill("SIGTERM");
+      await until(() => sidecar.exitCode !== null, "production Local Sidecar never exited after SIGTERM");
+      child = undefined;
+
+      expect(processAlive(pid)).toBeFalse();
+      writeFileSync(path.join(root, "release"), "");
+      // A survivor would write the marker within its poll interval, so watch for it.
+      await never(() => existsSync(path.join(root, "marker.txt")), "descendant survived the Sidecar shutdown");
+    } finally {
+      if (processAlive(pid)) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+    }
+  }, 40_000);
 });

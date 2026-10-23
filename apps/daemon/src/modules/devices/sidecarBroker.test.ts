@@ -222,6 +222,47 @@ describe("SidecarBroker This Device", () => {
   });
 });
 
+describe("SidecarBroker workspace transfer bounds", () => {
+  test("an oversized from-workspace source is rejected before dispatch", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-workspace-"));
+    const broker = new SidecarBroker(root);
+    brokers.push(broker);
+    const port = new RecordingPort();
+    register(broker, port);
+    mkdirSync(path.join(root, "outgoing"), { recursive: true });
+    writeFileSync(path.join(root, "outgoing/big.bin"), "x".repeat(65_537));
+
+    const pending = broker.execute(
+      { action: "transfer", path: "outgoing/big.bin", destination: "/tmp/big.bin", direction: "from-workspace" },
+      context,
+      new AbortController().signal,
+    );
+    pending.catch(() => {});
+    expect(port.frames).toEqual([]);
+    await expect(pending).rejects.toThrow(/contents is 65537 characters, limit is 65536/);
+  });
+
+  test("a 65536-character from-workspace source still dispatches in full", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-workspace-"));
+    const broker = new SidecarBroker(root);
+    brokers.push(broker);
+    const port = new RecordingPort();
+    register(broker, port);
+    mkdirSync(path.join(root, "outgoing"), { recursive: true });
+    writeFileSync(path.join(root, "outgoing/edge.bin"), "y".repeat(65_536));
+
+    const pending = broker.execute(
+      { action: "transfer", path: "outgoing/edge.bin", destination: "/tmp/edge.bin", direction: "from-workspace" },
+      context,
+      new AbortController().signal,
+    );
+    const job = await port.waitForJob();
+    expect(job.contents).toHaveLength(65_536);
+    broker.complete(port, DEVICE_A, { type: "local.result", jobId: job.jobId, ok: true, text: "ok" });
+    expect((await pending).text).toBe("ok");
+  });
+});
+
 describe("SidecarBroker liveness", () => {
   test("30 s without heartbeat makes the device offline and fails its jobs; heartbeats keep a job alive", async () => {
     let clock = 0;

@@ -359,10 +359,7 @@ export class TurnService {
         tools,
         execute: (params, context, signal, name) => {
           if (name === "send_bot_message") return this.#sendBotMessage(agentId, context, params);
-          if (name === AGENT_LOCAL_TOOL.name) {
-            const deviceId = this.#turns.get(context.workerSessionId)?.deviceId;
-            return this.devices.execute(params as Parameters<SidecarBroker["execute"]>[0], { botId: context.botId, turnId: context.turnId, ...(deviceId !== undefined ? { deviceId } : {}) }, signal);
-          }
+          if (name === AGENT_LOCAL_TOOL.name) return this.#runLocal(agentId, context, params, signal);
           if (name === AGENT_COMPUTER_TOOL.name) return this.#runComputer(agentId, context, params, signal);
           return this.#callPlugin(agentId, context, params, signal, name);
         },
@@ -535,6 +532,29 @@ export class TurnService {
     }
     const action = params as { action: ComputerActionName; args?: Record<string, unknown> };
     return computer.agentToolAct(owner, context.turnId, context.toolCallId, { name: action.action, args: action.args ?? {} }, signal);
+  }
+
+  /** Dispatch one Turn-bound local job; ownership and This Device come from the active Turn. */
+  async #runLocal(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal): Promise<AgentLocalToolOutput> {
+    const active = this.#turns.get(context.workerSessionId);
+    if (
+      active === undefined
+      || active.agentId !== agentId
+      || active.botId !== context.botId
+      || active.turnId !== context.turnId
+      || active.workerSessionId !== context.workerSessionId
+    ) {
+      throw new Error("local tool context is stale or mismatched");
+    }
+    return this.devices.execute(
+      params as Parameters<SidecarBroker["execute"]>[0],
+      {
+        botId: active.botId,
+        turnId: active.turnId,
+        ...(active.deviceId !== undefined ? { deviceId: active.deviceId } : {}),
+      },
+      signal,
+    );
   }
 
   async #sendBotMessage(agentId: AgentId, context: ToolChannelContext, params: unknown): Promise<AgentBotMessageToolOutput> {

@@ -6,7 +6,7 @@ import {
   type DeviceLocalJobFrame,
   type DeviceServerFrame,
 } from "@omarchy-bot/protocol";
-import type { LocalActionName } from "../../../packages/agent-contract/src/local-protocol.ts";
+import type { LocalActionName } from "@omarchy-bot/agent-contract";
 import { executeLocalJob, ruleKey } from "./execute.ts";
 
 export interface LocalAsk {
@@ -42,11 +42,13 @@ interface Policy {
 /** Policy and execution for one Local Sidecar. The shell supplies the socket and Ask card. */
 export function createLocalJobHandler(options: LocalJobHandlerOptions): {
   receive(raw: unknown): void;
-  close(): void;
+  close(): Promise<void>;
 } {
   const policyPath = path.join(options.root, ".omarchy-bot-local-policy.json");
   const policy = loadPolicy(policyPath);
   const pending = new Map<string, { job: DeviceLocalJobFrame; abort: AbortController; dismiss(): void }>();
+  // Executor promises outlive a cancel: close() must still be able to await their teardown.
+  const running = new Set<Promise<void>>();
   const cancelled = new Set<string>();
   let closed = false;
 
@@ -73,7 +75,10 @@ export function createLocalJobHandler(options: LocalJobHandlerOptions): {
   const run = (job: DeviceLocalJobFrame, signal: AbortSignal): void => {
     if (cancelled.has(job.jobId) || signal.aborted) return;
     options.observe?.({ action: job.action, rule: ruleKey(job), executed: true });
-    void executeLocalJob(job, options.root, signal).then((result) => finish(job, result));
+    const execution = executeLocalJob(job, options.root, signal).then((result) => finish(job, result));
+    running.add(execution);
+    // A settled executor is dropped; a rejected one stays so close() reports it.
+    void execution.then(() => running.delete(execution), () => undefined);
   };
 
   const decide = (job: DeviceLocalJobFrame, decision: LocalAskDecision, signal: AbortSignal): void => {
@@ -108,7 +113,6 @@ export function createLocalJobHandler(options: LocalJobHandlerOptions): {
     const dismissed = Promise.withResolvers<void>();
     pending.set(job.jobId, { job, abort, dismiss: () => dismissed.resolve() });
     if (policy.always.includes(key)) {
-      pending.delete(job.jobId);
       run(job, abort.signal);
       return;
     }
@@ -150,6 +154,11 @@ export function createLocalJobHandler(options: LocalJobHandlerOptions): {
         current.dismiss();
       }
       pending.clear();
+      return Promise.allSettled([...running]).then((settled) => {
+        for (const entry of settled) {
+          if (entry.status === "rejected") throw entry.reason;
+        }
+      });
     },
   };
 }

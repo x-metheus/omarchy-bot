@@ -67,7 +67,7 @@ export class LocalSidecarFixture {
       }
     });
     ws.addEventListener("close", () => {
-      this.#handler.close();
+      void this.#handler.close().catch(() => undefined);
       this.#closed.resolve();
     });
   }
@@ -148,7 +148,7 @@ export class LocalSidecarFixture {
   }
 
   async close(): Promise<void> {
-    this.#handler.close();
+    await this.#handler.close();
     if (this.ws.readyState === WebSocket.CLOSED) return;
     this.ws.close();
     await this.#closed.promise;
