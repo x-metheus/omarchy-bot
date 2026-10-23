@@ -7,20 +7,21 @@ import {
   toolCallSummaryFromEvent,
   SEND_BOT_MESSAGE_SCHEMA,
   LOCAL_SCHEMA,
+  COMPUTER_TOOL_SCHEMA,
+  AGENT_COMPUTER_TOOL,
   type AgentBotMessageToolOutput,
   createToolChannelDaemon,
+  type ToolChannelDaemon,
   type ToolChannelContext,
   type ToolChannelFrame,
   type AgentComputerToolOutput,
-  type AgentComputerToolRequest,
   type AgentEvent,
   type WorkerUserMessage,
-  type AgentPluginToolRequest,
   type AgentPluginToolOutput,
   type AgentLocalToolOutput,
 } from "@omarchy-bot/agent-contract";
 import type { SendResultDto, TurnDto } from "@omarchy-bot/protocol";
-import type { AgentId, SurfaceId, TurnStatus } from "@omarchy-bot/domain";
+import type { AgentId, ComputerActionName, SurfaceId, TurnStatus } from "@omarchy-bot/domain";
 import { canTransitionTurn, isTerminalTurn } from "@omarchy-bot/domain";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
@@ -41,13 +42,12 @@ interface TurnContext {
   botId: string;
   agentId: AgentId;
   workerSessionId: string;
-  computerToolSurfaces: Map<string, SurfaceId>;
-  startedComputerToolCalls: Set<string>;
-  botMessage?: ReturnType<typeof createToolChannelDaemon>;
-  local?: ReturnType<typeof createToolChannelDaemon>;
+  surfaceId: SurfaceId;
+  botMessage?: ToolChannelDaemon;
+  local?: ToolChannelDaemon;
+  computer?: ToolChannelDaemon;
+  plugin?: ToolChannelDaemon;
   pluginLease?: PluginLease;
-  startedPluginToolCalls: Map<string, string>;
-  dispatchedPluginToolCalls: Set<string>;
   closeSession(): void;
   turnTimeout: ReturnType<typeof setTimeout>;
   /** Present only when cancellation came from the explicit abort path. */
@@ -84,6 +84,7 @@ function agentEventFamily(event: AgentEvent): string {
 export class TurnService {
   #turns = new Map<string, TurnContext>(); // workerSessionId -> ctx
   #mailbox: MailboxService | undefined;
+  #computer: ComputerBroker | undefined;
   #turnStarts = new Map<string, Promise<TurnContext>>();
   #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
   #timeoutQueues = new Map<AgentId, Promise<void>>();
@@ -340,8 +341,7 @@ export class TurnService {
       botId,
       agentId,
       workerSessionId: opened.sessionId,
-      computerToolSurfaces: new Map(),
-      startedComputerToolCalls: new Set(),
+      surfaceId: surface.surface_id,
       botMessage: createToolChannelDaemon({
         tools: [{ name: "send_bot_message", schema: SEND_BOT_MESSAGE_SCHEMA, repeatable: true }],
         execute: (params, context) => this.#sendBotMessage(agentId, context, params),
@@ -350,9 +350,17 @@ export class TurnService {
         tools: [{ name: "local", schema: LOCAL_SCHEMA }],
         execute: (params, context, signal) => this.#runLocal(agentId, context, params, signal),
       }),
-      ...(pluginLease ? { pluginLease } : {}),
-      startedPluginToolCalls: new Map(),
-      dispatchedPluginToolCalls: new Set(),
+      computer: createToolChannelDaemon({
+        tools: [{ name: AGENT_COMPUTER_TOOL.name, schema: COMPUTER_TOOL_SCHEMA }],
+        execute: (params, context, signal) => this.#runComputer(agentId, context, params, signal),
+      }),
+      ...(pluginLease ? {
+        pluginLease,
+        plugin: createToolChannelDaemon({
+          tools: pluginLease.snapshot.tools.map((tool) => ({ name: tool.name, schema: tool.inputSchema })),
+          execute: (params, context, signal, name) => this.#callPlugin(agentId, context, params, signal, name),
+        }),
+      } : {}),
       closeSession: () => {
         if (worker.alive) void worker.request({ type: "session.close", sessionId: opened.sessionId }, 5_000).catch(() => {
           this.events.append("agent", agentId, "agent.error", { agentId, message: "Could not close an idle native session", retryable: false });
@@ -475,17 +483,48 @@ export class TurnService {
     }
   }
 
-  /** Routes a reverse worker RPC only after matching every authoritative turn identity. */
-  async onAgentComputerRequest(
+  /** Routes a worker tool frame to the Turn channel that owns the requested tool. */
+  onAgentToolFrame(
     agentId: AgentId,
-    request: AgentComputerToolRequest,
+    frame: ToolChannelFrame,
+    mailbox: MailboxService,
     computer: ComputerBroker,
-    signal: AbortSignal,
-  ): Promise<AgentComputerToolOutput> {
-    const context = request.context;
+  ): Promise<ToolChannelFrame | undefined> {
+    this.#mailbox = mailbox;
+    this.#computer = computer;
+    if (frame.type === "tool.cancel") {
+      // A cancel carries no turn identity, so only the sending Agent's turns may answer it.
+      for (const turn of this.#turns.values()) {
+        if (turn.agentId !== agentId) continue;
+        void turn.botMessage?.receive(frame);
+        void turn.local?.receive(frame);
+        void turn.computer?.receive(frame);
+        void turn.plugin?.receive(frame);
+      }
+      return Promise.resolve(undefined);
+    }
+    if (frame.type !== "tool.request") return Promise.resolve(undefined);
+    const turn = this.#turns.get(frame.context.workerSessionId);
+    if (turn === undefined || turn.agentId !== agentId) {
+      return Promise.resolve({ type: "tool.result", requestId: frame.requestId, ok: false, error: `${frame.name} tool context is stale or mismatched` });
+    }
+    const channel = frame.name === "local" ? turn.local
+      : frame.name === AGENT_COMPUTER_TOOL.name ? turn.computer
+      : frame.name === "send_bot_message" ? turn.botMessage
+      : turn.plugin;
+    if (channel === undefined) {
+      return Promise.resolve({ type: "tool.result", requestId: frame.requestId, ok: false, error: `${frame.name} tool context is stale or mismatched` });
+    }
+    return channel.receive(frame);
+  }
+
+  /** Dispatch one Turn-bound computer action to this Bot's own Computer Surface. */
+  async #runComputer(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal): Promise<AgentComputerToolOutput> {
+    const computer = this.#computer;
     const active = this.#turns.get(context.workerSessionId);
     if (
-      active === undefined
+      computer === undefined
+      || active === undefined
       || active.agentId !== agentId
       || active.botId !== context.botId
       || active.turnId !== context.turnId
@@ -493,40 +532,12 @@ export class TurnService {
     ) {
       throw new Error("computer tool context is stale or mismatched");
     }
-    if (context.toolCallId.length === 0) {
-      throw new Error("computer tool context has no tool-call identity");
-    }
-    if (!active.startedComputerToolCalls.has(context.toolCallId)) {
-      throw new Error("computer tool context has no active native tool call");
-    }
-    const owner = computer.resolveOwner(context.botId, context.surfaceId);
+    const owner = computer.resolveOwner(context.botId, active.surfaceId);
     if (owner === undefined) {
       throw new Error("computer tool context has a mismatched Computer Surface");
     }
-    if (active.computerToolSurfaces.has(context.toolCallId)) {
-      throw new Error("computer tool call was already dispatched");
-    }
-    active.computerToolSurfaces.set(context.toolCallId, owner.surfaceId);
-    return computer.agentToolAct(owner, context.turnId, context.toolCallId, request.action, signal);
-  }
-
-  onAgentBotMessageFrame(agentId: AgentId, frame: ToolChannelFrame, mailbox: MailboxService): Promise<ToolChannelFrame | undefined> {
-    this.#mailbox = mailbox;
-    void agentId;
-    if (frame.type === "tool.cancel") {
-      for (const turn of this.#turns.values()) {
-        void turn.botMessage?.receive(frame);
-        void turn.local?.receive(frame);
-      }
-      return Promise.resolve(undefined);
-    }
-    if (frame.type !== "tool.request") return Promise.resolve(undefined);
-    const turn = this.#turns.get(frame.context.workerSessionId);
-    const channel = frame.name === "local" ? turn?.local : turn?.botMessage;
-    if (channel === undefined) {
-      return Promise.resolve({ type: "tool.result", requestId: frame.requestId, ok: false, error: "tool context is stale or mismatched" });
-    }
-    return channel.receive(frame);
+    const action = params as { action: ComputerActionName; args?: Record<string, unknown> };
+    return computer.agentToolAct(owner, context.turnId, context.toolCallId, { name: action.action, args: action.args ?? {} }, signal);
   }
 
   async #sendBotMessage(agentId: AgentId, context: ToolChannelContext, params: unknown): Promise<AgentBotMessageToolOutput> {
@@ -605,15 +616,20 @@ export class TurnService {
     return { contents: readFileSync(source, "utf8") };
   }
 
-  async onAgentPluginRequest(agentId: AgentId, request: AgentPluginToolRequest, signal: AbortSignal): Promise<AgentPluginToolOutput> {
-    const context = request.context;
+  /** Runs one plugin tool of the lease this Turn holds; the channel owns schema and dispatch checks. */
+  async #callPlugin(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal, name: string): Promise<AgentPluginToolOutput> {
     const active = this.#turns.get(context.workerSessionId);
-    if (!active || active.agentId !== agentId || active.botId !== context.botId || active.turnId !== context.turnId
-      || active.workerSessionId !== context.workerSessionId || !active.pluginLease) throw new Error("Plugin tool context is stale or mismatched");
-    if (active.startedPluginToolCalls.get(context.toolCallId) !== request.name) throw new Error("Plugin request does not match an active native tool call");
-    if (active.dispatchedPluginToolCalls.has(context.toolCallId)) throw new Error("Plugin tool call was already dispatched");
-    active.dispatchedPluginToolCalls.add(context.toolCallId);
-    return active.pluginLease.call(request.name, request.arguments, signal);
+    if (
+      active === undefined
+      || active.pluginLease === undefined
+      || active.agentId !== agentId
+      || active.botId !== context.botId
+      || active.turnId !== context.turnId
+      || active.workerSessionId !== context.workerSessionId
+    ) {
+      throw new Error("Plugin tool context is stale or mismatched");
+    }
+    return active.pluginLease.call(name, params as Record<string, unknown>, signal);
   }
 
   /** Central agent-event router: worker events become ordered transcript records and Turn transitions. */
@@ -787,13 +803,11 @@ export class TurnService {
           turnId: ctx.turnId,
           toolCall,
         });
-        if (event.name === "computer") {
-          ctx.startedComputerToolCalls.add(event.id);
-        }
         if (event.name === "send_bot_message") ctx.botMessage?.start(event.id);
         if (event.name === "local") ctx.local?.start(event.id);
+        if (event.name === AGENT_COMPUTER_TOOL.name) ctx.computer?.start(event.id);
         if (ctx.pluginLease?.snapshot.tools.some((tool) => tool.name === event.name)) {
-          ctx.startedPluginToolCalls.set(event.id, event.name);
+          ctx.plugin?.start(event.id);
         }
         break;
       }
@@ -808,10 +822,6 @@ export class TurnService {
             messageId: updated.id,
             toolCall: updated.toolCall,
           });
-        }
-        if (event.type === "tool.completed") {
-          ctx.startedComputerToolCalls.delete(event.id);
-          ctx.startedPluginToolCalls.delete(event.id);
         }
         break;
       }
@@ -858,6 +868,12 @@ export class TurnService {
     clearTimeout(ctx.turnTimeout);
     this.#turns.delete(ctx.workerSessionId);
     ctx.pluginLease?.release();
+    // Every finished Turn — completed, cancelled, failed, or crashed worker —
+    // stops accepting tool calls.
+    ctx.botMessage?.close();
+    ctx.local?.close();
+    ctx.computer?.close();
+    ctx.plugin?.close();
     ctx.closeSession();
     const removedIncompleteBlocks = this.threads.removeIncompleteAgentBlocks(ctx.turnId);
     if (removedIncompleteBlocks.responses > 0) {

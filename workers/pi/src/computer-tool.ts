@@ -1,26 +1,13 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import {
   AGENT_COMPUTER_TOOL,
+  COMPUTER_TOOL_SCHEMA,
   type AgentComputerToolContext,
   type AgentComputerToolOutput,
   type AgentComputerTurnContext,
 } from "@omarchy-bot/agent-contract";
-import type { ComputerAction } from "@omarchy-bot/domain";
+import type { ComputerAction, ComputerActionName } from "@omarchy-bot/domain";
 import { Type } from "typebox";
-
-const COMPUTER_ACTION = Type.Union([
-  Type.Literal("observe"),
-  Type.Literal("screenshot"),
-  Type.Literal("list_windows"),
-  Type.Literal("focus_window"),
-  Type.Literal("click"),
-  Type.Literal("type"),
-  Type.Literal("key"),
-  Type.Literal("scroll"),
-  Type.Literal("open_app"),
-  Type.Literal("open_url"),
-  Type.Literal("notify"),
-]);
 
 export interface PiComputerBridge {
   request(
@@ -40,10 +27,10 @@ export function createComputerTool(
     description: AGENT_COMPUTER_TOOL.description,
     promptSnippet: AGENT_COMPUTER_TOOL.systemPrompt.summary,
     promptGuidelines: [...AGENT_COMPUTER_TOOL.systemPrompt.guidelines],
-    parameters: Type.Object({
-      action: COMPUTER_ACTION,
-      args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-    }),
+    parameters: Type.Unsafe<{
+      action: ComputerActionName;
+      args?: Record<string, unknown>;
+    }>(COMPUTER_TOOL_SCHEMA),
     executionMode: "sequential",
     execute: async (toolCallId, params, signal) => {
       const active = turnContext();

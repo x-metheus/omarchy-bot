@@ -1,13 +1,9 @@
 import path from "node:path";
 import type {
   ToolChannelFrame,
-  AgentComputerToolOutput,
-  AgentComputerToolRequest,
   AgentEvent,
   ComputerActPayload,
   ComputerCommand,
-  AgentPluginToolRequest,
-  AgentPluginToolOutput,
 } from "@omarchy-bot/agent-contract";
 import { isSurfaceId, type AgentId, type SurfaceId } from "@omarchy-bot/domain";
 import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
@@ -15,20 +11,10 @@ import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
 export interface SupervisorHooks {
   onAgentEvent: (agentId: AgentId, event: AgentEvent) => void;
   onWorkerCrash: (agentId: AgentId, error: Error) => void;
-  onAgentComputerRequest: (
-    agentId: AgentId,
-    request: AgentComputerToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentComputerToolOutput>;
-  onAgentBotMessageFrame: (
+  onAgentToolFrame: (
     agentId: AgentId,
     frame: ToolChannelFrame,
   ) => Promise<ToolChannelFrame | undefined>;
-  onAgentPluginRequest: (
-    agentId: AgentId,
-    request: AgentPluginToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentPluginToolOutput>;
 }
 
 type ComputerActCommand = Extract<ComputerCommand, { type: "act" }>;
@@ -87,12 +73,7 @@ export class Supervisor {
       script: path.join(this.workerDirs.agents, agentId, "src", "worker.ts"),
       env: this.#agentEnvironment,
       onEvent: (e) => this.hooks.onAgentEvent(agentId, e),
-      onRequest: (request, signal) =>
-        this.hooks.onAgentComputerRequest(agentId, request, signal),
-      onBotMessageFrame: (frame) =>
-        this.hooks.onAgentBotMessageFrame(agentId, frame),
-      onPluginRequest: (request, signal) =>
-        this.hooks.onAgentPluginRequest(agentId, request, signal),
+      onToolFrame: (frame) => this.hooks.onAgentToolFrame(agentId, frame),
       onExit: (code) => {
         this.hooks.onWorkerCrash(
           agentId,

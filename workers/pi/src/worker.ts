@@ -20,6 +20,7 @@ import {
   readJsonl,
   writeJsonl,
   AGENT_CAPABILITY_INVENTORY_VERSION,
+  AGENT_COMPUTER_TOOL,
   type AgentCommand,
   type AgentBotMessageToolContext,
   type AgentBotMessageToolOutput,
@@ -28,7 +29,6 @@ import {
   type ToolChannelFrame,
   type AgentComputerToolContext,
   type AgentComputerToolOutput,
-  type AgentComputerToolResult,
   type AgentComputerTurnContext,
   type AgentEvent,
   type AgentResult,
@@ -39,7 +39,6 @@ import {
   type AgentLocalToolContext,
   type AgentLocalToolOutput,
   type LocalActionName,
-  type AgentPluginToolResult,
   type SessionOpenedPayload,
 } from "@omarchy-bot/agent-contract";
 import { isSurfaceId, type ComputerAction } from "@omarchy-bot/domain";
@@ -49,7 +48,7 @@ import { createComputerTool } from "./computer-tool.ts";
 import { createLocalTool } from "./local-tool.ts";
 import { createBotMessageTool } from "./bot-message-tool.ts";
 import { thinkingCapabilityForProbe } from "./thinking-capability.ts";
-import { createPluginTools, disposePluginCalls, handlePluginResult } from "./plugin-tools.ts";
+import { createPluginTools, pluginChannel } from "./plugin-tools.ts";
 import { NativeMcp, NativeMcpControls, nativeMcpStatus } from "./native-mcp.ts";
 
 const AGENT_ID = "pi";
@@ -75,48 +74,22 @@ function getModelRuntime(): Promise<ModelRuntime> {
 
 const mcpControls = new NativeMcpControls(getModelRuntime);
 
-interface PendingComputerRequest {
-  resolve: (output: AgentComputerToolOutput) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-}
-
-const computerRequests = new Map<string, PendingComputerRequest>();
+const computerChannel = createToolChannelWorker();
+computerChannel.send = (frame) => writeJsonl(frame);
 
 function requestComputer(
   context: AgentComputerToolContext,
   action: ComputerAction,
   signal: AbortSignal | undefined,
 ): Promise<AgentComputerToolOutput> {
-  signal?.throwIfAborted();
-  const requestId = crypto.randomUUID();
-  return new Promise<AgentComputerToolOutput>((resolve, reject) => {
-    const pending: PendingComputerRequest = { resolve, reject };
-    if (signal !== undefined) {
-      pending.signal = signal;
-      pending.onAbort = () => {
-        if (computerRequests.delete(requestId)) {
-          writeJsonl({ type: "computer.cancel", requestId });
-          reject(new Error("computer tool call cancelled"));
-        }
-      };
-      signal.addEventListener("abort", pending.onAbort, { once: true });
-    }
-    computerRequests.set(requestId, pending);
-    writeJsonl({ type: "computer.request", requestId, context, action });
-  });
-}
-
-function handleComputerResult(result: AgentComputerToolResult): void {
-  const pending = computerRequests.get(result.requestId);
-  if (pending === undefined) return;
-  computerRequests.delete(result.requestId);
-  if (pending.signal !== undefined && pending.onAbort !== undefined) {
-    pending.signal.removeEventListener("abort", pending.onAbort);
+  const controller = new AbortController();
+  if (signal !== undefined) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
-  if (result.ok === true) pending.resolve(result.payload);
-  else pending.reject(new Error(result.error));
+  return computerChannel
+    .call(AGENT_COMPUTER_TOOL.name, { action: action.name, args: action.args }, context, controller.signal)
+    .then((result) => result as AgentComputerToolOutput);
 }
 
 const botMessageChannel = createToolChannelWorker();
@@ -241,7 +214,6 @@ function attachSubscription(entry: SessionEntry): void {
       delete entry.botMessage;
       delete entry.plugins;
       delete entry.local;
-      disposePluginCalls(sessionId);
       if (entry.aborted) emit({ type: "turn.cancelled", sessionId });
       else emit({ type: "turn.completed", sessionId });
     }
@@ -472,7 +444,6 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
             delete entry.botMessage;
             delete entry.plugins;
             delete entry.local;
-            disposePluginCalls(entry.sessionId);
             emit({ type: "error", sessionId: entry.sessionId, message: String(err), retryable: false });
           });
         reply({ requestId: cmd.requestId, ok: true, payload: { accepted: true } });
@@ -512,9 +483,11 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       }
       case "session.close": {
         const entry = sessionEntry(cmd.sessionId);
-        botMessageChannel.close();
-        localChannel.close();
-        disposePluginCalls(cmd.sessionId);
+        // Only this session's calls may fail; other sessions keep working.
+        botMessageChannel.close(cmd.sessionId);
+        localChannel.close(cmd.sessionId);
+        computerChannel.close(cmd.sessionId);
+        pluginChannel.close(cmd.sessionId);
         sessions.delete(cmd.sessionId);
         entry.unsubscribe?.();
         await entry.nativeMcp.dispose(entry.session);
@@ -545,11 +518,10 @@ const commands = new Set<Promise<void>>();
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  disposePluginCalls();
-  for (const pending of computerRequests.values()) pending.reject(new Error("daemon connection closed during computer tool call"));
   botMessageChannel.close();
   localChannel.close();
-  computerRequests.clear();
+  computerChannel.close();
+  pluginChannel.close();
   const controlsClosed = mcpControls.dispose();
   await Promise.allSettled(commands);
   await Promise.allSettled([...sessions.values()].map((entry) => {
@@ -567,13 +539,12 @@ await readJsonl(
   (msg) => {
     if (shuttingDown) return;
     if (msg && typeof msg === "object" && "type" in msg) {
-      if (msg.type === "computer.result") {
-        handleComputerResult(msg as AgentComputerToolResult);
-      } else if (msg.type === "tool.result") {
-        botMessageChannel.receive(msg as ToolChannelFrame);
-        localChannel.receive(msg as ToolChannelFrame);
-      } else if (msg.type === "plugin.result") {
-        handlePluginResult(msg as AgentPluginToolResult);
+      if (msg.type === "tool.result" || msg.type === "tool.cancel") {
+        const frame = msg as ToolChannelFrame;
+        botMessageChannel.receive(frame);
+        localChannel.receive(frame);
+        computerChannel.receive(frame);
+        pluginChannel.receive(frame);
       } else {
         const command = handleMessage(msg as AgentCommand);
         commands.add(command);

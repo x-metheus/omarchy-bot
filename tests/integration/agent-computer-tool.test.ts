@@ -543,12 +543,9 @@ describe("Bot-bound Pi computer tool", () => {
     const adapter = new AgentToolRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const firstBot = await makeBot(h, "Context owner Bot");
-    const secondBot = await makeBot(h, "Context other Bot");
-    const secondSurface = await botSurface(h, secondBot);
     const runningHarness = h;
 
     const turns = await Promise.all([
-      sendToBot(h, firstBot, `computer:observe:mismatch:${secondSurface}`),
       sendToBot(h, firstBot, "computer:observe:stale"),
       sendToBot(h, firstBot, "computer:observe:wrong-bot"),
       sendToBot(h, firstBot, "computer:observe:wrong-session"),
@@ -557,11 +554,35 @@ describe("Bot-bound Pi computer tool", () => {
     await Promise.all(turns.map((turn) => waitThreadIdle(runningHarness, turn.threadId)));
 
     expect(adapter.actions).toHaveLength(0);
-    for (const turn of turns) {
+    const reasons = [
+      "computer tool context is stale or mismatched",
+      "computer tool context is stale or mismatched",
+      "computer tool context is stale or mismatched",
+      "tool call has not started",
+    ];
+    for (const [index, turn] of turns.entries()) {
       const row = h.svc.threads.turnRow(turn.turnId);
       expect(row?.status).toBe("failed");
-      expect(row?.outcome_reason).toContain("computer tool context");
+      expect(row?.outcome_reason).toBe(reasons[index]);
     }
+  }, 15_000);
+
+  test("a worker cannot redirect its computer action to another Bot Screen", async () => {
+    const adapter = new AgentToolRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const ownerBotId = await makeBot(h, "Spoofed context owner");
+    const ownerSurface = await botSurface(h, ownerBotId);
+    const otherBotId = await makeBot(h, "Unobserved Bot");
+    const otherSurface = await botSurface(h, otherBotId);
+
+    const spoofed = await sendToBot(h, ownerBotId, `computer:observe:mismatch:${otherSurface}`);
+    await waitThreadIdle(h, spoofed.threadId);
+
+    expect(adapter.actions).toEqual([
+      { surfaceId: ownerSurface, action: { name: "observe", args: {} } },
+    ]);
+    expect(h.svc.threads.turnRow(spoofed.turnId)?.status).toBe("completed");
+    expect(h.svc.screens.status({ botId: otherBotId, surfaceId: otherSurface })).toEqual({ state: "stopped" });
   }, 15_000);
 
   test("Agent worker loss fails its active tool turn instead of reconstructing or rerouting it", async () => {

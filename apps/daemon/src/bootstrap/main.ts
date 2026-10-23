@@ -67,12 +67,8 @@ export async function main(options: MainOptions = {}): Promise<{
         agents.markOffline(agentId, err.message);
         turns.onAgentWorkerCrash(agentId, err);
       },
-      onAgentComputerRequest: (agentId, request, signal) =>
-        turns.onAgentComputerRequest(agentId, request, computer, signal),
-      onAgentBotMessageFrame: (agentId, frame) =>
-        turns.onAgentBotMessageFrame(agentId, frame, mailbox),
-      onAgentPluginRequest: (agentId, request, signal) =>
-        turns.onAgentPluginRequest(agentId, request, signal),
+      onAgentToolFrame: (agentId, frame) =>
+        turns.onAgentToolFrame(agentId, frame, mailbox, computer),
     },
     {
       agents: agentsDir,

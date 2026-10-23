@@ -94,4 +94,64 @@ describe("ToolChannel", () => {
     worker.close();
     await expect(pending).rejects.toThrow("tool session closed");
   });
+
+  test("close only rejects the pending calls of the given worker session", async () => {
+    const worker = createToolChannelWorker();
+    const sent: ToolChannelFrame[] = [];
+    worker.send = (frame) => sent.push(frame);
+    const other = { ...context, workerSessionId: "s_other" };
+    const closing = worker.call("echo", { n: 1 }, context, new AbortController().signal);
+    const surviving = worker.call("echo", { n: 2 }, other, new AbortController().signal);
+    worker.close(context.workerSessionId);
+    await expect(closing).rejects.toThrow("tool session closed");
+    worker.receive({
+      type: "tool.result",
+      requestId: (sent[1] as Extract<ToolChannelFrame, { type: "tool.request" }>).requestId,
+      ok: true,
+      result: { n: 2 },
+    });
+    expect(await surviving).toEqual({ n: 2 });
+  });
+
+  test("aborts a pending call immediately and ignores its late result", async () => {
+    const worker = createToolChannelWorker();
+    const sent: ToolChannelFrame[] = [];
+    worker.send = (frame) => sent.push(frame);
+    const turn = new AbortController();
+    const pending = worker.call("echo", { n: 1 }, context, turn.signal);
+    const request = sent[0] as Extract<ToolChannelFrame, { type: "tool.request" }>;
+    turn.abort();
+    expect(sent[1]).toEqual({ type: "tool.cancel", requestId: request.requestId });
+    await expect(pending).rejects.toThrow("tool call aborted");
+    worker.receive({ type: "tool.result", requestId: request.requestId, ok: true, result: { late: true } });
+    expect(await pending.then(() => "resolved", (error: Error) => error.message)).toBe("tool call aborted");
+    expect(sent).toHaveLength(2);
+  });
+
+  test("rejects a call whose signal already aborted without dispatching it", async () => {
+    const worker = createToolChannelWorker();
+    const sent: ToolChannelFrame[] = [];
+    worker.send = (frame) => sent.push(frame);
+    const turn = new AbortController();
+    turn.abort();
+    await expect(worker.call("echo", { n: 1 }, context, turn.signal)).rejects.toThrow("tool call aborted");
+    expect(sent).toEqual([]);
+  });
+
+  test("close aborts a running executor the dead worker can no longer cancel", async () => {
+    const worker = createToolChannelWorker();
+    const daemon = createToolChannelDaemon({
+      tools: [echo],
+      execute: (_params, _context, signal) => {
+        const gate = Promise.withResolvers<never>();
+        signal.addEventListener("abort", () => gate.reject(new Error("worker exited")), { once: true });
+        return gate.promise;
+      },
+    });
+    daemon.start(context.toolCallId);
+    worker.send = (frame) => { void daemon.receive(frame).then((result) => worker.receive(result)); };
+    const pending = worker.call("echo", { n: 1 }, context, new AbortController().signal);
+    daemon.close();
+    await expect(pending).rejects.toThrow("worker exited");
+  });
 });

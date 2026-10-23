@@ -22,13 +22,16 @@ export type ToolChannelFrame =
 export interface ToolChannelDaemon {
   start(toolCallId: string): void;
   receive(frame: ToolChannelFrame): Promise<ToolChannelFrame | undefined>;
+  /** Aborts every running executor; the worker that owns this channel is gone and can no longer cancel. */
+  close(): void;
 }
 
 export interface ToolChannelWorker {
   send(frame: ToolChannelFrame): void;
   call(name: string, params: unknown, context: ToolChannelContext, signal: AbortSignal): Promise<unknown>;
   receive(frame: ToolChannelFrame | undefined): void;
-  close(): void;
+  /** Rejects every pending call, or only one worker session's when given. */
+  close(workerSessionId?: string): void;
 }
 
 // shortcut: JSON Schema keywords these tools don't emit fail closed, switch to a full validator when a tool schema needs one.
@@ -83,7 +86,7 @@ export function schemaMatches(schema: Record<string, unknown>, value: unknown): 
 
 export function createToolChannelDaemon(options: {
   tools: readonly ToolChannelTool[];
-  execute(params: unknown, context: ToolChannelContext, signal: AbortSignal): Promise<unknown> | unknown;
+  execute(params: unknown, context: ToolChannelContext, signal: AbortSignal, name: string): Promise<unknown> | unknown;
 }): ToolChannelDaemon {
   const started = new Set<string>();
   const dispatched = new Set<string>();
@@ -111,7 +114,7 @@ export function createToolChannelDaemon(options: {
       const controller = new AbortController();
       running.set(frame.requestId, controller);
       try {
-        const result = await options.execute(frame.params, frame.context, controller.signal);
+        const result = await options.execute(frame.params, frame.context, controller.signal, frame.name);
         return { type: "tool.result", requestId: frame.requestId, ok: true, result };
       } catch (error) {
         return fail(error instanceof Error ? error.message : String(error));
@@ -119,18 +122,29 @@ export function createToolChannelDaemon(options: {
         running.delete(frame.requestId);
       }
     },
+    close() {
+      for (const controller of running.values()) controller.abort();
+      running.clear();
+    },
   };
 }
 
 export function createToolChannelWorker(): ToolChannelWorker {
-  const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>();
+  const pending = new Map<string, { workerSessionId: string; resolve(value: unknown): void; reject(error: Error): void }>();
   const worker: ToolChannelWorker = {
     send() {},
     call(name, params, context, signal) {
+      if (signal.aborted) return Promise.reject(new Error("tool call aborted"));
       const requestId = randomUUID();
       const result = Promise.withResolvers<unknown>();
-      pending.set(requestId, result);
-      signal.addEventListener("abort", () => worker.send({ type: "tool.cancel", requestId }), { once: true });
+      pending.set(requestId, { workerSessionId: context.workerSessionId, resolve: result.resolve, reject: result.reject });
+      // An aborted call settles here, so its late result is dropped instead of
+      // resolving a promise the caller already gave up on.
+      signal.addEventListener("abort", () => {
+        pending.delete(requestId);
+        result.reject(new Error("tool call aborted"));
+        worker.send({ type: "tool.cancel", requestId });
+      }, { once: true });
       worker.send({ type: "tool.request", requestId, name, params, context });
       return result.promise;
     },
@@ -142,8 +156,9 @@ export function createToolChannelWorker(): ToolChannelWorker {
       if (frame.ok) waiting.resolve(frame.result);
       else waiting.reject(new Error(frame.error));
     },
-    close() {
+    close(workerSessionId) {
       for (const [requestId, waiting] of pending) {
+        if (workerSessionId !== undefined && waiting.workerSessionId !== workerSessionId) continue;
         pending.delete(requestId);
         waiting.reject(new Error("tool session closed"));
       }

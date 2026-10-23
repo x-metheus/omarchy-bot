@@ -27,6 +27,10 @@ import {
   type AgentCapabilityInventory,
   type ProbePayload,
 } from "../../../../../packages/agent-contract/src/agent-protocol.ts";
+import {
+  createToolChannelWorker,
+  type ToolChannelFrame,
+} from "../../../../../packages/agent-contract/src/tool-channel.ts";
 import { readJsonl } from "../../../../../packages/agent-contract/src/framing.ts";
 
 const write = (msg: unknown): void => {
@@ -205,7 +209,7 @@ interface FakeSession {
   aborted: boolean;
   streaming: boolean;
   directive?: string | undefined;
-  computerRequestId?: string;
+  computerAbort?: AbortController;
   steerReply?: ((text: string) => void) | undefined;
 }
 const sessions = new Map<string, FakeSession>();
@@ -220,19 +224,9 @@ const respondError = (requestId: string, error: string): void => {
   write({ requestId, ok: false, error });
 };
 
-const localRequests = new Map<string, {
-  resolve: (value: { deviceId: string; hostname: string; text: string; exitCode?: number }) => void;
-  reject: (error: Error) => void;
-}>();
-const computerRequests = new Map<string, {
-  resolve: (payload: unknown) => void;
-  reject: (error: Error) => void;
-}>();
-
-const botMessageRequests = new Map<string, {
-  resolve: (payload: { deliveryId: string; queued: true }) => void;
-  reject: (error: Error) => void;
-}>();
+/** One ToolChannel for every daemon-owned bridge this fake worker calls. */
+const toolChannel = createToolChannelWorker();
+toolChannel.send = (frame) => write(frame);
 
 function requestBotMessage(
   context: BotMessageTurnContext,
@@ -240,36 +234,23 @@ function requestBotMessage(
   targetBotId: string,
   text: string,
 ): Promise<{ deliveryId: string; queued: true }> {
-  const requestId = crypto.randomUUID();
-  const pending = Promise.withResolvers<{ deliveryId: string; queued: true }>();
-  botMessageRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
-  write({
-    type: "tool.request",
-    requestId,
-    name: "send_bot_message",
-    params: { targetBotId, text },
-    context: { ...context, toolCallId },
-  });
-  return pending.promise;
+  return toolChannel
+    .call("send_bot_message", { targetBotId, text }, { ...context, toolCallId }, new AbortController().signal)
+    .then((result) => result as { deliveryId: string; queued: true });
 }
 
-async function requestComputer(
+function requestComputer(
   context: ComputerTurnContext,
   toolCallId: string,
   action: { name: string; args: Record<string, unknown> },
-  onRequest: (requestId: string) => void,
+  signal: AbortSignal,
 ): Promise<unknown> {
-  const requestId = crypto.randomUUID();
-  onRequest(requestId);
-  const pending = Promise.withResolvers<unknown>();
-  computerRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
-  write({
-    type: "computer.request",
-    requestId,
-    context: { ...context, toolCallId },
-    action,
-  });
-  return pending.promise;
+  return toolChannel.call(
+    "computer",
+    { action: action.name, args: action.args },
+    { ...context, toolCallId },
+    signal,
+  );
 }
 
 
@@ -287,17 +268,9 @@ function requestLocal(
     direction?: "to-workspace" | "from-workspace";
   } = {},
 ): Promise<{ deviceId: string; hostname: string; text: string; exitCode?: number }> {
-  const requestId = crypto.randomUUID();
-  const pending = Promise.withResolvers<{ deviceId: string; hostname: string; text: string; exitCode?: number }>();
-  localRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
-  write({
-    type: "tool.request",
-    requestId,
-    name: "local",
-    params: { action, ...args },
-    context: { ...context, toolCallId },
-  });
-  return pending.promise;
+  return toolChannel
+    .call("local", { action, ...args }, { ...context, toolCallId }, new AbortController().signal)
+    .then((result) => result as { deviceId: string; hostname: string; text: string; exitCode?: number });
 }
 
 function parseLocalDirective(text: string): {
@@ -337,14 +310,6 @@ function parseLocalDirective(text: string): {
     destination: parts.slice(2).join(":"),
     ...(target !== undefined ? { target } : {}),
   };
-}
-
-function cancelComputerRequest(requestId: string): void {
-  const pending = computerRequests.get(requestId);
-  if (pending === undefined) return;
-  computerRequests.delete(requestId);
-  write({ type: "computer.cancel", requestId });
-  pending.reject(new Error("computer tool call cancelled"));
 }
 
 function computerTurnContext(value: unknown): ComputerTurnContext | undefined {
@@ -391,14 +356,6 @@ function botMessageTurnContext(value: unknown): BotMessageTurnContext | undefine
 readJsonl(Bun.stdin.stream(), (raw) => {
   const msg = raw as Record<string, unknown> & { type: string; requestId?: string };
   switch (msg.type) {
-    case "computer.result": {
-      const pending = msg.requestId === undefined ? undefined : computerRequests.get(msg.requestId);
-      if (pending === undefined) break;
-      computerRequests.delete(msg.requestId!);
-      if (msg.ok === true) pending.resolve(msg.payload);
-      else pending.reject(new Error(String(msg.error)));
-      break;
-    }
     // Relay an inbound tool.request the worker did not originate, so a test can
     // inject a duplicate frame the daemon reads back as if the worker sent it.
     case "tool.request": {
@@ -407,18 +364,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     }
     case "tool.result": {
       if (msg.requestId === undefined) break;
-      const local = localRequests.get(msg.requestId);
-      if (local !== undefined) {
-        localRequests.delete(msg.requestId);
-        if (msg.ok === true) local.resolve(msg.result as { deviceId: string; hostname: string; text: string; exitCode?: number });
-        else local.reject(new Error(String(msg.error)));
-        break;
-      }
-      const pending = botMessageRequests.get(msg.requestId);
-      if (pending === undefined) break;
-      botMessageRequests.delete(msg.requestId);
-      if (msg.ok === true) pending.resolve(msg.result as { deliveryId: string; queued: true });
-      else pending.reject(new Error(String(msg.error)));
+      toolChannel.receive(msg as unknown as ToolChannelFrame);
       break;
     }
     case "probe": {
@@ -775,13 +721,13 @@ readJsonl(Bun.stdin.stream(), (raw) => {
                     args: parts[2] === "fail" ? { fail: true } : {},
                   };
             s.streaming = true;
+            const computerAbort = new AbortController();
+            s.computerAbort = computerAbort;
             const result = await requestComputer(
               context,
               requestToolCallId,
               action,
-              (requestId) => {
-                s.computerRequestId = requestId;
-              },
+              computerAbort.signal,
             );
             write({
               type: "event",
@@ -814,7 +760,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             });
           } finally {
             s.streaming = false;
-            delete s.computerRequestId;
+            delete s.computerAbort;
           }
           respond(msg.requestId!, { accepted: true });
           return;
@@ -1291,9 +1237,9 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         const s = sessions.get(sessionId);
         if (!s?.streaming) return;
         s.aborted = true;
-        if (s.computerRequestId !== undefined) {
-          cancelComputerRequest(s.computerRequestId);
-          delete s.computerRequestId;
+        if (s.computerAbort !== undefined) {
+          s.computerAbort.abort();
+          delete s.computerAbort;
         }
         s.streaming = false;
         s.steerReply?.("");
