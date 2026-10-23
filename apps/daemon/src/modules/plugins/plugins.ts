@@ -1,22 +1,22 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { redactToolErrorSummary, type AgentCommand, type AgentPluginSnapshot, type AgentPluginToolOutput, type NativeMcpControlResult, type NativePluginResources } from "@omarchy-bot/agent-contract";
 import {
-  HttpsOrigin, OAuthStartResponse, PLUGIN_OPERATIONS, PLUGIN_PROVIDERS,
-  PluginManageInput, PluginProviderId, PublisherTokenResponse, McpDefinition, SaveMcpBody,
-  TOKEN_METADATA_KEYS, type AuthorizePluginBody, type CatalogSkillDetailDto,
+  HttpsOrigin, PLUGIN_OPERATIONS, PLUGIN_PROVIDERS,
+  PluginManageInput, PluginProviderId, McpDefinition, SaveMcpBody,
+  type AuthorizePluginBody, type CatalogSkillDetailDto,
   type InstalledSkillDto, type InstallSkillBody, type McpConnectionDto, type PluginAccountDto,
   type PluginProviderDto, type PluginServiceDefinition, type PluginStateDto, type SkillCatalogDto, type SkillCommandDto,
 } from "@omarchy-bot/protocol";
 import { HttpError } from "../bots/bots.ts";
 import { CatalogClient } from "./catalogClient.ts";
-import { hasScopes, identifyAccount } from "./providerAccounts.ts";
+import { Grant, ProviderAccounts } from "./providerAccounts.ts";
 import { toolOperation } from "./pluginDispatch.ts";
 import { SkillInstalls } from "./skillInstall.ts";
+import { ServiceBundles } from "./serviceBundles.ts";
 import { materializeSkill, materializeSkillSource } from "./skillInstaller.ts";
 import { NativeSkills } from "./nativeSkills.ts";
 import { NativeMcpStore } from "./nativeMcp.ts";
@@ -24,11 +24,6 @@ import { McpPackages } from "./mcpPackages.ts";
 
 const DEFAULT_PUBLISHER_ORIGIN = "https://omarchy-bot-site-ymlq.vercel.app";
 
-const Grant = z.object({
-  generation: z.string(), accessToken: z.string(), refreshToken: z.string().optional(), expiresAt: z.number().optional(),
-  scopes: z.array(z.string()), cloudUrl: HttpsOrigin, metadata: z.record(z.unknown()).default({}),
-});
-type Grant = z.infer<typeof Grant>;
 const Account = z.object({
   id: z.string(), providerId: PluginProviderId, label: z.string(), identity: z.string(), enabledServices: z.array(z.string()),
   status: z.enum(["connected", "reauthorize"]), error: z.string().optional(), grant: Grant.optional(),
@@ -48,10 +43,6 @@ type Skill = z.infer<typeof Skill>;
 const StoredState = z.object({
   version: z.literal(1), revision: z.number().int().nonnegative(), cloudUrl: HttpsOrigin.nullable(), accounts: z.array(Account), mcp: z.array(Mcp), skills: z.array(Skill),
 });
-interface OAuthPending {
-  providerId: PluginProviderId; accountId?: string; verifier: string; cloudUrl: string; returnUrl: string; expiresAt: number;
-  brokerState: string;
-}
 export interface PluginLease {
   snapshot: AgentPluginSnapshot;
   call(name: string, arguments_: Record<string, unknown>, signal: AbortSignal): Promise<AgentPluginToolOutput>;
@@ -63,14 +54,12 @@ export class PluginsService {
   readonly skills: NativeSkills;
   #state: z.infer<typeof StoredState>;
   #file: string;
-  #refreshing = new Map<Grant, Promise<string>>();
-  #oauth = new Map<string, OAuthPending>();
+  readonly accounts: ProviderAccounts;
   readonly skillInstalls: SkillInstalls;
   readonly publisher: CatalogClient;
   #nativeCache: { at: number; resources: NativePluginResources; error?: string } | undefined;
   #nativePending: Promise<NativePluginResources> | undefined;
-  #serviceUpdates = new Map<string, Promise<void>>();
-  #serviceEpochs = new Map<string, number>();
+  readonly bundles: ServiceBundles;
   #timer: ReturnType<typeof setInterval>;
   #reconcileTimer: ReturnType<typeof setInterval>;
   #ready: Promise<void>;
@@ -138,6 +127,30 @@ export class PluginsService {
       try { this.skills.list(); this.packages.collect(); } catch (error) { this.#defaultError = error instanceof Error ? error.message : String(error); }
     }, 2000);
     this.#reconcileTimer.unref();
+    this.bundles = new ServiceBundles({
+      rootDir: this.rootDir, mcp: this.mcp, skills: this.skills,
+      accounts: () => this.#state.accounts,
+      stopping: () => this.#stopping,
+      ready: () => this.#ready,
+      token: (providerId, grant) => this.accounts.token(providerId, grant),
+      persist: (changed) => this.#persist(changed ?? false),
+      clearNative: () => { this.#nativeCache = undefined; },
+      removeUnused: (directory) => this.#removeUnusedSkill(directory),
+      accountDto: (account) => this.#accountDto(account as Account),
+    });
+    this.accounts = new ProviderAccounts({
+      cwd: this.cwd, mcp: this.mcp, publisher: this.publisher,
+      accounts: () => this.#state.accounts,
+      cloudUrl: () => this.#cloudUrl(),
+      ready: () => this.#ready,
+      persist: (changed) => this.#persist(changed ?? false),
+      provision: (account, service, enabled) => this.#provisionService(account, service, enabled),
+      serviceName: (account, serviceId) => this.#serviceName(account, serviceId),
+      change: (account, serviceId) => this.bundles.change(account, serviceId),
+      release: (providerId, serviceId) => this.#releaseBundle(providerId, serviceId),
+      authorizeMcp: (id) => this.authorizeMcp(id),
+      checkMcp: (id) => this.checkMcp(id),
+    });
     this.#ready = this.#initializeServices();
   }
 
@@ -307,91 +320,14 @@ export class PluginsService {
     return candidates.filter((skill, index) => candidates.findIndex((other) => other.command === skill.command) === index);
   }
 
-  #serviceName(account: Account, serviceId: string): string { return `service-${account.id}-${serviceId}`; }
-
-  #serviceEpoch(account: Account, serviceId: string): number {
-    return this.#serviceEpochs.get(`${account.id}/${serviceId}`) ?? 0;
-  }
-
-  #changeService(account: Account, serviceId: string): number {
-    const epoch = this.#serviceEpoch(account, serviceId) + 1;
-    this.#serviceEpochs.set(`${account.id}/${serviceId}`, epoch);
-    return epoch;
-  }
+  #serviceName(account: Account, serviceId: string): string { return this.bundles.serviceName(account, serviceId); }
 
   async #ensureBundle(account: Account, service: PluginServiceDefinition, update = false): Promise<void> {
-    const epoch = this.#serviceEpoch(account, service.id);
-    const sourceIds = (service.skillSources ?? []).map((source) => ({
-      source, id: `service:${account.providerId}:${service.id}:${createHash("sha256").update(source).digest("hex").slice(0, 12)}`,
-    }));
-    const before = new Map(this.skills.list().filter((skill) => skill.serviceId === `${account.providerId}/${service.id}`).map((skill) => [skill.id, skill]));
-    const downloaded = new Map<string, Awaited<ReturnType<typeof materializeSkillSource>>>();
-    try {
-      for (const { source, id } of sourceIds) {
-        if (update || !before.has(id)) downloaded.set(id, await materializeSkillSource({ source }, path.join(this.rootDir, "skills")));
-      }
-      if (this.#stopping || !this.#state.accounts.includes(account) || this.#serviceEpoch(account, service.id) !== epoch
-        || !this.mcp.serviceConnections(account.id).some((connection) => connection.name === this.#serviceName(account, service.id))) throw new HttpError(409, "Service changed or was removed during component preparation");
-      const current = new Map(this.skills.list().map((skill) => [skill.id, skill]));
-      const enabled = this.#state.accounts.some((entry) => entry.providerId === account.providerId && entry.enabledServices.includes(service.id));
-      const installations: Parameters<NativeSkills["installBundle"]>[0][number][] = [];
-      for (const { id } of sourceIds) {
-        const existing = current.get(id);
-        if (update && existing?.revision !== before.get(id)?.revision) throw new HttpError(409, "Service content changed during download; the current bundle was retained");
-        if (!update && existing?.enabled === enabled) continue;
-        const resource = downloaded.get(id);
-        if (resource && (update || !existing)) {
-          installations.push({ catalog: { ...resource.catalog, id }, materialized: resource, options: { origin: "service", serviceId: `${account.providerId}/${service.id}`, enabled } });
-        } else if (existing?.path) {
-          installations.push({
-            catalog: { id, name: existing.name, description: existing.description, source: existing.source, sourceType: existing.sourceType, installUrl: existing.installUrl,
-              ...(existing.skillPath ? { skillPath: existing.skillPath } : {}) },
-            materialized: { directory: path.dirname(existing.path), revision: existing.revision },
-            options: { origin: "service", serviceId: `${account.providerId}/${service.id}`, enabled },
-          });
-        } else throw new HttpError(409, "An official companion resource disappeared during preparation");
-      }
-      this.skills.installBundle(installations);
-      for (const owner of this.#state.accounts.filter((entry) => entry.providerId === account.providerId)) delete owner.bundleErrors[service.id];
-      this.#nativeCache = undefined;
-      this.#persist(true);
-    } catch (error) {
-      const detail = redactToolErrorSummary(error instanceof Error ? error.message : error);
-      if (this.#state.accounts.includes(account)) account.bundleErrors[service.id] = detail;
-      for (const { id } of sourceIds) this.skills.markError(id, detail);
-      this.#persist();
-      if (error instanceof HttpError && error.status === 409) throw error;
-      throw new HttpError(502, `Official Service content could not be prepared; the previous bundle was retained. ${detail}`);
-    } finally {
-      await Promise.all([...downloaded.values()].map((resource) => this.#removeUnusedSkill(resource.directory)));
-    }
+    return this.bundles.ensure(account, service, update);
   }
 
   async #provisionService(account: Account, service: PluginServiceDefinition, enabled: boolean): Promise<void> {
-    if (!service.mcpUrl) throw new HttpError(409, "This Service does not publish an official MCP endpoint");
-    const epoch = this.#serviceEpoch(account, service.id);
-    const name = this.#serviceName(account, service.id);
-    const existing = this.mcp.serviceConnections(account.id).find((connection) => connection.name === name);
-    if (existing) {
-      if (existing.transport.type !== "http" || existing.transport.url !== service.mcpUrl) throw new HttpError(409, "The native Service endpoint was modified; it was not overwritten");
-    } else {
-      const native = account.native ? PLUGIN_PROVIDERS[account.providerId].nativeOAuth : undefined;
-      this.mcp.putService(name, { url: service.mcpUrl, disabled: true,
-        ...(native ? { oauth: {
-          ...(native.publicClientId ? { clientId: native.publicClientId } : {}),
-          ...(native.redirectPort ? { redirectUri: `http://localhost:${native.redirectPort}/callback` } : {}),
-          ...(native.authServerMetadataUrl ? { authServerMetadataUrl: native.authServerMetadataUrl } : {}),
-          ...(service.scopes.length ? { scope: service.scopes.join(" ") } : {}),
-        } } : {}) }, { accountId: account.id, serviceId: service.id });
-    }
-    const token = enabled && account.grant ? await this.#token(account.providerId, account.grant) : undefined;
-    if (!this.#state.accounts.includes(account) || this.#serviceEpoch(account, service.id) !== epoch) throw new HttpError(409, "Service changed during credential preparation");
-    await this.#ensureBundle(account, service);
-    if (!this.#state.accounts.includes(account) || this.#serviceEpoch(account, service.id) !== epoch) throw new HttpError(409, "Service changed during provisioning");
-    const connection = this.mcp.serviceConnections(account.id).find((entry) => entry.name === name);
-    if (!connection) throw new HttpError(409, "Service was removed during provisioning");
-    if (token !== undefined) this.mcp.setServiceToken(name, service.mcpUrl, token);
-    if (connection.enabled !== enabled) this.mcp.enable(connection.id, enabled, true);
+    return this.bundles.provision(account, service, enabled);
   }
 
   async #initializeServices(): Promise<void> {
@@ -420,7 +356,7 @@ export class PluginsService {
     for (const account of this.#state.accounts) {
       if (!account.grant || account.status !== "connected") continue;
       try {
-        const token = await this.#token(account.providerId, account.grant);
+        const token = await this.accounts.token(account.providerId, account.grant);
         for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
           if (account.enabledServices.includes(service.id) && service.mcpUrl && this.mcp.serviceConnections(account.id).some((entry) => entry.name === this.#serviceName(account, service.id))) {
             this.mcp.setServiceToken(this.#serviceName(account, service.id), service.mcpUrl, token);
@@ -430,99 +366,12 @@ export class PluginsService {
     }
   }
 
-  async #authorizeNative(body: AuthorizePluginBody, previous?: Account): Promise<{ url: string }> {
-    const provider = PLUGIN_PROVIDERS[body.providerId];
-    if (previous && !previous.native) throw new HttpError(409, "An API grant cannot be silently rebound to native MCP authorization. Add a separate Service account.");
-    const serviceId = body.serviceId ?? previous?.native?.serviceId ?? (provider.services.length === 1 ? provider.services[0]!.id : undefined);
-    const service = provider.services.find((item) => item.id === serviceId);
-    if (!service) throw new HttpError(400, "Select the exact Service or region before native authorization");
-    if (previous && previous.native?.serviceId !== service.id) throw new HttpError(409, "Add a separate account connection for a different Service region");
-    const id = previous?.id ?? `account_${randomUUID().replace(/-/g, "")}`;
-    const account: Account = previous ?? {
-      id, providerId: body.providerId, label: `${provider.name} · ${id.slice(-6)}`,
-      identity: "Native OAuth account identity is not exposed by this provider connection",
-      enabledServices: [service.id], status: "reauthorize", nativeManaged: true,
-      bundleErrors: {},
-      native: { serviceId: service.id, name: `service-${id}-${service.id}` },
-    };
-    if (!previous) this.#state.accounts.push(account);
-    this.#changeService(account, service.id);
-    this.#persist(true);
-    try {
-      await this.#provisionService(account, service, account.enabledServices.includes(service.id));
-      const connection = this.mcp.serviceConnections(account.id).find((entry) => entry.name === account.native!.name)!;
-      const result = await this.authorizeMcp(connection.id);
-      if (result.error) throw new HttpError(502, result.error);
-      if (result.authenticated) await this.checkMcp(connection.id);
-      return { url: result.authorizationUrl ?? body.returnUrl };
-    } catch (error) {
-      account.error = redactToolErrorSummary(error instanceof Error ? error.message : error);
-      this.#persist();
-      throw error;
-    }
-  }
-
   async authorize(body: AuthorizePluginBody): Promise<{ url: string }> {
-    const cloudUrl = this.#cloudUrl();
-    const account = body.accountId === undefined ? undefined : this.#state.accounts.find((entry) => entry.id === body.accountId);
-    if (body.accountId !== undefined && (!account || account.providerId !== body.providerId)) throw new HttpError(404, "Provider account not found");
-    await this.#ready;
-    if (PLUGIN_PROVIDERS[body.providerId].nativeOAuth && (!account?.grant || !PLUGIN_PROVIDERS[body.providerId].publisherOAuth)) return this.#authorizeNative(body, account);
-    for (const [state, entry] of this.#oauth) if (entry.expiresAt < Date.now()) this.#oauth.delete(state);
-    const localState = randomBytes(32).toString("base64url");
-    const verifier = randomBytes(32).toString("base64url");
-    const callback = new URL("/api/plugins/oauth/callback", body.returnUrl);
-    const result = OAuthStartResponse.parse(await this.publisher.request("oauth/start", { providerId: body.providerId, callbackUrl: callback.href,
-      localState, challenge: createHash("sha256").update(verifier).digest("base64url") }));
-    if (new URL(result.url).origin !== new URL(PLUGIN_PROVIDERS[body.providerId].authorizeUrl).origin) throw new HttpError(502, "Publisher returned an unexpected authorization origin");
-    const brokerState = new URL(result.url).searchParams.get("state");
-    if (!brokerState) throw new HttpError(502, "Publisher authorization did not include its transaction binding");
-    this.#oauth.set(localState, { providerId: body.providerId, verifier, brokerState, cloudUrl, returnUrl: new URL(body.returnUrl).origin, expiresAt: Date.now() + 15 * 60_000,
-      ...(body.accountId === undefined ? {} : { accountId: body.accountId }) });
-    return result;
+    return this.accounts.authorize(body);
   }
 
   async finishAuthorization(url: URL): Promise<{ returnUrl: string; label: string }> {
-    const state = url.searchParams.get("state") ?? "";
-    const pending = this.#oauth.get(state);
-    if (!pending || pending.expiresAt < Date.now()) throw new HttpError(400, "Authorization state is missing, expired, or already used. Start again from Plugins.");
-    this.#oauth.delete(state);
-    const code = url.searchParams.get("code");
-    const brokerState = url.searchParams.get("brokerState");
-    if (url.searchParams.has("error") || !code || !brokerState) throw new HttpError(400, "Authorization was not granted");
-    if (brokerState !== pending.brokerState) throw new HttpError(400, "Authorization callback belongs to a different publisher transaction");
-    const tokens = PublisherTokenResponse.parse(await this.publisher.request("oauth/token", { grantType: "authorization_code", code, state: brokerState, verifier: pending.verifier }, pending.cloudUrl));
-    const metadata: Record<string, unknown> = {};
-    for (const key of TOKEN_METADATA_KEYS) if (key !== "refresh_token" && key !== "expires_in" && key !== "refresh_token_expires_in" && key !== "scope" && tokens[key] !== undefined) metadata[key] = tokens[key];
-    const grant: Grant = { generation: randomUUID(), accessToken: tokens.access_token, scopes: (tokens.scope ?? "").split(/[\s,]+/).filter(Boolean), cloudUrl: pending.cloudUrl, metadata,
-      ...(tokens.refresh_token === undefined ? {} : { refreshToken: tokens.refresh_token }), ...(tokens.expires_in === undefined ? {} : { expiresAt: Date.now() + tokens.expires_in * 1000 }) };
-    const identity = await this.#identify(pending.providerId, grant);
-    const previous = pending.accountId === undefined ? undefined : this.#state.accounts.find((account) => account.id === pending.accountId);
-    if (pending.accountId !== undefined && !previous) throw new HttpError(409, "Account was removed during authorization");
-    if (previous && previous.identity !== identity.identity) throw new HttpError(409, "A different provider identity was authorized. Use Add account instead of reconnecting this account.");
-    if (!grant.refreshToken && previous?.status === "connected" && previous.grant?.cloudUrl === grant.cloudUrl && previous.grant.refreshToken) {
-      grant.refreshToken = previous.grant.refreshToken;
-    }
-    const services = PLUGIN_PROVIDERS[pending.providerId].services.filter((service) => hasScopes(grant, service)).map((service) => service.id);
-    const account: Account = { id: previous?.id ?? `account_${randomUUID().replace(/-/g, "")}`, providerId: pending.providerId,
-      label: previous?.label ?? identity.label, identity: identity.identity, enabledServices: previous ? previous.enabledServices.filter((id) => services.includes(id)) : services,
-      bundleErrors: { ...previous?.bundleErrors },
-      status: "connected", grant, nativeManaged: true };
-    this.#state.accounts = [...this.#state.accounts.filter((item) => item.id !== account.id), account];
-    for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
-      this.#changeService(account, service.id);
-      if (!account.enabledServices.includes(service.id)) {
-        const connection = this.mcp.serviceConnections(account.id).find((entry) => entry.name === this.#serviceName(account, service.id));
-        if (connection) this.mcp.enable(connection.id, false, true);
-        this.#releaseBundle(account.providerId, service.id);
-      }
-    }
-    this.#persist(true);
-    for (const service of PLUGIN_PROVIDERS[account.providerId].services) if (account.enabledServices.includes(service.id)) {
-      try { await this.#provisionService(account, service, true); }
-      catch (error) { account.bundleErrors[service.id] = redactToolErrorSummary(error instanceof Error ? error.message : error); this.#persist(); }
-    }
-    return { returnUrl: pending.returnUrl, label: account.label };
+    return this.accounts.finishAuthorization(url);
   }
 
   labelAccount(id: string, label: string): void {
@@ -531,138 +380,26 @@ export class PluginsService {
     account.label = label;
     this.#persist(true);
   }
-  async enableService(id: string, serviceId: string, enabled: boolean): Promise<PluginAccountDto> {
-    await this.#ready;
-    const account = this.#state.accounts.find((entry) => entry.id === id);
-    if (!account) throw new HttpError(404, "Provider account not found");
-    const service = PLUGIN_PROVIDERS[account.providerId].services.find((entry) => entry.id === serviceId);
-    if (!service) throw new HttpError(404, "Service is not part of this provider account");
-    if (enabled && (account.status === "reauthorize" || (account.grant && !hasScopes(account.grant, service)))) throw new HttpError(409, "This service needs additional consent. Reconnect the account to request the supported provider permission group.");
-    if (account.native && account.native.serviceId !== serviceId) throw new HttpError(409, "Authorize this Service or region as a separate native account connection");
-    const epoch = this.#changeService(account, serviceId);
-    const wasEnabled = account.enabledServices.includes(serviceId);
-    account.enabledServices = enabled ? [...new Set([...account.enabledServices, serviceId])] : account.enabledServices.filter((entry) => entry !== serviceId);
-    this.#persist(true);
-    try {
-      if (enabled) await this.#provisionService(account, service, true);
-      else {
-        const connection = this.mcp.serviceConnections(account.id).find((entry) => entry.name === this.#serviceName(account, serviceId));
-        if (connection) this.mcp.enable(connection.id, false, true);
-        this.#releaseBundle(account.providerId, serviceId);
-      }
-    } catch (error) {
-      if (this.#state.accounts.includes(account) && this.#serviceEpoch(account, serviceId) === epoch) {
-        account.enabledServices = wasEnabled ? [...new Set([...account.enabledServices, serviceId])] : account.enabledServices.filter((entry) => entry !== serviceId);
-        account.bundleErrors[serviceId] = redactToolErrorSummary(error instanceof Error ? error.message : error);
-        this.#persist();
-      }
-      throw error;
-    }
-    return this.#accountDto(account);
+  enableService(id: string, serviceId: string, enabled: boolean): Promise<PluginAccountDto> {
+    return this.bundles.enable(id, serviceId, enabled);
   }
-
   #releaseBundle(providerId: PluginProviderId, serviceId: string): void {
-    const owners = this.#state.accounts.filter((account) => account.providerId === providerId
-      && this.mcp.serviceConnections(account.id).some((connection) => connection.name === this.#serviceName(account, serviceId)));
-    const enabled = owners.some((account) => account.enabledServices.includes(serviceId));
-    for (const skill of this.skills.list().filter((entry) => entry.origin === "service" && entry.serviceId === `${providerId}/${serviceId}`)) {
-      if (!owners.length) this.skills.remove(skill.id, true);
-      else if (skill.enabled !== enabled) this.skills.enable(skill.id, enabled, true);
-    }
-    this.#nativeCache = undefined;
+    this.bundles.release(providerId, serviceId);
   }
-
-  async removeService(id: string, serviceId: string): Promise<void> {
-    await this.#ready;
-    const account = this.#state.accounts.find((entry) => entry.id === id);
-    if (!account) throw new HttpError(404, "Provider account not found");
-    if (!PLUGIN_PROVIDERS[account.providerId].services.some((service) => service.id === serviceId)) throw new HttpError(404, "Unknown Service for this account");
-    this.#changeService(account, serviceId);
-    const connection = this.mcp.serviceConnections(id).find((entry) => entry.name === this.#serviceName(account, serviceId));
-    if (connection) this.mcp.remove(connection.id, true);
-    account.enabledServices = account.enabledServices.filter((entry) => entry !== serviceId);
-    delete account.bundleErrors[serviceId];
-    this.#releaseBundle(account.providerId, serviceId);
-    this.#persist(true);
+  removeService(id: string, serviceId: string): Promise<void> {
+    return this.bundles.remove(id, serviceId);
   }
-
   updateService(id: string, serviceId: string): Promise<void> {
-    const account = this.#state.accounts.find((entry) => entry.id === id);
-    if (!account) throw new HttpError(404, "Provider account not found");
-    const service = PLUGIN_PROVIDERS[account.providerId].services.find((entry) => entry.id === serviceId);
-    if (!service || !this.mcp.serviceConnections(id).some((entry) => entry.name === this.#serviceName(account, serviceId))) throw new HttpError(404, "Service is not installed for this account");
-    const key = `${account.providerId}/${serviceId}`;
-    const pending = this.#serviceUpdates.get(key);
-    if (pending) return pending;
-    const operation = this.#ensureBundle(account, service, true).finally(() => { if (this.#serviceUpdates.get(key) === operation) this.#serviceUpdates.delete(key); });
-    this.#serviceUpdates.set(key, operation);
-    return operation;
+    return this.bundles.update(id, serviceId);
   }
   disconnectAccount(id: string): void {
     const account = this.#state.accounts.find((entry) => entry.id === id);
     if (!account) throw new HttpError(404, "Provider account not found");
     for (const connection of this.mcp.serviceConnections(id)) this.mcp.remove(connection.id, true);
     this.#state.accounts = this.#state.accounts.filter((entry) => entry.id !== id);
-    for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
-      this.#serviceEpochs.delete(`${id}/${service.id}`);
-      this.#releaseBundle(account.providerId, service.id);
-    }
+    this.bundles.forget(id);
+    for (const service of PLUGIN_PROVIDERS[account.providerId].services) this.#releaseBundle(account.providerId, service.id);
     this.#persist(true);
-  }
-
-  async #token(providerId: PluginProviderId, grant: Grant, force = false): Promise<string> {
-    const refreshing = this.#refreshing.get(grant);
-    if (refreshing) return refreshing;
-    if (!force && (grant.expiresAt === undefined || grant.expiresAt > Date.now() + 60_000)) return grant.accessToken;
-    const refresh = (async () => {
-      try {
-        if (!grant.refreshToken) throw new HttpError(401, "Access expired or was revoked; reconnect this provider account");
-        const replacement = PublisherTokenResponse.parse(await this.publisher.request("oauth/token", { grantType: "refresh_token", providerId, refreshToken: grant.refreshToken }, grant.cloudUrl));
-        grant.accessToken = replacement.access_token;
-        if (replacement.refresh_token !== undefined) grant.refreshToken = replacement.refresh_token;
-        if (replacement.expires_in === undefined) delete grant.expiresAt;
-        else grant.expiresAt = Date.now() + replacement.expires_in * 1000;
-        if (replacement.scope !== undefined) grant.scopes = replacement.scope.split(/[\s,]+/).filter(Boolean);
-        if (this.#state.accounts.some((account) => account.grant === grant)) this.#persist();
-        return grant.accessToken;
-      } catch (error) {
-        if (error instanceof HttpError && error.status === 401) {
-          const account = this.#state.accounts.find((entry) => entry.grant === grant);
-          if (account) { account.status = "reauthorize"; account.error = "Provider authorization expired or was revoked. Reconnect this account."; this.#persist(); }
-        }
-        throw error;
-      }
-    })().finally(() => { this.#refreshing.delete(grant); });
-    this.#refreshing.set(grant, refresh);
-    return refresh;
-  }
-
-  #authenticatedFetch(providerId: PluginProviderId, grant: Grant): FetchLike {
-    return async (input, init) => {
-      const token = await this.#token(providerId, grant);
-      const headers = new Headers(init?.headers);
-      headers.set("authorization", `Bearer ${token}`);
-      let response = await fetch(input, { ...init, headers, redirect: "manual" });
-      if (response.status === 401) {
-        await response.body?.cancel();
-        const refreshed = grant.accessToken === token ? await this.#token(providerId, grant, true) : grant.accessToken;
-        headers.set("authorization", `Bearer ${refreshed}`);
-        response = await fetch(input, { ...init, headers, redirect: "manual" });
-        if (response.status === 401) {
-          const account = this.#state.accounts.find((entry) => entry.grant === grant);
-          if (account) {
-            account.status = "reauthorize";
-            account.error = "Provider rejected refreshed authorization. Reconnect this account.";
-            this.#persist();
-          }
-        }
-      }
-      return response;
-    };
-  }
-
-  async #identify(providerId: PluginProviderId, grant: Grant): Promise<{ identity: string; label: string }> {
-    return identifyAccount(providerId, grant, this.cwd, this.#authenticatedFetch(providerId, grant));
   }
 
   async #toolOutput(result: AgentPluginToolOutput): Promise<AgentPluginToolOutput> {
@@ -730,8 +467,8 @@ export class PluginsService {
     clearInterval(this.#reconcileTimer);
     await this.packages.shutdown();
     await this.#ready;
-    this.#oauth.clear();
+    this.accounts.clearPending();
     await Promise.allSettled(this.skillInstalls.pending());
-    await Promise.allSettled(this.#serviceUpdates.values());
+    await Promise.allSettled(this.bundles.pending());
   }
 }
