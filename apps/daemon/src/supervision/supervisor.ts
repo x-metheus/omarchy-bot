@@ -1,14 +1,8 @@
 import path from "node:path";
 import type {
-  AgentBotMessageToolOutput,
-  AgentBotMessageToolRequest,
-  AgentComputerToolOutput,
-  AgentComputerToolRequest,
+  ToolChannelFrame,
   AgentEvent,
-  AgentPluginToolRequest,
-  AgentPluginToolOutput,
-  AgentLocalToolRequest,
-  AgentLocalToolOutput,
+
 } from "@omarchy-bot/agent-contract";
 import type { AgentId } from "@omarchy-bot/domain";
 import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
@@ -16,26 +10,10 @@ import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
 export interface SupervisorHooks {
   onAgentEvent: (agentId: AgentId, event: AgentEvent) => void;
   onWorkerCrash: (agentId: AgentId, error: Error) => void;
-  onAgentComputerRequest: (
+  onAgentToolFrame: (
     agentId: AgentId,
-    request: AgentComputerToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentComputerToolOutput>;
-  onAgentBotMessageRequest: (
-    agentId: AgentId,
-    request: AgentBotMessageToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentBotMessageToolOutput>;
-  onAgentPluginRequest: (
-    agentId: AgentId,
-    request: AgentPluginToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentPluginToolOutput>;
-  onAgentLocalRequest: (
-    agentId: AgentId,
-    request: AgentLocalToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentLocalToolOutput>;
+    frame: ToolChannelFrame,
+  ) => Promise<ToolChannelFrame | undefined>;
 }
 
 
@@ -65,14 +43,7 @@ export class Supervisor {
       script: path.join(this.workerDirs.agents, agentId, "src", "worker.ts"),
       env: this.#agentEnvironment,
       onEvent: (e) => this.hooks.onAgentEvent(agentId, e),
-      onRequest: (request, signal) =>
-        this.hooks.onAgentComputerRequest(agentId, request, signal),
-      onBotMessageRequest: (request, signal) =>
-        this.hooks.onAgentBotMessageRequest(agentId, request, signal),
-      onPluginRequest: (request, signal) =>
-        this.hooks.onAgentPluginRequest(agentId, request, signal),
-      onLocalRequest: (request, signal) =>
-        this.hooks.onAgentLocalRequest(agentId, request, signal),
+      onToolFrame: (frame) => this.hooks.onAgentToolFrame(agentId, frame),
       onExit: (code) => {
         this.hooks.onWorkerCrash(
           agentId,

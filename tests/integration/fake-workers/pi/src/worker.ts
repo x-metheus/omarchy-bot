@@ -15,7 +15,8 @@
  *   computer:<action> invokes the daemon-owned Bot Screen tool bridge
  *   local.run:<command> invokes the daemon-owned Local Sidecar tool bridge
  *
- *   send_bot_message:<targetBotId>:<text>[:retry] invokes the daemon-owned mailbox bridge
+ *   send_bot_message:<targetBotId>:<text>[:retry] invokes the daemon-owned mailbox bridge;
+ *                    :retry re-sends the same Tool Call, which the channel must refuse
  *   send_bot_message_after_release:<file>:<targetBotId>:<text> delays that bridge for readiness tests
  * Stays alive until stdin closes (daemon lifecycle contract).
  */
@@ -27,6 +28,10 @@ import {
   type AgentCapabilityInventory,
   type ProbePayload,
 } from "../../../../../packages/agent-contract/src/agent-protocol.ts";
+import {
+  createToolChannelWorker,
+  type ToolChannelFrame,
+} from "../../../../../packages/agent-contract/src/tool-channel.ts";
 import { readJsonl } from "../../../../../packages/agent-contract/src/framing.ts";
 
 const write = (msg: unknown): void => {
@@ -205,7 +210,10 @@ interface FakeSession {
   aborted: boolean;
   streaming: boolean;
   directive?: string | undefined;
-  computerRequestId?: string;
+  /** One turn's tool-bridge signal: turn.abort aborts every bridge waiting on it. */
+  turnAbort?: AbortController;
+  /** A non-streaming bridge call (local, send_bot_message) whose Turn abort must cancel. */
+  toolInFlight?: boolean;
   steerReply?: ((text: string) => void) | undefined;
 }
 const sessions = new Map<string, FakeSession>();
@@ -220,56 +228,34 @@ const respondError = (requestId: string, error: string): void => {
   write({ requestId, ok: false, error });
 };
 
-const localRequests = new Map<string, {
-  resolve: (value: { deviceId: string; hostname: string; text: string; exitCode?: number }) => void;
-  reject: (error: Error) => void;
-}>();
-const computerRequests = new Map<string, {
-  resolve: (payload: unknown) => void;
-  reject: (error: Error) => void;
-}>();
-
-const botMessageRequests = new Map<string, {
-  resolve: (payload: { deliveryId: string; queued: true }) => void;
-  reject: (error: Error) => void;
-}>();
+/** One ToolChannel for every daemon-owned bridge this fake worker calls. */
+const toolChannel = createToolChannelWorker();
+toolChannel.send = (frame) => write(frame);
 
 function requestBotMessage(
   context: BotMessageTurnContext,
   toolCallId: string,
   targetBotId: string,
   text: string,
+  signal: AbortSignal,
 ): Promise<{ deliveryId: string; queued: true }> {
-  const requestId = crypto.randomUUID();
-  const pending = Promise.withResolvers<{ deliveryId: string; queued: true }>();
-  botMessageRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
-  write({
-    type: "bot-message.request",
-    requestId,
-    context: { ...context, toolCallId },
-    targetBotId,
-    text,
-  });
-  return pending.promise;
+  return toolChannel
+    .call("send_bot_message", { targetBotId, text }, { ...context, toolCallId }, signal)
+    .then((result) => result as { deliveryId: string; queued: true });
 }
 
-async function requestComputer(
+function requestComputer(
   context: ComputerTurnContext,
   toolCallId: string,
   action: { name: string; args: Record<string, unknown> },
-  onRequest: (requestId: string) => void,
+  signal: AbortSignal,
 ): Promise<unknown> {
-  const requestId = crypto.randomUUID();
-  onRequest(requestId);
-  const pending = Promise.withResolvers<unknown>();
-  computerRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
-  write({
-    type: "computer.request",
-    requestId,
-    context: { ...context, toolCallId },
-    action,
-  });
-  return pending.promise;
+  return toolChannel.call(
+    "computer",
+    { action: action.name, args: action.args },
+    { ...context, toolCallId },
+    signal,
+  );
 }
 
 
@@ -286,18 +272,11 @@ function requestLocal(
     contents?: string;
     direction?: "to-workspace" | "from-workspace";
   } = {},
+  signal: AbortSignal,
 ): Promise<{ deviceId: string; hostname: string; text: string; exitCode?: number }> {
-  const requestId = crypto.randomUUID();
-  const pending = Promise.withResolvers<{ deviceId: string; hostname: string; text: string; exitCode?: number }>();
-  localRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
-  write({
-    type: "local.request",
-    requestId,
-    context: { ...context, toolCallId },
-    action,
-    ...args,
-  });
-  return pending.promise;
+  return toolChannel
+    .call("local", { action, ...args }, { ...context, toolCallId }, signal)
+    .then((result) => result as { deviceId: string; hostname: string; text: string; exitCode?: number });
 }
 
 function parseLocalDirective(text: string): {
@@ -337,14 +316,6 @@ function parseLocalDirective(text: string): {
     destination: parts.slice(2).join(":"),
     ...(target !== undefined ? { target } : {}),
   };
-}
-
-function cancelComputerRequest(requestId: string): void {
-  const pending = computerRequests.get(requestId);
-  if (pending === undefined) return;
-  computerRequests.delete(requestId);
-  write({ type: "computer.cancel", requestId });
-  pending.reject(new Error("computer tool call cancelled"));
 }
 
 function computerTurnContext(value: unknown): ComputerTurnContext | undefined {
@@ -391,31 +362,15 @@ function botMessageTurnContext(value: unknown): BotMessageTurnContext | undefine
 readJsonl(Bun.stdin.stream(), (raw) => {
   const msg = raw as Record<string, unknown> & { type: string; requestId?: string };
   switch (msg.type) {
-    case "computer.result": {
-      const pending = msg.requestId === undefined ? undefined : computerRequests.get(msg.requestId);
-      if (pending === undefined) break;
-      computerRequests.delete(msg.requestId!);
-      if (msg.ok === true) pending.resolve(msg.payload);
-      else pending.reject(new Error(String(msg.error)));
+    // Relay an inbound tool.request the worker did not originate, so a test can
+    // inject a duplicate frame the daemon reads back as if the worker sent it.
+    case "tool.request": {
+      write(msg);
       break;
     }
-    case "local.result": {
-      const pending = msg.requestId === undefined ? undefined : localRequests.get(msg.requestId);
-      if (pending === undefined) break;
-      localRequests.delete(msg.requestId!);
-      if (msg.ok === true) pending.resolve(msg.payload as { deviceId: string; hostname: string; text: string; exitCode?: number });
-      else pending.reject(new Error(String(msg.error)));
-      break;
-    }
-    case "bot-message.result": {
-      const pending = msg.requestId === undefined ? undefined : botMessageRequests.get(msg.requestId);
-      if (pending === undefined) break;
-      botMessageRequests.delete(msg.requestId!);
-      if (msg.ok === true) {
-        pending.resolve(msg.payload as { deliveryId: string; queued: true });
-      } else {
-        pending.reject(new Error(String(msg.error)));
-      }
+    case "tool.result": {
+      if (msg.requestId === undefined) break;
+      toolChannel.receive(msg as unknown as ToolChannelFrame);
       break;
     }
     case "probe": {
@@ -512,6 +467,8 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       s.aborted = false;
       s.directive = undefined;
       s.steerReply = undefined;
+      const turnAbort = new AbortController();
+      s.turnAbort = turnAbort;
       void (async () => {
         let mailboxReleasePath: string | undefined;
         if (text.startsWith("send_bot_message_after_release:")) {
@@ -547,6 +504,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               target: targetBotId,
             },
           });
+          s.toolInFlight = true;
           while (mailboxReleasePath !== undefined && !existsSync(mailboxReleasePath)) {
             await Bun.sleep(10);
           }
@@ -556,12 +514,16 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               ? { ...binding, botId: targetBotId }
               : binding;
             const acknowledgements = [
-              await requestBotMessage(requestBinding, toolCallId, targetBotId, body),
+              await requestBotMessage(requestBinding, toolCallId, targetBotId, body, turnAbort.signal),
             ];
             if (retry) {
-              acknowledgements.push(
-                await requestBotMessage(binding, toolCallId, targetBotId, body),
-              );
+              // The channel dispatches a Tool Call once, so a repeated send must be
+              // refused and leave the delivery the first attempt acknowledged.
+              const refusal = await requestBotMessage(binding, toolCallId, targetBotId, body, turnAbort.signal)
+                .then(() => "", (error: unknown) => (error instanceof Error ? error.message : String(error)));
+              if (refusal !== "tool call was already dispatched") {
+                throw new Error(`expected a refused duplicate dispatch, got ${refusal === "" ? "an acknowledgement" : refusal}`);
+              }
             }
             if (mailboxReleasePath !== undefined) {
               appendFileSync(`${mailboxReleasePath}.ack`, "");
@@ -603,6 +565,8 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               type: "event",
               event: { type: "error", sessionId, message, retryable: false },
             });
+          } finally {
+            s.toolInFlight = false;
           }
           respond(msg.requestId!, { accepted: true });
           return;
@@ -697,10 +661,11 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             },
           });
           respond(msg.requestId!, { accepted: true });
+          s.toolInFlight = true;
           try {
             if (binding === undefined) throw new Error("local tool binding missing");
             const { action, ...args } = localDirective;
-            const result = await requestLocal(binding, toolCallId, action, args);
+            const result = await requestLocal(binding, toolCallId, action, args, turnAbort.signal);
             write({
               type: "event",
               event: {
@@ -732,6 +697,8 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               type: "event",
               event: { type: "error", sessionId, message, retryable: false },
             });
+          } finally {
+            s.toolInFlight = false;
           }
           return;
         }
@@ -773,9 +740,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               context,
               requestToolCallId,
               action,
-              (requestId) => {
-                s.computerRequestId = requestId;
-              },
+              turnAbort.signal,
             );
             write({
               type: "event",
@@ -808,7 +773,6 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             });
           } finally {
             s.streaming = false;
-            delete s.computerRequestId;
           }
           respond(msg.requestId!, { accepted: true });
           return;
@@ -1283,13 +1247,15 @@ readJsonl(Bun.stdin.stream(), (raw) => {
 
       const cancel = (): void => {
         const s = sessions.get(sessionId);
-        if (!s?.streaming) return;
+        if (!s) return;
+        // turnAbort covers every in-flight bridge (computer, local, send_bot_message),
+        // so abort it before the streaming gate: local and mail calls never stream.
+        s.turnAbort?.abort();
+        delete s.turnAbort;
+        if (!s.streaming && s.toolInFlight !== true) return;
         s.aborted = true;
-        if (s.computerRequestId !== undefined) {
-          cancelComputerRequest(s.computerRequestId);
-          delete s.computerRequestId;
-        }
         s.streaming = false;
+        s.toolInFlight = false;
         s.steerReply?.("");
         s.steerReply = undefined;
         s.directive = undefined;
@@ -1321,9 +1287,13 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         ],
       });
       break;
-    case "session.close":
+    case "session.close": {
+      // Every pending bridge call for this session settles here; others keep working.
+      const { sessionId } = msg as unknown as { sessionId: string };
+      toolChannel.close(sessionId);
       respond(msg.requestId!, {});
       break;
+    }
     default:
       if (msg.requestId) respondError(msg.requestId, `unknown command ${msg.type}`);
   }

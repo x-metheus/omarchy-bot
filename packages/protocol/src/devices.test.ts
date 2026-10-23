@@ -3,10 +3,9 @@ import {
   DeviceDto,
   DeviceErrorFrame,
   DeviceHeartbeatFrame,
-  DeviceLocalJobFrame,
-  DeviceLocalResultFrame,
   DeviceRegisterFrame,
   DeviceRegisteredFrame,
+  DeviceServerFrameSchema,
 } from "./devices.ts";
 
 const deviceId = "dev_0123456789abcdef0123456789abcdef";
@@ -86,7 +85,7 @@ describe("Local Sidecar device channel frames", () => {
 
 describe("Local Sidecar local job frames", () => {
   test("accepts a run job bound to Bot and Turn", () => {
-    expect(DeviceLocalJobFrame.parse({
+    expect(DeviceServerFrameSchema.parse({
       type: "local.job",
       jobId: "job-1",
       action: "run",
@@ -94,18 +93,15 @@ describe("Local Sidecar local job frames", () => {
       botId: "bot_1",
       turnId: "turn_1",
       command: "echo sidecar-sentinel",
-    }).command).toBe("echo sidecar-sentinel");
-    expect(DeviceLocalResultFrame.parse({
-      type: "local.result",
+    })).toMatchObject({ command: "echo sidecar-sentinel" });
+    expect(DeviceServerFrameSchema.parse({ type: "local.cancel", jobId: "job-1" })).toEqual({
+      type: "local.cancel",
       jobId: "job-1",
-      ok: true,
-      text: "sidecar-sentinel",
-      exitCode: 0,
-    }).ok).toBeTrue();
+    });
   });
 
   test("rejects screenshot actions on the Sidecar job frame", () => {
-    expect(DeviceLocalJobFrame.safeParse({
+    expect(DeviceServerFrameSchema.safeParse({
       type: "local.job",
       jobId: "job-1",
       action: "screenshot",

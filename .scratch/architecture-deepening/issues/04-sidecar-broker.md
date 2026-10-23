@@ -1,7 +1,7 @@
 # 04: SidecarBroker for `local` jobs
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** resolved
 **Blocked by:** 03
 
 **What to build:** Give `local` a deep `SidecarBroker` mirroring `ComputerBroker`, and register it as the `local` executor on the ToolChannel. It owns This Device resolution, capability checks, job ids, cancel, liveness, output bounds and redaction, and Shared Workspace transfer I/O behind one signal-aware call. `TurnService` stops doing file I/O for `local`.
@@ -17,9 +17,13 @@ Decisions (settled):
 - Sidecar parses incoming frames with the schemas instead of casting; imports via the workspace package, not relative paths.
 - Wire `shouldStartLocalSidecar` into its real caller or delete it; the same-host test must exercise real behaviour.
 
-- [ ] Abort/cancel test: cancelling a Turn during Ask dismisses the card and a later Allow does not run.
-- [ ] Heartbeat liveness test.
-- [ ] This Device resolution tests (tagged sender, untagged, two Sidecars).
-- [ ] Tests run through the in-process adapter with the real handler; twin deleted.
+- [x] Abort/cancel test: cancelling a Turn during Ask dismisses the card and a later Allow does not run.
+- [x] Heartbeat liveness test.
+- [x] This Device resolution tests (tagged sender, untagged, two Sidecars).
+- [x] Tests run through the in-process adapter with the real handler; twin deleted.
 
 ## Comments
+
+`SidecarBroker` is the `local` executor on the `ToolChannel`. This Device is resolved from the device id tagged on the user message that started the Turn; untagged requests fail closed, and explicit targets can name another online Sidecar. Cancellation sends `local.cancel`, dismisses the Ask card, and tears down the command's private POSIX process group (including descendants and SIGKILL escalation). A Sidecar with no heartbeat for 30 seconds is marked offline and its jobs fail. The real Sidecar handler owns policy and execution, the test fixture is an adapter over it, and `confinedPath` is the shared path-confinement helper. Assembled workspace-transfer frames are validated before dispatch with bounds errors on oversized payloads. Local dispatch validates active Turn identity (agentId, botId, turnId, workerSessionId) before execution.
+
+Review approved commit range `d305ec1..004935c` (`REVIEW.md`: `APPROVED`).

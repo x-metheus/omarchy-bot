@@ -55,43 +55,6 @@ describe("Pi SDK Omarchy Bot-message tool", () => {
     });
   });
 
-  test("rejects attachment-like and group arguments before bridge dispatch", async () => {
-    let dispatches = 0;
-    const tool = createBotMessageTool(
-      () => binding,
-      {
-        request: async () => {
-          dispatches += 1;
-          return { deliveryId: "delivery_0123456789abcdef0123456789abcdef", queued: true };
-        },
-      },
-    );
-    expect(tool.parameters.additionalProperties).toBeFalse();
-
-    await expect(tool.execute(
-      "attachment-mail",
-      {
-        targetBotId: "bot_fedcba9876543210fedcba9876543210",
-        text: "Review this.",
-        attachments: ["/tmp/private"],
-      } as never,
-      undefined,
-      undefined,
-      undefined as never,
-    )).rejects.toThrow("Bot mail accepts only targetBotId and text");
-    await expect(tool.execute(
-      "group-mail",
-      {
-        targetBotIds: ["bot_fedcba9876543210fedcba9876543210"],
-        text: "Review this.",
-      } as never,
-      undefined,
-      undefined,
-      undefined as never,
-    )).rejects.toThrow("Bot mail accepts only targetBotId and text");
-    expect(dispatches).toBe(0);
-  });
-
   test("fails before bridge dispatch without an active binding or after cancellation", async () => {
     let active = false;
     let dispatches = 0;

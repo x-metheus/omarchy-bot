@@ -2,17 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   HEARTBEAT_MS,
   readJsonl,
-  type AgentBotMessageToolOutput,
-  isAgentBotMessageToolRequest,
-  type AgentBotMessageToolRequest,
-  type AgentComputerToolOutput,
-  type AgentComputerToolRequest,
-  isAgentPluginToolRequest,
-  type AgentPluginToolRequest,
-  type AgentPluginToolOutput,
-  isAgentLocalToolRequest,
-  type AgentLocalToolRequest,
-  type AgentLocalToolOutput,
+  type ToolChannelFrame,
 } from "@omarchy-bot/agent-contract";
 import { stderr } from "@omarchy-bot/agent-contract";
 
@@ -26,22 +16,8 @@ export interface WorkerClientOptions {
   env?: Record<string, string>;
   onEvent: (event: any) => void;
   onExit?: (code: number | null) => void;
-  onRequest?: (
-    request: AgentComputerToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentComputerToolOutput>;
-  onBotMessageRequest?: (
-    request: AgentBotMessageToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentBotMessageToolOutput>;
-  onPluginRequest?: (
-    request: AgentPluginToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentPluginToolOutput>;
-  onLocalRequest?: (
-    request: AgentLocalToolRequest,
-    signal: AbortSignal,
-  ) => Promise<AgentLocalToolOutput>;
+  /** Reverse tool traffic; undefined answers every request with an error frame. */
+  onToolFrame?: (frame: ToolChannelFrame) => Promise<ToolChannelFrame | undefined>;
 }
 
 interface Pending {
@@ -57,8 +33,9 @@ interface Pending {
 export class WorkerClient {
   #proc: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined = undefined;
   #pending = new Map<string, Pending>();
-  #incoming = new Map<string, AbortController>();
   #hello: { v: number; worker: string; pid: number } | undefined;
+  /** Frames written to the worker, so a test can read a result without a second stdout reader. */
+  readonly sent: unknown[] = [];
   #lastMessageAt = 0;
   #stopping = false;
   #watchdog?: ReturnType<typeof setInterval>;
@@ -87,8 +64,6 @@ export class WorkerClient {
           p.reject(new Error(`${this.opts.name} worker exited (${exitCode})`));
         }
         this.#pending.clear();
-        for (const controller of this.#incoming.values()) controller.abort("worker exited");
-        this.#incoming.clear();
         this.#proc = undefined;
         this.#hello = undefined;
         if (!this.#stopping) this.opts.onExit?.(exitCode);
@@ -150,62 +125,27 @@ export class WorkerClient {
       return;
     }
     if (msg?.type === "heartbeat") return;
-    if (msg?.type === "computer.request") {
-      void this.#handleComputerRequest(msg as AgentComputerToolRequest);
-      return;
-    }
-    if (msg?.type === "bot-message.request") {
-      if (!isAgentBotMessageToolRequest(msg)) {
-        if (typeof msg.requestId === "string" && this.alive) {
+    if (msg?.type === "tool.request") {
+      if (
+        typeof msg.requestId !== "string"
+        || typeof msg.name !== "string"
+        || typeof msg.context?.workerSessionId !== "string"
+      ) {
+        if (this.alive) {
           this.write({
-            type: "bot-message.result",
-            requestId: msg.requestId,
+            type: "tool.result",
+            requestId: typeof msg.requestId === "string" ? msg.requestId : "",
             ok: false,
-            error: "invalid Bot message tool request",
+            error: "invalid tool request frame",
           });
         }
         return;
       }
-      void this.#handleBotMessageRequest(msg);
+      void this.#handleToolFrame(msg as ToolChannelFrame);
       return;
     }
-    if (msg?.type === "local.request") {
-      if (!isAgentLocalToolRequest(msg)) {
-        if (typeof msg.requestId === "string" && this.alive) {
-          this.write({
-            type: "local.result",
-            requestId: msg.requestId,
-            ok: false,
-            error: "invalid local tool request",
-          });
-        }
-        return;
-      }
-      void this.#handleLocalRequest(msg);
-      return;
-    }
-    if (msg?.type === "plugin.request") {
-      if (!isAgentPluginToolRequest(msg)) {
-        if (typeof msg.requestId === "string" && this.alive) this.write({ type: "plugin.result", requestId: msg.requestId, ok: false, error: "invalid plugin tool request" });
-        return;
-      }
-      void this.#handlePluginRequest(msg);
-      return;
-    }
-    if (msg?.type === "plugin.cancel" && typeof msg.requestId === "string") {
-      this.#incoming.get(msg.requestId)?.abort("plugin tool call cancelled");
-      return;
-    }
-    if (msg?.type === "computer.cancel" && typeof msg.requestId === "string") {
-      this.#incoming.get(msg.requestId)?.abort("tool call cancelled");
-      return;
-    }
-    if (msg?.type === "bot-message.cancel" && typeof msg.requestId === "string") {
-      this.#incoming.get(msg.requestId)?.abort("tool call cancelled");
-      return;
-    }
-    if (msg?.type === "local.cancel" && typeof msg.requestId === "string") {
-      this.#incoming.get(msg.requestId)?.abort("tool call cancelled");
+    if (msg?.type === "tool.cancel") {
+      void this.#handleToolFrame(msg as ToolChannelFrame);
       return;
     }
     if (msg?.type === "event") {
@@ -221,99 +161,15 @@ export class WorkerClient {
     }
   }
 
-  async #handleComputerRequest(request: AgentComputerToolRequest): Promise<void> {
-    const controller = new AbortController();
-    this.#incoming.set(request.requestId, controller);
-    try {
-      if (this.opts.onRequest === undefined) {
-        throw new Error(`${this.opts.name} cannot route computer tools`);
+  async #handleToolFrame(frame: ToolChannelFrame): Promise<void> {
+    if (this.opts.onToolFrame === undefined) {
+      if (frame.type === "tool.request" && this.alive) {
+        this.write({ type: "tool.result", requestId: frame.requestId, ok: false, error: `${this.opts.name} cannot route tool calls` });
       }
-      const payload = await this.opts.onRequest(request, controller.signal);
-      if (controller.signal.aborted) throw new Error("computer tool call cancelled");
-      if (this.alive) {
-        this.write({ type: "computer.result", requestId: request.requestId, ok: true, payload });
-      }
-    } catch (error) {
-      if (this.alive) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.write({ type: "computer.result", requestId: request.requestId, ok: false, error: message });
-      }
-    } finally {
-      if (this.#incoming.get(request.requestId) === controller) {
-        this.#incoming.delete(request.requestId);
-      }
-    }
-  }
-
-  async #handleBotMessageRequest(request: AgentBotMessageToolRequest): Promise<void> {
-    const controller = new AbortController();
-    this.#incoming.set(request.requestId, controller);
-    try {
-      if (this.opts.onBotMessageRequest === undefined) {
-        throw new Error(`${this.opts.name} cannot route Bot messages`);
-      }
-      const payload = await this.opts.onBotMessageRequest(request, controller.signal);
-      if (controller.signal.aborted) throw new Error("Bot message tool call cancelled");
-      if (this.alive) {
-        this.write({ type: "bot-message.result", requestId: request.requestId, ok: true, payload });
-      }
-    } catch (error) {
-      if (this.alive) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.write({ type: "bot-message.result", requestId: request.requestId, ok: false, error: message });
-      }
-    } finally {
-      if (this.#incoming.get(request.requestId) === controller) {
-        this.#incoming.delete(request.requestId);
-      }
-    }
-  }
-
-  async #handlePluginRequest(request: AgentPluginToolRequest): Promise<void> {
-    if (this.#incoming.has(request.requestId)) {
-      if (this.alive) this.write({ type: "plugin.result", requestId: request.requestId, ok: false, error: "duplicate plugin request identity" });
       return;
     }
-    const controller = new AbortController();
-    this.#incoming.set(request.requestId, controller);
-    try {
-      if (!this.opts.onPluginRequest) throw new Error(`${this.opts.name} cannot route plugin tools`);
-      const payload = await this.opts.onPluginRequest(request, controller.signal);
-      controller.signal.throwIfAborted();
-      if (this.alive) this.write({ type: "plugin.result", requestId: request.requestId, ok: true, payload });
-    } catch (error) {
-      if (this.alive) this.write({ type: "plugin.result", requestId: request.requestId, ok: false, error: error instanceof Error ? error.message : String(error) });
-    } finally {
-      if (this.#incoming.get(request.requestId) === controller) this.#incoming.delete(request.requestId);
-    }
-  }
-
-  async #handleLocalRequest(request: AgentLocalToolRequest): Promise<void> {
-    if (this.#incoming.has(request.requestId)) {
-      if (this.alive) this.write({ type: "local.result", requestId: request.requestId, ok: false, error: "duplicate local request identity" });
-      return;
-    }
-    const controller = new AbortController();
-    this.#incoming.set(request.requestId, controller);
-    try {
-      if (this.opts.onLocalRequest === undefined) {
-        throw new Error(`${this.opts.name} cannot route local tools`);
-      }
-      const payload = await this.opts.onLocalRequest(request, controller.signal);
-      if (controller.signal.aborted) throw new Error("local tool call cancelled");
-      if (this.alive) {
-        this.write({ type: "local.result", requestId: request.requestId, ok: true, payload });
-      }
-    } catch (error) {
-      if (this.alive) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.write({ type: "local.result", requestId: request.requestId, ok: false, error: message });
-      }
-    } finally {
-      if (this.#incoming.get(request.requestId) === controller) {
-        this.#incoming.delete(request.requestId);
-      }
-    }
+    const result = await this.opts.onToolFrame(frame);
+    if (result !== undefined && this.alive) this.write(result);
   }
 
   /** Send a command and await its result. Mutating worker commands are never auto-retried. */
@@ -335,6 +191,8 @@ export class WorkerClient {
     const stdin = (this.#proc as unknown as { stdin?: { write: (s: string) => void; flush?: () => void } } | undefined)?.stdin;
     if (!stdin) throw new Error(`${this.opts.name} worker not running`);
     stdin.write(JSON.stringify(obj) + "\n");
+    stdin.flush?.();
+    this.sent.push(obj);
   }
 
   async stop(graceMs = 3000): Promise<void> {

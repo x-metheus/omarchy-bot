@@ -1,3 +1,6 @@
+import { Type } from "typebox";
+import { COMPUTER_ACTION_NAMES, type ComputerActionName } from "@omarchy-bot/domain";
+
 export interface AgentComputerToolDefinition {
   readonly name: "computer";
   readonly description: string;
@@ -6,6 +9,15 @@ export interface AgentComputerToolDefinition {
     readonly guidelines: readonly string[];
   };
 }
+
+/** Every graphical action the `computer` tool accepts. */
+export const COMPUTER_TOOL_ACTIONS: readonly ComputerActionName[] = COMPUTER_ACTION_NAMES;
+
+/** One schema for the action and its args; the ToolChannel validates it. */
+export const COMPUTER_TOOL_SCHEMA = Type.Object({
+  action: Type.Union(COMPUTER_TOOL_ACTIONS.map((action) => Type.Literal(action))),
+  args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+}, { additionalProperties: false });
 
 /** Mandatory Bot Screen semantics shared by every Agent adapter exposing computer. */
 export const AGENT_COMPUTER_TOOL: AgentComputerToolDefinition = Object.freeze({

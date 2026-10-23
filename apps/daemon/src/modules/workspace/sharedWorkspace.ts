@@ -1,6 +1,7 @@
 import { accessSync, constants as fsConstants, mkdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { confinedPath } from "@omarchy-bot/domain";
 
 /**
  * User home for Shared Workspace resolution.
@@ -50,10 +51,9 @@ export function confinedWorkspacePath(relative: string, root = sharedWorkspaceDi
   if (trimmed.length === 0 || trimmed === "/") {
     throw new Error("Shared Workspace path must be explicit");
   }
-  const base = path.resolve(root);
-  const resolved = path.resolve(base, trimmed);
-  if (resolved !== base && !resolved.startsWith(`${base}${path.sep}`)) {
+  try {
+    return confinedPath(trimmed, root);
+  } catch {
     throw new Error("path escapes Shared Workspace");
   }
-  return resolved;
 }

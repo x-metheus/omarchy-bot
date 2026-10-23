@@ -1,11 +1,10 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import type {
-  AgentBotMessageToolContext,
-  AgentBotMessageToolOutput,
-  AgentBotMessageTurnContext,
+import {
+  SEND_BOT_MESSAGE_SCHEMA,
+  type AgentBotMessageToolContext,
+  type AgentBotMessageToolOutput,
+  type AgentBotMessageTurnContext,
 } from "@omarchy-bot/agent-contract";
-import { PEER_MAIL_TEXT_MAX_LENGTH } from "@omarchy-bot/domain";
-import { Type } from "typebox";
 
 export interface PiBotMessageBridge {
   request(
@@ -30,21 +29,9 @@ export function createBotMessageTool(
       "Use send_bot_message only when handing work or information to a distinct Bot ID.",
       "After a successful queued acknowledgement, conclude your response; the target Bot's later output is not returned to this Turn.",
     ],
-    parameters: Type.Object({
-      targetBotId: Type.String({ minLength: 1 }),
-      text: Type.String({ minLength: 1, maxLength: PEER_MAIL_TEXT_MAX_LENGTH }),
-    }, { additionalProperties: false }),
+    parameters: SEND_BOT_MESSAGE_SCHEMA,
     executionMode: "sequential",
     execute: async (toolCallId, params, signal) => {
-      if (
-        params === null
-        || typeof params !== "object"
-        || Object.keys(params).length !== 2
-        || !("targetBotId" in params)
-        || !("text" in params)
-      ) {
-        throw new Error("Bot mail accepts only targetBotId and text");
-      }
       const active = turnContext();
       if (active === undefined) {
         throw new Error("send_bot_message tool has no active Omarchy turn binding");

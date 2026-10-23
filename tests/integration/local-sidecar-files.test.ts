@@ -31,7 +31,7 @@ describe("search, read, and write on the Sidecar", () => {
       capabilities: ["search", "files"],
     });
     const botId = await makeBot(h, "Sidecar files Bot");
-    const pendingWrite = sendToBot(h, botId, "local.write:notes/doc.txt:hello-from-sidecar");
+    const pendingWrite = sendToBot(h, botId, "local.write:notes/doc.txt:hello-from-sidecar", DEVICE_A);
     const job = await sidecar.waitForJob();
     expect(job).toMatchObject({ action: "write", hostname: "laptop", path: "notes/doc.txt" });
     expect(sidecar.executed).toEqual([]);
@@ -46,7 +46,7 @@ describe("search, read, and write on the Sidecar", () => {
     expect(writeTool?.toolCall?.target).toContain("laptop");
     expect(writeTool?.toolCall?.target).toContain("notes/doc.txt");
 
-    const pendingRead = sendToBot(h, botId, "local.read:notes/doc.txt");
+    const pendingRead = sendToBot(h, botId, "local.read:notes/doc.txt", DEVICE_A);
     await sidecar.waitForJob();
     await sidecar.allowOnce();
     const read = await pendingRead;
@@ -63,12 +63,12 @@ describe("search, read, and write on the Sidecar", () => {
       capabilities: ["search", "files"],
     });
     const botId = await makeBot(h, "Sidecar search Bot");
-    const pendingWrite = sendToBot(h, botId, "local.write:notes/doc.txt:hello-from-sidecar");
+    const pendingWrite = sendToBot(h, botId, "local.write:notes/doc.txt:hello-from-sidecar", DEVICE_A);
     await sidecar.waitForJob();
     await sidecar.allowOnce();
     await waitThreadIdle(h, (await pendingWrite).threadId);
 
-    const pendingSearch = sendToBot(h, botId, "local.search:hello-from-sidecar");
+    const pendingSearch = sendToBot(h, botId, "local.search:hello-from-sidecar", DEVICE_A);
     await sidecar.waitForJob();
     await sidecar.allowOnce();
     const searched = await pendingSearch;
@@ -78,7 +78,7 @@ describe("search, read, and write on the Sidecar", () => {
     expect(blob).toContain("hello-from-sidecar");
     expect(blob.includes("/etc/passwd")).toBeFalse();
 
-    const root = await sendToBot(h, botId, "local.search:/");
+    const root = await sendToBot(h, botId, "local.search:/", DEVICE_A);
     await waitThreadIdle(h, root.threadId);
     expect((await messages(h, root.threadId)).some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "error")).toBeTrue();
   });
@@ -92,7 +92,7 @@ describe("search, read, and write on the Sidecar", () => {
       capabilities: ["files"],
     });
     const botId = await makeBot(h, "Denied write Bot");
-    const pending = sendToBot(h, botId, "local.write:secret.txt:must-not-land");
+    const pending = sendToBot(h, botId, "local.write:secret.txt:must-not-land", DEVICE_A);
     await sidecar.waitForJob();
     await sidecar.denyOnce();
     const sent = await pending;

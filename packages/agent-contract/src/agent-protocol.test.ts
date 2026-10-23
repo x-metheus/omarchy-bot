@@ -6,7 +6,6 @@ import {
   redactToolErrorSummary,
   toolCallSummaryFromEvent,
 } from "./agent-protocol.ts";
-import { isAgentBotMessageToolRequest } from "./bot-message-protocol.ts";
 
 describe("Agent capability inventory", () => {
   const inventory = {
@@ -42,32 +41,6 @@ describe("Agent capability inventory", () => {
       ...inventory,
       thinking: { ...inventory.thinking, source: "inferred" },
     })).toBeFalse();
-  });
-});
-
-describe("Agent Bot-message requests", () => {
-  const request = {
-    type: "bot-message.request" as const,
-    requestId: "request-1",
-    context: {
-      botId: "bot_0123456789abcdef0123456789abcdef",
-      turnId: "turn_0123456789abcdef0123456789abcdef",
-      workerSessionId: "worker-session-1",
-      toolCallId: "tool-call-1",
-    },
-    targetBotId: "bot_fedcba9876543210fedcba9876543210",
-    text: "Review this.",
-  };
-
-  test("accepts only exact bounded 1:1 text requests", () => {
-    expect(isAgentBotMessageToolRequest(request)).toBeTrue();
-    expect(isAgentBotMessageToolRequest({ ...request, attachments: ["/tmp/private"] })).toBeFalse();
-    expect(isAgentBotMessageToolRequest({
-      ...request,
-      targetBotIds: [request.targetBotId],
-    })).toBeFalse();
-    expect(isAgentBotMessageToolRequest({ ...request, targetBotId: "../../private" })).toBeFalse();
-    expect(isAgentBotMessageToolRequest({ ...request, text: "x".repeat(32_001) })).toBeFalse();
   });
 });
 

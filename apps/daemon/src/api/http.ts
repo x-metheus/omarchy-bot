@@ -27,7 +27,7 @@ import { handleDictationRequest } from "./dictationRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import { handlePluginRequest } from "./pluginRoutes.ts";
 import type { PluginsService } from "../modules/plugins/plugins.ts";
-import type { DeviceRoster } from "../modules/devices/deviceRoster.ts";
+import type { DevicePort, SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -51,7 +51,7 @@ export interface DaemonServices {
   computer: ComputerBroker;
   screens: BotScreenManager;
   projections: ScreenProjectionService;
-  devices: DeviceRoster;
+  devices: SidecarBroker;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
   supervisor: Supervisor;
 }
@@ -74,6 +74,7 @@ interface ProjectionWsData {
 interface DeviceWsData {
   kind: "device";
   svc: DaemonServices;
+  port?: DevicePort;
   deviceId?: string;
 }
 
@@ -205,6 +206,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
         body.text.trim(),
         body.attachmentIds ?? [],
         body.attachmentDraftToken,
+        body.deviceId === undefined ? {} : { deviceId: body.deviceId },
       );
       return json(result, 202);
     }
@@ -227,6 +229,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
         body.text.trim(),
         body.attachmentIds ?? [],
         body.attachmentDraftToken,
+        body.deviceId === undefined ? {} : { deviceId: body.deviceId },
       );
       return json(result, 202);
     }
@@ -283,6 +286,11 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
           return;
         }
         if (data.kind === "device") {
+          const port = data.port ?? {
+            send: (frame) => ws.send(JSON.stringify(frame)),
+            close: (code, reason) => ws.close(code, reason),
+          };
+          data.port = port;
           let frame: { type?: string };
           try {
             frame = JSON.parse(String(raw)) as { type?: string };
@@ -290,7 +298,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
             return;
           }
           if (frame.type === "register") {
-            const result = data.svc.devices.register(ws, frame);
+            const result = data.svc.devices.register(port, frame);
             if (!result.ok) {
               ws.send(JSON.stringify({ type: "error", error: result.error }));
               return;
@@ -299,8 +307,12 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
             ws.send(JSON.stringify({ type: "registered", deviceId: result.device.id }));
             return;
           }
-          if (frame.type === "local.result") {
-            data.svc.devices.complete(frame);
+          if (frame.type === "heartbeat" && data.deviceId !== undefined) {
+            data.svc.devices.heartbeat(port, data.deviceId);
+            return;
+          }
+          if (frame.type === "local.result" && data.deviceId !== undefined) {
+            data.svc.devices.complete(port, data.deviceId, frame);
             return;
           }
           return;
@@ -326,8 +338,8 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       close(ws) {
         const data = ws.data;
         if (data.kind === "events") data.sub?.();
-        else if (data.kind === "device") data.svc.devices.disconnect(ws, data.deviceId);
-        else data.svc.projections.socketClosed(data.reservation);
+        else if (data.kind === "device" && data.port !== undefined) data.svc.devices.disconnect(data.port, data.deviceId);
+        else if (data.kind === "projection") data.svc.projections.socketClosed(data.reservation);
       },
     },
   });

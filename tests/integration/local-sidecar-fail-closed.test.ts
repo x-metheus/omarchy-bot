@@ -85,43 +85,37 @@ describe("fail closed and keep Sidecars distinct", () => {
     expect(toolNamed(await messages(h, native.threadId), "bash")?.toolCall?.status).toBe("completed");
   });
 
-  test("two online Sidecars stay distinct and this-device does not guess", async () => {
+  test("This Device is the tagged sender, not whichever Sidecar is online", async () => {
     h = await startDaemon();
     const a = await connect();
     await a.register({ deviceId: DEVICE_A, hostname: "laptop-a", capabilities: ["shell"] });
     const b = await connect();
     await b.register({ deviceId: DEVICE_B, hostname: "laptop-b", capabilities: ["shell"] });
-    expect(await api<DeviceDto[]>(h, "GET", "/api/devices")).toHaveLength(2);
+    const botId = await makeBot(h, "Tagged sender Bot");
 
-    const botId = await makeBot(h, "Two device Bot");
-    const ambiguous = await sendToBot(h, botId, "local.run:echo x");
-    await waitThreadIdle(h, ambiguous.threadId);
-    const ambiguousTool = toolNamed(await messages(h, ambiguous.threadId), "local");
-    expect(ambiguousTool?.toolCall?.status).toBe("error");
-    expect(ambiguousTool?.toolCall?.errorSummary?.toLowerCase()).toContain("ambiguous");
-    expect(a.executed).toEqual([]);
-    expect(b.executed).toEqual([]);
+    const untagged = await sendToBot(h, botId, "local.run:echo untagged");
+    await waitThreadIdle(h, untagged.threadId);
+    expect(toolNamed(await messages(h, untagged.threadId), "local")?.toolCall?.status).toBe("error");
     expect(a.jobs()).toEqual([]);
     expect(b.jobs()).toEqual([]);
 
-    const pending = sendToBot(h, botId, `local.run@${DEVICE_B}:echo from-b`);
-    const job = await b.waitForJob();
-    expect(job).toMatchObject({ action: "run", hostname: "laptop-b", command: "echo from-b" });
-    expect(a.jobs()).toEqual([]);
-    await b.allowOnce();
+    const pending = sendToBot(h, botId, "local.run:echo tagged", DEVICE_A);
+    const job = await a.waitForJob();
+    expect(job).toMatchObject({ action: "run", hostname: "laptop-a", command: "echo tagged" });
+    expect(b.jobs()).toEqual([]);
+    await a.allowOnce();
     const sent = await pending;
     await waitThreadIdle(h, sent.threadId);
-    expect(b.executed).toEqual(["echo from-b"]);
-    expect(a.executed).toEqual([]);
-    expect(toolNamed(await messages(h, sent.threadId), "local")?.toolCall?.target).toContain("laptop-b");
+    expect(a.executed).toEqual(["echo tagged"]);
+    expect(b.executed).toEqual([]);
 
-    await b.close();
-    const remaining = await waitRoster(h, (devices) => devices.length === 1 && devices[0]?.id === DEVICE_A);
-    expect(remaining.map((device) => device.id)).toEqual([DEVICE_A]);
-    const afterClose = await sendToBot(h, botId, `local.run@${DEVICE_B}:echo after-close`);
-    await waitThreadIdle(h, afterClose.threadId);
-    expect(toolNamed(await messages(h, afterClose.threadId), "local")?.toolCall?.status).toBe("error");
-    expect(a.executed).toEqual([]);
+    const explicit = sendToBot(h, botId, `local.run@${DEVICE_B}:echo explicit`, DEVICE_A);
+    const other = await b.waitForJob();
+    expect(other.command).toBe("echo explicit");
+    expect(a.jobs().map((candidate) => candidate.command)).toEqual(["echo tagged"]);
+    await b.allowOnce();
+    await waitThreadIdle(h, (await explicit).threadId);
+    expect(b.executed).toEqual(["echo explicit"]);
   });
 
   test("unknown or disconnected device identities fail without running on another Sidecar", async () => {
@@ -154,7 +148,7 @@ describe("fail closed and keep Sidecars distinct", () => {
     const first = await connect();
     await first.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
     const botId = await makeBot(h, "Drop mid job Bot");
-    const pending = sendToBot(h, botId, "local.run:echo mid-job");
+    const pending = sendToBot(h, botId, "local.run:echo mid-job", DEVICE_A);
     await first.waitForJob();
     expect(first.executed).toEqual([]);
     await first.close();

@@ -4,7 +4,7 @@ import path from "node:path";
 import type { Database } from "bun:sqlite";
 import type { AgentCapabilityInventory, WorkerUserMessage } from "@omarchy-bot/agent-contract";
 import type { AttachmentDto } from "@omarchy-bot/protocol";
-import type { AgentId } from "@omarchy-bot/domain";
+import { confinedPath, type AgentId } from "@omarchy-bot/domain";
 import { HttpError } from "../bots/bots.ts";
 
 export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
@@ -258,11 +258,13 @@ export class AttachmentsService {
     const rows = this.db.query(`SELECT * FROM attachments WHERE bot_id = ?`).all(botId) as AttachmentRow[];
     const failures: Array<{ resource: string; message: string }> = [];
     let removed = 0;
-    const root = path.resolve(this.attachmentsDir);
+    const root = this.attachmentsDir;
     for (const row of rows) {
       try {
-        const fullPath = path.resolve(root, row.rel_path);
-        if (fullPath !== root && !fullPath.startsWith(`${root}${path.sep}`)) {
+        let fullPath: string;
+        try {
+          fullPath = confinedPath(row.rel_path, root);
+        } catch {
           throw new Error("stored attachment path escapes the managed root");
         }
         rmSync(fullPath, { force: true });

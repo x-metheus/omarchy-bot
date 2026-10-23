@@ -1,22 +1,13 @@
-import type { AgentPluginToolRequest, AgentPluginTurnContext } from "./plugin-protocol.ts";
+import type { AgentPluginTurnContext } from "./plugin-protocol.ts";
 import {
   TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH,
   isToolCallSummary,
-  type ComputerAction,
   type SurfaceId,
   type ToolCallSummary,
 } from "@omarchy-bot/domain";
 import type { Hello, OpenSessionOptionsLike } from "./shared.ts";
-import type {
-  AgentBotMessageToolCancel,
-  AgentBotMessageToolRequest,
-  AgentBotMessageTurnContext,
-} from "./bot-message-protocol.ts";
-import type {
-  AgentLocalToolCancel,
-  AgentLocalToolRequest,
-  AgentLocalTurnContext,
-} from "./local-protocol.ts";
+import type { AgentBotMessageTurnContext } from "./bot-message-protocol.ts";
+import type { AgentLocalTurnContext } from "./local-protocol.ts";
 
 /**
  * Normalized agent events (agents-integration.md §2). Adapters may only emit a
@@ -157,18 +148,6 @@ export interface AgentComputerToolContext extends AgentComputerTurnContext {
   toolCallId: string;
 }
 
-export interface AgentComputerToolRequest {
-  type: "computer.request";
-  requestId: string;
-  context: AgentComputerToolContext;
-  action: ComputerAction;
-}
-
-export interface AgentComputerToolCancel {
-  type: "computer.cancel";
-  requestId: string;
-}
-
 export interface AgentComputerToolOutput {
   /** Identity of the desktop that produced this result, not the Agent's Native Session. */
   desktopSession: {
@@ -185,10 +164,6 @@ export interface AgentComputerToolOutput {
   windowList?: unknown;
 }
 
-export type AgentComputerToolResult =
-  | { type: "computer.result"; requestId: string; ok: true; payload: AgentComputerToolOutput }
-  | { type: "computer.result"; requestId: string; ok: false; error: string };
-
 export type AgentResult =
   | { requestId: string; ok: true; payload: unknown }
   | { requestId: string; ok: false; error: string };
@@ -197,14 +172,6 @@ export type WorkerOutbound =
   | Hello
   | { type: "heartbeat" }
   | { type: "event"; event: AgentEvent }
-  | AgentComputerToolRequest
-  | AgentComputerToolCancel
-  | AgentBotMessageToolRequest
-  | AgentBotMessageToolCancel
-  | AgentLocalToolRequest
-  | AgentLocalToolCancel
-  | AgentPluginToolRequest
-  | { type: "plugin.cancel"; requestId: string }
   | AgentResult;
 
 export const AGENT_CAPABILITY_INVENTORY_VERSION = 4 as const;

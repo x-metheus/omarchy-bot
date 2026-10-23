@@ -20,14 +20,14 @@ import {
   readJsonl,
   writeJsonl,
   AGENT_CAPABILITY_INVENTORY_VERSION,
+  AGENT_COMPUTER_TOOL,
   type AgentCommand,
   type AgentBotMessageToolContext,
   type AgentBotMessageToolOutput,
-  type AgentBotMessageToolResult,
   type AgentBotMessageTurnContext,
+  type ToolChannelFrame,
   type AgentComputerToolContext,
   type AgentComputerToolOutput,
-  type AgentComputerToolResult,
   type AgentComputerTurnContext,
   type AgentEvent,
   type AgentResult,
@@ -37,9 +37,7 @@ import {
   type AgentLocalTurnContext,
   type AgentLocalToolContext,
   type AgentLocalToolOutput,
-  type AgentLocalToolResult,
   type LocalActionName,
-  type AgentPluginToolResult,
   type SessionOpenedPayload,
 } from "@omarchy-bot/agent-contract";
 import { isSurfaceId, type ComputerAction } from "@omarchy-bot/domain";
@@ -49,7 +47,8 @@ import { createComputerTool } from "./computer-tool.ts";
 import { createLocalTool } from "./local-tool.ts";
 import { createBotMessageTool } from "./bot-message-tool.ts";
 import { thinkingCapabilityForProbe } from "./thinking-capability.ts";
-import { createPluginTools, disposePluginCalls, handlePluginResult } from "./plugin-tools.ts";
+import { createPluginTools } from "./plugin-tools.ts";
+import { toolChannel } from "./tool-channel.ts";
 import { NativeMcp, NativeMcpControls, nativeMcpStatus } from "./native-mcp.ts";
 
 const AGENT_ID = "pi";
@@ -75,58 +74,15 @@ function getModelRuntime(): Promise<ModelRuntime> {
 
 const mcpControls = new NativeMcpControls(getModelRuntime);
 
-interface PendingComputerRequest {
-  resolve: (output: AgentComputerToolOutput) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-}
-
-const computerRequests = new Map<string, PendingComputerRequest>();
-
 function requestComputer(
   context: AgentComputerToolContext,
   action: ComputerAction,
   signal: AbortSignal | undefined,
 ): Promise<AgentComputerToolOutput> {
-  signal?.throwIfAborted();
-  const requestId = crypto.randomUUID();
-  return new Promise<AgentComputerToolOutput>((resolve, reject) => {
-    const pending: PendingComputerRequest = { resolve, reject };
-    if (signal !== undefined) {
-      pending.signal = signal;
-      pending.onAbort = () => {
-        if (computerRequests.delete(requestId)) {
-          writeJsonl({ type: "computer.cancel", requestId });
-          reject(new Error("computer tool call cancelled"));
-        }
-      };
-      signal.addEventListener("abort", pending.onAbort, { once: true });
-    }
-    computerRequests.set(requestId, pending);
-    writeJsonl({ type: "computer.request", requestId, context, action });
-  });
+  return toolChannel
+    .call(AGENT_COMPUTER_TOOL.name, { action: action.name, args: action.args }, context, signal ?? new AbortController().signal)
+    .then((result) => result as AgentComputerToolOutput);
 }
-
-function handleComputerResult(result: AgentComputerToolResult): void {
-  const pending = computerRequests.get(result.requestId);
-  if (pending === undefined) return;
-  computerRequests.delete(result.requestId);
-  if (pending.signal !== undefined && pending.onAbort !== undefined) {
-    pending.signal.removeEventListener("abort", pending.onAbort);
-  }
-  if (result.ok === true) pending.resolve(result.payload);
-  else pending.reject(new Error(result.error));
-}
-
-interface PendingBotMessageRequest {
-  resolve: (output: AgentBotMessageToolOutput) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-}
-
-const botMessageRequests = new Map<string, PendingBotMessageRequest>();
 
 function requestBotMessage(
   context: AgentBotMessageToolContext,
@@ -134,45 +90,13 @@ function requestBotMessage(
   text: string,
   signal: AbortSignal | undefined,
 ): Promise<AgentBotMessageToolOutput> {
-  signal?.throwIfAborted();
-  const requestId = crypto.randomUUID();
-  return new Promise<AgentBotMessageToolOutput>((resolve, reject) => {
-    const pending: PendingBotMessageRequest = { resolve, reject };
-    if (signal !== undefined) {
-      pending.signal = signal;
-      pending.onAbort = () => {
-        if (botMessageRequests.delete(requestId)) {
-          writeJsonl({ type: "bot-message.cancel", requestId });
-          reject(new Error("Bot message tool call cancelled"));
-        }
-      };
-      signal.addEventListener("abort", pending.onAbort, { once: true });
-    }
-    botMessageRequests.set(requestId, pending);
-    writeJsonl({ type: "bot-message.request", requestId, context, targetBotId, text });
-  });
+  return toolChannel.call(
+    "send_bot_message",
+    { targetBotId, text },
+    context,
+    signal ?? new AbortController().signal,
+  ).then((result) => result as AgentBotMessageToolOutput);
 }
-
-function handleBotMessageResult(result: AgentBotMessageToolResult): void {
-  const pending = botMessageRequests.get(result.requestId);
-  if (pending === undefined) return;
-  botMessageRequests.delete(result.requestId);
-  if (pending.signal !== undefined && pending.onAbort !== undefined) {
-    pending.signal.removeEventListener("abort", pending.onAbort);
-  }
-  if (result.ok === true) pending.resolve(result.payload);
-  else pending.reject(new Error(result.error));
-}
-
-
-interface PendingLocalRequest {
-  resolve: (output: AgentLocalToolOutput) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-}
-
-const localRequests = new Map<string, PendingLocalRequest>();
 
 function requestLocal(
   context: AgentLocalToolContext,
@@ -188,40 +112,8 @@ function requestLocal(
   },
   signal: AbortSignal | undefined,
 ): Promise<AgentLocalToolOutput> {
-  signal?.throwIfAborted();
-  const requestId = crypto.randomUUID();
-  return new Promise<AgentLocalToolOutput>((resolve, reject) => {
-    const pending: PendingLocalRequest = { resolve, reject };
-    if (signal !== undefined) {
-      pending.signal = signal;
-      pending.onAbort = () => {
-        if (localRequests.delete(requestId)) {
-          writeJsonl({ type: "local.cancel", requestId });
-          reject(new Error("local tool call cancelled"));
-        }
-      };
-      signal.addEventListener("abort", pending.onAbort, { once: true });
-    }
-    localRequests.set(requestId, pending);
-    writeJsonl({
-      type: "local.request",
-      requestId,
-      context,
-      action,
-      ...args,
-    });
-  });
-}
-
-function handleLocalResult(result: AgentLocalToolResult): void {
-  const pending = localRequests.get(result.requestId);
-  if (pending === undefined) return;
-  localRequests.delete(result.requestId);
-  if (pending.signal !== undefined && pending.onAbort !== undefined) {
-    pending.signal.removeEventListener("abort", pending.onAbort);
-  }
-  if (result.ok === true) pending.resolve(result.payload);
-  else pending.reject(new Error(result.error));
+  return toolChannel.call("local", { action, ...args }, context, signal ?? new AbortController().signal)
+    .then((result) => result as AgentLocalToolOutput);
 }
 
 let authAvailable: boolean | undefined;
@@ -297,7 +189,6 @@ function attachSubscription(entry: SessionEntry): void {
       delete entry.botMessage;
       delete entry.plugins;
       delete entry.local;
-      disposePluginCalls(sessionId);
       if (entry.aborted) emit({ type: "turn.cancelled", sessionId });
       else emit({ type: "turn.completed", sessionId });
     }
@@ -528,7 +419,6 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
             delete entry.botMessage;
             delete entry.plugins;
             delete entry.local;
-            disposePluginCalls(entry.sessionId);
             emit({ type: "error", sessionId: entry.sessionId, message: String(err), retryable: false });
           });
         reply({ requestId: cmd.requestId, ok: true, payload: { accepted: true } });
@@ -568,7 +458,8 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       }
       case "session.close": {
         const entry = sessionEntry(cmd.sessionId);
-        disposePluginCalls(cmd.sessionId);
+        // Only this session's calls may fail; other sessions keep working.
+        toolChannel.close(cmd.sessionId);
         sessions.delete(cmd.sessionId);
         entry.unsubscribe?.();
         await entry.nativeMcp.dispose(entry.session);
@@ -599,13 +490,7 @@ const commands = new Set<Promise<void>>();
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  disposePluginCalls();
-  for (const pending of computerRequests.values()) pending.reject(new Error("daemon connection closed during computer tool call"));
-  for (const pending of botMessageRequests.values()) pending.reject(new Error("daemon connection closed during Bot message tool call"));
-  for (const pending of localRequests.values()) pending.reject(new Error("daemon connection closed during local tool call"));
-  computerRequests.clear();
-  botMessageRequests.clear();
-  localRequests.clear();
+  toolChannel.close();
   const controlsClosed = mcpControls.dispose();
   await Promise.allSettled(commands);
   await Promise.allSettled([...sessions.values()].map((entry) => {
@@ -623,14 +508,8 @@ await readJsonl(
   (msg) => {
     if (shuttingDown) return;
     if (msg && typeof msg === "object" && "type" in msg) {
-      if (msg.type === "computer.result") {
-        handleComputerResult(msg as AgentComputerToolResult);
-      } else if (msg.type === "bot-message.result") {
-        handleBotMessageResult(msg as AgentBotMessageToolResult);
-      } else if (msg.type === "plugin.result") {
-        handlePluginResult(msg as AgentPluginToolResult);
-      } else if (msg.type === "local.result") {
-        handleLocalResult(msg as AgentLocalToolResult);
+      if (msg.type === "tool.result" || msg.type === "tool.cancel") {
+        toolChannel.receive(msg as ToolChannelFrame);
       } else {
         const command = handleMessage(msg as AgentCommand);
         commands.add(command);

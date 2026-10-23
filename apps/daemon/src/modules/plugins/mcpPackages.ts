@@ -4,7 +4,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { NpmMcpPackage, SaveMcpBody, type McpConnectionDto } from "@omarchy-bot/protocol";
+import { NpmMcpPackage, type SaveMcpBody, type McpConnectionDto } from "@omarchy-bot/protocol";
+import { confinedPath } from "@omarchy-bot/domain";
 import { redactToolErrorSummary } from "@omarchy-bot/agent-contract";
 import { HttpError } from "../bots/bots.ts";
 import { NativeMcpStore } from "./nativeMcp.ts";
@@ -26,8 +27,12 @@ const Lease = z.object({ pid: z.number().int().positive(), startTime: z.string()
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function within(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  try {
+    confinedPath(target, root);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function atomicJson(file: string, value: unknown): void {
@@ -125,7 +130,8 @@ export class McpPackages {
   list(): McpConnectionDto[] { return this.native.list().map((connection) => this.#decorate(connection)); }
 
   save(id: string | null, input: SaveMcpBody, signal?: AbortSignal): Promise<McpConnectionDto> {
-    const body = SaveMcpBody.parse(input);
+    // MANAGE_PLUGINS_SCHEMA (agent) and SaveMcpBody (HTTP route) already validated this input.
+    const body = input;
     const key = id ?? `name:${body.name}`;
     if (this.#pending.has(key)) throw new HttpError(409, "An MCP package operation is already in progress for this connection");
     const operation = this.#save(id, body, signal).finally(() => this.#pending.delete(key));
@@ -133,7 +139,7 @@ export class McpPackages {
     return operation;
   }
 
-  async #save(id: string | null, body: z.output<typeof SaveMcpBody>, requestedSignal?: AbortSignal): Promise<McpConnectionDto> {
+  async #save(id: string | null, body: SaveMcpBody, requestedSignal?: AbortSignal): Promise<McpConnectionDto> {
     this.#abort.signal.throwIfAborted();
     const previous = id ? this.native.list().find((connection) => connection.id === id) : undefined;
     if (id && !previous) throw new HttpError(404, "Native MCP connection not found");
@@ -183,7 +189,7 @@ export class McpPackages {
       atomicJson(path.join(root, "current.json"), next);
       published = true;
       const result = this.native.save(id, { name: body.name, enabled: actual && actual.enabled !== previous?.enabled ? actual.enabled : body.enabled,
-        transport: { type: "stdio", command: "node", args: [this.#runner, path.join(root, "current.json"), ...body.package.args],
+        transport: { type: "stdio", command: "node", args: [this.#runner, path.join(root, "current.json"), ...(body.package.args ?? [])],
           ...(body.package.env !== undefined ? { env: body.package.env } : record?.source.name === source.name ? {} : { env: {} }) } });
       this.native.setPackageRevision(result.id, this.#runtimeRevision(current));
       return this.#decorate(this.native.list().find((entry) => entry.id === result.id)!);

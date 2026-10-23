@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { redactToolErrorSummary, type AgentCommand, type AgentPluginSnapshot, type AgentPluginToolOutput, type NativeMcpControlResult, type NativePluginResources } from "@omarchy-bot/agent-contract";
+import { redactToolErrorSummary, MANAGE_PLUGINS_SCHEMA, type AgentCommand, type AgentPluginSnapshot, type AgentPluginToolOutput, type NativeMcpControlResult, type NativePluginResources } from "@omarchy-bot/agent-contract";
 import {
   HttpsOrigin, PLUGIN_OPERATIONS, PLUGIN_PROVIDERS,
   PluginManageInput, PluginProviderId, McpDefinition, SaveMcpBody,
@@ -415,14 +415,7 @@ export class PluginsService {
       tools: [{
         name: "manage_plugins",
         description: "Inspect shared Services, native MCP connections and Skills. inspect reads installed inventory; inspect_skill reads catalog source and content. Search and install complete independent Skills from the catalog or explicit sources; update Skills, and enable, disable or remove Skills and custom MCPs without a product approval gate. Authorize, enable, disable, remove or update Services; label or disconnect exact account ids. Updates preserve local modifications. Changes affect subsequent native resource reloads; actual reload and native/provider authorization still apply. authorize_service returns a real URL pending user authorization, never completed consent. Never claim an unprobed MCP is connected. Use Pi's native mcp tool for provider business operations, and the default official skill-creator for local authoring.",
-        inputSchema: { type: "object", properties: {
-          action: { type: "string", enum: PLUGIN_OPERATIONS.flatMap((operation) => "tool" in operation && operation.tool === false ? [] : [operation.action]) },
-          id: { type: "string" }, query: { type: "string" }, cursor: { type: "string" }, view: { type: "string" }, source: { type: "string" },
-          skillPath: { type: "string" }, ref: { type: "string" }, enabled: { type: "boolean" },
-          providerId: { type: "string", enum: PluginProviderId.options }, serviceId: { type: "string" }, label: { type: "string" },
-          connection: { type: "object", description: "SaveMcpBody: name, enabled, and either transport {type:stdio,command,args?,env?} / {type:http,url,headers?}, or package {name: exact public npm package,bin?,args?,env?}. Managed npm packages update automatically; arbitrary native commands remain user-owned. Credential fields are write-only." },
-          redirectUrl: { type: "string" },
-        }, required: ["action"], additionalProperties: false },
+        inputSchema: MANAGE_PLUGINS_SCHEMA,
       }],
     };
     let released = false;

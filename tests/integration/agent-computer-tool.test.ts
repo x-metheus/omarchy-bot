@@ -479,10 +479,17 @@ describe("Bot-bound Pi computer tool", () => {
     await Promise.all(turns.map((turn) => waitThreadIdle(runningHarness, turn.threadId)));
 
     expect(adapter.actionsStarted).toBe(0);
-    for (const turn of turns) {
+    const reasons = [
+      "computer tool context is stale or mismatched",
+      "computer tool context is stale or mismatched",
+      "computer tool context is stale or mismatched",
+      "computer tool context is stale or mismatched",
+      "tool call has not started",
+    ];
+    for (const [index, turn] of turns.entries()) {
       const row = h.svc.threads.turnRow(turn.turnId);
       expect(row?.status).toBe("failed");
-      expect(row?.outcome_reason).toContain("computer tool context");
+      expect(row?.outcome_reason).toBe(reasons[index]);
     }
   }, 15_000);
 
