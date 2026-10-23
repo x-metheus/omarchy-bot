@@ -273,10 +273,7 @@ export class ComputerBroker {
     signal?: AbortSignal,
   ): Promise<BotScreenBoundActionResult> {
     const owner = this.#requireOwner(input);
-    const inputAuthority = isInputAction(action.name)
-      ? { surfaceId: owner.surfaceId, botId: owner.botId, turnId }
-      : undefined;
-    if (inputAuthority === undefined) return this.screens.act(owner, action);
+    if (!isInputAction(action.name)) return this.screens.act(owner, action);
     await this.screens.ensureReady(owner);
     const generation = this.db
       .query(`SELECT runtime_generation FROM bot_surfaces WHERE surface_id = ?`)
@@ -287,7 +284,7 @@ export class ComputerBroker {
       {
         turnId,
         signal: signal ?? new AbortController().signal,
-        run: (_send, epoch) => this.screens.act(owner, action, { ...inputAuthority, controllerEpoch: epoch }),
+        run: (send) => this.screens.act(owner, action, send),
       },
     );
   }

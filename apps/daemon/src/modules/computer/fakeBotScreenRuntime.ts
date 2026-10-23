@@ -1,3 +1,4 @@
+import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import { BotScreenInputRejectedError } from "./botScreenManager.ts";
 import type {
@@ -49,6 +50,19 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   expandedViewsReleased = 0;
   captureRequestsInFlight = 0;
   maximumCaptureRequestsInFlight = 0;
+  /** Windows each Screen routes, keyed by Surface. */
+  #windows = new Map<string, ComputerWindowListItem[]>();
+  readonly focusRequests: string[] = [];
+  #captureStarts = new Map<string, number>();
+  #capturesInFlight = new Map<string, number>();
+  #maxCapturesInFlight = new Map<string, number>();
+  #blockedCaptureSurface: string | undefined;
+  #blockedCaptureStarted = Promise.withResolvers<void>();
+  #blockedCaptureRelease = Promise.withResolvers<void>();
+  #inputsInFlight = 0;
+  #inputSurfacesInFlight = new Set<string>();
+  maximumInputsInFlight = 0;
+  maximumInputSurfacesInFlight = 0;
   #unreconciled = new Set<string>();
   #runtimes = new Map<string, FakeRuntimeRecord>();
   #pointerWaiters: Array<{ count: number; resolve: () => void }> = [];
@@ -186,6 +200,36 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#releaseFailures.add(surfaceId);
   }
 
+  /** Windows this Screen routes, in Screen coordinates. */
+  setWindows(surfaceId: string, windows: ComputerWindowListItem[]): void {
+    this.#windows.set(surfaceId, windows);
+  }
+
+  blockFirstCapture(surfaceId: string): void {
+    this.#blockedCaptureSurface = surfaceId;
+  }
+
+  captureStarts(surfaceId: string): number {
+    return this.#captureStarts.get(surfaceId) ?? 0;
+  }
+
+  maxConcurrentCaptures(surfaceId: string): number {
+    return this.#maxCapturesInFlight.get(surfaceId) ?? 0;
+  }
+
+  waitForBlockedCapture(): Promise<void> {
+    return this.#blockedCaptureStarted.promise;
+  }
+
+  releaseBlockedCapture(): void {
+    this.#blockedCaptureRelease.resolve();
+  }
+
+  /** Actions that reached a Screen (window listing, focus, launch, notify). */
+  get actionsStarted(): number {
+    return this.#actionsStarted;
+  }
+
   running(surfaceId: string): { generation: number } | undefined {
     const record = this.#runtimes.get(surfaceId);
     return record === undefined ? undefined : { generation: record.provision.generation };
@@ -225,6 +269,11 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#finish(surfaceId, { type: "compositor-exited", error: new Error(message) });
   }
 
+  /** The fake Bot Screens share one compositor, so all of them exit together. */
+  exitSharedCompositor(message = "fake shared compositor exited"): void {
+    for (const surfaceId of [...this.#runtimes.keys()]) this.exitCompositor(surfaceId, message);
+  }
+
   #record(surfaceId: string): FakeRuntimeRecord {
     const record = this.#runtimes.get(surfaceId);
     if (record === undefined) throw new Error("fake Bot Screen is not running");
@@ -233,6 +282,18 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   #finish(surfaceId: string, outcome: BotScreenRuntimeOutcome): void {
     this.#record(surfaceId).finish(outcome);
+  }
+
+  #countAction(): void {
+    this.#actionsStarted += 1;
+    for (const waiter of this.#actionWaiters.splice(0)) {
+      if (this.#actionsStarted >= waiter.count) waiter.resolve();
+      else this.#actionWaiters.push(waiter);
+    }
+  }
+
+  async #gateAction(): Promise<void> {
+    if (this.#blockActions) await this.#actionGate.promise;
   }
 
   rejectReconciliation(surfaceId: string): void {
@@ -298,7 +359,23 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (this.#captureFailures.delete(provision.surfaceId)) {
           throw new Error("fake Bot Screen capture failed");
         }
-        return { mediaType: "image/png", bytes: FAKE_SCREEN_PNG };
+        const count = this.captureStarts(provision.surfaceId) + 1;
+        const inFlight = (this.#capturesInFlight.get(provision.surfaceId) ?? 0) + 1;
+        this.#captureStarts.set(provision.surfaceId, count);
+        this.#capturesInFlight.set(provision.surfaceId, inFlight);
+        this.#maxCapturesInFlight.set(
+          provision.surfaceId,
+          Math.max(inFlight, this.#maxCapturesInFlight.get(provision.surfaceId) ?? 0),
+        );
+        try {
+          if (provision.surfaceId === this.#blockedCaptureSurface && count === 1) {
+            this.#blockedCaptureStarted.resolve();
+            await this.#blockedCaptureRelease.promise;
+          }
+          return { mediaType: "image/png", bytes: FAKE_SCREEN_PNG };
+        } finally {
+          this.#capturesInFlight.set(provision.surfaceId, inFlight - 1);
+        }
       },
       openCaptureStream: async (): Promise<BotScreenCaptureStream> => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
@@ -376,25 +453,39 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         expandedViews.add(view);
         return view;
       },
-      act: async (action) => {
+      listWindows: async () => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
-        actionCount += 1;
-        this.#actionsStarted += 1;
-        for (const waiter of this.#actionWaiters.splice(0)) {
-          if (this.#actionsStarted >= waiter.count) waiter.resolve();
-          else this.#actionWaiters.push(waiter);
-        }
-        if (this.options.actionFailureAt === actionCount) {
+        this.#countAction();
+        await this.#gateAction();
+        return (this.#windows.get(provision.surfaceId) ?? []).map((window) => ({ ...window }));
+      },
+      focusWindow: async (window) => {
+        if (stopped) throw new Error("fake Bot Screen is stopped");
+        this.#countAction();
+        await this.#gateAction();
+        const windows = this.#windows.get(provision.surfaceId);
+        const target = windows?.find((candidate) => candidate.id === window.id);
+        if (target === undefined) throw new Error("fake Bot Screen does not route that window");
+        this.focusRequests.push(window.id);
+        this.#windows.set(
+          provision.surfaceId,
+          windows!.map((candidate) => ({ ...candidate, focused: candidate.id === window.id })),
+        );
+      },
+      launch: async (request) => {
+        if (stopped) throw new Error("fake Bot Screen is stopped");
+        this.#countAction();
+        await this.#gateAction();
+        if (this.options.actionFailureAt === this.#actionsStarted) {
           throw new Error("fake application launch failed");
         }
-        if (this.#blockActions) await this.#actionGate.promise;
-        return {
-          text: `fake-${action.name}#${actionCount}`,
-          ...(action.name === "list_windows" ? { windowList: [] } : {}),
-          ...(action.name === "screenshot"
-            ? { image: { mediaType: "image/png" as const, bytes: FAKE_SCREEN_PNG } }
-            : {}),
-        };
+        return { text: `fake-open#${this.#actionsStarted}:${request.app ?? request.url ?? ""}` };
+      },
+      notify: async () => {
+        if (stopped) throw new Error("fake Bot Screen is stopped");
+        this.#countAction();
+        await this.#gateAction();
+        return { text: `fake-notify#${this.#actionsStarted}` };
       },
       setInputAuthority: async (epoch): Promise<number> => {
         if (!Number.isSafeInteger(epoch) || epoch <= highestControllerEpoch) {
@@ -424,35 +515,47 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (this.options.inputFailureAt === this.#inputAttempts) {
           throw new Error("fake Bot Screen input helper failed");
         }
-        if (this.#blockInputs) await this.#inputGate.promise;
-        if (stopped) throw new Error("fake Bot Screen is stopped");
-        lastInputSequence = event.sequence;
-        if (this.options.pointerDelayMs !== undefined && event.type === "motion") {
-          await Bun.sleep(this.options.pointerDelayMs);
-        }
-        const recorded = {
-          surfaceId: provision.surfaceId,
-          runtimeGeneration: provision.generation,
-          event,
-        };
-        this.inputEvents.push(recorded);
-        for (const waiter of this.#inputWaiters.splice(0)) {
-          if (this.inputEvents.length >= waiter.count) waiter.resolve();
-          else this.#inputWaiters.push(waiter);
-        }
-        if (event.type === "key" || event.type === "paste") return;
-        this.pointerEvents.push({
-          surfaceId: provision.surfaceId,
-          runtimeGeneration: provision.generation,
-          event,
-        });
-        for (const waiter of this.#pointerWaiters.splice(0)) {
-          if (this.pointerEvents.length >= waiter.count) waiter.resolve();
-          else this.#pointerWaiters.push(waiter);
-        }
-        for (const waiter of this.#pointerEventWaiters.splice(0)) {
-          if (waiter.predicate(this.pointerEvents.at(-1)!)) waiter.resolve();
-          else this.#pointerEventWaiters.push(waiter);
+        this.#inputsInFlight += 1;
+        this.#inputSurfacesInFlight.add(provision.surfaceId);
+        this.maximumInputsInFlight = Math.max(this.maximumInputsInFlight, this.#inputsInFlight);
+        this.maximumInputSurfacesInFlight = Math.max(
+          this.maximumInputSurfacesInFlight,
+          this.#inputSurfacesInFlight.size,
+        );
+        try {
+          if (this.#blockInputs) await this.#inputGate.promise;
+          if (stopped) throw new Error("fake Bot Screen is stopped");
+          lastInputSequence = event.sequence;
+          if (this.options.pointerDelayMs !== undefined && event.type === "motion") {
+            await Bun.sleep(this.options.pointerDelayMs);
+          }
+          const recorded = {
+            surfaceId: provision.surfaceId,
+            runtimeGeneration: provision.generation,
+            event,
+          };
+          this.inputEvents.push(recorded);
+          for (const waiter of this.#inputWaiters.splice(0)) {
+            if (this.inputEvents.length >= waiter.count) waiter.resolve();
+            else this.#inputWaiters.push(waiter);
+          }
+          if (event.type === "key" || event.type === "paste") return;
+          this.pointerEvents.push({
+            surfaceId: provision.surfaceId,
+            runtimeGeneration: provision.generation,
+            event,
+          });
+          for (const waiter of this.#pointerWaiters.splice(0)) {
+            if (this.pointerEvents.length >= waiter.count) waiter.resolve();
+            else this.#pointerWaiters.push(waiter);
+          }
+          for (const waiter of this.#pointerEventWaiters.splice(0)) {
+            if (waiter.predicate(this.pointerEvents.at(-1)!)) waiter.resolve();
+            else this.#pointerEventWaiters.push(waiter);
+          }
+        } finally {
+          this.#inputsInFlight -= 1;
+          this.#inputSurfacesInFlight.delete(provision.surfaceId);
         }
       },
       releaseInput: async (epoch): Promise<void> => {

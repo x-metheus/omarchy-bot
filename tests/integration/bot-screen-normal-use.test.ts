@@ -339,7 +339,6 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       harness.svc.screens.act(
         owner,
         { name: "open_app", args: { app: process.env.OMARCHY_BOT_LOAD_APP_BIN } },
-        { ...owner, turnId: `normal-use-workload-${index}` },
       )
     ));
     await Bun.sleep(800);

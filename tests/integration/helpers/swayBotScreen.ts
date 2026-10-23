@@ -7,11 +7,27 @@ import type {
   BotScreenProvision,
   BotScreenRuntimeAdapter,
 } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
+import type { ComputerWindowListItem } from "../../../packages/agent-contract/src/computer-protocol.ts";
 import type { ComputerAction } from "../../../packages/domain/src/computer.ts";
 import type { SurfaceComputerWorker } from "../../../apps/daemon/src/supervision/supervisor.ts";
 import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./fakeSwayIpc.ts";
 
 const LIVE_UNICODE_TITLE = "未保存 你好";
+
+/** The single toplevel every scripted Sway Screen routes, in Screen coordinates. */
+export function scriptedSwayWindows(surfaceId: string): ComputerWindowListItem[] {
+  return [{
+    id: "10",
+    title: LIVE_UNICODE_TITLE,
+    appId: "firefox",
+    pid: 1001,
+    focused: true,
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    workspace: `bot-${surfaceId}`,
+    clientType: "wayland",
+  }];
+}
+
 
 function liveSwayTree(title: string, surfaceIds: readonly string[]): unknown {
   return {
@@ -58,6 +74,10 @@ export interface ScriptedSwayFixture {
   stops: Array<{ surfaceId: string; runtimeGeneration: number }>;
   failSurfacePath: string;
   wayvncBin: string;
+  /** Application the scripted Screen can launch. */
+  application: string;
+  /** Windows the Screen routes in Screen coordinates, once it has started. */
+  windowsFor: (surfaceId: string) => ComputerWindowListItem[];
   advanceLiveProgress: () => void;
   inputCommands: () => string[];
   wayvncStarts: () => number;
@@ -147,6 +167,27 @@ export async function createScriptedSwayFixture(options?: {
   const wayvncExitPath = path.join(root, "wayvnc-exit");
   mkdirSync(bin);
   mkdirSync(controlDir);
+  const applicationCwd = path.join(root, "workspace");
+  mkdirSync(applicationCwd);
+  const application = executable(bin, "fixture-application", `#!/usr/bin/env bun
+import { readFileSync, writeFileSync } from "node:fs";
+const tree = JSON.parse(readFileSync(${JSON.stringify(path.join(controlDir, "tree.json"))}, "utf8"));
+const workspace = tree.nodes[0]?.nodes?.[0] ?? tree.nodes[0];
+workspace.nodes.push({
+  id: 900,
+  type: "con",
+  name: "Contract App",
+  app_id: "fixture-application",
+  pid: process.pid,
+  focused: true,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(${JSON.stringify(path.join(controlDir, "tree.json"))}, JSON.stringify(tree));
+await Promise.withResolvers<void>().promise;
+`);
   writeFileSync(wayvncStartsPath, "");
   const wayvnc = createFakeWayvncBin(bin, {
     startsPath: wayvncStartsPath,
@@ -193,6 +234,7 @@ await serveFakeSwayIpc({
   const inner = new SwayBotScreenRuntimeAdapter({
     runtimeRoot,
     profileRoot,
+    applicationCwd,
     swayBin: sway,
     wlrRandrBin: executable(bin, "wlr-randr", "#!/bin/sh\nexit 0\n"),
     grimBin: executable(bin, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
@@ -298,6 +340,8 @@ for await (const chunk of Bun.stdin.stream()) {
     stops,
     failSurfacePath,
     wayvncBin: wayvnc,
+    application,
+    windowsFor: scriptedSwayWindows,
     advanceLiveProgress: () => {
       liveProgress += 1;
       updateLiveTree();

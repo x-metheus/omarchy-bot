@@ -1,20 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import path from "node:path";
-import type { ComputerAction, SurfaceId } from "../../packages/domain/src/index.ts";
+import type { SurfaceId } from "../../packages/domain/src/index.ts";
 import type { MessageDto } from "../../packages/protocol/src/index.ts";
-import type {
-  BotScreenProvision,
-  BotScreenRuntime,
-  BotScreenRuntimeAdapter,
-} from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
+import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import { api, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 import { createComputerTool } from "../../workers/pi/src/computer-tool.ts";
-
-interface RecordedAction {
-  surfaceId: SurfaceId;
-  action: ComputerAction;
-}
 
 interface ComputerView {
   botId: string;
@@ -46,111 +37,6 @@ async function waitForTakeover(
     if (Date.now() >= deadline) {
       throw new Error(`Takeover did not reach ${expected}`);
     }
-  }
-}
-
-class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
-  readonly actions: RecordedAction[] = [];
-  readonly inFlight = new Map<SurfaceId, number>();
-  readonly maxInFlight = new Map<SurfaceId, number>();
-  readonly releases: SurfaceId[] = [];
-  maxAcrossSurfaces = 0;
-  #blockActions = false;
-  #actionStartedWaiters: Array<{ count: number; resolve: () => void }> = [];
-  #releaseBlockedActions: (() => void) | undefined;
-  #blockedActions = Promise.resolve();
-
-  blockActions(): void {
-    this.#blockActions = true;
-    const gate = Promise.withResolvers<void>();
-    this.#blockedActions = gate.promise;
-    this.#releaseBlockedActions = gate.resolve;
-  }
-
-  waitForActions(count: number): Promise<void> {
-    if (this.actions.length >= count) return Promise.resolve();
-    const waiter = Promise.withResolvers<void>();
-    this.#actionStartedWaiters.push({ count, resolve: waiter.resolve });
-    return waiter.promise;
-  }
-
-  releaseActions(): void {
-    this.#releaseBlockedActions?.();
-    this.#releaseBlockedActions = undefined;
-    this.#blockActions = false;
-  }
-
-  async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
-    const videoWidth = Math.round(provision.logicalWidth * provision.scale);
-    const videoHeight = Math.round(provision.logicalHeight * provision.scale);
-    const rawFrame = new Uint8Array(videoWidth * videoHeight * 4);
-    return {
-      readiness: {
-        compositor: "ready",
-        waylandSocket: "private",
-        output: {
-          geometryGeneration: provision.geometryGeneration,
-          logicalWidth: provision.logicalWidth,
-          logicalHeight: provision.logicalHeight,
-          scale: provision.scale,
-          refreshRate: provision.refreshRate,
-        },
-        desktopSurface: "ready",
-        capture: "ready",
-        input: "ready",
-        computerWorker: "ready",
-      },
-      capture: async () => ({ mediaType: "image/png", bytes: new Uint8Array([1]) }),
-      openCaptureStream: async () => ({
-        next: async () => ({
-          pixelFormat: "rgba",
-          width: videoWidth,
-          height: videoHeight,
-          bytes: rawFrame,
-          capturedAt: new Date(),
-        }),
-        close: async () => {},
-      }),
-      acquireExpandedView: async () => {
-        throw new Error("test Bot Screen does not provide an expanded-view stream");
-      },
-      act: async (action) => {
-        const count = (this.inFlight.get(provision.surfaceId) ?? 0) + 1;
-        this.inFlight.set(provision.surfaceId, count);
-        this.maxInFlight.set(
-          provision.surfaceId,
-          Math.max(this.maxInFlight.get(provision.surfaceId) ?? 0, count),
-        );
-        this.maxAcrossSurfaces = Math.max(
-          this.maxAcrossSurfaces,
-          [...this.inFlight.values()].filter((value) => value > 0).length,
-        );
-        this.actions.push({ surfaceId: provision.surfaceId, action });
-        for (const waiter of this.#actionStartedWaiters.splice(0)) {
-          if (this.actions.length >= waiter.count) waiter.resolve();
-          else this.#actionStartedWaiters.push(waiter);
-        }
-        if (this.#blockActions) await this.#blockedActions;
-        this.inFlight.set(provision.surfaceId, count - 1);
-        if (action.args.fail === true) throw new Error("assigned Computer worker failed");
-        return {
-          text: `screen:${provision.surfaceId}:${action.name}`,
-          ...(action.name === "observe"
-            ? { windowList: [{ id: "window-1", title: "Fresh window", focused: true }] }
-            : {}),
-          ...(action.name === "screenshot" || action.name === "observe"
-            ? { image: { mediaType: "image/png" as const, bytes: new Uint8Array([1, 2, 3]) } }
-            : {}),
-        };
-      },
-      setInputAuthority: async (epoch) => epoch,
-      input: async () => {},
-      releaseInput: async () => {
-        this.releases.push(provision.surfaceId);
-      },
-      outcome: Promise.withResolvers<never>().promise,
-      stop: async () => {},
-    };
   }
 }
 
@@ -193,7 +79,7 @@ describe("Bot-bound Pi computer tool", () => {
   });
 
   test("Pi receives the actual desktop generation after a desktop restart without changing conversation binding", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const botId = await makeBot(h, "Desktop identity Bot");
     const surfaceId = await botSurface(h, botId);
@@ -227,7 +113,7 @@ describe("Bot-bound Pi computer tool", () => {
   });
 
   test("a public Agent turn observes and inputs only through its owning Bot Screen", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const firstBot = await makeBot(h, "First tool Bot");
     const secondBot = await makeBot(h, "Second tool Bot");
@@ -239,78 +125,80 @@ describe("Bot-bound Pi computer tool", () => {
     const acted = await sendToBot(h, secondBot, "computer:click:second");
     await waitThreadIdle(h, acted.threadId);
 
-    expect(adapter.actions).toEqual([
-      { surfaceId: firstSurface, action: { name: "observe", args: {} } },
-      {
-        surfaceId: secondSurface,
-        action: { name: "click", args: { marker: "second" } },
-      },
+    expect(adapter.captureStarts(firstSurface)).toBe(1);
+    expect(adapter.actionsStarted).toBe(1);
+    expect(adapter.inputEvents.map((record) => record.surfaceId)).toEqual([
+      secondSurface,
+      secondSurface,
+      secondSurface,
     ]);
     const transcript = await messages(h, observed.threadId);
-    expect(transcript.some((message) => message.text?.includes(`screen:${firstSurface}:observe`))).toBeTrue();
+    expect(transcript.some((message) =>
+      message.text?.includes(firstSurface) && message.text.includes("imageRef")
+    )).toBeTrue();
     expect(transcript.some((message) => message.kind === "tool" && message.toolCall?.name === "computer")).toBeTrue();
   });
 
   test("one shared seat orders Agent input across Screens while one Screen stays ordered", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const firstBot = await makeBot(h, "Concurrent first Bot");
     const secondBot = await makeBot(h, "Concurrent second Bot");
     const firstSurface = await botSurface(h, firstBot);
     const secondSurface = await botSurface(h, secondBot);
-    adapter.blockActions();
+    adapter.blockInputs();
     const turnsPromise = Promise.all([
       sendToBot(h, firstBot, "computer:click:first-a"),
       sendToBot(h, firstBot, "computer:click:first-b"),
       sendToBot(h, secondBot, "computer:click:second"),
     ]);
-    await adapter.waitForActions(1);
-    expect(adapter.maxInFlight.get(firstSurface)).toBe(1);
-    expect(adapter.maxAcrossSurfaces).toBe(1);
-    adapter.releaseActions();
+    await adapter.waitForInputAttempts(1);
+    expect(adapter.maximumInputsInFlight).toBe(1);
+    expect(adapter.maximumInputSurfacesInFlight).toBe(1);
+    adapter.releaseInputs();
     const turns = await turnsPromise;
     await Promise.all(turns.map((turn) => waitThreadIdle(h!, turn.threadId)));
 
-    expect(adapter.actions.filter((record) => record.surfaceId === firstSurface)).toHaveLength(2);
+    expect(adapter.inputEvents.filter((record) => record.surfaceId === firstSurface)).toHaveLength(6);
+    expect(adapter.inputEvents.filter((record) => record.surfaceId === secondSurface)).toHaveLength(3);
   });
 
   test("cancelling a pending serialized tool call prevents its input from dispatching", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const bot = await makeBot(h, "Cancelled tool Bot");
     const surfaceId = await botSurface(h, bot);
-    adapter.blockActions();
+    adapter.blockInputs();
 
     try {
       const first = await sendToBot(h, bot, "computer:click:first");
-      await adapter.waitForActions(1);
+      await adapter.waitForInputAttempts(1);
       const cancelled = await sendToBot(h, bot, "computer:click:cancelled");
       await h.svc.turns.abortTurn(cancelled.turnId, "cancel pending computer tool");
-      adapter.releaseActions();
+      adapter.releaseInputs();
       await Promise.all([
         waitThreadIdle(h, first.threadId),
         waitThreadIdle(h, cancelled.threadId),
       ]);
 
-      expect(adapter.actions).toEqual([
-        { surfaceId, action: { name: "click", args: { marker: "first" } } },
-      ]);
+      expect(adapter.inputEvents.map((record) => record.surfaceId)).toEqual([surfaceId, surfaceId, surfaceId]);
       expect(h.svc.threads.turnRow(cancelled.turnId)?.status).toBe("cancelled");
     } finally {
-      adapter.releaseActions();
+      adapter.releaseInputs();
     }
   });
 
   test("Takeover persists one fresh final observation and resumes that same tool call", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const botId = await makeBot(h, "Same-turn Takeover Bot");
     const surfaceId = await botSurface(h, botId);
     const owner = { botId, surfaceId };
-    adapter.blockActions();
+    adapter.setWindows(surfaceId, [{ id: "window-1", title: "Fresh window", focused: true }]);
+    adapter.blockFirstCapture(surfaceId);
 
     const sent = await sendToBot(h, botId, "computer:screenshot");
-    await adapter.waitForActions(1);
+    await adapter.waitForBlockedCapture();
     expect(coordination(h, surfaceId)).toMatchObject({ authority_kind: "agent" });
     expect(await waitForTakeover(h, owner, "available")).toMatchObject({
       state: "bot-using",
@@ -337,20 +225,19 @@ describe("Bot-bound Pi computer tool", () => {
     expect(beforeQuiescence).toBe("state-readable");
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("working");
 
-    adapter.releaseActions();
+    adapter.releaseBlockedCapture();
     const taken = await takeover;
     expect(taken.response.status).toBe(200);
     expect(taken.body).toMatchObject({ state: "user-control", takeover: "active" });
     expect(coordination(h, surfaceId)).toMatchObject({ authority_kind: "takeover" });
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("working");
-    expect(adapter.actions).toEqual([
-      { surfaceId, action: { name: "screenshot", args: {} } },
-    ]);
+    expect(adapter.captureStarts(surfaceId)).toBe(1);
+    expect(adapter.actionsStarted).toBe(0);
     adapter.blockActions();
     const artifactsBeforeReturn = artifactCount(h, surfaceId);
     expect(artifactsBeforeReturn).toBe(0);
     const returning = computerRequest(h, owner, "POST", "/api/computer/return-to-bot");
-    await adapter.waitForActions(2);
+    await adapter.waitForActions(1);
     const duplicate = await computerRequest(h, owner, "POST", "/api/computer/return-to-bot");
     expect(duplicate.response.status).toBe(409);
     adapter.releaseActions();
@@ -360,10 +247,8 @@ describe("Bot-bound Pi computer tool", () => {
     expect(coordination(h, surfaceId)).toMatchObject({ authority_kind: "idle" });
     await waitThreadIdle(h, sent.threadId);
 
-    expect(adapter.actions).toEqual([
-      { surfaceId, action: { name: "screenshot", args: {} } },
-      { surfaceId, action: { name: "observe", args: {} } },
-    ]);
+    expect(adapter.captureStarts(surfaceId)).toBe(2);
+    expect(adapter.actionsStarted).toBe(1);
     expect(artifactCount(h, surfaceId)).toBe(1);
     const transcript = await messages(h, sent.threadId);
     const computerTools = transcript.filter((message) =>
@@ -371,7 +256,7 @@ describe("Bot-bound Pi computer tool", () => {
     );
     expect(computerTools).toHaveLength(1);
     expect(transcript.some((message) =>
-      message.text?.includes(`screen:${surfaceId}:observe`)
+      message.text?.includes(`"surfaceId":"${surfaceId}"`)
       && message.text.includes("Fresh window")
       && message.text.includes("imageRef")
     )).toBeTrue();
@@ -379,7 +264,7 @@ describe("Bot-bound Pi computer tool", () => {
   });
 
   test("persisted authority transitions are isolated by Surface", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const firstBotId = await makeBot(h, "Authority owner");
     const first = { botId: firstBotId, surfaceId: await botSurface(h, firstBotId) };
@@ -396,23 +281,23 @@ describe("Bot-bound Pi computer tool", () => {
     const secondSettled = coordination(h, second.surfaceId);
     expect(secondSettled).toMatchObject({ authority_kind: "idle" });
 
-    adapter.blockActions();
+    adapter.blockInputs();
     const controller = new AbortController();
     const firstAction = h.svc.computer.agentToolAct(
       first,
       "authority-first-turn",
       "authority-first-tool",
-      { name: "click", args: {} },
+      { name: "click", args: { x: 4, y: 5 } },
       controller.signal,
     );
-    await adapter.waitForActions(2);
+    await adapter.waitForInputAttempts(1);
     expect(coordination(h, first.surfaceId)).toMatchObject({ authority_kind: "agent" });
     expect(coordination(h, second.surfaceId)).toEqual(secondSettled);
 
     const takeover = h.svc.computer.takeOver(first);
     expect(coordination(h, first.surfaceId)).toMatchObject({ authority_kind: "takeover" });
     expect(coordination(h, second.surfaceId)).toEqual(secondSettled);
-    adapter.releaseActions();
+    adapter.releaseInputs();
     await expect(takeover).resolves.toEqual({ ok: true });
     expect(coordination(h, first.surfaceId)).toMatchObject({ authority_kind: "takeover" });
     expect(coordination(h, second.surfaceId)).toEqual(secondSettled);
@@ -424,7 +309,7 @@ describe("Bot-bound Pi computer tool", () => {
   });
 
   test("Takeover is unavailable without a pending Broker tool and native cancellation cancels a held waiter", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const botId = await makeBot(h, "Cancelled Takeover Bot");
     const surfaceId = await botSurface(h, botId);
@@ -434,15 +319,15 @@ describe("Bot-bound Pi computer tool", () => {
     expect(unavailable.response.status).toBe(409);
     expect(unavailable.body).toEqual({ error: "Takeover requires a pending computer tool." });
 
-    adapter.blockActions();
+    adapter.blockInputs();
     const sent = await sendToBot(h, botId, "computer:click:cancelled-takeover");
-    await adapter.waitForActions(1);
+    await adapter.waitForInputAttempts(1);
     const takeover = computerRequest(h, owner, "POST", "/api/computer/take-control");
     expect(await Promise.race([
       takeover.then(() => "takeover-settled" as const),
       computerRequest(h, owner, "GET", "/api/computer/state").then(() => "state-readable" as const),
     ])).toBe("state-readable");
-    adapter.releaseActions();
+    adapter.releaseInputs();
     expect((await takeover).body).toMatchObject({ takeover: "active" });
 
     await h.svc.turns.abortTurn(sent.turnId, "cancel held Takeover");
@@ -453,27 +338,25 @@ describe("Bot-bound Pi computer tool", () => {
     });
     const returned = await computerRequest(h, owner, "POST", "/api/computer/return-to-bot");
     expect(returned.response.status).toBe(409);
-    expect(adapter.actions).toEqual([
-      { surfaceId, action: { name: "click", args: { marker: "cancelled-takeover" } } },
-    ]);
+    expect(adapter.inputEvents.map((record) => record.surfaceId)).toEqual([surfaceId, surfaceId, surfaceId]);
   });
 
   test("Agent-worker loss during a held Takeover fails the turn and never reconstructs the waiter", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const botId = await makeBot(h, "Restarted Takeover Bot");
     const surfaceId = await botSurface(h, botId);
     const owner = { botId, surfaceId };
-    adapter.blockActions();
+    adapter.blockInputs();
 
     const sent = await sendToBot(h, botId, "computer:click:worker-restart");
-    await adapter.waitForActions(1);
+    await adapter.waitForInputAttempts(1);
     const takeover = computerRequest(h, owner, "POST", "/api/computer/take-control");
     expect(await Promise.race([
       takeover.then(() => "takeover-settled" as const),
       computerRequest(h, owner, "GET", "/api/computer/state").then(() => "state-readable" as const),
     ])).toBe("state-readable");
-    adapter.releaseActions();
+    adapter.releaseInputs();
     expect((await takeover).body).toMatchObject({ takeover: "active" });
 
     await expect(
@@ -484,9 +367,7 @@ describe("Bot-bound Pi computer tool", () => {
     expect(await waitForTakeover(h, owner, "unavailable")).toMatchObject({
       takeover: "unavailable",
     });
-    expect(adapter.actions).toEqual([
-      { surfaceId, action: { name: "click", args: { marker: "worker-restart" } } },
-    ]);
+    expect(adapter.inputEvents.map((record) => record.surfaceId)).toEqual([surfaceId, surfaceId, surfaceId]);
     const transcript = await messages(h, sent.threadId);
     expect(transcript.some((message) =>
       message.author.kind === "system" && message.text?.includes("worker exited")
@@ -494,21 +375,21 @@ describe("Bot-bound Pi computer tool", () => {
   });
 
   test("daemon restart fails a held Takeover turn instead of pretending to resume it", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const botId = await makeBot(h, "Daemon restart Takeover Bot");
     const surfaceId = await botSurface(h, botId);
     const owner = { botId, surfaceId };
-    adapter.blockActions();
+    adapter.blockInputs();
 
     const sent = await sendToBot(h, botId, "computer:click:daemon-restart");
-    await adapter.waitForActions(1);
+    await adapter.waitForInputAttempts(1);
     const takeover = computerRequest(h, owner, "POST", "/api/computer/take-control");
     expect(await Promise.race([
       takeover.then(() => "takeover-settled" as const),
       computerRequest(h, owner, "GET", "/api/computer/state").then(() => "state-readable" as const),
     ])).toBe("state-readable");
-    adapter.releaseActions();
+    adapter.releaseInputs();
     expect((await takeover).body).toMatchObject({ takeover: "active" });
     const staleAuthority = coordination(h, surfaceId);
     expect(staleAuthority).toMatchObject({ authority_kind: "takeover" });
@@ -523,7 +404,7 @@ describe("Bot-bound Pi computer tool", () => {
       )
       .run(new Date(0).toISOString(), surfaceId);
     staleDb.close();
-    h = await startDaemon(home, { botScreenAdapter: new AgentToolRuntimeAdapter() });
+    h = await startDaemon(home, { botScreenAdapter: new FakeBotScreenRuntimeAdapter() });
     expect(coordination(h, surfaceId)).toEqual({
       authority_kind: "idle",
     });
@@ -536,7 +417,7 @@ describe("Bot-bound Pi computer tool", () => {
   });
 
   test("every stale or mismatched binding identity fails without touching either Screen", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const firstBot = await makeBot(h, "Context owner Bot");
     const secondBot = await makeBot(h, "Context other Bot");
@@ -552,7 +433,7 @@ describe("Bot-bound Pi computer tool", () => {
     ]);
     await Promise.all(turns.map((turn) => waitThreadIdle(runningHarness, turn.threadId)));
 
-    expect(adapter.actions).toHaveLength(0);
+    expect(adapter.actionsStarted).toBe(0);
     for (const turn of turns) {
       const row = h.svc.threads.turnRow(turn.turnId);
       expect(row?.status).toBe("failed");
@@ -561,31 +442,29 @@ describe("Bot-bound Pi computer tool", () => {
   }, 15_000);
 
   test("Agent worker loss fails its active tool turn instead of reconstructing or rerouting it", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const bot = await makeBot(h, "Crashed Agent worker Bot");
 
     const sent = await sendToBot(h, bot, "computer:crash-agent");
     await waitThreadIdle(h, sent.threadId);
 
-    expect(adapter.actions).toHaveLength(0);
+    expect(adapter.actionsStarted).toBe(0);
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("failed");
     expect(h.svc.threads.turnRow(sent.turnId)?.outcome_reason).toContain("worker exited");
   }, 15_000);
 
   test("assigned worker failure fails honestly and never reroutes", async () => {
-    const adapter = new AgentToolRuntimeAdapter();
+    const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const bot = await makeBot(h, "Failed tool Bot");
     const surfaceId = await botSurface(h, bot);
 
-    const sent = await sendToBot(h, bot, "computer:observe:fail");
+    adapter.failNextCapture(surfaceId);
+    const sent = await sendToBot(h, bot, "computer:observe");
     await waitThreadIdle(h, sent.threadId);
 
-    expect(adapter.actions).toEqual([
-      { surfaceId, action: { name: "observe", args: { fail: true } } },
-    ]);
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("failed");
-    expect(h.svc.threads.turnRow(sent.turnId)?.outcome_reason).toContain("assigned Computer worker failed");
+    expect(h.svc.threads.turnRow(sent.turnId)?.outcome_reason).toContain("fake Bot Screen capture failed");
   }, 15_000);
 });

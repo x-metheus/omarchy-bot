@@ -302,7 +302,7 @@ test("Sway capture, worker actions, and private input succeed while missing WayV
   expect(captureResult.bytes.slice(0, 8)).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   const stream = await runtime.openCaptureStream();
   await stream.close();
-  await expect(runtime.act({ name: "notify", args: { body: "ready" } })).resolves.toEqual({
+  await expect(runtime.notify({ body: "ready" })).resolves.toEqual({
     text: "worker-notify",
   });
   await expect(runtime.acquireExpandedView()).rejects.toThrow("WayVNC executable is unavailable");
@@ -825,10 +825,13 @@ realSway("WebSocket RFB survives preview teardown before expand", async () => {
     const bot = await api<{ surfaceId: SurfaceId }>(harness, "GET", `/api/bots/${botId}`);
     owner = { botId, surfaceId: bot.surfaceId };
     await waitScreenReady(harness, owner);
-    await harness.svc.screens.act(owner, { name: "click", args: { x: 40, y: 50 } }, {
-      ...owner,
-      turnId: "turn_preview_then_rfb",
-    });
+    await harness.svc.computer.agentToolAct(
+      owner,
+      "turn_preview_then_rfb",
+      "turn_preview_then_rfb",
+      { name: "click", args: { x: 40, y: 50 } },
+      new AbortController().signal,
+    );
     preview = await ProjectionClient.connect(harness.baseUrl, owner, "real-sway-preview-then-rfb");
     await preview.setMode("preview");
     await preview.waitForPreviewFrame(0, 8_000);

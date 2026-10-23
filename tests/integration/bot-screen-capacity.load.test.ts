@@ -207,7 +207,6 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
       harness.svc.screens.act(
         owner,
         { name: "open_app", args: { app: workloadApplication } },
-        { ...owner, turnId: `workload-turn-${profile}-${count}-${index}` },
       )
     ));
     await Bun.sleep(500);

@@ -177,7 +177,6 @@ describe("Bot Screen lifecycle", () => {
     await expect(h.svc.screens.act(
       { botId: owner.id, surfaceId: owner.surfaceId },
       { name: "open_app", args: { app: "missing.desktop" } },
-      { botId: owner.id, surfaceId: owner.surfaceId, turnId: "application-failure" },
     )).rejects.toThrow("fake application launch failed");
     expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
     expect((await fetch(
@@ -260,6 +259,39 @@ describe("Bot Screen lifecycle", () => {
       expect(adapter.running(affected.surfaceId)).toEqual({ generation });
     }
     expect(adapter.running(unaffected.surfaceId)).toEqual({ generation: 1 });
+  });
+
+  test("one shared compositor exit fails every Bot Screen together", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const first = await bot(h, await makeBot(h, "Shared compositor A"));
+    const second = await bot(h, await makeBot(h, "Shared compositor B"));
+    await Promise.all([activateScreen(h, first), activateScreen(h, second)]);
+    const outcomes = [
+      adapter.runtimeOutcome(first.surfaceId),
+      adapter.runtimeOutcome(second.surfaceId),
+    ];
+
+    adapter.exitSharedCompositor();
+
+    expect((await Promise.all(outcomes)).map((outcome) => outcome.type)).toEqual([
+      "compositor-exited",
+      "compositor-exited",
+    ]);
+    await waitForState(h, first, "unavailable");
+    await waitForState(h, second, "unavailable");
+    expect(h.svc.screens.status({ botId: first.id, surfaceId: first.surfaceId })).toEqual({
+      state: "failed",
+      failure: "Bot Computer compositor failed: fake shared compositor exited",
+    });
+    expect(h.svc.screens.status({ botId: second.id, surfaceId: second.surfaceId })).toEqual({
+      state: "failed",
+      failure: "Bot Computer compositor failed: fake shared compositor exited",
+    });
+
+    await Promise.all([activateScreen(h, first), activateScreen(h, second)]);
+    expect(adapter.running(first.surfaceId)).toEqual({ generation: 2 });
+    expect(adapter.running(second.surfaceId)).toEqual({ generation: 2 });
   });
 
   test("input-release cleanup failure stays on the affected Screen and leaves it retryable", async () => {
@@ -592,7 +624,6 @@ describe("Bot Screen lifecycle", () => {
     const action = h.svc.screens.act(
       { botId: owner.id, surfaceId: owner.surfaceId },
       { name: "open_app", args: { app: "fixture.desktop" } },
-      { botId: owner.id, surfaceId: owner.surfaceId, turnId: "concurrent-first-use" },
     );
     await adapter.waitForStartAttempts(1);
     expect(adapter.starts).toHaveLength(0);
@@ -600,7 +631,7 @@ describe("Bot Screen lifecycle", () => {
     adapter.releaseStarts();
 
     expect((await view).status).toBe(200);
-    await expect(action).resolves.toMatchObject({ text: "fake-open_app#1" });
+    await expect(action).resolves.toMatchObject({ text: "fake-open#1:fixture.desktop" });
     expect(adapter.starts).toEqual([
       expect.objectContaining({ surfaceId: owner.surfaceId, generation: 1 }),
     ]);
@@ -648,7 +679,6 @@ describe("Bot Screen lifecycle", () => {
     await h.svc.screens.act(
       { botId: first.id, surfaceId: first.surfaceId },
       { name: "open_app", args: { app: "fixture-a.desktop" } },
-      { botId: first.id, surfaceId: first.surfaceId, turnId: "independent-a" },
     );
     expect(h.svc.screens.status({ botId: first.id, surfaceId: first.surfaceId })).toEqual({ state: "ready" });
     expect(h.svc.screens.status({ botId: second.id, surfaceId: second.surfaceId })).toEqual({ state: "ready" });
@@ -746,7 +776,6 @@ describe("Bot Screen lifecycle", () => {
     const pending = h.svc.screens.act(
       { botId: affected.id, surfaceId: affected.surfaceId },
       { name: "open_app", args: { app: "held.desktop" } },
-      { botId: affected.id, surfaceId: affected.surfaceId, turnId: "pending-action-failure" },
     );
     void pending.catch(() => {});
     await adapter.waitForActions(1);

@@ -10,8 +10,8 @@ import {
 } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
-import { isInputAction, type ComputerAction, type SurfaceId } from "@omarchy-bot/domain";
-import type { ComputerInputAuthority, ComputerWindowListItem } from "@omarchy-bot/agent-contract";
+import type { SurfaceId } from "@omarchy-bot/domain";
+import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
 import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
 import { ensureCaptureHelper } from "../../../native/capture-helper/build.ts";
 import { ensureInputHelper } from "../../../native/pointer-helper/build.ts";
@@ -27,7 +27,7 @@ import {
   type BotScreenCapture,
   type BotScreenCaptureStream,
   type BotScreenExpandedView,
-  type BotScreenInputAction,
+  type BotScreenLaunchRequest,
   type BotScreenProvision,
   type BotScreenRuntime,
   type BotScreenRuntimeAdapter,
@@ -139,134 +139,6 @@ interface SwaySession {
   virtualInput?: WaylandVirtualInput;
   computerWorker?: SurfaceComputerWorker;
   cleanup?: (() => Promise<void>) | undefined;
-}
-
-const LINUX_KEY_CODES: Record<string, number> = {
-  Esc: 1,
-  Escape: 1,
-  Tab: 15,
-  Return: 28,
-  Enter: 28,
-  LeftCtrl: 29,
-  Control: 29,
-  Ctrl: 29,
-  LeftShift: 42,
-  Shift: 42,
-  LeftAlt: 56,
-  Alt: 56,
-  Space: 57,
-  Backspace: 14,
-  RightShift: 54,
-  RightCtrl: 97,
-  RightAlt: 100,
-  LeftMeta: 125,
-  Super: 125,
-  Meta: 125,
-  Win: 125,
-  Up: 103,
-  Down: 108,
-  Left: 105,
-  Right: 106,
-  Home: 102,
-  End: 107,
-  PageUp: 104,
-  PageDown: 109,
-  Delete: 111,
-  Insert: 110,
-  CapsLock: 58,
-  F1: 59,
-  F2: 60,
-  F3: 61,
-  F4: 62,
-  F5: 63,
-  F6: 64,
-  F7: 65,
-  F8: 66,
-  F9: 67,
-  F10: 68,
-  F11: 87,
-  F12: 88,
-};
-
-const LINUX_LETTER_KEY_CODES: Readonly<Record<string, number>> = {
-  q: 16,
-  w: 17,
-  e: 18,
-  r: 19,
-  t: 20,
-  y: 21,
-  u: 22,
-  i: 23,
-  o: 24,
-  p: 25,
-  a: 30,
-  s: 31,
-  d: 32,
-  f: 33,
-  g: 34,
-  h: 35,
-  j: 36,
-  k: 37,
-  l: 38,
-  z: 44,
-  x: 45,
-  c: 46,
-  v: 47,
-  b: 48,
-  n: 49,
-  m: 50,
-};
-
-function linuxKeyCode(key: string): number {
-  const name = key.trim();
-  if (name === "") throw new Error("key requires a known key name");
-  const keyCode = LINUX_KEY_CODES[name]
-    ?? LINUX_LETTER_KEY_CODES[name.toLowerCase()]
-    ?? (/^[0-9]$/.test(name) ? (name === "0" ? 11 : Number(name) + 1) : undefined);
-  if (keyCode === undefined) throw new Error(`unknown key: ${name}`);
-  return keyCode;
-}
-
-function linuxKeyChord(value: unknown): number[] {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error("key requires a known key name");
-  }
-  const keys = value.split("+").map((key) => key.trim());
-  if (keys.some((key) => key === "")) throw new Error(`unknown key chord: ${value}`);
-  return keys.map(linuxKeyCode);
-}
-
-function requireCoordinate(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a number`);
-  return value;
-}
-
-function optionalCoordinate(value: unknown, fallback: number): number {
-  if (value === undefined) return fallback;
-  return requireCoordinate(value, "coordinate");
-}
-
-function pointerButton(value: unknown): "left" | "middle" | "right" {
-  if (value === undefined || value === "left") return "left";
-  if (value === "middle" || value === "right") return value;
-  throw new Error("click button must be left, middle, or right");
-}
-
-function resolveFocusMatches(
-  windows: ComputerWindowListItem[],
-  args: Record<string, unknown>,
-): ComputerWindowListItem[] {
-  if (args.id !== undefined && args.id !== null && args.id !== "") {
-    const id = String(args.id);
-    return windows.filter((window) => window.id === id);
-  }
-  if (typeof args.title === "string") {
-    return windows.filter((window) => window.title === args.title);
-  }
-  if (typeof args.appId === "string") {
-    return windows.filter((window) => window.appId === args.appId);
-  }
-  throw new Error("focus_window requires id, title, or appId");
 }
 
 function writeSwayConfig(configHome: string): string {
@@ -988,38 +860,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           },
         });
     let lastInputEpoch = 0;
-    let nextInputSequence = 1;
-    const sendAgentInput = async (
-      granted: number | undefined,
-      deliver: (send: (event: BotScreenInputAction) => Promise<void>) => Promise<void>,
-    ): Promise<void> => {
-      await this.#withInputLease(session, async () => {
-        // A granted epoch already reached the helper through setInputAuthority, so only that
-        // same epoch may deliver. Re-arming the helper would restart its event sequence.
-        if (granted !== undefined && granted !== lastInputEpoch) {
-          throw new BotScreenInputRejectedError("stale controller epoch");
-        }
-        const epoch = granted ?? ++lastInputEpoch;
-        if (granted === undefined) {
-          nextInputSequence = 1;
-          await virtualInput.setInputAuthority(epoch);
-        }
-        try {
-          await deliver(async (event) => {
-            await virtualInput.input({
-              surfaceId: provision.surfaceId,
-              runtimeGeneration: provision.generation,
-              geometryGeneration: provision.geometryGeneration,
-              controllerEpoch: epoch,
-              ...event,
-              sequence: nextInputSequence++,
-            });
-          });
-        } finally {
-          if (granted === undefined) await virtualInput.release(epoch);
-        }
-      });
-    };
     const outcome = Promise.race<BotScreenRuntimeOutcome>([
       this.#computerExited(computer).then((status) => ({
         type: "compositor-exited",
@@ -1192,77 +1032,26 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         captureStreamStarts.delete(opening.promise);
       }
     };
-    const act = async (
-      action: ComputerAction,
-      inputAuthority?: ComputerInputAuthority,
-    ): Promise<BotScreenActionResult> => {
-      if (isInputAction(action.name)) {
-        if (inputAuthority === undefined || inputAuthority.surfaceId !== provision.surfaceId) {
-          throw new Error("Bot Screen input authority does not match this Surface");
-        }
-      }
-      if (action.name === "screenshot") return { image: await capture() };
-      if (action.name === "list_windows") return { windowList: await listWindows() };
-      if (action.name === "observe") {
-        const windowList = await listWindows();
-        return { image: await capture(), windowList };
-      }
-      if (action.name === "focus_window") {
-        const matches = resolveFocusMatches(await listWindows(), action.args);
-        if (matches.length === 0) throw new Error("focus_window did not match a window");
-        if (matches.length > 1) throw new Error("focus_window matched multiple windows");
-        const target = matches[0]!;
-        await this.#withInputLease(session, async () => {
-          await swayIpc.runCommand(`[con_id=${target.id}] focus`);
-          const confirmed = (await listWindows()).find((window) => window.id === target.id);
-          if (confirmed?.focused !== true) throw new Error("Sway window focus was not confirmed");
-        });
-        return {};
-      }
-      if (action.name === "click") {
-        const x = requireCoordinate(action.args.x, "click x");
-        const y = requireCoordinate(action.args.y, "click y");
-        const button = pointerButton(action.args.button);
-        await sendAgentInput(inputAuthority?.controllerEpoch, async (send) => {
-          await send({ type: "motion", x, y });
-          await send({ type: "button", x, y, button, state: "pressed" });
-          await send({ type: "button", x, y, button, state: "released" });
-        });
-        return {};
-      }
-      if (action.name === "scroll") {
-        const x = optionalCoordinate(action.args.x, 0);
-        const y = optionalCoordinate(action.args.y, 0);
-        const deltaX = requireCoordinate(action.args.deltaX, "scroll deltaX");
-        const deltaY = requireCoordinate(action.args.deltaY, "scroll deltaY");
-        await sendAgentInput(inputAuthority?.controllerEpoch, async (send) => {
-          await send({ type: "scroll", x, y, deltaX, deltaY });
-        });
-        return {};
-      }
-      if (action.name === "key") {
-        const keyCodes = linuxKeyChord(action.args.key);
-        await sendAgentInput(inputAuthority?.controllerEpoch, async (send) => {
-          for (const keyCode of keyCodes) await send({ type: "key", keyCode, state: "pressed" });
-          for (const keyCode of keyCodes.toReversed()) await send({ type: "key", keyCode, state: "released" });
-        });
-        return {};
-      }
-      if (action.name === "type") {
-        if (typeof action.args.text !== "string") throw new Error("type requires args.text");
-        await sendAgentInput(inputAuthority?.controllerEpoch, async (send) => {
-          await send({ type: "paste", text: action.args.text as string });
-        });
-        return {};
-      }
-      if (action.name === "open_app" || action.name === "open_url") {
-        return this.#withInputLease(session, async () => {
-          const result = await this.#launchApplication(session, action);
-          await hideBotDesktop(swayIpc, session.workspaceName);
-          return result;
-        });
-      }
-      const result = await computerWorker.act(action, inputAuthority);
+    const focusWindow = async (window: ComputerWindowListItem): Promise<void> => {
+      if (stopped || !this.#computerRunning(computer)) throw new Error("Bot Computer compositor is not running");
+      if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
+      await this.#withInputLease(session, async () => {
+        await swayIpc.runCommand(`[con_id=${window.id}] focus`);
+        const confirmed = (await listWindows()).find((candidate) => candidate.id === window.id);
+        if (confirmed?.focused !== true) throw new Error("Sway window focus was not confirmed");
+      });
+    };
+    const launch = async (request: BotScreenLaunchRequest): Promise<{ text?: string }> => {
+      if (stopped || !this.#computerRunning(computer)) throw new Error("Bot Computer compositor is not running");
+      if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
+      return this.#withInputLease(session, async () => {
+        const result = await this.#launchApplication(session, request);
+        await hideBotDesktop(swayIpc, session.workspaceName);
+        return result;
+      });
+    };
+    const notify = async (args: Record<string, unknown>): Promise<BotScreenActionResult> => {
+      const result = await computerWorker.act({ name: "notify", args });
       const workerImage = result.image === undefined
         ? undefined
         : {
@@ -1478,7 +1267,10 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           expandedViewStarts.delete(opening.promise);
         }
       },
-      act,
+      listWindows,
+      focusWindow,
+      launch,
+      notify,
       setInputAuthority: async (controllerEpoch) => {
         if (!Number.isSafeInteger(controllerEpoch) || controllerEpoch <= lastInputEpoch) {
           throw new BotScreenInputRejectedError("stale controller epoch");
@@ -1518,8 +1310,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   async #launchApplication(
     session: SwaySession,
-    action: ComputerAction,
-  ): Promise<BotScreenActionResult> {
+    request: BotScreenLaunchRequest,
+  ): Promise<{ text?: string }> {
     const cwd = this.options.applicationCwd;
     if (cwd === undefined || cwd === "" || !existsSync(cwd)) {
       throw new Error("Shared Workspace is unavailable for application launch");
@@ -1528,19 +1320,10 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const before = new Set(
       listApplicationToplevels(await swayIpc.getTree()).map((window) => window.id),
     );
-    let argv: string[];
-    let text: string;
-    if (action.name === "open_app") {
-      const application = String(action.args.app ?? "");
-      if (application === "") throw new Error("open_app requires args.app");
-      argv = desktopApplicationCommand(application, session.computer.childEnv);
-      text = `launched ${application}`;
-    } else {
-      const url = String(action.args.url ?? "");
-      if (url === "") throw new Error("open_url requires args.url");
-      argv = browserCommand(url, session.computer.childEnv);
-      text = `opened ${url}`;
-    }
+    const argv = request.app !== undefined
+      ? desktopApplicationCommand(request.app, session.computer.childEnv)
+      : browserCommand(request.url!, session.computer.childEnv);
+    const text = request.app !== undefined ? `launched ${request.app}` : `opened ${request.url}`;
     const role = `application-${++session.computer.applicationSequence}` as const;
     const application = Bun.spawn([
       ...this.#units.computerCommand(

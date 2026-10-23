@@ -256,7 +256,7 @@ export class ScreenInputLease {
     input: {
       turnId: string;
       signal: AbortSignal;
-      run: (send: (event: BotScreenInputAction) => Promise<void>, epoch: number) => Promise<T>;
+      run: (send: (event: BotScreenInputAction) => Promise<void>) => Promise<T>;
     },
   ): Promise<T> {
     if (input.signal.aborted) throw abortError(input.signal);
@@ -281,7 +281,7 @@ export class ScreenInputLease {
     input: {
       turnId: string;
       signal: AbortSignal;
-      run: (send: (event: BotScreenInputAction) => Promise<void>, epoch: number) => Promise<T>;
+      run: (send: (event: BotScreenInputAction) => Promise<void>) => Promise<T>;
     },
     turn: () => void,
   ): Promise<T> {
@@ -302,7 +302,7 @@ export class ScreenInputLease {
       }
       this.#epoch.set(target.surfaceId, epoch);
       try {
-        return await input.run((event) => this.#deliver(holder, event), epoch);
+        return await input.run((event) => this.#deliver(holder, event));
       } finally {
         await this.#drop(holder);
       }

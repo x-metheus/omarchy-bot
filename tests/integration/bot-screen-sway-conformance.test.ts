@@ -108,7 +108,8 @@ async function act(
   action: ComputerAction,
   turnId: string,
 ): Promise<BotScreenActionResult> {
-  return harness!.svc.screens.act(owner, action, { ...owner, turnId });
+  // Input actions go through the input lease (svc.computer.agentToolAct); act() is for the rest.
+  return harness!.svc.screens.act(owner, action);
 }
 
 async function screenshotBytes(owner: Owner): Promise<Uint8Array> {
@@ -169,7 +170,13 @@ async function focusFixtureEditor(owner: Owner, label: string): Promise<void> {
   const window = isolationWindow(await listedWindows(owner), label);
   if (window === undefined) throw new Error(`missing ${label} browser fixture`);
   await act(owner, { name: "focus_window", args: { id: window.id } }, `focus-editor-${label}`);
-  await act(owner, { name: "key", args: { key: "Tab" } }, `inspect-editor-${label}`);
+  await harness!.svc.computer.agentToolAct(
+    owner,
+    `conformance-key-${label}`,
+    `conformance-key-${label}`,
+    { name: "key", args: { key: "Tab" } },
+    new AbortController().signal,
+  );
   await until(() => browserFixtureState(owner, label), 8_000, `${label} editor focus`);
 }
 
