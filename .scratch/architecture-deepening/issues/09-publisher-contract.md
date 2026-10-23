@@ -1,7 +1,7 @@
 # 09: PublisherContract and PluginsService split
 
 **Type:** task
-**Status:** claimed
+**Status:** resolved
 **Blocked by:** —
 
 **What to build:** Type the daemon ↔ publisher contract once and split `apps/daemon/src/modules/plugins/plugins.ts` (971 lines) into deeper modules: provider accounts (OAuth, tokens, identity, scopes), catalog client, Service bundle provisioning, Skill install, driven by one operation table.
@@ -15,3 +15,13 @@ Decisions (settled, see [system ADR 0012](../../../docs/adr/0012-publisher-contr
 - One token-metadata whitelist and one HTTPS-origin check, from the contract.
 
 ## Comments
+
+## Answer
+
+`PublisherContract` schemas live in `packages/protocol` and are imported by the site and the daemon. `PLUGIN_OPERATIONS` is the only action, method, path, and body list. `PLUGIN_DISPATCH` maps those rows and adds the daemon handler; `pluginRoutes.ts` and `manage_plugins` both call it. The duplicated action enum is gone.
+
+`plugins.ts` is split into `CatalogClient`, `ProviderAccounts` (OAuth start, callback, token refresh, grant persistence, identity, scopes), `ServiceBundles` (provision, enable, remove, update), and `SkillInstalls`. Account records stay in the daemon store and are mutated by those modules.
+
+Integration tests call the real `handlePluginCloudRequest` and stub only provider token endpoints and skills.sh. New daemons read `catalog/normalised`; the raw skills.sh passthrough remains. `identifyAccount` refuses Microsoft and Miro before any fetch, and `ProviderAccounts.authorize` for Microsoft records no publisher route. Google identity stored by the publisher is `{ subject }` only. `HttpsOrigin` and `TOKEN_METADATA_KEYS` are defined once in the protocol package.
+
+`bun run typecheck` passed. Publisher, plugin service, skill, shared plugin, native MCP, and MCP package integration tests passed. Review of `24fe99b` is APPROVED.

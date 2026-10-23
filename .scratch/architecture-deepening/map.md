@@ -24,7 +24,7 @@ Origin: architecture review and grilling session on 2026-10-22. Each ticket reco
 | 06 | [Narrow the Bot Screen runtime seam](./issues/06-narrow-runtime-seam.md) | task | 05 | ready-for-agent |
 | 07 | [Extract BotComputer from the Sway runtime](./issues/07-bot-computer-module.md) | task | 06 | ready-for-agent |
 | 08 | [Retire the computer worker](./issues/08-retire-computer-worker.md) | task | 07 | ready-for-agent |
-| 09 | [PublisherContract and PluginsService split](./issues/09-publisher-contract.md) | task | — | ready-for-agent |
+| 09 | [PublisherContract and PluginsService split](./issues/09-publisher-contract.md) | task | — | resolved |
 | 10 | [Shared NativeMcpConfig module](./issues/10-native-mcp-config.md) | task | — | ready-for-agent |
 
 ## Lanes
