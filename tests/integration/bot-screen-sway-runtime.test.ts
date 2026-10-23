@@ -3,7 +3,6 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, st
 import os from "node:os";
 import path from "node:path";
 import { SwayBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/swayBotScreenRuntime.ts";
-import { leftoverCageTrees, prepareSwayProductionCutover } from "../../apps/daemon/src/modules/computer/leftoverCage.ts";
 import { PortableSwayRuntimeSupply } from "../../apps/daemon/src/modules/computer/swayRuntimeSupply.ts";
 import { waitScreenReady } from "./helpers/bot-screen-load-observe.ts";
 import { api, makeBot, startDaemon } from "./helpers/harness.ts";
@@ -925,8 +924,6 @@ test("partial Sway startup is not Cage and private orphan processes are cleaned"
       await Bun.sleep(10);
     }
     expect(existsSync(path.join(runtimeDir, "session.json"))).toBeFalse();
-    expect(leftoverCageTrees(options.runtimeRoot)).toEqual([]);
-    await prepareSwayProductionCutover(options.runtimeRoot);
     const recovered = new SwayBotScreenRuntimeAdapter(options);
     expect(await recovered.reconcile(provision(SURFACE_A))).toBeUndefined();
     expect(await starting).toBe("failed");

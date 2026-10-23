@@ -9,8 +9,6 @@ import { TurnService } from "../modules/turns/turns.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker, type ComputerSurfaceOwner } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
-import { BOT_DESKTOP_ROLLOUT } from "../modules/computer/botDesktopRollout.ts";
-import { prepareSwayProductionCutover } from "../modules/computer/leftoverCage.ts";
 import { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
 import { ScreenInputLease } from "../modules/computer/screenInputLease.ts";
 import { SwayBotScreenRuntimeAdapter } from "../modules/computer/swayBotScreenRuntime.ts";
@@ -83,9 +81,6 @@ export async function main(options: MainOptions = {}): Promise<{
       computer: process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR ?? path.resolve(agentsDir, "computer"),
     },
   );
-  if (options.botScreenAdapter === undefined) {
-    await prepareSwayProductionCutover(cfg.botScreenRuntimeDir);
-  }
   const productionScreenAdapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
@@ -253,7 +248,6 @@ export async function main(options: MainOptions = {}): Promise<{
       ts: new Date().toISOString(),
       agents: agents.list().map((a) => ({ id: a.id, status: a.status })),
       computer: computer.states(),
-      botDesktopRollout: BOT_DESKTOP_ROLLOUT,
     });
   };
   try {

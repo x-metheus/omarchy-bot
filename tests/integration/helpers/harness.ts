@@ -49,7 +49,6 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   process.env.OMARCHY_BOT_HOME = home;
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
-  process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT = "0";
   process.env.OMARCHY_BOT_WORKERS_DIR = path.resolve(import.meta.dir, "../fake-workers");
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
     options.botDeletionTerminalTimeoutMs ?? 30_000,
