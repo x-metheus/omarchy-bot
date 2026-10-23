@@ -1,7 +1,7 @@
 # 04: SidecarBroker for `local` jobs
 
 **Type:** task
-**Status:** claimed
+**Status:** resolved
 **Blocked by:** 03
 
 **What to build:** Give `local` a deep `SidecarBroker` mirroring `ComputerBroker`, and register it as the `local` executor on the ToolChannel. It owns This Device resolution, capability checks, job ids, cancel, liveness, output bounds and redaction, and Shared Workspace transfer I/O behind one signal-aware call. `TurnService` stops doing file I/O for `local`.
@@ -24,9 +24,6 @@ Decisions (settled):
 
 ## Comments
 
-The previous resolution used ticket 03's stale approval. Fresh review of `d305ec1..389a2be` requires four fixes:
+`SidecarBroker` is the `local` executor on the `ToolChannel`. This Device is resolved from the device id tagged on the user message that started the Turn; untagged requests fail closed, and explicit targets can name another online Sidecar. Cancellation sends `local.cancel`, dismisses the Ask card, and tears down the command's private POSIX process group (including descendants and SIGKILL escalation). A Sidecar with no heartbeat for 30 seconds is marked offline and its jobs fail. The real Sidecar handler owns policy and execution, the test fixture is an adapter over it, and `confinedPath` is the shared path-confinement helper. Assembled workspace-transfer frames are validated before dispatch with bounds errors on oversized payloads. Local dispatch validates active Turn identity (agentId, botId, turnId, workerSessionId) before execution.
 
-- [ ] Keep executing remembered-Always jobs cancellable until completion.
-- [ ] Cancel the command's private process group, including descendants and bounded escalation.
-- [ ] Validate assembled workspace-transfer frames before dispatch.
-- [ ] Validate the active Turn identity before dispatching `local`.
+Review approved commit range `d305ec1..004935c` (`REVIEW.md`: `APPROVED`).
