@@ -14,7 +14,6 @@ import type { ScreenInputLease } from "./screenInputLease.ts";
 
 
 
-type TakeoverPhase = "running" | "takeover-requested" | "held" | "completing" | "waiting" | "settled";
 type ComputerAuthority = "idle" | "agent" | "web" | "takeover";
 type Deferred<T> = {
   promise: Promise<T>;
@@ -36,7 +35,6 @@ interface PendingAgentTool {
   owner: ComputerSurfaceOwner;
   turnId: string;
   toolCallId: string;
-  phase: TakeoverPhase;
   actionDone: Deferred<void>;
   activated: Deferred<void>;
   completion: Deferred<AgentComputerToolOutput>;
@@ -165,18 +163,8 @@ export class ComputerBroker {
     const surface = this.db
       .query(`SELECT last_image_at FROM bot_surfaces WHERE surface_id = ?`)
       .get(owner.surfaceId) as { last_image_at: string | null };
-    const pending = this.#pendingAgentTools.get(owner.surfaceId);
-    const takeover =
-      pending?.phase === "held" || pending?.phase === "completing" || pending?.phase === "waiting"
-        ? "active" as const
-        : pending?.phase === "running" || pending?.phase === "takeover-requested"
-          ? "available" as const
-          : "unavailable" as const;
-    const screenUse = pending?.phase === "held"
-      || pending?.phase === "completing"
-      || this.lease.screenUse(owner.surfaceId) === "human"
-      ? "human" as const
-      : takeover === "available" ? "bot" as const : "idle" as const;
+    const takeover = this.lease.takeover(owner.surfaceId);
+    const screenUse = this.lease.screenUse(owner.surfaceId);
     return {
       ...owner,
       screenUse,
@@ -196,43 +184,31 @@ export class ComputerBroker {
     const owner = this.#requireOwner(input);
     const pending = this.#pendingAgentTools.get(owner.surfaceId);
     if (pending === undefined) return { ok: false };
-    if (pending.phase === "held" || pending.phase === "completing" || pending.phase === "waiting") {
-      return { ok: true };
-    }
-    if (pending.phase === "settled") return { ok: false };
-    if (pending.phase === "running") {
-      pending.phase = "takeover-requested";
-      this.#transitionAuthority(owner, "takeover");
-      this.#event(owner);
-    }
-
-    await pending.actionDone.promise;
-    const current = this.#pendingAgentTools.get(owner.surfaceId);
+    if (this.lease.takeover(owner.surfaceId) === "active") return { ok: true };
+    if (this.lease.takeover(owner.surfaceId) !== "available") return { ok: false };
+    this.#transitionAuthority(owner, "takeover");
+    this.#event(owner);
+    const takeover = await this.lease.requestTakeover(owner.surfaceId);
     if (
-      current?.phase === "settled"
-      || current !== pending
+      !takeover.ok
+      || this.#pendingAgentTools.get(owner.surfaceId) !== pending
       || pending.cancellation !== undefined
       || pending.actionError !== undefined
     ) {
       return { ok: false };
     }
-    if (pending.phase === "takeover-requested") {
-      await this.lease.requestTakeover(owner.surfaceId);
-      pending.phase = "held";
-      pending.activated.resolve();
-      this.#transitionAuthority(owner, "takeover");
-      this.#event(owner);
-    }
-    return { ok: pending.phase === "held" || pending.phase === "completing" || pending.phase === "waiting" };
+    pending.activated.resolve();
+    this.#event(owner);
+    return { ok: true };
   }
 
   async imDone(input: ComputerSurfaceOwner): Promise<{ observation?: string }> {
     const owner = this.#requireOwner(input);
     const pending = this.#pendingAgentTools.get(owner.surfaceId);
-    if (pending === undefined || pending.phase !== "held") {
+    if (pending === undefined || this.lease.agentToolPhase(owner.surfaceId) !== "held") {
       throw new Error("Takeover is not active");
     }
-    pending.phase = "completing";
+    this.lease.setAgentToolPhase(owner.surfaceId, pending.toolCallId, "completing");
     this.#event(owner);
     try {
       await this.lease.revoke(owner.surfaceId);
@@ -249,18 +225,17 @@ export class ComputerBroker {
         await this.#recordActionResult(owner, capture),
       );
       if (pending.cancellation !== undefined) throw pending.cancellation;
-      pending.phase = "settled";
+      await this.lease.settleAgentTool(owner.surfaceId, pending.toolCallId);
       this.#transitionAuthority(owner, "idle");
       pending.completion.resolve(result);
       this.#event(owner);
       return result.text === undefined ? {} : { observation: result.text };
     } catch (error) {
       if (pending.cancellation === undefined) {
-        pending.phase = "completing";
         try {
           await this.projections.restoreInput(owner.surfaceId);
         } catch (restoreError) {
-          pending.phase = "waiting";
+          this.lease.setAgentToolPhase(owner.surfaceId, pending.toolCallId, "waiting");
           this.#transitionAuthority(owner, "idle");
           this.#event(owner);
           throw new AggregateError(
@@ -268,7 +243,7 @@ export class ComputerBroker {
             "Bot Screen observation failed and Web Control could not be restored",
           );
         }
-        pending.phase = "held";
+        this.lease.setAgentToolPhase(owner.surfaceId, pending.toolCallId, "held");
         this.#transitionAuthority(owner, "takeover");
         this.#event(owner);
       }
@@ -278,24 +253,17 @@ export class ComputerBroker {
 
   #noteWebControl(input: ComputerSurfaceOwner, claimed: boolean): void {
     const owner = this.#requireOwner(input);
-    const pending = this.#pendingAgentTools.get(owner.surfaceId);
-    if (claimed) {
-      if (pending !== undefined) {
-        if (pending.phase === "waiting") pending.phase = "held";
-        else if (pending.phase !== "held" && pending.phase !== "completing") return;
-        this.#transitionAuthority(owner, "takeover");
-      } else {
-        this.#transitionAuthority(owner, "web");
-      }
-    } else {
-      if (pending?.phase === "held") pending.phase = "waiting";
-      const authority = pending?.phase === "running"
-        ? "agent"
-        : pending?.phase === "takeover-requested" || pending?.phase === "completing"
-          ? "takeover"
-          : "idle";
-      this.#transitionAuthority(owner, authority);
-    }
+    const phase = this.lease.agentToolPhase(owner.surfaceId);
+    this.#transitionAuthority(
+      owner,
+      claimed && phase === undefined
+        ? "web"
+        : phase === "running"
+          ? "agent"
+          : phase === undefined || phase === "settled"
+            ? "idle"
+            : "takeover",
+    );
     this.#event(owner);
   }
 
@@ -377,7 +345,6 @@ export class ComputerBroker {
         owner,
         turnId,
         toolCallId,
-        phase: "running",
         actionDone: deferred<void>(),
         activated: deferred<void>(),
         completion: deferred<AgentComputerToolOutput>(),
@@ -385,16 +352,8 @@ export class ComputerBroker {
       pending.activated.promise.catch(() => {});
       pending.completion.promise.catch(() => {});
       this.#pendingAgentTools.set(owner.surfaceId, pending);
-      const generation = this.db
-        .query(`SELECT runtime_generation FROM bot_surfaces WHERE surface_id = ?`)
-        .get(owner.surfaceId) as { runtime_generation: number } | null;
-      if (generation !== null) {
-        const handle = this.lease.beginAgentTool(
-          { surfaceId: owner.surfaceId, runtimeGeneration: generation.runtime_generation },
-          { turnId, toolCallId },
-        );
-        void handle.actionFinished(pending.actionDone.promise);
-      }
+      const handle = this.lease.beginAgentTool(owner.surfaceId, { turnId, toolCallId });
+      void handle.actionFinished(pending.actionDone.promise);
       this.lease.webControlReleased(owner);
       this.#transitionAuthority(owner, "agent");
       this.#event(owner);
@@ -421,18 +380,18 @@ export class ComputerBroker {
           pending.actionDone.resolve();
         }
 
-        if (pending.phase === "running") {
+        if (pending.cancellation !== undefined) throw pending.cancellation;
+        if (!this.lease.takeoverRequested(owner.surfaceId)) {
           await this.lease.settleAgentTool(owner.surfaceId, toolCallId);
-          pending.phase = "settled";
           this.#transitionAuthority(owner, "idle");
           return this.#withImageFile(owner, await this.#recordActionResult(owner, initial));
         }
-        if (pending.phase === "takeover-requested") await pending.activated.promise;
+        await pending.activated.promise;
         if (pending.cancellation !== undefined) throw pending.cancellation;
         return await pending.completion.promise;
       } finally {
         signal.removeEventListener("abort", cancel);
-        if (this.#pendingAgentTools.get(owner.surfaceId) === pending) {
+        if (this.#pendingAgentTools.get(owner.surfaceId) === pending && !this.lease.takeoverRequested(owner.surfaceId)) {
           this.#transitionAuthority(owner, "idle");
           this.#pendingAgentTools.delete(owner.surfaceId);
         }
@@ -459,7 +418,6 @@ export class ComputerBroker {
       const error = new Error("daemon stopped during pending computer tool");
       pending.cancellation = error;
       this.#transitionAuthority(pending.owner, "idle");
-      pending.phase = "settled";
       pending.activated.reject(error);
       pending.completion.reject(error);
     }
@@ -499,12 +457,14 @@ export class ComputerBroker {
   }
 
   async #cancelPending(pending: PendingAgentTool, error: Error): Promise<void> {
-    if (pending.cancellation !== undefined || pending.phase === "settled") return;
+    if (
+      pending.cancellation !== undefined
+      || this.#pendingAgentTools.get(pending.owner.surfaceId) !== pending
+    ) return;
     pending.cancellation = error;
-    const held = pending.phase === "held" || pending.phase === "completing" || pending.phase === "waiting";
-    pending.phase = "settled";
+    // The lease owns the phase machine: settle it here or Takeover stays active after the turn dies.
+    await this.lease.settleAgentTool(pending.owner.surfaceId, pending.toolCallId);
     this.#transitionAuthority(pending.owner, "idle");
-    if (held) await this.lease.revoke(pending.owner.surfaceId).catch(() => {});
     pending.activated.reject(error);
     pending.completion.reject(error);
     this.#event(pending.owner);

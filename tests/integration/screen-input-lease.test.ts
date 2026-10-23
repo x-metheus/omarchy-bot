@@ -137,17 +137,25 @@ describe("ScreenInputLease", () => {
     const sink = delivery();
     const lease = new ScreenInputLease(sink.adapter);
     const actionDone = Promise.withResolvers<void>();
-    const tool = lease.beginAgentTool(target(SURFACE_A), { turnId: "turn-1", toolCallId: "call-1" });
+    const tool = lease.beginAgentTool(SURFACE_A, { turnId: "turn-1", toolCallId: "call-1" });
     expect(lease.takeover(SURFACE_A)).toBe("available");
+    expect(lease.agentToolPhase(SURFACE_A)).toBe("running");
 
     const requesting = lease.requestTakeover(SURFACE_A);
+    expect(lease.agentToolPhase(SURFACE_A)).toBe("takeover-requested");
     expect(lease.takeover(SURFACE_A)).toBe("available");
     expect(lease.screenUse(SURFACE_A)).toBe("bot");
     actionDone.resolve();
     await tool.actionFinished(actionDone.promise);
     expect(await requesting).toEqual({ ok: true });
     expect(lease.takeover(SURFACE_A)).toBe("active");
+    expect(lease.agentToolPhase(SURFACE_A)).toBe("held");
     expect(lease.screenUse(SURFACE_A)).toBe("human");
+
+    lease.setAgentToolPhase(SURFACE_A, "call-1", "completing");
+    expect(lease.takeover(SURFACE_A)).toBe("active");
+    lease.setAgentToolPhase(SURFACE_A, "call-1", "held");
+    expect(lease.agentToolPhase(SURFACE_A)).toBe("held");
 
     const holder = await lease.acquireWebControl(target(SURFACE_A));
     await holder.input({ type: "key", keyCode: KEY_A, state: "pressed" });
@@ -159,6 +167,7 @@ describe("ScreenInputLease", () => {
     expect(lease.screenUse(SURFACE_A)).not.toBe("human");
 
     await lease.settleAgentTool(SURFACE_A, "call-1");
+    expect(lease.agentToolPhase(SURFACE_A)).toBeUndefined();
     expect(lease.takeover(SURFACE_A)).toBe("unavailable");
     expect(lease.screenUse(SURFACE_A)).toBe("idle");
   });
@@ -276,5 +285,60 @@ describe("ScreenInputLease", () => {
     })).rejects.toThrow(/generation/i);
     expect(sink.events.filter((event) => event.kind === "grant")).toHaveLength(1);
     await holder.release();
+  });
+
+  test("a grant in flight keeps the seat so the next caller does not enter grant", async () => {
+    const events: Delivered[] = [];
+    let entered: string[] = [];
+    const grantEntered = Promise.withResolvers<void>();
+    let gate = Promise.resolve();
+    const lease = new ScreenInputLease({
+      grant: async (surfaceId, epoch) => {
+        entered.push(surfaceId);
+        if (entered.length === 2) grantEntered.resolve();
+        await gate;
+        events.push({ surfaceId, epoch, kind: "grant" });
+        return epoch;
+      },
+      deliver: async () => {},
+      release: async (surfaceId, epoch) => {
+        events.push({ surfaceId, epoch, kind: "release" });
+      },
+      capture: async (surfaceId) => ({ surfaceId }),
+    });
+    const runGate = Promise.withResolvers<void>();
+    const first = lease.performBotInput(target(SURFACE_A), {
+      turnId: "a",
+      signal: new AbortController().signal,
+      run: async () => {
+        await runGate.promise;
+      },
+    });
+    await lease.seatHeld();
+    const blocking = Promise.withResolvers<void>();
+    gate = blocking.promise;
+    const webQueued = lease.seatQueued();
+    const web = lease.acquireWebControl(target(SURFACE_B));
+    await webQueued;
+    runGate.resolve();
+    await grantEntered.promise;
+    expect(entered).toEqual([SURFACE_A, SURFACE_B]);
+    let secondEntered = false;
+    const second = lease.performBotInput(target(SURFACE_A), {
+      turnId: "a2",
+      signal: new AbortController().signal,
+      run: async () => {
+        secondEntered = true;
+        return "second";
+      },
+    });
+    await lease.seatQueued();
+    expect(secondEntered).toBeFalse();
+    expect(entered).toEqual([SURFACE_A, SURFACE_B]);
+    blocking.resolve();
+    await web.then((grant) => grant.release());
+    await second;
+    await first;
+    expect(entered).toEqual([SURFACE_A, SURFACE_B, SURFACE_A]);
   });
 });

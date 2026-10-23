@@ -988,18 +988,22 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           },
         });
     let lastInputEpoch = 0;
+    let nextInputSequence = 1;
     const sendAgentInput = async (
       granted: number | undefined,
       deliver: (send: (event: BotScreenInputAction) => Promise<void>) => Promise<void>,
     ): Promise<void> => {
       await this.#withInputLease(session, async () => {
-        const epoch = granted ?? lastInputEpoch + 1;
-        if (granted !== undefined && granted < lastInputEpoch) {
+        // A granted epoch already reached the helper through setInputAuthority, so only that
+        // same epoch may deliver. Re-arming the helper would restart its event sequence.
+        if (granted !== undefined && granted !== lastInputEpoch) {
           throw new BotScreenInputRejectedError("stale controller epoch");
         }
-        lastInputEpoch = epoch;
-        if (granted === undefined) await virtualInput.setInputAuthority(epoch);
-        let sequence = 0;
+        const epoch = granted ?? ++lastInputEpoch;
+        if (granted === undefined) {
+          nextInputSequence = 1;
+          await virtualInput.setInputAuthority(epoch);
+        }
         try {
           await deliver(async (event) => {
             await virtualInput.input({
@@ -1007,8 +1011,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
               runtimeGeneration: provision.generation,
               geometryGeneration: provision.geometryGeneration,
               controllerEpoch: epoch,
-              sequence: ++sequence,
               ...event,
+              sequence: nextInputSequence++,
             });
           });
         } finally {

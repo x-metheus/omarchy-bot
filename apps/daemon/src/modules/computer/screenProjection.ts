@@ -994,8 +994,6 @@ export class ScreenProjectionService {
     controller.revoked = true;
     controller.active = false;
     controller.queue.length = 0;
-    controller.heldCodes.clear();
-    controller.heldButtons.clear();
     const surfaceId = controller.session.source.surfaceId;
     if (this.#controllers.get(surfaceId) === controller) this.#controllers.delete(surfaceId);
     this.#sendInputAuthority(controller, false);

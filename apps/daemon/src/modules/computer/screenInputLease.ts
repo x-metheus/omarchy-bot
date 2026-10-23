@@ -23,7 +23,7 @@ export interface ScreenInputDelivery {
 export type TakeoverState = "unavailable" | "available" | "active";
 export type ScreenUse = "idle" | "bot" | "human";
 
-type TakeoverPhase = "running" | "takeover-requested" | "held" | "completing" | "waiting" | "settled";
+export type TakeoverPhase = "running" | "takeover-requested" | "held" | "completing" | "waiting" | "settled";
 
 interface AgentTool {
   turnId: string;
@@ -66,6 +66,7 @@ export class ScreenInputLease {
   #generation = new Map<SurfaceId, number>();
   #tools = new Map<SurfaceId, AgentTool>();
   #holder: SeatHolder | undefined;
+  #releasing: SeatHolder | undefined;
   #surfaceTail = new Map<SurfaceId, Promise<void>>();
   #waiters: Array<{ resolve: () => void; reject: (error: unknown) => void; signal?: AbortSignal }> = [];
   #grantStarted = Promise.withResolvers<void>();
@@ -95,6 +96,22 @@ export class ScreenInputLease {
     if (phase === "held" || phase === "completing" || phase === "waiting") return "active";
     if (phase === "running" || phase === "takeover-requested") return "available";
     return "unavailable";
+  }
+
+  /** The one Takeover phase machine. Nothing else tracks phases. */
+  agentToolPhase(surfaceId: SurfaceId): TakeoverPhase | undefined {
+    return this.#tools.get(surfaceId)?.phase;
+  }
+
+  setAgentToolPhase(surfaceId: SurfaceId, toolCallId: string, phase: TakeoverPhase): void {
+    const tool = this.#tools.get(surfaceId);
+    if (tool === undefined || tool.toolCallId !== toolCallId) return;
+    tool.phase = phase;
+  }
+
+  takeoverRequested(surfaceId: SurfaceId): boolean {
+    const phase = this.#tools.get(surfaceId)?.phase;
+    return phase === "takeover-requested" || phase === "held" || phase === "completing" || phase === "waiting";
   }
 
   screenUse(surfaceId: SurfaceId): ScreenUse {
@@ -130,7 +147,7 @@ export class ScreenInputLease {
   }
 
   beginAgentTool(
-    target: ScreenInputTarget,
+    surfaceId: SurfaceId,
     input: { turnId: string; toolCallId: string },
   ): AgentToolHandle {
     const action = Promise.withResolvers<void>();
@@ -144,7 +161,7 @@ export class ScreenInputLease {
       activated: activated.promise,
       resolveActivated: activated.resolve,
     };
-    this.#tools.set(target.surfaceId, tool);
+    this.#tools.set(surfaceId, tool);
     return {
       actionFinished: async (pending) => {
         try {
@@ -174,7 +191,7 @@ export class ScreenInputLease {
 
   async settleAgentTool(surfaceId: SurfaceId, toolCallId: string): Promise<void> {
     const tool = this.#tools.get(surfaceId);
-    if (tool === undefined || tool.toolCallId !== toolCallId) return;
+    if (tool === undefined || tool.toolCallId !== toolCallId || tool.phase === "takeover-requested") return;
     if (this.#holder?.surfaceId === surfaceId) await this.revoke(surfaceId);
     tool.phase = "settled";
     this.#tools.delete(surfaceId);
@@ -192,22 +209,22 @@ export class ScreenInputLease {
     const epoch = requested ?? current + 1;
     if (epoch <= current) throw new Error(`stale controller epoch ${epoch}`);
     this.#requireGeneration(target);
-    if (this.#holder !== undefined) await this.#whenFree();
+    while (this.#seated()) await this.#whenFree();
+    const holder = this.#hold(target.surfaceId, epoch, "web");
     this.#grantStarted.resolve();
     let accepted: number;
     try {
       accepted = await this.delivery.grant(target.surfaceId, epoch);
     } catch (error) {
-      this.#wake();
+      await this.#abandon(holder);
       throw error;
     }
     if (accepted !== epoch) {
-      this.#wake();
+      await this.#abandon(holder);
       throw new Error(`stale controller epoch ${accepted}`);
     }
     this.#epoch.set(target.surfaceId, epoch);
     this.#generation.set(target.surfaceId, target.runtimeGeneration);
-    const holder = this.#hold(target.surfaceId, epoch, "web");
     return {
       epoch,
       input: (event) => this.#deliver(holder, event),
@@ -251,7 +268,7 @@ export class ScreenInputLease {
   ): Promise<T> {
     if (input.signal.aborted) throw abortError(input.signal);
     this.#requireGeneration(target);
-    while (this.#holder !== undefined) {
+    while (this.#seated()) {
       await this.#whenFree(input.signal);
       if (input.signal.aborted) throw abortError(input.signal);
     }
@@ -297,16 +314,30 @@ export class ScreenInputLease {
   }
 
   async #drop(holder: SeatHolder): Promise<void> {
-    if (this.#holder !== holder) return;
+    if (this.#holder !== holder || this.#releasing !== undefined) return;
     this.#holder = undefined;
+    // The seat stays taken until the release lands, so the next caller cannot grant first.
+    this.#releasing = holder;
     const held: HeldInput = holder.keys.size === 0 && holder.buttons.size === 0
       ? EMPTY_HELD
       : { keys: holder.keys, buttons: holder.buttons };
     try {
       await this.delivery.release(holder.surfaceId, holder.epoch, held, holder.sequence + 1);
     } finally {
+      this.#releasing = undefined;
       this.#wake();
     }
+  }
+
+  /** Drops the seat without a release: the runtime never accepted this grant. */
+  #abandon(holder: SeatHolder): void {
+    if (this.#holder !== holder) return;
+    this.#holder = undefined;
+    this.#wake();
+  }
+
+  #seated(): boolean {
+    return this.#holder !== undefined || this.#releasing !== undefined;
   }
 
   #requireGeneration(target: ScreenInputTarget): void {
@@ -317,7 +348,7 @@ export class ScreenInputLease {
   }
 
   async #whenFree(signal?: AbortSignal): Promise<void> {
-    if (this.#holder === undefined) return;
+    if (!this.#seated()) return;
     if (signal?.aborted) throw abortError(signal);
     const seat = Promise.withResolvers<void>();
     const waiter = signal === undefined
