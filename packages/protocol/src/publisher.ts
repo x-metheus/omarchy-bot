@@ -21,7 +21,8 @@ export const TOKEN_METADATA_KEYS = [
   "user_id", "workspace_id", "email_domain", "team_id", "data", "identity",
 ] as const;
 
-const GoogleIdentity = z.object({ subject: z.string().min(1) }).strict();
+/** The publisher only adds fields (ADR 0012), so unknown identity fields are ignored; `subject` stays required. */
+const GoogleIdentity = z.object({ subject: z.string().min(1) }).strip();
 
 export const PublisherTokenResponse = z.object({
   access_token: z.string().min(1),

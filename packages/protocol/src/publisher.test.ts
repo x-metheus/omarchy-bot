@@ -26,7 +26,7 @@ describe("publisher contract", () => {
       data: { gid: "gid" }, identity: { subject: "subject" },
     });
     expect("future_claim" in parsed).toBe(false);
-    expect(PublisherTokenResponse.safeParse({ access_token: "access", identity: { subject: "subject", tid: "tenant", oid: "user" } }).success).toBe(false);
+    expect(PublisherTokenResponse.safeParse({ access_token: "access", identity: { tid: "tenant" } }).success).toBe(false);
   });
 
   test("normalises a raw skills.sh page into catalog entries without copying the upstream document", () => {
