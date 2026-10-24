@@ -39,7 +39,7 @@ The isolated integration that translates between Omarchy Bot's worker protocol a
 _Avoid_: Bot implementation, PTY wrapper, capability filter
 
 **Agent Capability**:
-An operation the selected Agent can already perform in the user's Omarchy Linux environment. Omarchy Bot preserves the Agent's native capabilities and approval behavior rather than adding, removing, filtering, or independently approving them.
+An operation the selected Agent can already perform in the Service Host's Linux environment. Omarchy Bot preserves the Agent's native capabilities and approval behavior rather than adding, removing, filtering, or independently approving them.
 _Avoid_: Bot permission, provisioned capability
 
 **Agent Capability Inventory**:

@@ -1,5 +1,7 @@
 # Defer Web Control authentication and transport security
 
+Status: superseded on 2026-10-24 by [ADR 0014](0014-require-paired-device-tokens.md). Kept as the record of the unauthenticated posture that ADR 0014's breaking cutover replaces.
+
 The first Web Control release may be reachable from arbitrary networks without application authentication, authorization, or an HTTPS/WSS requirement. Account, pairing, permission, and trusted-network policy are explicitly deferred so the first release can focus on Bot Screen projection and input behavior.
 
 This is not a secure remote-access boundary: any party that can reach the daemon may observe a selected Bot Screen, acquire Web Control, send input and one-way pasted text, and replace its current controller; plaintext signaling and control traffic may also be observed or modified in transit. Projection v3 uses preview/control and RFB WebSockets; neither is encrypted on the default HTTP listener. An HTTPS/WSS deployment encrypts transport but does not establish application peer identity. The product and documentation must not describe this mode as secure, and authentication will be a breaking public-protocol cutover rather than an optional hardening detail.
