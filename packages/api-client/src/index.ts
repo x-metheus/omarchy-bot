@@ -36,11 +36,19 @@ import type {
 import {
   ComputerViewDto as ComputerViewSchema,
   DeleteBotResultDto as DeleteBotResultSchema,
+  isDeviceId,
 } from "@omarchy-bot/protocol";
 
 export interface ApiClientOptions {
   baseUrl?: string;
   fetch?: typeof fetch;
+  /**
+   * Device identity of the Local Sidecar this client install started
+   * (`dev_<32hex>`, the same value passed as `OMARCHY_BOT_DEVICE_ID`).
+   * It tags `message.send` so the daemon can resolve This Device.
+   * Omitted means this client has no Local Sidecar — no tag is ever sent.
+   */
+  localSidecarDeviceId?: string | undefined;
 }
 
 export interface ComputerSurfaceOwner {
@@ -67,10 +75,16 @@ export function randomUuid(): string {
 export class ApiClient {
   private readonly base: string;
   private readonly f: typeof fetch;
+  private readonly localSidecarDeviceId: string | undefined;
 
   constructor(opts: ApiClientOptions = {}) {
     this.base = (opts.baseUrl ?? "").replace(/\/$/, "");
     this.f = opts.fetch ?? fetch.bind(globalThis);
+    const deviceId = opts.localSidecarDeviceId;
+    if (deviceId !== undefined && !isDeviceId(deviceId)) {
+      throw new Error("localSidecarDeviceId must be a Local Sidecar device identity");
+    }
+    this.localSidecarDeviceId = deviceId;
   }
 
   get baseUrl(): string {
@@ -231,7 +245,7 @@ export class ApiClient {
     return this.req(`/api/bots/${id}/threads${q ? `?q=${encodeURIComponent(q)}` : ""}`);
   }
   sendBotMessage(id: string, body: SendMessageBodyDto): Promise<SendResultDto> {
-    return this.req(`/api/bots/${id}/messages`, { method: "POST", body: JSON.stringify(body) });
+    return this.req(`/api/bots/${id}/messages`, { method: "POST", body: JSON.stringify(this.#sendBody(body)) });
   }
 
   // ----- threads & messages -----
@@ -245,7 +259,18 @@ export class ApiClient {
     return this.req(`/api/threads/${threadId}/messages`);
   }
   sendMessage(threadId: string, body: SendMessageBodyDto): Promise<SendResultDto> {
-    return this.req(`/api/threads/${threadId}/messages`, { method: "POST", body: JSON.stringify(body) });
+    return this.req(`/api/threads/${threadId}/messages`, { method: "POST", body: JSON.stringify(this.#sendBody(body)) });
+  }
+
+  /**
+   * The client's own Local Sidecar identity is the only tag authority: a body
+   * claim never overrides it, and a client without a Sidecar sends no tag
+   * (fail closed, no This Device).
+   */
+  #sendBody(body: SendMessageBodyDto): SendMessageBodyDto {
+    const { deviceId: _claimed, ...rest } = body;
+    if (this.localSidecarDeviceId === undefined) return rest;
+    return { ...rest, deviceId: this.localSidecarDeviceId };
   }
 
 

@@ -22,3 +22,13 @@ This ADR records architecture for Omarchy Bot on other machines. Sidecar executi
 - A browser tab is not a Sidecar host. Local Docker, file search, and host app start/stop require Omarchy Bot on another machine.
 - `local.*` is offered only for an online Sidecar. Omarchy Bot on the plugin host and mobile-class clients have no `this-device`.
 - Sidecar approval (Ask / Always / Never, exact command on the card) is per Omarchy Bot install and distinct from Agent-native approvals.
+
+## Client-side device identity
+
+A Turn's **This Device** is the Sidecar of the install that sent the message starting it, so the client that starts a Sidecar must state that identity on every send. The client shell is outside this repository; it owns the contract:
+
+- It starts the Sidecar with `OMARCHY_BOT_DEVICE_ID` set to a `dev_<32hex>` identity (the Sidecar also requires `OMARCHY_BOT_DAEMON_PORT` and `OMARCHY_BOT_SIDECAR_ROOT`; `OMARCHY_BOT_HOSTNAME` is optional) and registers that same identity with the daemon over the device channel.
+- It installs the identical value as `globalThis.__OMARCHY_BOT_DEVICE_ID__` before the Web UI bundle loads. The Web client reads it once at load time and tags each `message.send` with it; `ApiClient` accepts the same identity as `localSidecarDeviceId`.
+- The tag is a claim, not a registration: the daemon resolves it against the online Sidecar roster when a `local` job is dispatched. A Sidecar that has not finished registering yet is "offline or unknown" and the job fails closed; nothing waits for it, and no other device is substituted.
+- The claim and the registered identity must match exactly. `ApiClient` refuses a malformed identity, and it is the only tag authority: a body claim cannot override the client's own identity, and a client without one sends no tag at all.
+- A browser tab, a mobile-class client, and Omarchy Bot on the plugin host install nothing and send no tag, so their Turns have no This Device and unqualified `local` fails closed.

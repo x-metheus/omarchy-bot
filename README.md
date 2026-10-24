@@ -94,6 +94,8 @@ The current implementation includes a Bun daemon, React web client, SQLite persi
 
 Omarchy Bot (Tauri) will reuse the Web frontend while execution stays on the plugin. [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md) define that contract; Tauri packaging and WebView compatibility are not implemented or verified by the current client. The application is Omarchy Bot, not a Desktop SKU.
 
+A Local Sidecar host is external to this repository. The client shell that starts one must set the Sidecar's `OMARCHY_BOT_DEVICE_ID` to a `dev_<32hex>` identity and install the same value as `globalThis.__OMARCHY_BOT_DEVICE_ID__` before the Web bundle loads; the Web client then tags each send with it so the daemon can resolve that Sidecar as **This Device**. A browser tab, a mobile-class client, and Omarchy Bot on the plugin host install nothing and send no tag, so their Turns have no This Device. See [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md#client-side-device-identity) for the full shell contract.
+
 ## Development
 
 From a local checkout:

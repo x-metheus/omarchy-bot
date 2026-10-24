@@ -2,6 +2,8 @@ import { z } from "zod";
 import { isLocalJob, type LocalJob } from "@omarchy-bot/agent-contract";
 import { isDeviceId } from "@omarchy-bot/domain";
 
+export { isDeviceId };
+
 /** Local Sidecar OS capabilities. Screenshot and Takeover are Bot Screen, not Sidecar. */
 export const DEVICE_CAPABILITIES = ["shell", "search", "files", "transfer"] as const;
 export type DeviceCapability = (typeof DEVICE_CAPABILITIES)[number];
