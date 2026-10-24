@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Value } from "typebox/value";
-import { MANAGE_PLUGINS_SCHEMA } from "./plugin-protocol.ts";
+import { createManagePluginsSchema } from "./plugin-protocol.ts";
 
-const connection = (value: unknown) => Value.Check(MANAGE_PLUGINS_SCHEMA, { action: "save_mcp", connection: value });
+const schema = createManagePluginsSchema(["save_mcp"], []);
+const connection = (value: unknown) => Value.Check(schema, { action: "save_mcp", connection: value });
 
 describe("MANAGE_PLUGINS_SCHEMA connection", () => {
   test("rejects a bare URL and accepts an uppercase scheme", () => {

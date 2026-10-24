@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { PLUGIN_PROVIDER_IDS, isMcpHttpUrl } from "@omarchy-bot/agent-contract";
+import { isMcpHttpUrl } from "@omarchy-bot/agent-contract";
+import { PLUGIN_PROVIDERS, type PluginProviderKey } from "./pluginProviders.ts";
 
-export const PluginProviderId = z.enum(PLUGIN_PROVIDER_IDS);
+export const PluginProviderId = z.enum(Object.keys(PLUGIN_PROVIDERS) as [PluginProviderKey, ...PluginProviderKey[]]);
 export type PluginProviderId = z.infer<typeof PluginProviderId>;
 
 export interface PluginServiceDto {

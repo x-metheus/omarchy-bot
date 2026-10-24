@@ -3,9 +3,9 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { redactToolErrorSummary, MANAGE_PLUGINS_SCHEMA, type AgentCommand, type AgentPluginSnapshot, type AgentPluginToolOutput, type NativeMcpControlResult, type NativePluginResources } from "@omarchy-bot/agent-contract";
+import { redactToolErrorSummary, type AgentCommand, type AgentPluginSnapshot, type AgentPluginToolOutput, type NativeMcpControlResult, type NativePluginResources } from "@omarchy-bot/agent-contract";
 import {
-  HttpsOrigin, PLUGIN_OPERATIONS, PLUGIN_PROVIDERS,
+  HttpsOrigin, PLUGIN_OPERATIONS, PLUGIN_PROVIDERS, MANAGE_PLUGINS_SCHEMA,
   PluginManageInput, PluginProviderId, McpDefinition, SaveMcpBody,
   type AuthorizePluginBody, type CatalogSkillDetailDto,
   type InstalledSkillDto, type InstallSkillBody, type McpConnectionDto, type PluginAccountDto,

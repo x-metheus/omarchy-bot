@@ -1,11 +1,12 @@
-import type { PluginProviderDto, PluginProviderId, PluginServiceDto } from "./plugins.ts";
+import type { PluginProviderDto, PluginServiceDto } from "./plugins.ts";
 
 export interface PluginServiceDefinition extends PluginServiceDto {
   scopes: string[];
   mcpUrl?: string;
   skillSources?: string[];
 }
-export interface PluginProviderDefinition extends Omit<PluginProviderDto, "services"> {
+export interface PluginProviderDefinition extends Omit<PluginProviderDto, "services" | "id"> {
+  id: string;
   services: PluginServiceDefinition[];
   authorizeUrl: string;
   tokenUrl: string;
@@ -24,7 +25,7 @@ export interface PluginProviderDefinition extends Omit<PluginProviderDto, "servi
 const GOOGLE_SCOPE = "https://www.googleapis.com/auth/";
 
 /** Official provider contracts; native OAuth state and publisher credentials remain private. */
-export const PLUGIN_PROVIDERS: Record<PluginProviderId, PluginProviderDefinition> = {
+const providers = {
   google: {
     id: "google", name: "Google", mode: "mcp",
     documentationUrl: "https://developers.google.com/workspace/guides/configure-mcp-servers",
@@ -138,4 +139,7 @@ export const PLUGIN_PROVIDERS: Record<PluginProviderId, PluginProviderDefinition
         "https://github.com/miroapp/miro-ai/tree/main/skills/miro-table",
       ] }],
   },
-};
+} satisfies Record<string, PluginProviderDefinition>;
+
+export type PluginProviderKey = keyof typeof providers;
+export const PLUGIN_PROVIDERS = providers as Record<PluginProviderKey, PluginProviderDefinition & { id: PluginProviderKey }>;

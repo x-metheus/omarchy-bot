@@ -1,4 +1,6 @@
 import { z, type ZodTypeAny } from "zod";
+import { createManagePluginsSchema } from "@omarchy-bot/agent-contract";
+import { PLUGIN_PROVIDERS } from "./pluginProviders.ts";
 import {
   AuthorizePluginBody, InstallSkillBody, PluginAccountBody, PluginEnabledBody, PluginProviderId,
   PluginServiceBody, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT, SaveMcpBody,
@@ -200,6 +202,11 @@ export const PLUGIN_OPERATIONS = [
   { action: "authorize_mcp", method: "POST", path: `${mcp}/authorize`, body: z.object({ redirectUrl: z.string().url().max(8192).optional() }).strict() },
 ] as const satisfies readonly PluginOperation[];
 export type PluginAction = (typeof PLUGIN_OPERATIONS)[number]["action"];
+
+export const MANAGE_PLUGINS_SCHEMA = createManagePluginsSchema(
+  [...new Set(PLUGIN_OPERATIONS.map((operation) => operation.action))],
+  Object.keys(PLUGIN_PROVIDERS),
+);
 
 
 export const PluginManageInput = PluginOperationInput.extend({

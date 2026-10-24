@@ -20,6 +20,8 @@ Decisions (settled, see [system ADR 0012](../../../docs/adr/0012-publisher-contr
 
 `PublisherContract` schemas live in `packages/protocol` and are imported by the site and the daemon. `PLUGIN_OPERATIONS` is the only action, method, path, and body list. `PLUGIN_DISPATCH` maps those rows and adds the daemon handler; `pluginRoutes.ts` and `manage_plugins` both call it. The duplicated action enum is gone.
 
+The `manage_plugins` TypeBox schema is assembled in `packages/protocol` from `PLUGIN_OPERATIONS` and the keys of `PLUGIN_PROVIDERS`. `agent-contract` supplies the schema builder without importing protocol, because protocol already depends on agent-contract. The HTTP provider schema derives from the same catalog keys. The acquired tool schema is checked against exact action and provider sets; temporary additions to either canonical table prove that the regression detects drift.
+
 `plugins.ts` is split into `CatalogClient`, `ProviderAccounts` (OAuth start, callback, token refresh, grant persistence, identity, scopes), `ServiceBundles` (provision, enable, remove, update), and `SkillInstalls`. Account records stay in the daemon store and are mutated by those modules.
 
 Integration tests call the real `handlePluginCloudRequest` and stub only provider token endpoints and skills.sh. New daemons read `catalog/normalised`; the raw skills.sh passthrough remains. `identifyAccount` refuses Microsoft and Miro before any fetch, and `ProviderAccounts.authorize` for Microsoft records no publisher route. Google identity stored by the publisher is `{ subject }` only. `HttpsOrigin` and `TOKEN_METADATA_KEYS` are defined once in the protocol package.

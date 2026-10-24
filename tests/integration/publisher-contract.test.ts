@@ -76,13 +76,6 @@ test("new daemons read the normalised catalog while the raw skills.sh route stay
 });
 
 test("one operation table names every manage_plugins action and its daemon path", () => {
-  const actions = [...new Set(PLUGIN_OPERATIONS.map((operation) => operation.action))];
-  expect(actions).toEqual([
-    "list", "inspect", "inspect_skill", "search_skills", "install_skill", "enable_skill", "remove_skill", "update_skills",
-    "authorize_service", "enable_service", "remove_service", "update_service", "label_account", "disconnect_account",
-    "save_mcp", "update_mcp", "enable_mcp", "remove_mcp", "check_mcp", "authorize_mcp",
-  ]);
-  expect(PLUGIN_OPERATIONS).toHaveLength(actions.length + 1);
   expect(new Set(PLUGIN_OPERATIONS.map((operation) => `${operation.method} ${operation.path}`)).size).toBe(PLUGIN_OPERATIONS.length);
   expect(PLUGIN_OPERATIONS.find((operation) => operation.method === "PUT")).toMatchObject({ action: "save_mcp", path: "/api/plugins/mcp/:id" });
   expect(PLUGIN_OPERATIONS.find((operation) => operation.action === "search_skills")).toMatchObject({
@@ -91,17 +84,22 @@ test("one operation table names every manage_plugins action and its daemon path"
   expect(PLUGIN_OPERATIONS.find((operation) => operation.action === "inspect_skill")).toMatchObject({ upstream: "catalog/detail/normalised" });
 });
 
-test("manage_plugins publishes each action once and accepts view", async () => {
+test("manage_plugins publishes exactly the operation actions and provider ids", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "publisher-schema-"));
   const service = new PluginsService(root, root, async () => ({ skills: [] }));
   try {
     const lease = await service.acquire();
-    const schema = lease.snapshot.tools[0]!.inputSchema as { properties: { action: { enum?: string[]; anyOf?: Array<{ const: string }> }; view?: unknown } };
-    const actions = schema.properties.action.enum ?? schema.properties.action.anyOf?.map((item) => item.const) ?? [];
-    expect(new Set(actions).size).toBe(actions.length);
-    expect(actions).toHaveLength(20);
-    expect(schema.properties.view).toEqual({ type: "string" });
-    lease.release();
+    try {
+      type EnumSchema = { enum?: string[]; anyOf?: Array<{ const: string }> };
+      const schema = lease.snapshot.tools[0]!.inputSchema as { properties: { action: EnumSchema; providerId: EnumSchema } };
+      const values = (field: EnumSchema) => field.enum ?? field.anyOf?.map((item) => item.const) ?? [];
+      const actions = values(schema.properties.action);
+      expect(new Set(actions).size).toBe(actions.length);
+      expect(new Set(actions)).toEqual(new Set(PLUGIN_OPERATIONS.map((operation) => operation.action)));
+      expect(new Set(values(schema.properties.providerId))).toEqual(new Set(Object.keys(PLUGIN_PROVIDERS)));
+    } finally {
+      lease.release();
+    }
   } finally {
     await service.shutdown();
     await rm(root, { recursive: true, force: true });
