@@ -45,7 +45,7 @@ function clientCredentials(providerId: PluginProviderId, origin: string): { clie
   return { clientId, ...(clientSecret ? { clientSecret } : {}) };
 }
 
-/** Only local clients receive code callbacks; this is not a general-purpose redirector. */
+/** Client callbacks require HTTPS unless the client is local. */
 function callbackUrl(value: string): URL {
   const url = new URL(value);
   const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
@@ -54,8 +54,8 @@ function callbackUrl(value: string): URL {
     || (isIP(hostname) === 4 && (octets[0] === 127 || octets[0] === 10 || (octets[0] === 192 && octets[1] === 168)
       || (octets[0] === 172 && octets[1]! >= 16 && octets[1]! <= 31)))
     || (isIP(hostname) === 6 && /^(fc|fd|fe80:)/.test(hostname));
-  if (!local || !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash || url.search
-    || url.pathname !== "/api/plugins/oauth/callback") throw new BrokerError(400, "OAuth callback must be a local Omarchy Bot client callback URL.");
+  if ((url.protocol !== "https:" && (url.protocol !== "http:" || !local)) || url.username || url.password || url.hash || url.search
+    || url.pathname !== "/api/plugins/oauth/callback") throw new BrokerError(400, "OAuth callback must be an HTTPS client callback URL, or a local client over HTTP.");
   return url;
 }
 

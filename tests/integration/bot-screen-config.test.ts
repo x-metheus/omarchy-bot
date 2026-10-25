@@ -10,6 +10,9 @@ const original = {
   host: process.env.OMARCHY_BOT_HOST,
   home: process.env.OMARCHY_BOT_HOME,
   state: process.env.OMARCHY_BOT_STATE,
+  cert: process.env.OMARCHY_BOT_TLS_CERT,
+  key: process.env.OMARCHY_BOT_TLS_KEY,
+  proxy: process.env.OMARCHY_BOT_TRUSTED_PROXY,
 };
 let temporaryRoot: string | undefined;
 
@@ -21,6 +24,9 @@ afterEach(() => {
     ["OMARCHY_BOT_HOST", original.host],
     ["OMARCHY_BOT_HOME", original.home],
     ["OMARCHY_BOT_STATE", original.state],
+    ["OMARCHY_BOT_TLS_CERT", original.cert],
+    ["OMARCHY_BOT_TLS_KEY", original.key],
+    ["OMARCHY_BOT_TRUSTED_PROXY", original.proxy],
   ] as const) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -51,11 +57,14 @@ test("keeps HTTP loopback-only unless LAN binding is explicitly configured", () 
   process.env.OMARCHY_BOT_HOME = path.join(temporaryRoot, "data");
   process.env.OMARCHY_BOT_STATE = path.join(temporaryRoot, "state");
   delete process.env.OMARCHY_BOT_HOST;
+  delete process.env.OMARCHY_BOT_TLS_CERT;
+  delete process.env.OMARCHY_BOT_TLS_KEY;
+  delete process.env.OMARCHY_BOT_TRUSTED_PROXY;
 
   expect(loadConfig().host).toBe("127.0.0.1");
 
   process.env.OMARCHY_BOT_HOST = "0.0.0.0";
-  expect(loadConfig().host).toBe("0.0.0.0");
+  expect(() => loadConfig()).toThrow(/certificate.*trusted proxy/);
 });
 
 test("uses the measured conservative Bot Screen default", () => {
