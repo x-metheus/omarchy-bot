@@ -2,9 +2,16 @@ import { randomUUID } from "node:crypto";
 import {
   HEARTBEAT_MS,
   readJsonl,
+  stderr,
   type ToolChannelFrame,
 } from "@omarchy-bot/agent-contract";
-import { stderr } from "@omarchy-bot/agent-contract";
+import {
+  anchoredSessionCommand,
+  sessionAnchor,
+  terminateOwnedSession,
+  type OwnedSession,
+} from "./ownedProcesses.ts";
+
 
 export interface WorkerClientOptions {
   name: string;
@@ -39,6 +46,10 @@ export class WorkerClient {
   #lastMessageAt = 0;
   #stopping = false;
   #watchdog?: ReturnType<typeof setInterval>;
+  #session: OwnedSession | undefined;
+  /** One cleanup per worker generation; every path awaits the same promise. */
+  #cleanup: Promise<void> | undefined;
+  #generation = 0;
 
   constructor(private readonly opts: WorkerClientOptions) {}
 
@@ -51,24 +62,55 @@ export class WorkerClient {
 
   async start(timeoutMs = 15_000): Promise<void> {
     this.#stopping = false;
+    this.#cleanup = undefined;
+    const generation = ++this.#generation;
+    const token = randomUUID();
+    const session: OwnedSession = { sessionId: -1, anchor: sessionAnchor(token) };
     const proc = Bun.spawn({
-      cmd: [...(this.opts.commandPrefix ?? []), process.execPath, this.opts.script, ...(this.opts.args ?? [])],
+      cmd: anchoredSessionCommand(
+        [...(this.opts.commandPrefix ?? []), process.execPath, this.opts.script, ...(this.opts.args ?? [])],
+        token,
+      ),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
+      // Own session: descendants stay findable after they scrub their
+      // environment, and nothing but our teardown reaches them.
+      detached: true,
       env: this.opts.env ?? {},
-      onExit: (proc, exitCode) => {
+      onExit: (_exited, exitCode) => {
+        // A late exit from a replaced generation must not disturb its successor.
+        if (generation !== this.#generation) {
+          void this.#terminate(session).catch((error: unknown) => {
+            stderr(`${this.opts.name}: cleanup after late exit failed: ${String(error)}`);
+          });
+          return;
+        }
         clearInterval(this.#watchdog);
-        for (const [, p] of this.#pending) {
-          clearTimeout(p.timer);
-          p.reject(new Error(`${this.opts.name} worker exited (${exitCode})`));
+        for (const [, pending] of this.#pending) {
+          clearTimeout(pending.timer);
+          pending.reject(new Error(`${this.opts.name} worker exited (${exitCode})`));
         }
         this.#pending.clear();
         this.#proc = undefined;
         this.#hello = undefined;
-        if (!this.#stopping) this.opts.onExit?.(exitCode);
+        // The leader is gone but its descendants are not: reap them before any
+        // restart can start a second copy of the same work. Assigning the shared
+        // promise first lets a concurrent stop await the same cleanup.
+        void (this.#cleanup ??= this.#terminate(session)).then(
+          () => {
+            if (!this.#stopping) this.opts.onExit?.(exitCode);
+          },
+          (error: unknown) => {
+            // A restart must not hide a failed teardown: report it as the crash.
+            stderr(`${this.opts.name}: cleanup after exit failed: ${String(error)}`);
+            if (!this.#stopping) this.opts.onExit?.(exitCode);
+          },
+        );
       },
     });
+    session.sessionId = proc.pid;
+    this.#session = session;
     this.#proc = proc;
 
     void readJsonl(
@@ -79,27 +121,52 @@ export class WorkerClient {
     void this.#drainStderr(proc.stderr as unknown as ReadableStream<Uint8Array>);
 
     // Handshake: first frame must be hello.
-    await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error(`${this.opts.name} worker handshake timeout`)), timeoutMs);
+    try {
+      const handshake = Promise.withResolvers<void>();
       const check = setInterval(() => {
         if (this.#hello) {
-          clearInterval(check);
-          clearTimeout(t);
-          resolve();
+          handshake.resolve();
         } else if (!this.alive) {
-          clearInterval(check);
-          clearTimeout(t);
-          reject(new Error(`${this.opts.name} worker died during handshake`));
+          handshake.reject(new Error(`${this.opts.name} worker died during handshake`));
         }
       }, 25);
+      const timeout = setTimeout(
+        () => handshake.reject(new Error(`${this.opts.name} worker handshake timeout`)),
+        timeoutMs,
+      );
       this.#lastMessageAt = Date.now();
       this.#watchdog = setInterval(() => {
         if (Date.now() - this.#lastMessageAt > HEARTBEAT_MS * 2.5) {
           stderr(`${this.opts.name} heartbeat missed; killing`);
-          this.#proc?.kill();
+          void (this.#cleanup ??= this.#terminate(session)).catch((error: unknown) => {
+            stderr(`${this.opts.name}: heartbeat cleanup failed: ${String(error)}`);
+          });
         }
       }, HEARTBEAT_MS);
-    });
+      try {
+        await handshake.promise;
+      } finally {
+        // Settled either way: no interval may outlive the handshake.
+        clearInterval(check);
+        clearTimeout(timeout);
+      }
+    } catch (error) {
+      // A worker that never became usable must not leave owned processes behind,
+      // and no watchdog may outlive it.
+      clearInterval(this.#watchdog);
+      await (this.#cleanup ??= this.#terminate(session));
+      throw error;
+    }
+  }
+
+  /**
+   * Stops one worker generation's session: identity-verified members, TERM then
+   * KILL, including descendants that scrubbed their environment. Shared so exit,
+   * watchdog, handshake failure and stop await one cleanup.
+   */
+  #terminate(session: OwnedSession | undefined, graceMs?: number): Promise<void> {
+    if (session === undefined || session.sessionId <= 0) return Promise.resolve();
+    return graceMs === undefined ? terminateOwnedSession(session) : terminateOwnedSession(session, graceMs);
   }
 
   async #drainStderr(readable: ReadableStream<Uint8Array>): Promise<void> {
@@ -205,8 +272,11 @@ export class WorkerClient {
       }
       const deadline = Date.now() + graceMs;
       while (this.alive && Date.now() < deadline) await Bun.sleep(50);
-      this.#proc?.kill();
     }
+    // Graceful shutdown, a leader that exits early, and a TERM-resistant worker
+    // all end the same way: nothing in this generation's session survives.
+    // An exit already in flight owns the cleanup, so await it instead of repeating it.
+    await (this.#cleanup ??= this.#terminate(this.#session, graceMs));
   }
 }
 

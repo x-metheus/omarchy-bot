@@ -1,0 +1,18 @@
+/**
+ * Boots the real Service in its own process so a fixture user manager can be on
+ * PATH from process start (`Bun.which` reads PATH once per process). Used only
+ * by the supervision acceptance suite; never talks to the host's systemd.
+ */
+import path from "node:path";
+import { main } from "../../../../apps/daemon/src/bootstrap/main.ts";
+
+const dataDir = process.env.OMARCHY_BOT_HOME;
+const runtimeRoot = process.env.OMARCHY_BOT_SCREEN_RUNTIME_DIR;
+if (dataDir === undefined || runtimeRoot === undefined) {
+  throw new Error("OMARCHY_BOT_HOME and OMARCHY_BOT_SCREEN_RUNTIME_DIR are required");
+}
+const { port } = await main({
+  useHostApplicationUnits: true,
+  botScreenRuntimeDir: path.resolve(runtimeRoot),
+});
+console.log(`SERVICE_READY ${port}`);

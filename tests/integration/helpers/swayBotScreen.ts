@@ -74,6 +74,10 @@ export interface ScriptedSwayFixture {
   wayvncBin: string;
   /** Application the scripted Screen can launch. */
   application: string;
+  /** The scripted binaries, for a production adapter built outside this fixture. */
+  binEnv: Record<string, string>;
+  /** Scripted Sway IPC control directory. */
+  controlDir: string;
   /** Windows the Screen routes in Screen coordinates, once it has started. */
   windowsFor: (surfaceId: string) => ComputerWindowListItem[];
   advanceLiveProgress: () => void;
@@ -219,6 +223,7 @@ await serveFakeSwayIpc({
   controlDir: ${JSON.stringify(controlDir)},
 });
 `);
+  const swaymsg = executable(bin, "swaymsg", "#!/bin/sh\nexit 0\n");
   const desktop = executable(bin, "bot-desktop", [
     "#!/bin/sh",
     "printf 'READY %s %s\\n' \"$1\" \"$2\"",
@@ -326,6 +331,17 @@ for await (const chunk of Bun.stdin.stream()) {
     failSurfacePath,
     wayvncBin: wayvnc,
     application,
+    binEnv: {
+      OMARCHY_BOT_SWAY_BIN: sway,
+      OMARCHY_BOT_SWAYMSG_BIN: swaymsg,
+      OMARCHY_BOT_WAYVNC_BIN: wayvnc,
+      OMARCHY_BOT_WLR_RANDR_BIN: path.join(bin, "wlr-randr"),
+      OMARCHY_BOT_GRIM_BIN: path.join(bin, "grim"),
+      OMARCHY_BOT_INPUT_HELPER_BIN: path.join(bin, "input"),
+      OMARCHY_BOT_CAPTURE_HELPER_BIN: path.join(bin, "capture"),
+      OMARCHY_BOT_DESKTOP_BIN: desktop,
+    },
+    controlDir,
     windowsFor: scriptedSwayWindows,
     advanceLiveProgress: () => {
       liveProgress += 1;

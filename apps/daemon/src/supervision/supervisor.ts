@@ -1,8 +1,8 @@
 import path from "node:path";
-import type {
-  ToolChannelFrame,
-  AgentEvent,
-
+import {
+  stderr,
+  type ToolChannelFrame,
+  type AgentEvent,
 } from "@omarchy-bot/agent-contract";
 import type { AgentId } from "@omarchy-bot/domain";
 import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
@@ -37,7 +37,9 @@ export class Supervisor {
   async agentWorker(agentId: AgentId): Promise<WorkerClient> {
     let w = this.#agentWorkers.get(agentId);
     if (w?.alive) return w;
-    if (w) await this.#killQuietly(w);
+    // Replaces a dead generation only once its owned processes are gone; the
+    // stop awaits an in-flight cleanup instead of repeating it.
+    if (w) await this.#killQuietly(agentId, w);
     w = new WorkerClient({
       name: `agent:${agentId}`,
       script: path.join(this.workerDirs.agents, agentId, "src", "worker.ts"),
@@ -72,19 +74,33 @@ export class Supervisor {
     }
     const worker = this.#agentWorkers.get(agentId);
     this.#agentWorkers.delete(agentId);
-    if (worker !== undefined) await this.#killQuietly(worker);
+    if (worker !== undefined) await this.#killQuietly(agentId, worker);
   }
 
 
   async stopAll(): Promise<void> {
     for (const [, t] of this.#restartTimers) clearTimeout(t);
     this.#restartTimers.clear();
-    const workers = [...this.#agentWorkers.values()];
+    const workers = [...this.#agentWorkers.entries()];
     this.#agentWorkers.clear();
-    await Promise.allSettled(workers.map((worker) => worker.stop()));
+    // Shutdown attempts every worker and reports a failed teardown rather than
+    // counting it as a clean stop.
+    await Promise.all(
+      workers.map(async ([agentId, worker]) => {
+        try {
+          await worker.stop();
+        } catch (error) {
+          stderr(`agent:${agentId} teardown failed: ${String(error)}`);
+        }
+      }),
+    );
   }
 
-  async #killQuietly(w: WorkerClient): Promise<void> {
-    await w.stop().catch(() => {});
+  async #killQuietly(agentId: AgentId, w: WorkerClient): Promise<void> {
+    // Quarantine and replacement paths must not fail the caller, but a failed
+    // teardown still has to be visible rather than reported as a clean stop.
+    await w.stop().catch((error: unknown) => {
+      stderr(`agent:${agentId} worker teardown failed: ${String(error)}`);
+    });
   }
 }

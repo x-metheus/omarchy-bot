@@ -37,20 +37,27 @@ import {
 import {
   command,
   executable,
-  ownedProcessIdentity,
-  ownedProcessRunning,
-  readOwnedIdentity,
-  type OwnedProcessIdentity,
   ProcessLineReader,
-  terminateDetachedProcess,
-  terminateOwnedProcess,
-  terminateProcess,
+  settleOwnedChild,
+  spawnDetachedChild,
+  terminateOwnedChild,
   waitForSocket,
-  watchOwnedProcess,
   WaylandCaptureStream,
   WaylandVirtualInput,
   type DetachedProcess,
+  type OwnedChild,
 } from "./botScreenWaylandHelpers.ts";
+import {
+  ownedProcessIdentity,
+  ownedProcessRunning,
+  ownedSessionAt,
+  readOwnedIdentity,
+  terminateOwnedProcess,
+  terminateOwnedSession,
+  watchOwnedProcess,
+  type OwnedProcessIdentity,
+  type OwnedSession,
+} from "../../supervision/ownedProcesses.ts";
 import { BOT_DESKTOP_APP_ID, listApplicationToplevels, SwayIpcClient } from "./swayIpc.ts";
 import { resolveSwayRuntimeBinaries } from "./swayRuntimeSupply.ts";
 
@@ -92,6 +99,7 @@ interface SwaySession {
   videoHeight: number;
   desktopProcess?: SwayProcess;
   desktopPid?: number;
+  desktopSession?: OwnedSession;
   desktopIdentity?: OwnedProcessIdentity | undefined;
   virtualInput?: WaylandVirtualInput;
   cleanup?: (() => Promise<void>) | undefined;
@@ -312,7 +320,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     }
     const videoWidth = Math.round(provision.logicalWidth * provision.scale);
     const videoHeight = Math.round(provision.logicalHeight * provision.scale);
-    let desktopProcess: SwayProcess | undefined;
+    let desktopChild: OwnedChild | undefined;
     let session: SwaySession | undefined;
     try {
       await this.#configureOutput(
@@ -329,19 +337,19 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const swayIpc = new SwayIpcClient(computer.sockets.swaySock);
       await swayIpc.runCommand(`workspace ${workspaceName}`);
       await swayIpc.runCommand(`move workspace to output ${outputName}`);
-      desktopProcess = Bun.spawn([
-        ...this.#units.command(provision.surfaceId, computer.generation, "application", computer.childEnv),
-        computer.botDesktop,
-        String(provision.logicalWidth),
-        String(provision.logicalHeight),
-        String(provision.scale),
-      ], {
+      desktopChild = spawnDetachedChild({
+        argv: [
+          ...this.#units.command(provision.surfaceId, computer.generation, "application", computer.childEnv),
+          computer.botDesktop,
+          String(provision.logicalWidth),
+          String(provision.logicalHeight),
+          String(provision.scale),
+        ],
         env: this.#units.launcherEnvironment(computer.childEnv),
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-        detached: true,
+        output: "pipe",
+        owned: !this.#units.enabled,
       });
+      const desktopProcess = desktopChild.process;
       const desktopReadiness = new ProcessLineReader(desktopProcess.stdout);
       await this.#waitForDesktop(
         desktopReadiness,
@@ -361,6 +369,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         videoHeight,
         desktopProcess,
         desktopPid: desktopProcess.pid,
+        ...(desktopChild.session === undefined ? {} : { desktopSession: desktopChild.session }),
         desktopIdentity: ownedProcessIdentity(
           desktopProcess.pid,
           computer.runtimeDir,
@@ -376,7 +385,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       return runtime;
     } catch (error) {
       await session?.virtualInput?.stop().catch(() => {});
-      if (desktopProcess !== undefined) await terminateDetachedProcess(desktopProcess).catch(() => {});
+      await terminateOwnedChild(desktopChild).catch(() => {});
       await this.#units.stop(provision.surfaceId, computer.generation).catch(() => {});
       rmSync(runtimeSurfaceDir, { recursive: true, force: true });
       if (computer.surfaceIds.size === 0) await computer.stop().catch(() => {});
@@ -412,6 +421,9 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const sockets = wayvncSockets(this.options.runtimeRoot, provision.surfaceId);
     rmSync(sockets.listen, { force: true });
     rmSync(sockets.control, { force: true });
+    // The desktop outlived a daemon restart: re-adopt its anchored session so
+    // teardown can still find descendants that scrubbed their environment.
+    const desktopSession = ownedSessionAt(state.desktopPid, state.desktopIdentity);
     const session: SwaySession = {
       provision,
       computer,
@@ -423,6 +435,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       videoHeight,
       ...(state.desktopPid === undefined ? {} : { desktopPid: state.desktopPid }),
       desktopIdentity: state.desktopIdentity,
+      ...(desktopSession === undefined ? {} : { desktopSession }),
     };
     try {
       await this.#startHelpers(session);
@@ -505,7 +518,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const expandedViews = new Set<BotScreenExpandedView>();
     const expandedViewStarts = new Set<Promise<void>>();
     type SharedWayvnc = {
-      process: SwayProcess;
+      child: OwnedChild;
       socketPath: string;
       controlSocketPath: string;
       leaseCount: number;
@@ -528,7 +541,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           computer.generation,
           "wayvnc",
         ).catch(() => {});
-        await terminateDetachedProcess(shared.process);
+        await terminateOwnedChild(shared.child);
         try { unlinkSync(shared.socketPath); } catch { /* already gone */ }
         try { unlinkSync(shared.controlSocketPath); } catch { /* already gone */ }
       })();
@@ -551,29 +564,29 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         const sockets = wayvncSockets(this.options.runtimeRoot, provision.surfaceId);
         const socketPath = sockets.listen;
         const controlSocketPath = sockets.control;
-        const wayvncProcess = Bun.spawn([
-          ...this.#units.command(provision.surfaceId, computer.generation, "wayvnc", computer.childEnv),
-          wayvnc,
-          "--unix-socket",
-          "--socket",
-          controlSocketPath,
-          "--output",
-          session.outputName,
-          "--disable-input",
-          socketPath,
-        ], {
+        const wayvncChild = spawnDetachedChild({
+          argv: [
+            ...this.#units.command(provision.surfaceId, computer.generation, "wayvnc", computer.childEnv),
+            wayvnc,
+            "--unix-socket",
+            "--socket",
+            controlSocketPath,
+            "--output",
+            session.outputName,
+            "--disable-input",
+            socketPath,
+          ],
           env: this.#units.launcherEnvironment(computer.childEnv),
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-          detached: true,
+          output: "pipe",
+          owned: !this.#units.enabled,
         });
+        const wayvncProcess = wayvncChild.process;
         const wayvncStderr = new Response(wayvncProcess.stderr).text();
         try {
           await waitForSocket(socketPath, wayvncProcess, "WayVNC");
           chmodSync(socketPath, 0o600);
           const shared: SharedWayvnc = {
-            process: wayvncProcess,
+            child: wayvncChild,
             socketPath,
             controlSocketPath,
             leaseCount: 0,
@@ -590,7 +603,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           sharedWayvnc = shared;
           return shared;
         } catch (error) {
-          await terminateDetachedProcess(wayvncProcess).catch(() => {});
+          await terminateOwnedChild(wayvncChild).catch(() => {});
           try { unlinkSync(socketPath); } catch { /* already gone */ }
           throw error;
         }
@@ -930,24 +943,30 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       : browserCommand(request.url!, session.computer.childEnv);
     const text = request.app !== undefined ? `launched ${request.app}` : `opened ${request.url}`;
     const role = `application-${++session.computer.applicationSequence}` as const;
-    const application = Bun.spawn([
-      ...this.#units.computerCommand(
-        session.computer.generation,
-        role,
-        session.computer.childEnv,
-        cwd,
-      ),
-      ...argv,
-    ], {
-      cwd,
+    const application = spawnDetachedChild({
+      argv: [
+        ...this.#units.computerCommand(
+          session.computer.generation,
+          role,
+          session.computer.childEnv,
+          cwd,
+        ),
+        ...argv,
+      ],
       env: this.#units.launcherEnvironment(session.computer.childEnv),
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-      detached: true,
+      cwd,
+      output: "ignore",
+      owned: !this.#units.enabled,
     });
+    // An application is shared by every Screen, so it is stopped with the Bot
+    // Computer. Its entry survives its leader while descendants still live in the
+    // owned session; that is what makes the teardown find them.
+    // shortcut: such an entry and its idle anchor live until the Computer stops,
+    // upgrade to a session watcher if orphaned applications become common.
     session.computer.applicationProcesses.add(application);
-    void application.exited.then(() => session.computer.applicationProcesses.delete(application));
+    void application.process.exited.then(() => {
+      if (settleOwnedChild(application)) session.computer.applicationProcesses.delete(application);
+    });
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline && session.computer.running()) {
       const windows = listApplicationToplevels(await swayIpc.getTree());
@@ -1035,8 +1054,13 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   async #discardSurfaceFromDisk(surfaceId: SurfaceId): Promise<void> {
     const retained = this.#latestSurfaceState(surfaceId);
     await this.#units.stop(surfaceId).catch(() => {});
-    if (retained?.state.desktopIdentity !== undefined) {
-      await terminateOwnedProcess(retained.state.desktopIdentity);
+    if (retained !== undefined) {
+      if (retained.state.desktopIdentity !== undefined) {
+        await terminateOwnedProcess(retained.state.desktopIdentity);
+      }
+      // Only this Screen's recorded session: its children share the Computer's
+      // private runtime directory, so a runtime sweep would reach other Screens.
+      await terminateOwnedSession(ownedSessionAt(retained.state.desktopPid, retained.state.desktopIdentity));
     }
     rmSync(path.join(this.options.runtimeRoot, surfaceId), { recursive: true, force: true });
   }
@@ -1070,7 +1094,17 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   async #stopDesktop(session: SwaySession): Promise<void> {
-    await terminateProcess(session.desktopProcess, session.desktopIdentity);
+    if (session.desktopProcess !== undefined) {
+      await terminateOwnedChild({
+        process: session.desktopProcess,
+        ...(session.desktopSession === undefined ? {} : { session: session.desktopSession }),
+      });
+      return;
+    }
+    // A reattached desktop has no handle; identity covers the leader, the
+    // recorded session covers descendants that outlived it.
+    await terminateOwnedProcess(session.desktopIdentity);
+    await terminateOwnedSession(session.desktopSession);
   }
 
   #allocateOutput(): string {

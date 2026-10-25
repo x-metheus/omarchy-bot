@@ -1,5 +1,13 @@
-import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, lstatSync } from "node:fs";
 import path from "node:path";
+import {
+  anchoredSessionCommand,
+  sessionAnchor,
+  settleOwnedSession,
+  terminateOwnedSession,
+  type OwnedSession,
+} from "../../supervision/ownedProcesses.ts";
 import {
   BotScreenInputRejectedError,
   type BotScreenCaptureStream,
@@ -8,7 +16,7 @@ import {
   type BotScreenProvision,
 } from "./botScreenManager.ts";
 
-export type DetachedProcess = Bun.Subprocess<"ignore", "pipe", "pipe">;
+export type DetachedProcess = Bun.Subprocess<"pipe" | "ignore", "pipe", "pipe">;
 type PointerProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
 type CaptureProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
 
@@ -474,88 +482,6 @@ export function isSocket(candidate: string): boolean {
   }
 }
 
-/** PID reuse protection: Linux boot + start ticks, bound to private runtime ownership. */
-export interface OwnedProcessIdentity {
-  pid: number;
-  startTime: string;
-  bootId: string;
-  runtimeDir: string;
-  unitName?: string;
-}
-
-export function ownedProcessIdentity(pid: number, runtimeDir: string, unitName?: string): OwnedProcessIdentity | undefined {
-  if (!Number.isSafeInteger(pid) || pid <= 0 || !path.isAbsolute(runtimeDir)) return undefined;
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-    if (fields[0] === "Z" || fields[0] === "X") return undefined;
-    const startTime = fields[19];
-    if (startTime === undefined || !/^\d+$/.test(startTime)) return undefined;
-    const environment = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
-    const args = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
-    const privateEnvironment = environment.includes(`XDG_RUNTIME_DIR=${runtimeDir}`);
-    // systemd-run lives in the daemon environment; its exact service and env -i
-    // arguments are the ownership evidence, not that launcher's host runtime.
-    const ownedLauncher = unitName !== undefined
-      && path.basename(args[0] ?? "") === "systemd-run"
-      && args.includes(`--unit=${unitName.replace(/\.service$/, "")}`)
-      && args.includes(`XDG_RUNTIME_DIR=${runtimeDir}`);
-    if (!privateEnvironment && !ownedLauncher) return undefined;
-    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    return { pid, startTime, bootId, runtimeDir, ...(unitName === undefined ? {} : { unitName }) };
-  } catch {
-    return undefined;
-  }
-}
-
-export function ownedProcessRunning(identity: OwnedProcessIdentity | undefined): boolean {
-  if (identity === undefined) return false;
-  const current = ownedProcessIdentity(identity.pid, identity.runtimeDir, identity.unitName);
-  return current !== undefined && current.startTime === identity.startTime && current.bootId === identity.bootId;
-}
-
-/** Validates a serialized identity against the private runtime directory that must own it. */
-export function readOwnedIdentity(
-  value: unknown,
-  pid: number | undefined,
-  runtimeDir: string,
-): OwnedProcessIdentity | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const identity = value as Partial<OwnedProcessIdentity>;
-  if (
-    identity.pid !== pid
-    || identity.runtimeDir !== runtimeDir
-    || typeof identity.startTime !== "string"
-    || !/^\d+$/.test(identity.startTime)
-    || typeof identity.bootId !== "string"
-    || (identity.unitName !== undefined && typeof identity.unitName !== "string")
-  ) {
-    return undefined;
-  }
-  return identity as OwnedProcessIdentity;
-}
-
-export function privateRuntimeProcesses(runtimeDir: string): OwnedProcessIdentity[] {
-  const identities: OwnedProcessIdentity[] = [];
-  for (const entry of readdirSync("/proc")) {
-    if (!/^\d+$/.test(entry)) continue;
-    const identity = ownedProcessIdentity(Number(entry), runtimeDir);
-    if (identity !== undefined) identities.push(identity);
-  }
-  return identities;
-}
-
-export async function terminateOwnedProcess(identity: OwnedProcessIdentity | undefined): Promise<void> {
-  if (identity === undefined || !ownedProcessRunning(identity)) return;
-  // Never signal a numeric process group recovered from disk. Each member must
-  // carry its own private ownership evidence, rechecked immediately before kill.
-  try { process.kill(identity.pid, "SIGTERM"); } catch { return; }
-  const deadline = Date.now() + 3_000;
-  while (Date.now() < deadline && ownedProcessRunning(identity)) await Bun.sleep(20);
-  if (!ownedProcessRunning(identity)) return;
-  try { process.kill(identity.pid, "SIGKILL"); } catch { /* already gone */ }
-}
-
 export class ProcessLineReader {
   #reader: ReadableStreamDefaultReader<Uint8Array>;
   #decoder = new TextDecoder();
@@ -600,39 +526,69 @@ export async function waitForSocket(
   throw new Error(`${label} did not create its private socket`);
 }
 
-export async function watchOwnedProcess(identity: OwnedProcessIdentity | undefined): Promise<number> {
-  while (ownedProcessRunning(identity)) await Bun.sleep(100);
-  return 0;
+/** One detached child plus, when the Service owns it, the session that proves its descendants. */
+export interface OwnedChild {
+  process: DetachedProcess;
+  session?: OwnedSession;
 }
 
-export async function terminateProcess(
-  child: DetachedProcess | undefined,
-  identity: OwnedProcessIdentity | undefined,
-): Promise<void> {
-  if (child !== undefined) {
-    await terminateDetachedProcess(child);
-  } else {
-    await terminateOwnedProcess(identity);
-  }
+/**
+ * Spawns one detached child. Without a user manager (`owned`) it leads an
+ * anchored session, so teardown still finds its descendants after its leader
+ * exits and even when they scrubbed their environment. With a transient unit the
+ * unit's cgroup owns the group, so the spawn stays exactly as before.
+ */
+export function spawnDetachedChild(input: {
+  argv: readonly string[];
+  env: Record<string, string>;
+  cwd?: string;
+  output: "pipe" | "ignore";
+  owned: boolean;
+}): OwnedChild {
+  const token = randomUUID();
+  const process = Bun.spawn(
+    input.owned ? anchoredSessionCommand(input.argv, token) : [...input.argv],
+    {
+      env: input.env,
+      ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+      stdin: "ignore",
+      stdout: input.output,
+      stderr: input.output,
+      detached: true,
+    },
+  );
+  return {
+    process,
+    ...(input.owned ? { session: { sessionId: process.pid, anchor: sessionAnchor(token) } } : {}),
+  };
 }
 
-export async function terminateDetachedProcess(child: DetachedProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    if (child.exitCode === null) child.kill("SIGTERM");
+/** Stops an owned child's whole session, including TERM-resistant descendants. */
+export async function terminateOwnedChild(child: OwnedChild | undefined): Promise<void> {
+  if (child === undefined) return;
+  if (child.session === undefined) {
+    // A transient unit owns the group through its cgroup; stop the leader and
+    // let the unit's KillMode=control-group clean the rest.
+    if (child.process.exitCode !== null || child.process.signalCode !== null) return;
+    try {
+      child.process.kill("SIGTERM");
+    } catch {
+      return;
+    }
+    const stopped = await Promise.race([
+      child.process.exited.then(() => true),
+      Bun.sleep(3_000).then(() => false),
+    ]);
+    if (stopped) return;
+    child.process.kill("SIGKILL");
+    await child.process.exited;
+    return;
   }
-  if (child.exitCode !== null) return;
-  const stopped = await Promise.race([
-    child.exited.then(() => true),
-    Bun.sleep(3_000).then(() => false),
-  ]);
-  if (stopped) return;
-  try {
-    process.kill(-child.pid, "SIGKILL");
-  } catch {
-    child.kill("SIGKILL");
-  }
-  await child.exited;
+  await terminateOwnedSession(child.session);
+  await child.process.exited;
+}
+
+/** Releases a session anchor once the leader and every descendant have exited. */
+export function settleOwnedChild(child: OwnedChild | undefined): boolean {
+  return child === undefined || child.session === undefined || settleOwnedSession(child.session);
 }
