@@ -22,6 +22,39 @@ function stubFetch(sent: SentRequest[]): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
+describe("ApiClient Paired Device token", () => {
+  test("sends the token as a Bearer header and on the events socket", async () => {
+    const requests: Array<{ url: string; headers: Headers }> = [];
+    const client = new ApiClient({
+      baseUrl: "http://127.0.0.1:7321",
+      fetch: (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        requests.push({ url: String(input), headers: new Headers(init?.headers) });
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }) as unknown as typeof fetch,
+      deviceToken: () => "a".repeat(64),
+    });
+
+    await client.listAgents();
+
+    expect(requests[0]?.headers.get("authorization")).toBe(`Bearer ${"a".repeat(64)}`);
+    expect(client.avatarUrl("bot-1")).toBe(`http://127.0.0.1:7321/api/bots/bot-1/avatar?access_token=${"a".repeat(64)}`);
+
+    const sockets: string[] = [];
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = class {
+      constructor(readonly url: string | URL) {
+        sockets.push(String(url));
+      }
+    } as unknown as typeof WebSocket;
+    try {
+      client.connectEvents(undefined, () => {});
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+    expect(sockets).toEqual([`ws://127.0.0.1:7321/api/events?access_token=${"a".repeat(64)}`]);
+  });
+});
+
 describe("ApiClient This Device tag", () => {
   test("a client with a device id tags its sends", async () => {
     const sent: SentRequest[] = [];

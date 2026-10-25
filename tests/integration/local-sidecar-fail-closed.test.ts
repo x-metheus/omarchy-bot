@@ -61,7 +61,7 @@ describe("fail closed and keep Sidecars distinct", () => {
   });
 
   async function connect(): Promise<LocalSidecarFixture> {
-    const sidecar = await LocalSidecarFixture.connect(h!.port);
+    const sidecar = await LocalSidecarFixture.connect(h!.port, h!.token);
     sidecars.push(sidecar);
     return sidecar;
   }

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { DeleteBotResultDto, ThreadDto } from "../../packages/protocol/src/index.ts";
 import {
   api,
+  authedFetch,
   makeBot,
   sendToBot,
   sendToThread,
@@ -332,7 +333,7 @@ describe("Shared Workspace default cwd", () => {
     h = await startDaemon();
     const workspace = sharedWorkspace(h);
     const botId = await makeBot(h, "Avatar recipe Bot");
-    const recipe = fetch(`${h.baseUrl}/api/bots/${botId}/avatar/recipe`, {
+    const recipe = authedFetch(h, `${h.baseUrl}/api/bots/${botId}/avatar/recipe`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID() },
       body: JSON.stringify({ prompt: "calm blue teammate" }),

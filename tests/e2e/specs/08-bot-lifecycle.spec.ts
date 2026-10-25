@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "../fixtures.ts";
 
 test.describe("single Bot lifecycle", () => {
   test("shows the startup-recovered Bot and only permanent removal controls", async ({ page }) => {

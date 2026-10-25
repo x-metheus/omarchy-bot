@@ -59,11 +59,12 @@ async function main(): Promise<void> {
   if (!Number.isInteger(port) || port <= 0) throw new Error("OMARCHY_BOT_DAEMON_PORT must be a positive integer");
   const deviceId = requiredEnv("OMARCHY_BOT_DEVICE_ID");
   if (!isDeviceId(deviceId)) throw new Error("OMARCHY_BOT_DEVICE_ID must be a Local Sidecar device identity");
+  const token = requiredEnv("OMARCHY_BOT_DEVICE_TOKEN");
   const hostname = process.env.OMARCHY_BOT_HOSTNAME?.trim() || os.hostname();
   const root = path.resolve(requiredEnv("OMARCHY_BOT_SIDECAR_ROOT"));
   mkdirSync(root, { recursive: true });
 
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/devices`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/devices?access_token=${encodeURIComponent(token)}`);
   await waitOpen(ws);
   const send = (frame: DeviceClientFrame): void => ws.send(JSON.stringify(frame));
   const asks = new Map<string, { resolve(decision: LocalAskDecision): void }>();

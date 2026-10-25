@@ -14,6 +14,7 @@ import {
   api,
   makeBot,
   messages,
+  pairForToken,
   sendToBot,
   startDaemon,
   waitThreadIdle,
@@ -318,11 +319,17 @@ describe("Service supervision with a user manager present", () => {
       workersDir: path.resolve(import.meta.dir, "fake-workers"),
       runtimeRoot,
     });
+    // The managed Service is a separate process; pair once on its loopback host, then carry the token.
+    const token = await pairForToken(managed.baseUrl, state, "service-supervision");
     const request = async <T>(method: string, p: string, body?: unknown): Promise<T> => {
       const response = await fetch(`${managed!.baseUrl}${p}`, {
         method,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID() },
+        headers: {
+          "content-type": "application/json",
+          "x-command-id": crypto.randomUUID(),
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
       });
       return (await response.json()) as T;
     };
@@ -345,6 +352,7 @@ describe("Service supervision with a user manager present", () => {
     // A preview request is the ordinary client trigger that starts the Screen.
     const snapshot = await fetch(
       `${managed.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(bot.id)}&surfaceId=${encodeURIComponent(bot.surfaceId)}`,
+      { headers: token ? { authorization: `Bearer ${token}` } : {} },
     );
     expect(snapshot.status).toBe(200);
     await waitFor(

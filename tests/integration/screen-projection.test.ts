@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import type { ProjectionWebSocket } from "../../apps/daemon/src/modules/computer/screenProjection.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
-import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 const RFB_BANNER = new Uint8Array([
   0x52, 0x46, 0x42, 0x20, 0x30, 0x30, 0x33, 0x2e, 0x30, 0x30, 0x38, 0x0a,
@@ -123,7 +123,10 @@ async function until(probe: () => boolean, message: string, timeoutMs = 5_000): 
 }
 
 function wsUrl(h: Harness, path: string): string {
-  return `${h.baseUrl.replace(/^http/, "ws")}${path}`;
+  const url = new URL(path, h.baseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  if (h.token) url.searchParams.set("access_token", h.token);
+  return url.href;
 }
 
 async function openSocket(url: string): Promise<SocketInbox> {
@@ -149,7 +152,8 @@ async function closed(socket: WebSocket): Promise<void> {
 }
 
 async function createSession(h: Harness, owner: ComputerSurfaceOwner): Promise<SessionDescriptor> {
-  const response = await fetch(
+  const response = await authedFetch(
+    h,
     `${h.baseUrl}/api/computer/projection?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
     {
       method: "POST",
@@ -212,7 +216,7 @@ describe("WebSocket Screen Projection", () => {
   test("creates a version 3 WebSocket projection session without an SDP offer", async () => {
     const owner = await ownerFor(h, await makeBot(h, "WebSocket projected screen"));
     const query = `botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`;
-    const response = await fetch(`${h.baseUrl}/api/computer/projection?${query}`, {
+    const response = await authedFetch(h, `${h.baseUrl}/api/computer/projection?${query}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ version: 3 }),
@@ -243,7 +247,8 @@ describe("WebSocket Screen Projection", () => {
 
   test("rejects legacy WebRTC offers instead of converting them", async () => {
     const owner = await ownerFor(h, await makeBot(h, "Legacy offer"));
-    const response = await fetch(
+    const response = await authedFetch(
+      h,
       `${h.baseUrl}/api/computer/projection?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
       {
         method: "POST",

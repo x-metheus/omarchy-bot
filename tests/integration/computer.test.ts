@@ -3,10 +3,10 @@ import { ApiClient } from "../../packages/api-client/src/index.ts";
 import { handleComputerRequest } from "../../apps/daemon/src/api/computerRoutes.ts";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
-import { api, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 async function computerRequest<T>(h: Harness, method: string, path: string): Promise<{ response: Response; body: T }> {
-  const response = await fetch(`${h.baseUrl}${path}`, { method });
+  const response = await authedFetch(h, `${h.baseUrl}${path}`, { method });
   const contentType = response.headers.get("content-type");
   return {
     response,
@@ -51,7 +51,7 @@ async function waitForComputerState(
   previewAt?: string;
 }> {
   if (activate) {
-    await fetch(`${h.baseUrl}${computerPath("/api/computer/snapshot", owner)}`);
+    await authedFetch(h, `${h.baseUrl}${computerPath("/api/computer/snapshot", owner)}`);
   }
   const deadline = Date.now() + 5_000;
   for (;;) {
@@ -105,7 +105,7 @@ describe("contextual computer control", () => {
   });
 
   test("Computer routes reject a missing Bot and Surface association", async () => {
-    const response = await fetch(`${h.baseUrl}/api/computer/state`);
+    const response = await authedFetch(h, `${h.baseUrl}/api/computer/state`);
     expect(response.status).toBe(400);
   });
 
@@ -121,7 +121,8 @@ describe("contextual computer control", () => {
       agentId: "pi",
     });
 
-    const response = await fetch(
+    const response = await authedFetch(
+      h,
       `${h.baseUrl}/api/computer/state?botId=${first.id}&surfaceId=${second.surfaceId}`,
     );
     expect(response.status).toBe(404);
@@ -170,7 +171,7 @@ describe("contextual computer control", () => {
     );
     expect(admittedPreview.response.status).toBe(200);
 
-    const client = new ApiClient({ baseUrl: h.baseUrl });
+    const client = new ApiClient({ baseUrl: h.baseUrl, deviceToken: h.token });
     await expect(client.computerState(waiting)).resolves.toEqual({
       ...waiting,
       state: "unavailable",
@@ -208,7 +209,7 @@ describe("contextual computer control", () => {
       takeover: "unavailable",
     });
 
-    const projection = await fetch(`${h.baseUrl}${computerPath("/api/computer/projection", owner)}`, {
+    const projection = await authedFetch(h, `${h.baseUrl}${computerPath("/api/computer/projection", owner)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ version: 3 }),
@@ -265,10 +266,10 @@ describe("contextual computer control", () => {
     const second = await ownerFor(h, await makeBot(h, "Second concurrent screen"));
     adapter.blockFirstCapture(first.surfaceId);
 
-    const firstRequest = fetch(`${h.baseUrl}${computerPath("/api/computer/snapshot", first)}`);
+    const firstRequest = authedFetch(h, `${h.baseUrl}${computerPath("/api/computer/snapshot", first)}`);
     await adapter.waitForBlockedCapture();
-    const secondRequestOnFirst = fetch(`${h.baseUrl}${computerPath("/api/computer/snapshot", first)}`);
-    const independent = fetch(`${h.baseUrl}${computerPath("/api/computer/snapshot", second)}`);
+    const secondRequestOnFirst = authedFetch(h, `${h.baseUrl}${computerPath("/api/computer/snapshot", first)}`);
+    const independent = authedFetch(h, `${h.baseUrl}${computerPath("/api/computer/snapshot", second)}`);
 
     const independentResponse = await independent;
     expect(independentResponse.status).toBe(200);
@@ -408,7 +409,7 @@ describe("contextual computer control", () => {
     const deleted = await api<{ status: string }>(h, "DELETE", `/api/bots/${owner.botId}`, {});
     expect(deleted.status).toBe("deleted");
     expect(h.svc.db.query(`SELECT surface_id FROM bot_surfaces WHERE surface_id = ?`).get(owner.surfaceId)).toBeNull();
-    expect((await fetch(`${h.baseUrl}${computerPath("/api/computer/state", owner)}`)).status).toBe(404);
+    expect((await authedFetch(h, `${h.baseUrl}${computerPath("/api/computer/state", owner)}`)).status).toBe(404);
   });
 
   test("non-computer requests are left to the parent router", async () => {

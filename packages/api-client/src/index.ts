@@ -49,6 +49,12 @@ export interface ApiClientOptions {
    * Omitted means this client has no Local Sidecar — no tag is ever sent.
    */
   localSidecarDeviceId?: string | undefined;
+  /**
+   * Paired Device token (`Authorization: Bearer`, `access_token` on sockets and
+   * browser-loaded URLs). A getter is read per request, so a client created
+   * before pairing picks the token up once it is stored. The getter wins.
+   */
+  deviceToken?: string | (() => string | undefined) | undefined;
 }
 
 export interface ComputerSurfaceOwner {
@@ -76,6 +82,7 @@ export class ApiClient {
   private readonly base: string;
   private readonly f: typeof fetch;
   private readonly localSidecarDeviceId: string | undefined;
+  private readonly token: () => string | undefined;
 
   constructor(opts: ApiClientOptions = {}) {
     this.base = (opts.baseUrl ?? "").replace(/\/$/, "");
@@ -85,16 +92,35 @@ export class ApiClient {
       throw new Error("localSidecarDeviceId must be a Local Sidecar device identity");
     }
     this.localSidecarDeviceId = deviceId;
+    const token = opts.deviceToken;
+    this.token = typeof token === "function" ? token : () => token;
   }
 
   get baseUrl(): string {
     return this.base;
   }
 
+  private authHeaders(): Record<string, string> {
+    const token = this.token();
+    return token ? { authorization: `Bearer ${token}` } : {};
+  }
+
+  /** Browsers cannot set headers on WebSockets, `<img>`, or noVNC: carry the token in the query. */
+  private withToken(url: string): string {
+    const token = this.token();
+    if (!token) return url;
+    const queryAt = url.indexOf("?");
+    const path = queryAt === -1 ? url : url.slice(0, queryAt);
+    const search = new URLSearchParams(queryAt === -1 ? "" : url.slice(queryAt + 1));
+    search.set("access_token", token);
+    return `${path}?${search}`;
+  }
+
   private async req<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await this.f(`${this.base}${path}`, {
       ...init,
       headers: {
+        ...this.authHeaders(),
         "content-type": "application/json",
         "x-command-id": randomUuid(),
         ...(init?.headers ?? {}),
@@ -220,7 +246,7 @@ export class ApiClient {
   async uploadAvatar(id: string, file: Blob): Promise<BotDto> {
     const res = await this.f(`${this.base}/api/bots/${id}/avatar/upload`, {
       method: "POST",
-      headers: { "content-type": file.type || "application/octet-stream", "x-command-id": randomUuid() },
+      headers: { ...this.authHeaders(), "content-type": file.type || "application/octet-stream", "x-command-id": randomUuid() },
       body: file,
     });
     if (!res.ok) {
@@ -236,7 +262,7 @@ export class ApiClient {
     return this.req(`/api/bots/${id}/avatar/recipe`, { method: "POST", body: JSON.stringify(body) });
   }
   avatarUrl(id: string): string {
-    return `${this.base}/api/bots/${id}/avatar`;
+    return this.withToken(`${this.base}/api/bots/${id}/avatar`);
   }
   markBotRead(id: string, threadId: string): Promise<void> {
     return this.req(`/api/bots/${id}/read`, { method: "POST", body: JSON.stringify({ threadId }) });
@@ -281,6 +307,7 @@ export class ApiClient {
     const res = await this.f(`${this.base}/api/attachments/stage`, {
       method: "POST",
       headers: {
+        ...this.authHeaders(),
         "x-bot-id": botId,
         "x-attachment-draft-token": draftToken,
         "x-command-id": randomUuid(),
@@ -308,7 +335,7 @@ export class ApiClient {
     });
   }
   attachmentUrl(id: string): string {
-    return `${this.base}/api/attachments/${id}`;
+    return this.withToken(`${this.base}/api/attachments/${id}`);
   }
 
 
@@ -348,7 +375,7 @@ export class ApiClient {
     return this.req(this.computerPath("/api/computer/return-to-bot", owner), { method: "POST" });
   }
   computerProjectionUrl(owner: ComputerSurfaceOwner): string {
-    return `${this.base}${this.computerPath("/api/computer/projection", owner)}`;
+    return this.withToken(`${this.base}${this.computerPath("/api/computer/projection", owner)}`);
   }
 
   private computerPath(path: string, owner: ComputerSurfaceOwner): string {
@@ -364,7 +391,7 @@ export class ApiClient {
   ): WebSocket {
     // Resolve relative bases (web served by the daemon) against the page origin.
     const base = this.base !== "" ? this.base : (typeof window !== "undefined" ? window.location.origin : "");
-    const wsUrl = `${base.replace(/^http/, "ws")}/api/events`;
+    const wsUrl = this.withToken(`${base.replace(/^http/, "ws")}/api/events`);
     const ws = new WebSocket(wsUrl);
     ws.onopen = () => {
       const hello: ClientToServer = { type: "hello", ...(lastCursor !== undefined ? { lastCursor } : {}) };

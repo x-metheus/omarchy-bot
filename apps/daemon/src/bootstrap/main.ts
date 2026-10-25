@@ -21,6 +21,7 @@ import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts"
 import { PluginsService } from "../modules/plugins/plugins.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
 import { SidecarBroker } from "../modules/devices/sidecarBroker.ts";
+import { PairingService } from "../modules/pairing/pairing.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
 import { stderr } from "@omarchy-bot/agent-contract";
@@ -145,6 +146,8 @@ export async function main(options: MainOptions = {}): Promise<{
     return origin.origin;
   });
   const devices = new SidecarBroker(cfg.sharedWorkspaceDir);
+  const pairing = new PairingService(db);
+  const pairingHostSecret = pairing.ensureHostSecret(cfg.stateDir);
   const deviceLiveness = setInterval(() => devices.expire(), 5_000);
   deviceLiveness.unref?.();
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices);
@@ -249,6 +252,8 @@ export async function main(options: MainOptions = {}): Promise<{
     screens,
     projections,
     devices,
+    pairing,
+    pairingHostSecret,
     supervisor,
   };
   const http = startHttp(svc);

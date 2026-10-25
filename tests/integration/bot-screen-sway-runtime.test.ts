@@ -693,7 +693,7 @@ realSway("WebSocket expanded view negotiates a real WayVNC RFB session", async (
     const bot = await api<{ surfaceId: SurfaceId }>(harness, "GET", `/api/bots/${botId}`);
     owner = { botId, surfaceId: bot.surfaceId };
     await waitScreenReady(harness, owner);
-    peer = await ProjectionClient.connect(harness.baseUrl, owner, "real-sway-rfb-websocket");
+    peer = await ProjectionClient.connect(harness.baseUrl, owner, "real-sway-rfb-websocket", harness.token);
     await peer.setMode("expanded");
     expect(peer.rfb?.serverInit).toMatchObject({
       width: peer.session.videoWidth,
@@ -742,12 +742,12 @@ realSway("WebSocket RFB survives preview teardown before expand", async () => {
       { name: "click", args: { x: 40, y: 50 } },
       new AbortController().signal,
     );
-    preview = await ProjectionClient.connect(harness.baseUrl, owner, "real-sway-preview-then-rfb");
+    preview = await ProjectionClient.connect(harness.baseUrl, owner, "real-sway-preview-then-rfb", harness.token);
     await preview.setMode("preview");
     await preview.waitForPreviewFrame(0, 8_000);
     await preview.close();
     preview = undefined;
-    expanded = await ProjectionClient.connect(harness.baseUrl, owner, "real-sway-expand-after-preview");
+    expanded = await ProjectionClient.connect(harness.baseUrl, owner, "real-sway-expand-after-preview", harness.token);
     await expanded.setMode("expanded");
     expect(expanded.rfb?.serverInit).toMatchObject({
       width: expanded.session.videoWidth,

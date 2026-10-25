@@ -3,7 +3,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentCapabilityInventory } from "../../packages/agent-contract/src/index.ts";
 import type { AgentDto, AttachmentDto } from "../../packages/protocol/src/index.ts";
-import { api, apiStatus, makeBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, apiStatus, makeBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 async function stage(
   h: Harness,
@@ -14,7 +14,7 @@ async function stage(
 ): Promise<{ status: number; body: AttachmentDto | { error: string } }> {
   const form = new FormData();
   form.set("file", file, name);
-  const response = await fetch(`${h.baseUrl}/api/attachments/stage`, {
+  const response = await authedFetch(h, `${h.baseUrl}/api/attachments/stage`, {
     method: "POST",
     headers: {
       "x-bot-id": botId,
@@ -114,14 +114,14 @@ describe("agent capability inventory", () => {
     });
     expect(
       (
-        await fetch(`${h.baseUrl}/api/attachments/staged/${(textUpload.body as AttachmentDto).id}`, {
+        await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${(textUpload.body as AttachmentDto).id}`, {
           headers: { "x-attachment-draft-token": draftToken },
         })
       ).status,
     ).toBe(200);
     expect(
       (
-        await fetch(`${h.baseUrl}/api/attachments/staged/${(imageUpload.body as AttachmentDto).id}`, {
+        await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${(imageUpload.body as AttachmentDto).id}`, {
           headers: { "x-attachment-draft-token": draftToken },
         })
       ).status,
@@ -141,14 +141,14 @@ describe("agent capability inventory", () => {
     await waitThreadIdle(h, sent.threadId);
     expect(
       (
-        await fetch(`${h.baseUrl}/api/attachments/staged/${(textUpload.body as AttachmentDto).id}`, {
+        await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${(textUpload.body as AttachmentDto).id}`, {
           headers: { "x-attachment-draft-token": draftToken },
         })
       ).status,
     ).toBe(404);
     expect(
       (
-        await fetch(`${h.baseUrl}/api/attachments/staged/${(imageUpload.body as AttachmentDto).id}`, {
+        await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${(imageUpload.body as AttachmentDto).id}`, {
           headers: { "x-attachment-draft-token": draftToken },
         })
       ).status,

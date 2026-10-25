@@ -14,7 +14,7 @@ function nextEvent(
   h: Harness,
   predicate: (event: EventEnvelope) => boolean,
 ): { ready: Promise<void>; event: Promise<EventEnvelope>; close: () => void } {
-  const socket = new WebSocket(h.baseUrl.replace(/^http/, "ws") + "/api/events");
+  const socket = new WebSocket(`${h.baseUrl.replace(/^http/, "ws")}/api/events?access_token=${encodeURIComponent(h.token)}`);
   let resolveReady: (() => void) | undefined;
   let rejectReady: ((error: Error) => void) | undefined;
   const ready = new Promise<void>((resolve, reject) => {

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import { waitScreenReady } from "./helpers/bot-screen-load-observe.ts";
-import { api, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
 import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./helpers/fakeSwayIpc.ts";
 
 function ownerOf(bot: { id: string; surfaceId: string }): ComputerSurfaceOwner {
@@ -146,7 +146,7 @@ test("production Sway serves a Computer Surface, Agent-only use, and deletion", 
   const sent = await sendToBot(harness, botId, "agent-only later");
   const owner = ownerOf(await api<{ id: string; surfaceId: string }>(harness, "GET", `/api/bots/${botId}`));
 
-  const preview = await fetch(
+  const preview = await authedFetch(harness,
     `${harness.baseUrl}/api/computer/snapshot?botId=${owner.botId}&surfaceId=${owner.surfaceId}`,
   );
   expect(preview.status).toBe(200);
@@ -163,6 +163,6 @@ test("production Sway serves a Computer Surface, Agent-only use, and deletion", 
   expect(deleted.status).toBe("deleted");
   expect(existsSync(path.join(harness.home, "r", owner.surfaceId))).toBeFalse();
   expect(readFileSync(workspaceMarker, "utf8")).toBe("keep");
-  expect((await fetch(`${harness.baseUrl}/api/computer/state?botId=${owner.botId}&surfaceId=${owner.surfaceId}`)).status).toBe(404);
+  expect((await authedFetch(harness, `${harness.baseUrl}/api/computer/state?botId=${owner.botId}&surfaceId=${owner.surfaceId}`)).status).toBe(404);
   expect(sent.threadId).toBeString();
 }, 20_000);

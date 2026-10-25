@@ -12,7 +12,7 @@ import path from "node:path";
 import { BOT_SCREEN_CAPACITY_POLICY } from "../../apps/daemon/src/bootstrap/config.ts";
 import type { ProjectionLoadMetrics } from "../../apps/daemon/src/modules/computer/screenProjection.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
-import { api, apiStatus, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, authedFetch, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 import {
   buildFinalWebClient,
   FinalWebBrowserHarness,
@@ -160,7 +160,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
       directWebSocketAttempts += 1;
       if (kind === "churn") churnAttempts += 1;
       try {
-        candidate = await ProjectionClient.connect(harness.baseUrl, owner, `${label}-attempt-${attempt}`);
+        candidate = await ProjectionClient.connect(harness.baseUrl, owner, `${label}-attempt-${attempt}`, harness.token);
         await candidate.setMode("expanded");
         if (candidate.rfb?.serverInit === undefined) throw new Error("RFB WebSocket did not complete protocol negotiation");
         directWebSocketSuccesses += 1;
@@ -250,6 +250,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
            FROM input_diagnostics WHERE surface_id = ? ORDER BY id`,
         ).all(owner.surfaceId),
       }),
+      harness.token,
     );
     browserHarness = finalWebBrowser;
     browserMetadata = {
@@ -418,7 +419,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
       );
       const query = `botId=${owner.botId}&surfaceId=${owner.surfaceId}`;
       const taken = await withTimeout(
-        fetch(`${harness.baseUrl}/api/computer/take-control?${query}`, { method: "POST" }),
+        authedFetch(harness, `${harness.baseUrl}/api/computer/take-control?${query}`, { method: "POST" }),
         10_000,
         "Takeover did not quiesce",
       );
@@ -489,7 +490,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
         `${fault} failure was not surfaced by Screen Projection`,
       );
       const query = `botId=${faultOwner.botId}&surfaceId=${faultOwner.surfaceId}`;
-      const snapshot = await fetch(`${harness.baseUrl}/api/computer/snapshot?${query}`);
+      const snapshot = await authedFetch(harness, `${harness.baseUrl}/api/computer/snapshot?${query}`);
       crashes.push({
         surfaceId: faultOwner.surfaceId,
         role: fault,

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AttachmentDto, BotViewDto, DeleteBotResultDto } from "../../packages/protocol/src/index.ts";
-import { api, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 async function stageAttachment(
   h: Harness,
@@ -13,7 +13,7 @@ async function stageAttachment(
 ): Promise<AttachmentDto> {
   const form = new FormData();
   form.set("file", new Blob([contents], { type: "text/plain" }), name);
-  const response = await fetch(`${h.baseUrl}/api/attachments/stage`, {
+  const response = await authedFetch(h, `${h.baseUrl}/api/attachments/stage`, {
     method: "POST",
     headers: {
       "x-bot-id": botId,
@@ -88,7 +88,7 @@ describe("local Bot deletion", () => {
       JSON.stringify({ ok: true, image: "verified", fakeAbortReleaseFile: "release-delete-aborts" }),
     );
 
-    const deletionResponse = fetch(`${h.baseUrl}/api/bots/${botId}`, {
+    const deletionResponse = authedFetch(h, `${h.baseUrl}/api/bots/${botId}`, {
       method: "DELETE",
       body: "{}",
       headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID() },

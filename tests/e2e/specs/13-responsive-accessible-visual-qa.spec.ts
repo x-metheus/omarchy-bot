@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "../fixtures.ts";
 
 const PRIMARY_BOT_ID = "bot_ticket13_primary";
 const SECONDARY_BOT_ID = "bot_ticket13_unavailable";
@@ -211,7 +211,7 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
 async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<void> {
   const bots = options.empty ? [] : botFixtures(options.primaryStatus ?? "active", options.richTranscript);
 
-  await page.route(`**/api/bots/${SECONDARY_BOT_ID}/avatar`, (route) =>
+  await page.route(`**/api/bots/${SECONDARY_BOT_ID}/avatar*`, (route) =>
     route.fulfill({ status: 200, contentType: "image/png", body: ONE_PIXEL_PNG }),
   );
   await page.route("**/api/agents", (route) =>
@@ -502,8 +502,8 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(selectedRow.getByTestId("sidebar-activity-point")).toBeVisible();
 
     const uploadedRow = page.getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`);
-    await expect(uploadedRow.getByTestId("avatar-upload").locator("img"))
-      .toHaveAttribute("src", `/api/bots/${SECONDARY_BOT_ID}/avatar`);
+    await expect.poll(async () => new URL((await uploadedRow.getByTestId("avatar-upload").locator("img").getAttribute("src")) ?? "http://invalid/", page.url()).pathname)
+      .toBe(`/api/bots/${SECONDARY_BOT_ID}/avatar`);
     await expect(uploadedRow.getByTestId("avatar-upload")).toHaveCSS("animation-name", "none");
     await expect(uploadedRow.getByTestId("sidebar-activity-point")).toBeVisible();
     await expect(uploadedRow.getByTestId(`sidebar-unread-${SECONDARY_BOT_ID}`)).toBeVisible();

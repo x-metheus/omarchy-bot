@@ -5,6 +5,7 @@ import type { BotDto, BotViewDto, MessageDto, ThreadDto } from "../../packages/p
 import {
   api,
   apiStatus,
+  authedFetch,
   makeBot,
   messages,
   sendToBot,
@@ -650,7 +651,7 @@ describe("durable Bot mailbox", () => {
       JSON.stringify({ ok: true, image: "verified", fakeAbortReleaseFile: "release-mailbox-delete" }),
     );
 
-    const deletion = fetch(`${h.baseUrl}/api/bots/${targetBotId}`, {
+    const deletion = authedFetch(h, `${h.baseUrl}/api/bots/${targetBotId}`, {
       method: "DELETE",
       body: "{}",
       headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID() },

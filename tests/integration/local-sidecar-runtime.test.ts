@@ -11,6 +11,12 @@ const sidecarMain = path.resolve(import.meta.dir, "../../apps/sidecar/src/main.t
 /** A detached descendant that ignores SIGTERM and only writes its marker once released. */
 const DESCENDANT_COMMAND = `sh -c 'trap "" TERM; echo $$ > descendant.pid; while [ ! -f release ]; do sleep 0.05; done; printf survived > marker.txt' & wait`;
 
+/** Paired-device token; the Harness field may not be typed yet, so narrow at runtime. */
+const pairedToken = (h: Harness): string => {
+  if (!("token" in h) || typeof h.token !== "string") throw new Error("harness did not pair");
+  return h.token;
+};
+
 const processAlive = (pid: number): boolean => {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -72,6 +78,7 @@ describe("plugin-runtime Bun Local Sidecar", () => {
         ...process.env,
         OMARCHY_BOT_DAEMON_PORT: String(h.port),
         OMARCHY_BOT_DEVICE_ID: DEVICE_A,
+        OMARCHY_BOT_DEVICE_TOKEN: pairedToken(h),
         OMARCHY_BOT_HOSTNAME: "runtime-laptop",
         OMARCHY_BOT_SIDECAR_ROOT: root,
       },
@@ -159,6 +166,7 @@ describe("plugin-runtime Bun Local Sidecar", () => {
         ...process.env,
         OMARCHY_BOT_DAEMON_PORT: String(h.port),
         OMARCHY_BOT_DEVICE_ID: DEVICE_A,
+        OMARCHY_BOT_DEVICE_TOKEN: pairedToken(h),
         OMARCHY_BOT_HOSTNAME: "stale-laptop",
         OMARCHY_BOT_SIDECAR_ROOT: root,
       },
@@ -213,6 +221,7 @@ describe("plugin-runtime Bun Local Sidecar", () => {
         ...process.env,
         OMARCHY_BOT_DAEMON_PORT: String(h.port),
         OMARCHY_BOT_DEVICE_ID: DEVICE_A,
+        OMARCHY_BOT_DEVICE_TOKEN: pairedToken(h),
         OMARCHY_BOT_HOSTNAME: "shutdown-laptop",
         OMARCHY_BOT_SIDECAR_ROOT: root,
       },

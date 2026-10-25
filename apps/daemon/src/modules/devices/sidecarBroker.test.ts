@@ -298,10 +298,10 @@ describe("SidecarBroker output", () => {
       type: "local.result",
       jobId: job.jobId,
       ok: true,
-      text: `token=abc123 Bearer xyz ${"x".repeat(12_000)}`,
+      text: `token=abc123 Bearer xyz ${"a".repeat(64)} ${"x".repeat(12_000)}`,
     });
     const result = await pending;
-    expect(result.text.startsWith("token=[redacted] Bearer [redacted] ")).toBeTrue();
+    expect(result.text.startsWith("token=[redacted] Bearer [redacted] [redacted] ")).toBeTrue();
     expect(result.text).toHaveLength(8_192);
   });
 

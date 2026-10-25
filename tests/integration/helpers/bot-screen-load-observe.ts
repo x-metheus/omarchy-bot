@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { SurfaceId } from "../../../packages/domain/src/ids.ts";
-import type { Harness } from "./harness.ts";
+import { authedFetch, type Harness } from "./harness.ts";
 
 export const SCREEN_PROCESS_ROLES = ["compositor", "application", "input", "worker", "capture", "wayvnc"] as const;
 export type ScreenProcessRole = typeof SCREEN_PROCESS_ROLES[number];
@@ -583,7 +583,7 @@ export async function waitScreenReady(harness: Harness, owner: ScreenOwner): Pro
   const startedAt = performance.now();
   harness.svc.screens.open(owner);
   await until(async () => {
-    const response = await fetch(`${harness.baseUrl}/api/computer/state?botId=${owner.botId}&surfaceId=${owner.surfaceId}`);
+    const response = await authedFetch(harness, `${harness.baseUrl}/api/computer/state?botId=${owner.botId}&surfaceId=${owner.surfaceId}`);
     const view = await response.json() as { state?: string; activity?: string };
     if (view.state === "unavailable") {
       const runtime = harness.svc.screens.status(owner);

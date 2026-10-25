@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "../fixtures.ts";
 
 type DictationOutcome = "success" | "empty" | "timeout" | "failure" | "unavailable" | "cancelled";
 

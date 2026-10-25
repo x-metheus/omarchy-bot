@@ -36,6 +36,7 @@ function redactLocalOutput(text: string): string {
   return text
     .replace(/\b(Bearer)\s+\S+/gi, "$1 [redacted]")
     .replace(/\b((?:api[_-]?key|token|password|secret)\s*[:=]\s*)\S+/gi, "$1[redacted]")
+    .replace(/\b(?:paired_)?[0-9a-f]{64}\b/g, "[redacted]")
     .slice(0, LOCAL_OUTPUT_MAX);
 }
 
