@@ -95,6 +95,7 @@ Without `XDG_RUNTIME_DIR`, the entry creates `/tmp/ob-<uid>` with mode 0700 and 
 ```
 
 - **One Bot Computer, multiple Bot Screens.** Each active Screen owns an output and workspace in a shared, pure-headless Sway runtime. Screens do not own separate compositors, browser profiles, or input seats.
+- **Tabbed Bot Screens.** Each workspace shows one full-width application with readable titles for the other open windows. Dialogs and file pickers float centered above the application.
 - **Coordinated desktop input.** The runtime serializes actions across Screens. Human Web Control holds the shared input seat until control is returned; background applications can continue running.
 - **Viewing is not execution.** Closing a viewer does not stop the Screen's applications. WayVNC supplies on-demand, view-only RFB projection; Computer Broker remains the input authority.
 - **Work files outlive a Bot.** Deleting a Bot removes its plugin-owned data and targeted Screen runtime/workspace, not Shared Workspace files, Agent-owned Native Sessions, or the shared Bot Computer profile.

@@ -135,7 +135,39 @@ function writeSwayConfig(configHome: string): string {
     configPath,
     [
       "xwayland enable",
-      "default_border none",
+      // Each Screen workspace is tabbed: the focused window fills the Screen and the
+      // others stay visible as titled tabs (Computer ADR 0011).
+      "workspace_layout tabbed",
+      // Tab headers stay; edge borders do not, or a capture shows a frame the
+      // window did not draw.
+      "default_border pixel 0",
+      "default_floating_border normal 0",
+      "hide_edge_borders both",
+      // Inactive tabs are what makes a multi-window Screen readable; sway's default
+      // unfocused title text is too dim to read in a capture.
+      "client.unfocused #333333 #222222 #ffffff #292d2e #222222",
+      // A client asking to raise its window should land on that window.
+      "focus_on_window_activation focus",
+      // The Bot Desktop placeholder is a full-screen toplevel; tiled inside the
+      // tabbed container it collapses that container to 0x0 until the first focus.
+      "for_window [app_id=\"dev.omarchy.BotDesktop\"] floating enable",
+      // X11 dialogs and pop-ups float themselves only when the client asks first.
+      // These rules cover the ones that do not, and center them. window_type and
+      // window_role match X11 windows only.
+      ...[
+        "dialog", "utility", "toolbar", "splash", "menu",
+        "dropdown_menu", "popup_menu", "notification",
+      ].map((type) =>
+        `for_window [window_type=\"${type}\"] floating enable, border normal 0, move position center`,
+      ),
+      ...["pop-up", "bubble", "Popup"].map((role) =>
+        `for_window [window_role=\"${role}\"] floating enable, border normal 0, move position center`,
+      ),
+      // Portal pickers set their parent after mapping, so sway has already tiled
+      // them; matching the portal app id floats and centers them on map.
+      ...["xdg-desktop-portal-gtk", "xdg-desktop-portal-gnome", "xdg-desktop-portal-kde"].map((appId) =>
+        `for_window [app_id=\"${appId}\"] floating enable, border normal 0, move position center`,
+      ),
       // Sway sets DISPLAY once Xwayland reserves a display; deferred exec runs
       // after that, so record it for application launches and reattaches.
       `exec printf '%s' "$DISPLAY" > "$OMARCHY_BOT_DISPLAY_FILE"`,
