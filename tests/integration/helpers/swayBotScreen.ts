@@ -114,16 +114,12 @@ if (existsSync(exitPath)) process.exit(1);
 const socketPath = (() => {
   const prefixed = tokens.find((token) => token.startsWith("unix:"));
   if (prefixed !== undefined) return prefixed.replace(/^unix:(?:path=)?/, "");
-  const flag = tokens.indexOf("--unix-socket");
-  if (flag >= 0) {
-    for (let i = flag + 1; i < tokens.length; i++) {
-      const token = tokens[i]!;
-      if (token.startsWith("-")) continue;
-      if (tokens[i - 1] === "--output") continue;
-      return token;
-    }
+  // --socket <control> precedes the listen path, the last absolute argument.
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const token = tokens[i]!;
+    if (token.startsWith("/") && tokens[i - 1] !== "--output") return token;
   }
-  return tokens.find((token, i) => token.startsWith("/") && tokens[i - 1] !== "--output");
+  return undefined;
 })();
 if (socketPath === undefined) {
   await new Promise(() => {});

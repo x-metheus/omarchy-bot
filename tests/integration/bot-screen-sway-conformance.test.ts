@@ -223,7 +223,6 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     const host = kernelAndGpu();
     const browser = Bun.which("brave") ?? Bun.which("chromium") ?? Bun.which("firefox");
     const terminal = Bun.which("alacritty") ?? Bun.which("ghostty") ?? Bun.which("foot");
-    const grim = Bun.which("grim");
     report.environment = {
       kernel: host.kernel,
       gpu: host.gpu,
@@ -232,17 +231,12 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       hostCompositorPid: hostBefore.compositorPid,
       hostWAYLAND_DISPLAY: hostBefore.waylandDisplay,
       hostSWAYSOCK: hostBefore.swaySock,
-      grim,
       browser,
       terminal,
       compare: Bun.which("compare"),
     };
     persist(report);
 
-    if (grim === null) {
-      record(check("prerequisites", false, "grim is not on PATH", "host grim is required; no package install was attempted"));
-      throw new Error("grim is required for real Sway conformance");
-    }
     if (browser === null) {
       record(check("prerequisites", false, "no browser on PATH", "firefox/chromium/brave missing; no package install was attempted"));
       throw new Error("a host Wayland browser is required");
@@ -265,6 +259,9 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       swaymsgBin: binaries.swaymsgBin,
       wayvncBin: binaries.wayvncBin,
       wlrRandrBin: binaries.wlrRandrBin,
+      grimBin: binaries.grimBin,
+      dbusDaemonBin: binaries.dbusDaemonBin,
+      xwaylandBin: binaries.xwaylandBin,
       swayWrapperSha256: sha256File(binaries.swayBin),
       wayvncWrapperSha256: sha256File(binaries.wayvncBin),
       swayVersion: `${swayVersion.stdout.toString().trim()} ${swayVersion.stderr.toString().trim()}`.trim(),
@@ -281,11 +278,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       runtimeRoot: path.join(daemonHome, "r"),
       profileRoot: path.join(daemonHome, "screens"),
       applicationCwd,
-      swayBin: binaries.swayBin,
-      swaymsgBin: binaries.swaymsgBin,
-      wayvncBin: binaries.wayvncBin,
-      wlrRandrBin: binaries.wlrRandrBin,
-      grimBin: grim,
+      runtimeSupply: supply,
     });
 
     try {

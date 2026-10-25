@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -15,7 +16,8 @@ import {
   PortableSwayRuntimeSupply,
   SWAY_RUNTIME_RELEASE,
   resolveSwayRuntimeBinaries,
-  type SwayRuntimePackage,
+  type SwayRuntimeBinaries,
+  type SwayRuntimeBundle,
 } from "../../apps/daemon/src/modules/computer/swayRuntimeSupply.ts";
 
 let root: string | undefined;
@@ -25,172 +27,151 @@ afterEach(() => {
   root = undefined;
 });
 
-const REQUIRED_BINARIES = ["sway", "swaymsg", "wayvnc", "wlr-randr"] as const;
+const LAUNCHERS = [
+  "sway",
+  "swaymsg",
+  "wayvnc",
+  "wlr-randr",
+  "Xwayland",
+  "grim",
+  "dbus-daemon",
+  "omarchy-bot-wayland-input",
+  "omarchy-bot-wayland-capture",
+  "omarchy-bot-desktop",
+] as const;
 
-function fixturePackage(archive = "verified portable sway runtime fixture"): {
-  runtimePackage: SwayRuntimePackage;
+function fixtureBundle(archive = "verified portable sway runtime fixture"): {
+  bundle: SwayRuntimeBundle;
   archive: string;
 } {
   return {
     archive,
-    runtimePackage: {
-      name: "fixture",
-      url: "https://packages.invalid/fixture.pkg.tar.zst",
+    bundle: {
+      release: SWAY_RUNTIME_RELEASE,
+      url: "https://packages.invalid/omarchy-bot-sway-runtime.tar.gz",
       sha256: new Bun.CryptoHasher("sha256").update(archive).digest("hex"),
     },
   };
 }
 
-function writeExtractedBinaries(destination: string, binaries: readonly string[] = REQUIRED_BINARIES): void {
-  const binaryDir = path.join(destination, "usr", "bin");
-  mkdirSync(binaryDir, { recursive: true });
-  for (const binary of binaries) {
-    const executable = path.join(binaryDir, binary);
-    writeFileSync(executable, "#!/bin/sh\nexit 0\n");
-    chmodSync(executable, 0o700);
+/** Extracts launchers that print the path they were executed from. */
+function writeLaunchers(destination: string, launchers: readonly string[] = LAUNCHERS): void {
+  const binDir = path.join(destination, "bin");
+  mkdirSync(binDir, { recursive: true });
+  for (const launcher of launchers) {
+    const target = path.join(binDir, launcher);
+    writeFileSync(target, `#!/bin/sh\nprintf '%s\\n' "$0"\n`);
+    chmodSync(target, 0o700);
   }
 }
 
-test("selects the app-owned Sway fallback only when the system set is incomplete", async () => {
-  let supplyCalls = 0;
-  const appOwned = {
-    swayBin: "/app-data/runtime/sway/bin/sway",
-    swaymsgBin: "/app-data/runtime/sway/bin/swaymsg",
-    wayvncBin: "/app-data/runtime/sway/bin/wayvnc",
-    wlrRandrBin: "/app-data/runtime/sway/bin/wlr-randr",
-  };
-  const supply = {
-    ensure: async () => {
-      supplyCalls += 1;
-      return appOwned;
+function bundleSupply(options: {
+  rootDir: string;
+  bundle: SwayRuntimeBundle;
+  archive?: string;
+  launchers?: readonly string[];
+  onFetch?: () => void;
+}): PortableSwayRuntimeSupply {
+  const { archive = "verified portable sway runtime fixture" } = options;
+  return new PortableSwayRuntimeSupply({
+    rootDir: options.rootDir,
+    bundle: options.bundle,
+    fetch: async () => {
+      options.onFetch?.();
+      return new Response(archive);
     },
-  };
-
-  await expect(resolveSwayRuntimeBinaries({
-    supply,
-    findExecutable: () => undefined,
-  })).resolves.toEqual(appOwned);
-  expect(supplyCalls).toBe(1);
-
-  const system = await resolveSwayRuntimeBinaries({
-    supply,
-    findExecutable: (candidate) => `/usr/bin/${candidate}`,
-  });
-  expect(system).toEqual({
-    swayBin: "/usr/bin/sway",
-    swaymsgBin: "/usr/bin/swaymsg",
-    wayvncBin: "/usr/bin/wayvnc",
-    wlrRandrBin: "/usr/bin/wlr-randr",
-  });
-  expect(supplyCalls).toBe(1);
-});
-
-test("keeps an unavailable explicit Sway override authoritative", async () => {
-  let supplyCalls = 0;
-  await expect(resolveSwayRuntimeBinaries({
-    swayOverride: "/configured/missing-sway",
-    supply: {
-      ensure: async () => {
-        supplyCalls += 1;
-        return {
-          swayBin: "/app/sway",
-          swaymsgBin: "/app/swaymsg",
-          wayvncBin: "/app/wayvnc",
-          wlrRandrBin: "/app/wlr-randr",
-        };
-      },
+    extractArchive: async (_archivePath, destination) => {
+      writeLaunchers(destination, options.launchers);
     },
-    findExecutable: (candidate) => candidate === "wayvnc" ? "/usr/bin/wayvnc" : undefined,
-  })).rejects.toThrow("configured Sway executable is unavailable: /configured/missing-sway");
-  expect(supplyCalls).toBe(0);
-});
+  });
+}
 
-test("rejects an archive integrity failure and removes its private staging tree", async () => {
-  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-supply-integrity-"));
-  const runtimePackage: SwayRuntimePackage = {
-    name: "fixture",
-    url: "https://packages.invalid/fixture.pkg.tar.zst",
-    sha256: "0".repeat(64),
-  };
+function supplyRoot(): string {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-bundle-"));
+  return root;
+}
+
+test("refuses a checksum mismatch without extracting or publishing", async () => {
+  const supplyDir = supplyRoot();
   let extractionCalls = 0;
   const supply = new PortableSwayRuntimeSupply({
-    rootDir: root,
-    packages: [runtimePackage],
+    rootDir: supplyDir,
+    bundle: { ...fixtureBundle().bundle, sha256: "0".repeat(64) },
     fetch: async () => new Response("tampered archive"),
     extractArchive: async () => {
       extractionCalls += 1;
     },
   });
 
-  await expect(supply.ensure()).rejects.toThrow("fixture archive failed SHA-256 verification");
+  await expect(supply.ensure()).rejects.toThrow("Sway runtime bundle failed SHA-256 verification");
   expect(extractionCalls).toBe(0);
-  expect(readdirSync(root)).toEqual([]);
+  expect(readdirSync(supplyDir)).toEqual([]);
 });
 
-test("shares one provision across concurrent callers and atomically publishes launch wrappers", async () => {
-  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-supply-concurrent-"));
-  const { archive, runtimePackage } = fixturePackage();
-  const fetchStarted = Promise.withResolvers<void>();
-  const releaseFetch = Promise.withResolvers<void>();
-  let fetchCalls = 0;
-  let extractionCalls = 0;
-  const supply = new PortableSwayRuntimeSupply({
-    rootDir: root,
-    packages: [runtimePackage],
-    fetch: async () => {
-      fetchCalls += 1;
-      fetchStarted.resolve();
-      await releaseFetch.promise;
-      return new Response(archive);
-    },
-    extractArchive: async (_archivePath, destination) => {
-      extractionCalls += 1;
-      writeExtractedBinaries(destination);
-    },
-  });
+test("publishes a verified bundle and runs every bundled launcher from its cache", async () => {
+  const supplyDir = supplyRoot();
+  const { bundle, archive } = fixtureBundle();
+  const supply = bundleSupply({ rootDir: supplyDir, bundle, archive });
 
-  const first = supply.ensure();
-  await fetchStarted.promise;
-  const second = supply.ensure();
-  const third = supply.ensure();
-  releaseFetch.resolve();
-  const results = await Promise.all([first, second, third]);
+  const binaries = await supply.ensure();
+  const [published] = readdirSync(supplyDir);
+  expect(published).toBe(`${SWAY_RUNTIME_RELEASE}-${bundle.sha256.slice(0, 16)}`);
 
-  expect(fetchCalls).toBe(1);
-  expect(extractionCalls).toBe(1);
-  expect(results[1]).toEqual(results[0]);
-  expect(results[2]).toEqual(results[0]);
-  expect(readdirSync(root)).toEqual([SWAY_RUNTIME_RELEASE]);
-  const published = path.join(root, SWAY_RUNTIME_RELEASE);
-  const expected = {
-    swayBin: "sway",
-    swaymsgBin: "swaymsg",
-    wayvncBin: "wayvnc",
-    wlrRandrBin: "wlr-randr",
-  } as const;
-  for (const [name, binary] of Object.entries(expected)) {
-    const executable = results[0]![name as keyof typeof expected];
-    expect(executable.startsWith(published)).toBeTrue();
-    expect(statSync(executable).mode & 0o111).not.toBe(0);
-    const contents = readFileSync(executable, "utf8");
-    expect(contents).toContain("$bundle_root/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}");
-    expect(contents).toContain(`/usr/bin/${binary}`);
+  const expected: [keyof SwayRuntimeBinaries, string][] = [
+    ["swayBin", "sway"],
+    ["swaymsgBin", "swaymsg"],
+    ["wayvncBin", "wayvnc"],
+    ["wlrRandrBin", "wlr-randr"],
+    ["xwaylandBin", "Xwayland"],
+    ["grimBin", "grim"],
+    ["dbusDaemonBin", "dbus-daemon"],
+    ["inputHelperBin", "omarchy-bot-wayland-input"],
+    ["captureHelperBin", "omarchy-bot-wayland-capture"],
+    ["botDesktopBin", "omarchy-bot-desktop"],
+  ];
+  for (const [field, launcher] of expected) {
+    const resolved = binaries[field];
+    expect(resolved).toBe(path.join(supplyDir, published!, "bin", launcher));
+    expect(statSync(resolved).mode & 0o111).not.toBe(0);
+    const ran = Bun.spawnSync([resolved]);
+    expect(ran.exitCode).toBe(0);
+    expect(ran.stdout.toString().trim()).toBe(resolved);
   }
 });
 
-test("reuses a verified cached Sway runtime without fetching again", async () => {
-  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-supply-reuse-"));
-  const { archive, runtimePackage } = fixturePackage();
-  let fetchCalls = 0;
+test("never exposes a partial bundle while publishing", async () => {
+  const supplyDir = supplyRoot();
+  const { bundle, archive } = fixtureBundle();
+  const published = `${SWAY_RUNTIME_RELEASE}-${bundle.sha256.slice(0, 16)}`;
+  let visibleDuringExtraction: boolean | undefined;
   const supply = new PortableSwayRuntimeSupply({
-    rootDir: root,
-    packages: [runtimePackage],
-    fetch: async () => {
-      fetchCalls += 1;
-      return new Response(archive);
-    },
+    rootDir: supplyDir,
+    bundle,
+    fetch: async () => new Response(archive),
     extractArchive: async (_archivePath, destination) => {
-      writeExtractedBinaries(destination);
+      writeLaunchers(destination);
+      visibleDuringExtraction = existsSync(path.join(supplyDir, published));
+    },
+  });
+
+  const binaries = await supply.ensure();
+
+  // Half-extracted launchers stay under a private name until the rename.
+  expect(visibleDuringExtraction).toBeFalse();
+  expect(binaries.swayBin).toBe(path.join(supplyDir, published, "bin", "sway"));
+  expect(readdirSync(supplyDir)).toEqual([published]);
+});
+
+test("reuses a verified cached bundle without fetching again", async () => {
+  const supplyDir = supplyRoot();
+  const { bundle, archive } = fixtureBundle();
+  let fetchCalls = 0;
+  const supply = bundleSupply({
+    rootDir: supplyDir,
+    bundle,
+    archive,
+    onFetch: () => {
+      fetchCalls += 1;
     },
   });
 
@@ -200,44 +181,66 @@ test("reuses a verified cached Sway runtime without fetching again", async () =>
   expect(second).toEqual(first);
 });
 
-test("rejects an incomplete extract and leaves no ready destination", async () => {
-  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-supply-incomplete-"));
-  const { archive, runtimePackage } = fixturePackage();
-  const supply = new PortableSwayRuntimeSupply({
-    rootDir: root,
-    packages: [runtimePackage],
-    fetch: async () => new Response(archive),
-    extractArchive: async (_archivePath, destination) => {
-      writeExtractedBinaries(destination, ["sway", "swaymsg"]);
-    },
-  });
+test("invalidates the cache when the pinned checksum changes", async () => {
+  const supplyDir = supplyRoot();
+  const first = fixtureBundle("first archive");
+  await bundleSupply({ rootDir: supplyDir, bundle: first.bundle, archive: first.archive }).ensure();
 
-  await expect(supply.ensure()).rejects.toThrow("did not contain executable usr/bin/wayvnc");
-  expect(readdirSync(root)).toEqual([]);
+  const second = fixtureBundle("second archive");
+  let fetchCalls = 0;
+  const binaries = await bundleSupply({
+    rootDir: supplyDir,
+    bundle: second.bundle,
+    archive: second.archive,
+    onFetch: () => {
+      fetchCalls += 1;
+    },
+  }).ensure();
+
+  expect(fetchCalls).toBe(1);
+  expect(binaries.swayBin).toContain(second.bundle.sha256.slice(0, 16));
+  expect(readdirSync(supplyDir).sort()).toEqual([
+    `${SWAY_RUNTIME_RELEASE}-${first.bundle.sha256.slice(0, 16)}`,
+    `${SWAY_RUNTIME_RELEASE}-${second.bundle.sha256.slice(0, 16)}`,
+  ].sort());
 });
 
-test("rejects an unsupported architecture before downloading", async () => {
-  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-supply-arch-"));
+test("rejects a bundle missing a required launcher and publishes nothing", async () => {
+  const supplyDir = supplyRoot();
+  const { bundle, archive } = fixtureBundle();
+  const supply = bundleSupply({
+    rootDir: supplyDir,
+    bundle,
+    archive,
+    launchers: LAUNCHERS.filter((launcher) => launcher !== "grim"),
+  });
+
+  await expect(supply.ensure()).rejects.toThrow("did not contain executable bin/grim");
+  expect(readdirSync(supplyDir)).toEqual([]);
+});
+
+test("rejects an unsupported platform before downloading", async () => {
+  const supplyDir = supplyRoot();
   let fetchCalls = 0;
   const supply = new PortableSwayRuntimeSupply({
-    rootDir: root,
+    rootDir: supplyDir,
     platform: "linux",
     arch: "arm64",
-    packages: [fixturePackage().runtimePackage],
+    bundle: fixtureBundle().bundle,
     fetch: async () => {
       fetchCalls += 1;
       return new Response("unused");
     },
   });
 
-  await expect(supply.ensure()).rejects.toThrow("portable Sway provisioning requires Omarchy on x64");
+  await expect(supply.ensure()).rejects.toThrow("requires Linux on x86_64");
   expect(fetchCalls).toBe(0);
-  expect(readdirSync(root)).toEqual([]);
+  expect(readdirSync(supplyDir)).toEqual([]);
 });
 
 test("ensure does not create or touch a running Bot Desktop Session directory", async () => {
-  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-supply-session-"));
-  const sessionDir = path.join(root, "running-session");
+  const supplyDir = supplyRoot();
+  const sessionDir = path.join(supplyDir, "running-session");
   const sentinel = path.join(sessionDir, "session.json");
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
   writeFileSync(sentinel, "{\"generation\":1}\n", { mode: 0o600 });
@@ -248,29 +251,114 @@ test("ensure does not create or touch a running Bot Desktop Session directory", 
     mtimeMs: statSync(sentinel).mtimeMs,
   };
 
-  const { archive, runtimePackage } = fixturePackage();
-  const supplyRoot = path.join(root, "runtime", "sway");
-  const supply = new PortableSwayRuntimeSupply({
-    rootDir: supplyRoot,
-    packages: [runtimePackage],
-    fetch: async () => new Response(archive),
-    extractArchive: async (_archivePath, destination) => {
-      writeExtractedBinaries(destination);
-    },
-  });
+  const { bundle, archive } = fixtureBundle();
+  const binaries = await bundleSupply({
+    rootDir: path.join(supplyDir, "runtime", "sway"),
+    bundle,
+    archive,
+  }).ensure();
 
-  await supply.ensure();
+  expect(existsSync(binaries.swayBin)).toBeTrue();
   expect(readdirSync(sessionDir)).toEqual(before.entries);
   expect(readFileSync(sentinel, "utf8")).toBe(before.sentinel);
   expect(statSync(sessionDir).mode).toBe(before.mode);
   expect(statSync(sentinel).mtimeMs).toBe(before.mtimeMs);
-  expect(existsReadyRelease(supplyRoot)).toBeTrue();
 });
 
-function existsReadyRelease(supplyRoot: string): boolean {
-  try {
-    return readdirSync(supplyRoot).includes(SWAY_RUNTIME_RELEASE);
-  } catch {
-    return false;
-  }
+const BUNDLE_BINARIES: SwayRuntimeBinaries = {
+  swayBin: "/bundle/bin/sway",
+  swaymsgBin: "/bundle/bin/swaymsg",
+  wayvncBin: "/bundle/bin/wayvnc",
+  wlrRandrBin: "/bundle/bin/wlr-randr",
+  xwaylandBin: "/bundle/bin/Xwayland",
+  grimBin: "/bundle/bin/grim",
+  dbusDaemonBin: "/bundle/bin/dbus-daemon",
+  inputHelperBin: "/bundle/bin/omarchy-bot-wayland-input",
+  captureHelperBin: "/bundle/bin/omarchy-bot-wayland-capture",
+  botDesktopBin: "/bundle/bin/omarchy-bot-desktop",
+};
+
+function supplyOf(binaries: SwayRuntimeBinaries): { supply: { ensure(): Promise<SwayRuntimeBinaries> } } {
+  return { supply: { ensure: async () => binaries } };
 }
+
+test("prefers the bundle over installed host tools", async () => {
+  const { supply } = supplyOf(BUNDLE_BINARIES);
+  const resolved = await resolveSwayRuntimeBinaries({
+    supply,
+    findExecutable: (candidate) => `/usr/bin/${candidate}`,
+  });
+  expect(resolved).toEqual(BUNDLE_BINARIES);
+});
+
+test("lets explicit overrides win and skips the bundle when the set is complete", async () => {
+  let supplyCalls = 0;
+  const overrides = {
+    swayOverride: "/configured/sway",
+    swaymsgOverride: "/configured/swaymsg",
+    wayvncOverride: "/configured/wayvnc",
+    wlrRandrOverride: "/configured/wlr-randr",
+    xwaylandOverride: "/configured/Xwayland",
+    grimOverride: "/configured/grim",
+    dbusDaemonOverride: "/configured/dbus-daemon",
+    inputHelperOverride: "/configured/input",
+    captureHelperOverride: "/configured/capture",
+    botDesktopOverride: "/configured/bot-desktop",
+  };
+  const resolved = await resolveSwayRuntimeBinaries({
+    supply: {
+      ensure: async () => {
+        supplyCalls += 1;
+        return BUNDLE_BINARIES;
+      },
+    },
+    findExecutable: (candidate) => (candidate.includes("/") ? candidate : undefined),
+    ...overrides,
+  });
+
+  expect(supplyCalls).toBe(0);
+  expect(resolved).toEqual({
+    swayBin: "/configured/sway",
+    swaymsgBin: "/configured/swaymsg",
+    wayvncBin: "/configured/wayvnc",
+    wlrRandrBin: "/configured/wlr-randr",
+    xwaylandBin: "/configured/Xwayland",
+    grimBin: "/configured/grim",
+    dbusDaemonBin: "/configured/dbus-daemon",
+    inputHelperBin: "/configured/input",
+    captureHelperBin: "/configured/capture",
+    botDesktopBin: "/configured/bot-desktop",
+  });
+});
+
+test("keeps an unavailable explicit override authoritative", async () => {
+  let supplyCalls = 0;
+  await expect(resolveSwayRuntimeBinaries({
+    swayOverride: "/configured/missing-sway",
+    supply: {
+      ensure: async () => {
+        supplyCalls += 1;
+        return BUNDLE_BINARIES;
+      },
+    },
+    findExecutable: (candidate) => (candidate.includes("/") ? undefined : `/usr/bin/${candidate}`),
+  })).rejects.toThrow("configured Sway executable is unavailable: /configured/missing-sway");
+  expect(supplyCalls).toBe(0);
+});
+
+test("fails an incomplete cache entry without deleting it", async () => {
+  const supplyDir = supplyRoot();
+  const { bundle, archive } = fixtureBundle();
+  const cacheDir = path.join(supplyDir, `${SWAY_RUNTIME_RELEASE}-${bundle.sha256.slice(0, 16)}`);
+  const stale = path.join(cacheDir, "bin", "sway");
+  mkdirSync(path.dirname(stale), { recursive: true });
+  writeFileSync(stale, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+
+  await expect(bundleSupply({ rootDir: supplyDir, bundle, archive }).ensure()).rejects
+    .toThrow(`is incomplete; remove that directory and retry`);
+  // The preseeded key is the one the supply targets: no second cache entry and
+  // no leftover staging tree, and the foreign bytes are untouched.
+  expect(readdirSync(supplyDir)).toEqual([path.basename(cacheDir)]);
+  expect(readFileSync(stale, "utf8")).toBe("#!/bin/sh\nexit 0\n");
+  expect(readdirSync(cacheDir)).toEqual(["bin"]);
+});

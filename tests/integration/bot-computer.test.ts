@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import os from "node:os";
 import path from "node:path";
 import { BotComputerRuntime } from "../../apps/daemon/src/modules/computer/botComputer.ts";
+import type { SwayRuntimeBinaries } from "../../apps/daemon/src/modules/computer/swayRuntimeSupply.ts";
 import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./helpers/fakeSwayIpc.ts";
 
 interface FakeComputerBins {
@@ -51,10 +52,11 @@ function installFakeComputerBins(directory: string): FakeComputerBins {
   const helperPath = path.resolve(import.meta.dir, "helpers/fakeSwayIpc.ts");
   const swayStarts = path.join(directory, "sway-starts");
   const sway = executable(directory, "sway", `#!/usr/bin/env bun
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
 appendFileSync(${JSON.stringify(swayStarts)}, "start\\n");
+writeFileSync(${JSON.stringify(path.join(directory, "sway-env"))}, process.env.WLR_XWAYLAND ?? "");
 const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "";
 const wayland = path.join(runtimeDir, "wayland-0");
 const swaySock = process.env.SWAYSOCK ?? path.join(runtimeDir, "sway-ipc.sock");
@@ -95,6 +97,35 @@ function computerOptions(bin: FakeComputerBins) {
     dbusDaemonBin: bin.dbusDaemon,
   };
 }
+
+test("passes a configured Xwayland override to the compositor without a supply", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-xwayland-"));
+  const bin = installFakeComputerBins(path.join(root, "bin"));
+  const xwayland = executable(path.dirname(bin.sway), "Xwayland", "#!/bin/sh\nexit 0\n");
+  const runtime = new BotComputerRuntime({ ...computerOptions(bin), xwaylandBin: xwayland });
+
+  const computer = await runtime.ensure();
+  try {
+    expect(computer.childEnv.DISPLAY).toBeUndefined();
+    expect(readFileSync(path.join(path.dirname(bin.sway), "sway-env"), "utf8")).toBe(xwayland);
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("rejects an unavailable Xwayland override without a supply", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-xwayland-missing-"));
+  const bin = installFakeComputerBins(path.join(root, "bin"));
+  const runtime = new BotComputerRuntime({
+    ...computerOptions(bin),
+    xwaylandBin: path.join(root, "missing", "Xwayland"),
+  });
+
+  await expect(runtime.ensure()).rejects.toThrow(
+    `configured Xwayland executable is unavailable: ${path.join(root, "missing", "Xwayland")}`,
+  );
+  expect(existsSync(bin.swayStarts)).toBeFalse();
+});
 
 function readComputerState(): ComputerState {
   const stateFile = path.join(root!, "runtime", "computer", "computer.json");
@@ -221,3 +252,162 @@ test("stop terminates the compositor and session bus and clears current", async 
   expect(existsSync(path.join(root, "runtime", "computer"))).toBeFalse();
 });
 
+
+function installBundleBins(
+  root: string,
+  swayBody: string,
+): { bundleRoot: string; binDir: string; binaries: SwayRuntimeBinaries } {
+  const bundleRoot = path.join(root, "bundle");
+  const binDir = path.join(bundleRoot, "bin");
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(path.join(bundleRoot, "share", "X11", "xkb"), { recursive: true });
+  const launchers: Record<string, string> = {
+    sway: swayBody,
+    "dbus-daemon": `#!/usr/bin/env bun
+const address = process.argv.find((argument) => argument.startsWith("--address=")) ?? "";
+Bun.listen({ unix: address.slice("--address=".length).replace("unix:path=", ""), socket: { data() {} } });
+await new Promise(() => {});
+`,
+    grim: "#!/bin/sh\nexit 1\n",
+    "omarchy-bot-wayland-input": "#!/bin/sh\nwhile :; do sleep 60; done\n",
+    "omarchy-bot-wayland-capture": "#!/bin/sh\nwhile :; do sleep 60; done\n",
+    "omarchy-bot-desktop": "#!/bin/sh\nprintf 'READY %s %s\\n' \"$1\" \"$2\"\nwhile :; do sleep 60; done\n",
+  };
+  for (const name of [
+    "sway",
+    "swaymsg",
+    "wayvnc",
+    "wlr-randr",
+    "Xwayland",
+    "grim",
+    "dbus-daemon",
+    "omarchy-bot-wayland-input",
+    "omarchy-bot-wayland-capture",
+    "omarchy-bot-desktop",
+  ]) {
+    executable(binDir, name, launchers[name] ?? "#!/bin/sh\nexit 0\n");
+  }
+  return {
+    bundleRoot,
+    binDir,
+    binaries: {
+      swayBin: path.join(binDir, "sway"),
+      swaymsgBin: path.join(binDir, "swaymsg"),
+      wayvncBin: path.join(binDir, "wayvnc"),
+      wlrRandrBin: path.join(binDir, "wlr-randr"),
+      xwaylandBin: path.join(binDir, "Xwayland"),
+      grimBin: path.join(binDir, "grim"),
+      dbusDaemonBin: path.join(binDir, "dbus-daemon"),
+      inputHelperBin: path.join(binDir, "omarchy-bot-wayland-input"),
+      captureHelperBin: path.join(binDir, "omarchy-bot-wayland-capture"),
+      botDesktopBin: path.join(binDir, "omarchy-bot-desktop"),
+    },
+  };
+}
+
+function fakeBundleSway(root: string, recordDisplay: string): string {
+  const controlDir = path.join(root, "ipc-control");
+  mkdirSync(controlDir, { recursive: true });
+  writeFakeSwayTree(controlDir, { id: 1, type: "root", name: "root", nodes: [], floating_nodes: [] });
+  writeFakeSwayIpcMode(controlDir, "ok");
+  const helperPath = path.resolve(import.meta.dir, "helpers/fakeSwayIpc.ts");
+  return `#!/usr/bin/env bun
+import { writeFileSync } from "node:fs";
+import path from "node:path";
+import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
+const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "";
+${recordDisplay}
+Bun.listen({ unix: path.join(runtimeDir, "wayland-0"), socket: { data() {} } });
+await serveFakeSwayIpc({ socketPath: process.env.SWAYSOCK ?? path.join(runtimeDir, "sway-ipc.sock"), controlDir: ${JSON.stringify(controlDir)} });
+`;
+}
+
+function bundleRuntime(root: string, binaries: SwayRuntimeBinaries): BotComputerRuntime {
+  return new BotComputerRuntime({
+    runtimeRoot: path.join(root, "runtime"),
+    profileRoot: path.join(root, "profiles"),
+    runtimeSupply: { ensure: async () => binaries },
+  });
+}
+
+test("takes every runtime tool from the bundle and exports its launchers and DISPLAY", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-bundle-"));
+  const bundle = installBundleBins(
+    root,
+    fakeBundleSway(root, 'writeFileSync(path.join(runtimeDir, "x11-display"), ":99");'),
+  );
+  const runtime = bundleRuntime(root, bundle.binaries);
+
+  const computer = await runtime.ensure();
+  try {
+    expect(computer.grim).toBe(bundle.binaries.grimBin);
+    expect(computer.inputHelper).toBe(bundle.binaries.inputHelperBin);
+    expect(computer.captureHelper).toBe(bundle.binaries.captureHelperBin);
+    expect(computer.botDesktop).toBe(bundle.binaries.botDesktopBin);
+    expect(computer.wlrRandr).toBe(bundle.binaries.wlrRandrBin);
+    expect(computer.childEnv.PATH!.split(":")[0]).toBe(bundle.binDir);
+    expect(computer.childEnv.DISPLAY).toBe(":99");
+    expect(computer.childEnv.XKB_CONFIG_ROOT!).toBe(path.join(bundle.bundleRoot, "share", "X11", "xkb"));
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("waits for a complete private display instead of accepting a partial file", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-display-"));
+  const bundle = installBundleBins(
+    root,
+    fakeBundleSway(root, `
+const displayFile = path.join(runtimeDir, "x11-display");
+writeFileSync(displayFile, "");
+setTimeout(() => writeFileSync(displayFile, ":1"), 150);`),
+  );
+  const runtime = bundleRuntime(root, bundle.binaries);
+
+  const computer = await runtime.ensure();
+  try {
+    expect(computer.childEnv.DISPLAY!).toBe(":1");
+  } finally {
+    await runtime.stop();
+  }
+});
+
+test("fails startup when bundle Xwayland never records a private display", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-no-display-"));
+  const bundle = installBundleBins(
+    root,
+    fakeBundleSway(root, 'writeFileSync(path.join(runtimeDir, "x11-display"), "");'),
+  );
+  const runtime = bundleRuntime(root, bundle.binaries);
+
+  await expect(runtime.ensure()).rejects.toThrow(
+    "Bot Computer Xwayland did not record a private DISPLAY",
+  );
+  expect(existsSync(path.join(root, "runtime", "computer"))).toBeFalse();
+}, 20_000);
+
+test("reattaching a bundle computer without its private display reprovisions", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-reattach-display-"));
+  const bundle = installBundleBins(
+    root,
+    fakeBundleSway(root, 'writeFileSync(path.join(runtimeDir, "x11-display"), ":42");'),
+  );
+  const first = bundleRuntime(root, bundle.binaries);
+  const computer = await first.ensure();
+  try {
+    const displayFile = path.join(computer.runtimeDir, "x11-display");
+    writeFileSync(displayFile, "garbage");
+    expect(await bundleRuntime(root, bundle.binaries).reattach()).toBeUndefined();
+    expect(existsSync(computer.runtimeDir)).toBeFalse();
+
+    const provisioned = await bundleRuntime(root, bundle.binaries).ensure();
+    try {
+      expect(provisioned.generation).not.toBe(computer.generation);
+      expect(provisioned.childEnv.DISPLAY!).toBe(":42");
+    } finally {
+      await provisioned.stop();
+    }
+  } finally {
+    await first.stop().catch(() => {});
+  }
+}, 20_000);

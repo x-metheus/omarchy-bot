@@ -1,0 +1,21 @@
+--- a/xkb/xkbInit.c
++++ b/xkb/xkbInit.c
+@@ -86,7 +86,8 @@
+ #endif
+ 
+ const char *XkbBaseDirectory = XKB_BASE_DIRECTORY;
+-const char *XkbBinDirectory = XKB_BIN_DIRECTORY;
++/* Bundled Xwayland: resolve xkbcomp through PATH so the bundle's copy runs. */
++const char *XkbBinDirectory = NULL;
+ static int XkbWantAccessX = 0;
+ 
+ static char *XkbRulesDflt = NULL;
+@@ -741,6 +742,8 @@
+ int
+ XkbProcessArguments(int argc, char *argv[], int i)
+ {
++    if (XkbBinDirectory == NULL)
++        XkbBinDirectory = getenv("XKB_BIN_DIRECTORY");
+     if (strncmp(argv[i], "-xkbdir", 7) == 0) {
+         if (++i < argc) {
+ #if !defined(WIN32) && !defined(__CYGWIN__)

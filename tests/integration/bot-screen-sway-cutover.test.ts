@@ -16,7 +16,9 @@ const ENV_KEYS = [
   "OMARCHY_BOT_SWAYMSG_BIN",
   "OMARCHY_BOT_WAYVNC_BIN",
   "OMARCHY_BOT_WLR_RANDR_BIN",
+  "OMARCHY_BOT_XWAYLAND_BIN",
   "OMARCHY_BOT_GRIM_BIN",
+  "OMARCHY_BOT_DBUS_DAEMON_BIN",
   "OMARCHY_BOT_INPUT_HELPER_BIN",
   "OMARCHY_BOT_CAPTURE_HELPER_BIN",
   "OMARCHY_BOT_DESKTOP_BIN",
@@ -52,7 +54,9 @@ async function installFakeSwayBins(directory: string): Promise<{
   swaymsg: string;
   wayvnc: string;
   wlrRandr: string;
+  xwayland: string;
   grim: string;
+  dbusDaemon: string;
   input: string;
   capture: string;
   desktop: string;
@@ -97,7 +101,13 @@ await serveFakeSwayIpc({
     swaymsg: executable(directory, "swaymsg", "#!/bin/sh\nexit 0\n"),
     wayvnc: executable(directory, "wayvnc", "#!/bin/sh\nsleep 3600\n"),
     wlrRandr: executable(directory, "wlr-randr", "#!/bin/sh\nexit 0\n"),
+    xwayland: executable(directory, "Xwayland", "#!/bin/sh\nexit 0\n"),
     grim: executable(directory, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
+    dbusDaemon: executable(directory, "dbus-daemon", `#!/usr/bin/env bun
+const address = process.argv.find((argument) => argument.startsWith("--address=")) ?? "";
+Bun.listen({ unix: address.slice("--address=".length).replace("unix:path=", ""), socket: { data() {} } });
+await new Promise(() => {});
+`),
     input: executable(directory, "input", [
       "#!/bin/sh",
       "printf 'READY\\n'",
@@ -119,7 +129,9 @@ async function useFakeSwayProductionBins(): Promise<string> {
   process.env.OMARCHY_BOT_SWAYMSG_BIN = bins.swaymsg;
   process.env.OMARCHY_BOT_WAYVNC_BIN = bins.wayvnc;
   process.env.OMARCHY_BOT_WLR_RANDR_BIN = bins.wlrRandr;
+  process.env.OMARCHY_BOT_XWAYLAND_BIN = bins.xwayland;
   process.env.OMARCHY_BOT_GRIM_BIN = bins.grim;
+  process.env.OMARCHY_BOT_DBUS_DAEMON_BIN = bins.dbusDaemon;
   process.env.OMARCHY_BOT_INPUT_HELPER_BIN = bins.input;
   process.env.OMARCHY_BOT_CAPTURE_HELPER_BIN = bins.capture;
   process.env.OMARCHY_BOT_DESKTOP_BIN = bins.desktop;

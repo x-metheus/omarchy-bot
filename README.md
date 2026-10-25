@@ -277,12 +277,14 @@ accounts before presenting these connectors as publicly available.
 | :--- | :--- |
 | **Bun 1.4+** | Workspace dependencies, daemon, and development commands |
 | **Configured Pi installation** | Real Agent execution and Pi conformance |
-| **`grim`, `tar` with zstd support** | Bot Screen capture and runtime archives |
-| **Wayland headers, `wayland-scanner`, C compiler, `pkg-config`** | Native capture/input helpers |
+| **`tar` with gzip support** | Extracting the checksum-verified Bot Computer bundle |
+| **Docker** | Building the portable Bot Computer runtime and running its container conformance |
 | **`computer-use-linux`** | Real desktop control |
 | **Voxtype** | Composer dictation |
 
-Sway is an internal desktop runtime, not a portability layer. On first graphical use, the plugin uses an installed `sway` / `wlr-randr` / `wayvnc` set when available. Otherwise, it downloads pinned Arch packages appropriate to Omarchy, verifies their SHA-256 digests, and prepares them under `OMARCHY_BOT_HOME`. Explicit development overrides remain authoritative.
+On first graphical use, the Service downloads one SHA-256-pinned Bot Computer bundle under `OMARCHY_BOT_HOME`. It contains Sway, wlroots, WayVNC, wlr-randr, Xwayland, grim, a private D-Bus daemon, and prebuilt capture/input/desktop helpers with their loader, libraries, and runtime data. The same archive runs on glibc and musl x86_64 Linux hosts; host grim, D-Bus, and a C toolchain are unnecessary. Explicit binary overrides remain available for development.
+
+Maintainers build the pinned sources and verify the resulting library closure with `bash scripts/build-sway-runtime.sh .lane/dist`. Run `sh scripts/sway-runtime/conformance/run.sh <archive.tar.gz>` for bundle-only Ubuntu 22.04 Bot Screen conformance and an Alpine loader smoke check. Release CI requires the built archive to match the checksum in `swayRuntimeSupply.ts` before publishing the archive and SHA-256 sidecar.
 
 ### Useful checks
 
