@@ -834,3 +834,119 @@ test("partial Sway startup is not Cage and private orphan processes are cleaned"
     await adapter.destroy(SURFACE_A);
   }
 }, 15_000);
+
+function pidFrom(file: string): number | undefined {
+  try {
+    const [pid] = readFileSync(file, "utf8").trim().split("\n");
+    return pid !== undefined && /^\d+$/.test(pid) ? Number(pid) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function waitForPid(file: string, timeoutMs = 10_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pid = pidFrom(file);
+    if (pid !== undefined) return pid;
+    await Bun.sleep(20);
+  }
+  throw new Error(`no pid recorded in ${file}`);
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForExit(pid: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processAlive(pid)) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`process ${pid} survived teardown`);
+}
+
+test("a Screen application leader exit leaves no resistant descendant behind", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-orphan-app-"));
+  const bin = path.join(root, "bin");
+  const png = path.join(root, "screen.png");
+  const workspace = path.join(root, "workspace");
+  const pidFile = path.join(root, "orphan.pid");
+  mkdirSync(bin);
+  mkdirSync(workspace);
+  writeFileSync(png, SCREEN_PNG);
+  const bins = installFakeSwayBins(bin, { png });
+  const application = executable(bin, "orphan-app", `#!/bin/sh
+env -i PIDFILE=${JSON.stringify(pidFile)} /bin/sh -c 'trap "" TERM; echo $$ > "$PIDFILE"; while :; do sleep 1; done' &
+exit 0
+`);
+  const adapter = new SwayBotScreenRuntimeAdapter({
+    runtimeRoot: path.join(root, "runtime"),
+    profileRoot: path.join(root, "profiles"),
+    applicationCwd: workspace,
+    swayBin: bins.sway,
+    wlrRandrBin: bins.wlrRandr,
+    grimBin: bins.grim,
+    inputHelperBin: bins.input,
+    captureHelperBin: bins.capture,
+    botDesktopBin: bins.desktop,
+  });
+  const runtime = await adapter.start(provision(SURFACE_A));
+  try {
+    await expect(runtime.launch({ app: application })).resolves.toEqual({ text: `launched ${application}` });
+    const orphan = await waitForPid(pidFile);
+    expect(processAlive(orphan)).toBeTrue();
+    await runtime.stop();
+    await adapter.destroy(SURFACE_A);
+    await waitForExit(orphan);
+  } finally {
+    await adapter.destroy(SURFACE_A).catch(() => {});
+  }
+}, 30_000);
+
+test("stopping one Screen leaves another Screen's application and computer running", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-shared-app-"));
+  const bin = path.join(root, "bin");
+  const png = path.join(root, "screen.png");
+  const workspace = path.join(root, "workspace");
+  const pidFile = path.join(root, "app.pid");
+  mkdirSync(bin);
+  mkdirSync(workspace);
+  writeFileSync(png, SCREEN_PNG);
+  const bins = installFakeSwayBins(bin, { png });
+  const application = executable(bin, "shared-app", `#!/bin/sh
+printf '%s' "$$" > ${JSON.stringify(pidFile)}
+while :; do sleep 1; done
+`);
+  const adapter = new SwayBotScreenRuntimeAdapter({
+    runtimeRoot: path.join(root, "runtime"),
+    profileRoot: path.join(root, "profiles"),
+    applicationCwd: workspace,
+    swayBin: bins.sway,
+    wlrRandrBin: bins.wlrRandr,
+    grimBin: bins.grim,
+    inputHelperBin: bins.input,
+    captureHelperBin: bins.capture,
+    botDesktopBin: bins.desktop,
+  });
+  const first = await adapter.start(provision(SURFACE_A));
+  const second = await adapter.start(provision(SURFACE_B));
+  try {
+    await first.launch({ app: application });
+    const applicationPid = await waitForPid(pidFile);
+    await first.stop();
+    await adapter.destroy(SURFACE_A);
+    expect(processAlive(applicationPid)).toBeTrue();
+    expect((await second.capture()).mediaType).toBe("image/png");
+  } finally {
+    await adapter.destroy(SURFACE_A).catch(() => {});
+    await adapter.destroy(SURFACE_B).catch(() => {});
+  }
+  expect(processAlive(await waitForPid(pidFile))).toBeFalse();
+}, 30_000);

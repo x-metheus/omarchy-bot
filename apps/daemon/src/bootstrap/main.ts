@@ -23,6 +23,7 @@ import { Supervisor } from "../supervision/supervisor.ts";
 import { SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
+import { stderr } from "@omarchy-bot/agent-contract";
 import path from "node:path";
 import type { SurfaceId } from "@omarchy-bot/domain";
 
@@ -283,19 +284,20 @@ export async function main(options: MainOptions = {}): Promise<{
     stopping = true;
     removeSignalHandlers();
     // Safe shutdown order: stop new work before revoking shared resources.
+    // A teardown that cannot kill one child must not skip the rest.
     clearInterval(statusTimer);
     clearInterval(deviceLiveness);
     devices.close();
-    await dictation.shutdown();
+    await dictation.shutdown().catch(reportStopFailure("dictation"));
     mailbox.pauseDispatch();
-    await turns.shutdown();
+    await turns.shutdown().catch(reportStopFailure("turns"));
     computer.shutdown();
-    await projections.shutdown();
-    await screens.shutdown();
-    await supervisor.stopAll(); // close workers
-    await plugins.shutdown();
-    http.stop(); // close listeners
-    db.close(); // flush WAL
+    await projections.shutdown().catch(reportStopFailure("projections"));
+    await screens.shutdown().catch(reportStopFailure("screens"));
+    await supervisor.stopAll().catch(reportStopFailure("workers"));
+    await plugins.shutdown().catch(reportStopFailure("plugins"));
+    http.stop();
+    db.close();
     console.log("omarchy-bot daemon stopped");
   };
 
@@ -321,6 +323,11 @@ export async function main(options: MainOptions = {}): Promise<{
 
   process.on("SIGINT", onInterrupt);
   process.on("SIGTERM", onTerminate);
+
+  function reportStopFailure(step: string): (error: unknown) => void {
+    return (error) => stderr(`daemon stop: ${step} failed: ${String(error)}`);
+  }
+
 
   return { stop, disconnectForRestart, port: http.port, svc };
 }

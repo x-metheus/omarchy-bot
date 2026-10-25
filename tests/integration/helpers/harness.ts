@@ -28,6 +28,8 @@ export interface HarnessOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
+  /** Worker tree override; defaults to the shared fake workers. */
+  workersDir?: string;
 }
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
@@ -47,7 +49,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   process.env.OMARCHY_BOT_HOME = home;
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
-  process.env.OMARCHY_BOT_WORKERS_DIR = path.resolve(import.meta.dir, "../fake-workers");
+  process.env.OMARCHY_BOT_WORKERS_DIR = options.workersDir ?? path.resolve(import.meta.dir, "../fake-workers");
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
     options.botDeletionTerminalTimeoutMs ?? 30_000,
   );

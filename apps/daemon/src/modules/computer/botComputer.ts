@@ -20,25 +20,28 @@ import {
   executable,
   explicitEnvironment,
   isSocket,
+  spawnDetachedChild,
+  terminateOwnedChild,
+  waitForSocket,
+  type DetachedProcess,
+  type OwnedChild,
+} from "./botScreenWaylandHelpers.ts";
+import {
   ownedProcessIdentity,
   ownedProcessRunning,
-  privateRuntimeProcesses,
   readOwnedIdentity,
-  terminateDetachedProcess,
   terminateOwnedProcess,
-  terminateProcess,
-  waitForSocket,
+  terminateRuntimeProcesses,
   watchOwnedProcess,
-  type DetachedProcess,
   type OwnedProcessIdentity,
-} from "./botScreenWaylandHelpers.ts";
+} from "../../supervision/ownedProcesses.ts";
 import {
   resolveSwayRuntimeBinaries,
   type SwayRuntimeSupply,
 } from "./swayRuntimeSupply.ts";
 
 type SwayProcess = DetachedProcess;
-export type ApplicationProcess = Bun.Subprocess<"ignore", "ignore", "ignore">;
+export type ApplicationProcess = OwnedChild;
 
 const COMPUTER_STATE_FILE = "computer.json";
 
@@ -86,6 +89,8 @@ interface LiveComputer extends BotComputer {
   dbusProcess?: SwayProcess;
   swayPid?: number;
   dbusPid?: number;
+  swayChild?: OwnedChild;
+  dbusChild?: OwnedChild;
   swayIdentity?: OwnedProcessIdentity | undefined;
   dbusIdentity?: OwnedProcessIdentity | undefined;
 }
@@ -307,19 +312,19 @@ export class BotComputerRuntime {
       WLR_RENDERER: "pixman",
     };
     await this.#units.stopComputer();
-    const swayProcess = Bun.spawn([
-      ...this.#units.computerCommand(generation, "compositor", bootstrapEnv),
-      tools.sway,
-      "-c",
-      configPath,
-    ], {
+    const swayChild = spawnDetachedChild({
+      argv: [
+        ...this.#units.computerCommand(generation, "compositor", bootstrapEnv),
+        tools.sway,
+        "-c",
+        configPath,
+      ],
       env: this.#units.launcherEnvironment(bootstrapEnv),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: true,
+      output: "pipe",
+      owned: !this.#units.enabled,
     });
-    let dbusProcess: SwayProcess | undefined;
+    const swayProcess = swayChild.process;
+    let dbusChild: OwnedChild | undefined;
     try {
       const sockets = await this.#discoverSockets(runtimeDir, swayProcess);
       const dbusPath = path.join(runtimeDir, "bus");
@@ -334,20 +339,20 @@ export class BotComputerRuntime {
         swaySock: sockets.swaySock,
         dbusAddress: `unix:path=${dbusPath}`,
       });
-      dbusProcess = Bun.spawn([
-        ...this.#units.computerCommand(generation, "session-bus", childEnv),
-        tools.dbusDaemon,
-        "--session",
-        "--nofork",
-        "--nopidfile",
-        `--address=unix:path=${dbusPath}`,
-      ], {
+      dbusChild = spawnDetachedChild({
+        argv: [
+          ...this.#units.computerCommand(generation, "session-bus", childEnv),
+          tools.dbusDaemon,
+          "--session",
+          "--nofork",
+          "--nopidfile",
+          `--address=unix:path=${dbusPath}`,
+        ],
         env: this.#units.launcherEnvironment(childEnv),
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-        detached: true,
+        output: "pipe",
+        owned: !this.#units.enabled,
       });
+      const dbusProcess = dbusChild.process;
       await waitForSocket(dbusPath, dbusProcess, "Bot Computer session bus");
       const computer: LiveComputer = {
         generation,
@@ -360,6 +365,8 @@ export class BotComputerRuntime {
         dbusProcess,
         swayPid: swayProcess.pid,
         dbusPid: dbusProcess.pid,
+        swayChild,
+        dbusChild,
         swayIdentity: ownedProcessIdentity(
           swayProcess.pid,
           runtimeDir,
@@ -387,10 +394,10 @@ export class BotComputerRuntime {
       this.#writeComputerState(computer);
       return computer;
     } catch (error) {
-      if (dbusProcess !== undefined) await terminateDetachedProcess(dbusProcess).catch(() => {});
-      await terminateDetachedProcess(swayProcess).catch(() => {});
+      if (dbusChild !== undefined) await terminateOwnedChild(dbusChild).catch(() => {});
+      await terminateOwnedChild(swayChild).catch(() => {});
       await this.#units.stopComputer(generation).catch(() => {});
-      await Promise.all(privateRuntimeProcesses(runtimeDir).map(terminateOwnedProcess));
+      await terminateRuntimeProcesses(runtimeDir).catch(() => {});
       rmSync(runtimeComputerDir, { recursive: true, force: true });
       throw error;
     }
@@ -407,10 +414,10 @@ export class BotComputerRuntime {
     );
     computer.applicationProcesses.clear();
     await Promise.allSettled([
-      terminateProcess(computer.dbusProcess, computer.dbusIdentity),
-      terminateProcess(computer.swayProcess, computer.swayIdentity),
+      this.#stopOwned(computer.dbusChild, computer.dbusProcess, computer.dbusIdentity),
+      this.#stopOwned(computer.swayChild, computer.swayProcess, computer.swayIdentity),
     ]);
-    await Promise.all(privateRuntimeProcesses(computer.runtimeDir).map(terminateOwnedProcess));
+    await terminateRuntimeProcesses(computer.runtimeDir);
     rmSync(computer.runtimeComputerDir, { recursive: true, force: true });
   }
 
@@ -427,12 +434,28 @@ export class BotComputerRuntime {
     if (existsSync(runtimeComputerDir)) {
       const generations = readdirSync(runtimeComputerDir)
         .filter((entry) => /^\d+$/.test(entry));
-      await Promise.all(generations.flatMap((generation) =>
-        privateRuntimeProcesses(path.join(runtimeComputerDir, generation))
-          .map(terminateOwnedProcess)
+      await Promise.all(generations.map((generation) =>
+        terminateRuntimeProcesses(path.join(runtimeComputerDir, generation))
       ));
     }
     rmSync(runtimeComputerDir, { recursive: true, force: true });
+  }
+
+  /** Stops a live child, or a reattached one proven only by its recorded identity. */
+  async #stopOwned(
+    child: OwnedChild | undefined,
+    process: SwayProcess | undefined,
+    identity: OwnedProcessIdentity | undefined,
+  ): Promise<void> {
+    if (child !== undefined) {
+      await terminateOwnedChild(child);
+      return;
+    }
+    if (process === undefined) {
+      await terminateOwnedProcess(identity);
+      return;
+    }
+    await terminateOwnedChild({ process });
   }
 
   #running(computer: LiveComputer): boolean {
@@ -459,23 +482,7 @@ export class BotComputerRuntime {
   }
 
   async #stopApplicationProcess(application: ApplicationProcess): Promise<void> {
-    if (application.exitCode !== null || application.signalCode !== null) return;
-    try {
-      process.kill(-application.pid, "SIGTERM");
-    } catch {
-      application.kill("SIGTERM");
-    }
-    const stopped = await Promise.race([
-      application.exited.then(() => true),
-      Bun.sleep(3_000).then(() => false),
-    ]);
-    if (stopped) return;
-    try {
-      process.kill(-application.pid, "SIGKILL");
-    } catch {
-      application.kill("SIGKILL");
-    }
-    await application.exited;
+    await terminateOwnedChild(application);
   }
 
   async #resolveTools(): Promise<{

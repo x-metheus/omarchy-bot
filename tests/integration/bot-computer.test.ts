@@ -221,3 +221,95 @@ test("stop terminates the compositor and session bus and clears current", async 
   expect(existsSync(path.join(root, "runtime", "computer"))).toBeFalse();
 });
 
+
+function waitForPid(file: string, timeoutMs = 10_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  return (async () => {
+    while (Date.now() < deadline) {
+      try {
+        const [pid] = readFileSync(file, "utf8").trim().split("\n");
+        if (pid !== undefined && /^\d+$/.test(pid)) return Number(pid);
+      } catch {
+        // Not written yet.
+      }
+      await Bun.sleep(20);
+    }
+    throw new Error(`no pid recorded in ${file}`);
+  })();
+}
+
+async function waitUntilGone(pid: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!alive(pid)) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`process ${pid} survived teardown`);
+}
+
+/** Replaces the fixture compositor with one that leaves an env-scrubbed, TERM-ignoring child. */
+function installResistantSway(bin: FakeComputerBins, pidFile: string): void {
+  const realSway = `${bin.sway}.real`;
+  writeFileSync(realSway, readFileSync(bin.sway, "utf8"));
+  chmodSync(realSway, 0o700);
+  writeFileSync(bin.sway, `#!/bin/sh
+env -i PIDFILE=${JSON.stringify(pidFile)} /bin/sh -c 'trap "" TERM; echo $$ > "$PIDFILE"; while :; do sleep 1; done' &
+exec bun ${JSON.stringify(realSway)} "$@"
+`);
+  chmodSync(bin.sway, 0o700);
+}
+
+test("stop tears down a TERM-resistant compositor descendant that scrubbed its environment", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-resistant-"));
+  const bin = installFakeComputerBins(path.join(root, "bin"));
+  const pidFile = path.join(root, "resistant.pid");
+  installResistantSway(bin, pidFile);
+  const runtime = new BotComputerRuntime(computerOptions(bin));
+  await runtime.ensure();
+  const descendant = await waitForPid(pidFile);
+  expect(alive(descendant)).toBeTrue();
+
+  const state = readComputerState();
+  await runtime.stop();
+
+  expect(alive(state.swayPid)).toBeFalse();
+  await waitUntilGone(descendant);
+  expect(existsSync(path.join(root, "runtime", "computer"))).toBeFalse();
+}, 30_000);
+
+test("a recorded identity whose pid was reused is never signalled", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-reuse-"));
+  const runtimeComputerDir = path.join(root, "runtime", "computer");
+  const generation = 123;
+  const runtimeDir = path.join(runtimeComputerDir, String(generation));
+  mkdirSync(runtimeDir, { recursive: true });
+  // An unrelated live process whose pid a stale record claims, in its own runtime.
+  const bystander = Bun.spawn(["sleep", "3600"], {
+    env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: path.join(root, "unrelated") },
+    stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true,
+  });
+  const recorded = {
+    pid: bystander.pid,
+    startTime: "1",
+    bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
+    runtimeDir,
+  };
+  writeFileSync(path.join(runtimeComputerDir, "computer.json"), JSON.stringify({
+    generation,
+    waylandDisplay: "wayland-0",
+    swaySockName: "sway-ipc.sock",
+    swayPid: bystander.pid,
+    dbusPid: bystander.pid,
+    swayIdentity: recorded,
+    dbusIdentity: recorded,
+  }));
+  const runtime = new BotComputerRuntime(computerOptions(installFakeComputerBins(path.join(root, "bin"))));
+  try {
+    expect(await runtime.reattach()).toBeUndefined();
+    expect(alive(bystander.pid)).toBeTrue();
+    expect(existsSync(runtimeComputerDir)).toBeFalse();
+  } finally {
+    if (bystander.exitCode === null) bystander.kill("SIGKILL");
+    await bystander.exited;
+  }
+}, 30_000);
