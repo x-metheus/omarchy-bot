@@ -29,7 +29,7 @@ export interface Config {
   /** Transient child sockets and retained Bot-owned application profiles. */
   botScreenRuntimeDir: string;
   botScreenProfileDir: string;
-  /** Lazy Sway/WayVNC pack root used by production Bot Desktop Sessions. */
+  /** Lazy Bot Computer runtime bundle cache used by production Bot Desktop Sessions. */
   botScreenSwayRuntimeSupplyDir: string;
   conformanceDir: string;
   statusPath: string;

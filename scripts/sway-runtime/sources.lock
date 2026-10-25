@@ -1,0 +1,75 @@
+# Pinned sources for the self-contained Sway runtime bundle.
+#
+# Every archive is downloaded and its SHA-256 checked before anything is
+# unpacked; the build aborts on a mismatch. Update a pin only together with the
+# published archive hash in the runtime supply descriptor.
+#
+# shellcheck shell=sh
+
+SWAY_RUNTIME_RELEASE="sway-1.10.1-wayvnc-0.8.0-wlroots-0.18.1-v1"
+
+# name|version|url|sha256
+SOURCES="
+sway|1.10.1|https://github.com/swaywm/sway/releases/download/1.10.1/sway-1.10.1.tar.gz|b2fbf3a2f94c8926efa18d6af59bb9f5f1eafa6d46491284b1610c57bef2d105
+wlroots|0.18.1|https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/0.18.1/wlroots-0.18.1.tar.gz|10084bba57bf4162cd81eb79c2a0bee0d02c7ccd747eac0a7021b45b10bb821c
+wayvnc|0.8.0|https://github.com/any1/wayvnc/archive/refs/tags/v0.8.0.tar.gz|075dcbe321d51ee5e6b59467f2d2fa313d49254fe574f9d6caf400f3a2ffd368
+neatvnc|0.8.0|https://github.com/any1/neatvnc/archive/refs/tags/v0.8.0.tar.gz|6c0feff5d8de20d1f47938936fd2c0e99dc56c28033e2149863cf70ce6cfcc5c
+aml|0.3.0|https://github.com/any1/aml/archive/refs/tags/v0.3.0.tar.gz|cba1ca1689d4031faf37bb7a184559106b6d2f462ae8890a9fa16e3022ca1eb0
+grim|1.4.1|https://gitlab.freedesktop.org/emersion/grim/-/archive/v1.4.1/grim-v1.4.1.tar.gz|5ed8e70fcd83a7e203e92d34dbb82a1342d3f13ad98a6b0310cc97e1a9342ded
+wlr-randr|0.4.1|https://gitlab.freedesktop.org/emersion/wlr-randr/-/archive/v0.4.1/wlr-randr-v0.4.1.tar.gz|8af085aeed3132f7442a05bafeadfd0ea30e9a4818af1a91e161f7d560f2cd93
+xwayland|24.1.6|https://xorg.freedesktop.org/archive/individual/xserver/xwayland-24.1.6.tar.xz|737e612ca36bbdf415a911644eb7592cf9389846847b47fa46dc705bd754d2d7
+dbus|1.14.10|https://dbus.freedesktop.org/releases/dbus/dbus-1.14.10.tar.xz|ba1f21d2bd9d339da2d4aa8780c09df32fea87998b73da24f49ab9df1e36a50f
+"
+
+# Runtime libraries and data come from these exact Alpine 3.21.3 packages. The
+# repository index for the pinned base image digest is the provenance: the
+# build records every resolved package version in the artifact manifest.
+APK_PACKAGES="
+mesa
+libdrm
+libinput
+libevdev
+libxkbcommon
+pixman
+wayland
+wayland-protocols
+xkeyboard-config
+xkbcomp
+libdisplay-info
+libseat
+eudev
+libcap
+json-c
+pcre2
+pango
+cairo
+gdk-pixbuf
+glib
+libxcb
+xcb-util-wm
+xcb-util-renderutil
+xcb-util-image
+libxcvt
+libxfont2
+libxkbfile
+libmd
+libtirpc
+libepoxy
+libxau
+libxdmcp
+libxshmfence
+libliftoff
+lcms2
+zlib
+expat
+fftw
+libjpeg-turbo
+libwebp
+gnutls
+nettle
+gmp
+p11-kit
+libtasn1
+dbus
+xorg-server-common
+"

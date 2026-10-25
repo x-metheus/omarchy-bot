@@ -527,7 +527,7 @@ exec ${JSON.stringify(realSway)} "$@"
   expect((await started.capture()).mediaType).toBe("image/png");
   const staleView = await started.acquireExpandedView();
   await expect(staleView.receive()).resolves.toEqual(expect.any(Uint8Array));
-  const staleWayvncSocket = path.join(root, "runtime", SURFACE_A, String(started.generation), "wayvnc.sock");
+  const staleWayvncSocket = path.join(root, "runtime", `wv-${SURFACE_A.slice("surf_".length)}.sock`);
   expect(existsSync(staleWayvncSocket)).toBeTrue();
   const second = new SwayBotScreenRuntimeAdapter(options);
   const recovered = await second.reconcile(provision(SURFACE_A));
@@ -598,21 +598,14 @@ test("a replacement Screen does not take an output a live unreconciled Screen st
 const realSway = process.env.OMARCHY_BOT_REAL_SWAY === "1" ? test : test.skip;
 realSway("real pinned Sway delivers an RFB banner through acquireExpandedView", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "obw-"));
-  const grim = Bun.which("grim");
-  if (grim === null) throw new Error("host grim is required");
   const supply = new PortableSwayRuntimeSupply({
     rootDir: process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
       ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply"),
   });
-  const binaries = await supply.ensure();
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "profiles"),
-    swayBin: binaries.swayBin,
-    swaymsgBin: binaries.swaymsgBin,
-    wayvncBin: binaries.wayvncBin,
-    wlrRandrBin: binaries.wlrRandrBin,
-    grimBin: grim,
+    runtimeSupply: supply,
   });
   const runtime = await adapter.start({
     ...provision(SURFACE_A),
@@ -643,20 +636,14 @@ realSway("real pinned Sway delivers an RFB banner through acquireExpandedView", 
 
 realSway("daemon-wrapped real Sway projection source delivers an RFB banner", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "obd-"));
-  const grim = Bun.which("grim");
-  if (grim === null) throw new Error("host grim is required");
-  const binaries = await new PortableSwayRuntimeSupply({
+  const supply = new PortableSwayRuntimeSupply({
     rootDir: process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
       ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply"),
-  }).ensure();
+  });
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "r"),
     profileRoot: path.join(root, "screens"),
-    swayBin: binaries.swayBin,
-    swaymsgBin: binaries.swaymsgBin,
-    wayvncBin: binaries.wayvncBin,
-    wlrRandrBin: binaries.wlrRandrBin,
-    grimBin: grim,
+    runtimeSupply: supply,
   });
   const harness = await startDaemon(root, {
     botScreenAdapter: adapter,
@@ -686,20 +673,14 @@ realSway("daemon-wrapped real Sway projection source delivers an RFB banner", as
 
 realSway("WebSocket expanded view negotiates a real WayVNC RFB session", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "obp-"));
-  const grim = Bun.which("grim");
-  if (grim === null) throw new Error("host grim is required");
-  const binaries = await new PortableSwayRuntimeSupply({
+  const supply = new PortableSwayRuntimeSupply({
     rootDir: process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
       ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply"),
-  }).ensure();
+  });
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "r"),
     profileRoot: path.join(root, "screens"),
-    swayBin: binaries.swayBin,
-    swaymsgBin: binaries.swaymsgBin,
-    wayvncBin: binaries.wayvncBin,
-    wlrRandrBin: binaries.wlrRandrBin,
-    grimBin: grim,
+    runtimeSupply: supply,
   });
   const harness = await startDaemon(root, {
     botScreenAdapter: adapter,
@@ -733,20 +714,14 @@ realSway("WebSocket expanded view negotiates a real WayVNC RFB session", async (
 
 realSway("WebSocket RFB survives preview teardown before expand", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "obp-"));
-  const grim = Bun.which("grim");
-  if (grim === null) throw new Error("host grim is required");
-  const binaries = await new PortableSwayRuntimeSupply({
+  const supply = new PortableSwayRuntimeSupply({
     rootDir: process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
       ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply"),
-  }).ensure();
+  });
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "r"),
     profileRoot: path.join(root, "screens"),
-    swayBin: binaries.swayBin,
-    swaymsgBin: binaries.swaymsgBin,
-    wayvncBin: binaries.wayvncBin,
-    wlrRandrBin: binaries.wlrRandrBin,
-    grimBin: grim,
+    runtimeSupply: supply,
   });
   const harness = await startDaemon(root, {
     botScreenAdapter: adapter,

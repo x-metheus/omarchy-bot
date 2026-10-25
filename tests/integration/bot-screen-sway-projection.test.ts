@@ -32,14 +32,13 @@ function provision(surfaceId = SURFACE) {
   };
 }
 
-function wayvncSocket(fixture: ScriptedSwayFixture, surfaceId: string, generation: number): string {
-  return path.join(fixture.runtimeRoot, surfaceId, String(generation), "wayvnc.sock");
+function wayvncSocket(fixture: ScriptedSwayFixture, surfaceId: string): string {
+  return path.join(fixture.runtimeRoot, `wv-${surfaceId.slice("surf_".length)}.sock`);
 }
 
-function leftoverWayvncSockets(fixture: ScriptedSwayFixture, surfaceId: string, generation: number): string[] {
-  const runtimeDir = path.join(fixture.runtimeRoot, surfaceId, String(generation));
+function leftoverWayvncSockets(fixture: ScriptedSwayFixture, surfaceId: string): string[] {
   try {
-    return readdirSync(runtimeDir).filter((entry) => entry.startsWith("wayvnc") && entry.endsWith(".sock"));
+    return readdirSync(fixture.runtimeRoot).filter((entry) => entry.startsWith(`wv-${surfaceId.slice("surf_".length)}`) && entry.endsWith(".sock"));
   } catch {
     return [];
   }
@@ -69,7 +68,7 @@ test("expanded view starts one owner-only WayVNC unix socket and close leaves Sw
   fixture = await createScriptedSwayFixture();
   const runtime = await fixture.adapter.start(provision());
   expect(fixture.wayvncStarts()).toBe(0);
-  expect(existsSync(wayvncSocket(fixture, SURFACE, runtime.generation))).toBeFalse();
+  expect(existsSync(wayvncSocket(fixture, SURFACE))).toBeFalse();
 
   await runtime.capture();
   const stream = await runtime.openCaptureStream();
@@ -77,12 +76,12 @@ test("expanded view starts one owner-only WayVNC unix socket and close leaves Sw
   expect(fixture.wayvncStarts()).toBe(0);
 
   const view = await runtime.acquireExpandedView();
-  await until(() => existsSync(wayvncSocket(fixture!, SURFACE, runtime.generation)), "WayVNC unix socket was not created");
+  await until(() => existsSync(wayvncSocket(fixture!, SURFACE)), "WayVNC unix socket was not created");
   expect(fixture.wayvncStarts()).toBe(1);
-  expect(lstatSync(wayvncSocket(fixture, SURFACE, runtime.generation)).isSocket()).toBeTrue();
-  expect(statSync(wayvncSocket(fixture, SURFACE, runtime.generation)).mode & 0o777).toBe(0o600);
+  expect(lstatSync(wayvncSocket(fixture, SURFACE)).isSocket()).toBeTrue();
+  expect(statSync(wayvncSocket(fixture, SURFACE)).mode & 0o777).toBe(0o600);
   expect(fixture.wayvncArgvTokens()).toContain("--unix-socket");
-  expect(fixture.wayvncArgvTokens()).toContain(wayvncSocket(fixture, SURFACE, runtime.generation));
+  expect(fixture.wayvncArgvTokens()).toContain(wayvncSocket(fixture, SURFACE));
   expect(fixture.wayvncArgvTokens()).toContain("HEADLESS-1");
   expect(fixture.wayvncArgvTokens()).toContain("--disable-input");
   // Pinned wayvnc 0.10.1 rejects unknown --disable-paste; clipboard is
@@ -94,7 +93,7 @@ test("expanded view starts one owner-only WayVNC unix socket and close leaves Sw
   expect(await view.receive()).toEqual(RFB_BANNER);
 
   await view.close();
-  await until(() => !existsSync(wayvncSocket(fixture!, SURFACE, runtime.generation)), "WayVNC unix socket remained after lease close");
+  await until(() => !existsSync(wayvncSocket(fixture!, SURFACE)), "WayVNC unix socket remained after lease close");
   expect(fixture.wayvncStarts()).toBe(1);
   expect(runtime.readiness.compositor).toBe("ready");
   expect(runtime.readiness.desktopSurface).toBe("ready");
@@ -125,12 +124,12 @@ test("two expanded leases share one WayVNC process and survive a sibling close",
   const first = await runtime.acquireExpandedView();
   const second = await runtime.acquireExpandedView();
   expect(fixture.wayvncStarts()).toBe(1);
-  expect(existsSync(wayvncSocket(fixture, SURFACE, runtime.generation))).toBeTrue();
+  expect(existsSync(wayvncSocket(fixture, SURFACE))).toBeTrue();
   expect(await first.receive()).toEqual(RFB_BANNER);
   expect(await second.receive()).toEqual(RFB_BANNER);
 
   await first.close();
-  expect(existsSync(wayvncSocket(fixture, SURFACE, runtime.generation))).toBeTrue();
+  expect(existsSync(wayvncSocket(fixture, SURFACE))).toBeTrue();
   expect(fixture.wayvncStarts()).toBe(1);
   expect(runtime.readiness.compositor).toBe("ready");
   expect(fixture.starts).toHaveLength(1);
@@ -139,7 +138,7 @@ test("two expanded leases share one WayVNC process and survive a sibling close",
   expect(await second.receive()).toEqual(RFB_POINTER_EVENT);
 
   await second.close();
-  await until(() => !existsSync(wayvncSocket(fixture!, SURFACE, runtime.generation)), "WayVNC unix socket remained after last lease close");
+  await until(() => !existsSync(wayvncSocket(fixture!, SURFACE)), "WayVNC unix socket remained after last lease close");
   expect(fixture.wayvncStarts()).toBe(1);
   expect(runtime.readiness.compositor).toBe("ready");
   expect(await runtime.capture()).toMatchObject({ mediaType: "image/png" });
@@ -302,7 +301,7 @@ test("Sway preview streams PNG on the control socket without starting WayVNC", a
     });
     expect(header).not.toHaveProperty("chunkCount");
     expect(fixture.wayvncStarts()).toBe(0);
-    expect(existsSync(wayvncSocket(fixture, owner.surfaceId, projection.runtimeGeneration))).toBeFalse();
+    expect(existsSync(wayvncSocket(fixture, owner.surfaceId))).toBeFalse();
   } finally {
     control.socket.close();
   }
@@ -322,7 +321,7 @@ test("Sway expanded projection bridges actual RFB bytes while Broker input stays
     rfb = await openProjectionSocket(harness, projection.rfbUrl);
     expect(await rfb.binary("RFB banner")).toEqual(RFB_BANNER);
     expect(fixture.wayvncStarts()).toBe(1);
-    expect(JSON.stringify(projection)).not.toContain(wayvncSocket(fixture, owner.surfaceId, projection.runtimeGeneration));
+    expect(JSON.stringify(projection)).not.toContain(wayvncSocket(fixture, owner.surfaceId));
 
     rfb.socket.send(RFB_POINTER_EVENT);
     expect(await rfb.binary("RFB response")).toEqual(RFB_POINTER_EVENT);
@@ -400,7 +399,7 @@ test("two expanded viewers share WayVNC until the final RFB lease closes", async
     expect(await firstRfb.binary("first RFB banner")).toEqual(RFB_BANNER);
     expect(await secondRfb.binary("second RFB banner")).toEqual(RFB_BANNER);
     expect(fixture.wayvncStarts()).toBe(1);
-    const socketPath = wayvncSocket(fixture, owner.surfaceId, firstSession.runtimeGeneration);
+    const socketPath = wayvncSocket(fixture, owner.surfaceId);
     expect(existsSync(socketPath)).toBeTrue();
 
     firstRfb.socket.close();
@@ -534,7 +533,7 @@ const startsPath =`));
     await closing;
     const replacement = await expanding;
     expect(await replacement.receive()).toEqual(RFB_BANNER);
-    expect(existsSync(wayvncSocket(fixture, SURFACE, runtime.generation))).toBeTrue();
+    expect(existsSync(wayvncSocket(fixture, SURFACE))).toBeTrue();
     const sibling = await runtime.acquireExpandedView();
     expect(await sibling.receive()).toEqual(RFB_BANNER);
     await replacement.send(RFB_POINTER_EVENT);

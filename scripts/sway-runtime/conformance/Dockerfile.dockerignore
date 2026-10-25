@@ -1,0 +1,13 @@
+.git
+.lane
+.scratch
+node_modules
+**/node_modules
+dist
+**/dist
+dist-runtime
+test-results
+playwright-report
+blob-report
+coverage
+*.log

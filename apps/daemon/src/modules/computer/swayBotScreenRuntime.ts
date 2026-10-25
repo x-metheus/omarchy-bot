@@ -1,6 +1,7 @@
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -18,6 +19,7 @@ import {
 } from "../../supervision/applicationUnits.ts";
 import {
   BotComputerRuntime,
+  swayRuntimeOverrides,
   type BotComputer,
   type BotComputerOptions,
 } from "./botComputer.ts";
@@ -63,6 +65,12 @@ type SwayProcess = DetachedProcess;
 const SURFACE_STATE_FILE = "surface.json";
 const BOT_DESKTOP_SWAY_CRITERIA = `[app_id="^${BOT_DESKTOP_APP_ID.replaceAll(".", "[.]")}$"]`;
 const OUTPUT_SLOT_WIDTH = 8_192;
+
+/** Listen and control sockets short enough for sockaddr_un, one pair per Screen. */
+function wayvncSockets(runtimeRoot: string, surfaceId: string): { listen: string; control: string } {
+  const stem = path.join(runtimeRoot, `wv-${surfaceId.slice("surf_".length)}`);
+  return { listen: `${stem}.sock`, control: `${stem}.ctl` };
+}
 
 interface SwaySurfaceState {
   /** The Bot Computer generation this Screen attached under. */
@@ -401,7 +409,9 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       this.#units.stopRole(provision.surfaceId, computer.generation, "input").catch(() => {}),
       this.#units.stopRole(provision.surfaceId, computer.generation, "wayvnc").catch(() => {}),
     ]);
-    rmSync(path.join(runtimeDir, "wayvnc.sock"), { force: true });
+    const sockets = wayvncSockets(this.options.runtimeRoot, provision.surfaceId);
+    rmSync(sockets.listen, { force: true });
+    rmSync(sockets.control, { force: true });
     const session: SwaySession = {
       provision,
       computer,
@@ -497,6 +507,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     type SharedWayvnc = {
       process: SwayProcess;
       socketPath: string;
+      controlSocketPath: string;
       leaseCount: number;
       stopping?: Promise<void>;
       listeners: Set<(error: Error) => void>;
@@ -519,6 +530,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         ).catch(() => {});
         await terminateDetachedProcess(shared.process);
         try { unlinkSync(shared.socketPath); } catch { /* already gone */ }
+        try { unlinkSync(shared.controlSocketPath); } catch { /* already gone */ }
       })();
       shared.stopping = stopping;
       sharedWayvncStop = stopping;
@@ -533,11 +545,18 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (sharedWayvnc !== undefined) return sharedWayvnc;
       if (sharedWayvncStart !== undefined) return sharedWayvncStart;
       const starting = (async (): Promise<SharedWayvnc> => {
-        const socketPath = path.join(session.runtimeDir, "wayvnc.sock");
+        // sun_path holds 107 bytes. The generation directory already holds a
+        // near-limit Wayland socket, and wayvnc's default control socket
+        // ($XDG_RUNTIME_DIR/wayvncctl) does not fit beside it.
+        const sockets = wayvncSockets(this.options.runtimeRoot, provision.surfaceId);
+        const socketPath = sockets.listen;
+        const controlSocketPath = sockets.control;
         const wayvncProcess = Bun.spawn([
           ...this.#units.command(provision.surfaceId, computer.generation, "wayvnc", computer.childEnv),
           wayvnc,
           "--unix-socket",
+          "--socket",
+          controlSocketPath,
           "--output",
           session.outputName,
           "--disable-input",
@@ -556,6 +575,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           const shared: SharedWayvnc = {
             process: wayvncProcess,
             socketPath,
+            controlSocketPath,
             leaseCount: 0,
             listeners: new Set(),
           };
@@ -1079,6 +1099,11 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     if (!existsSync(runtimeRoot)) return claimed;
     for (const entry of readdirSync(runtimeRoot)) {
       if (entry === "computer" || entry === exceptSurfaceId) continue;
+      try {
+        if (!lstatSync(path.join(runtimeRoot, entry)).isDirectory()) continue;
+      } catch {
+        continue;
+      }
       const surfaceId = entry as SurfaceId;
       if (this.#sessions.has(surfaceId)) continue;
       const retained = this.#latestSurfaceState(surfaceId);
@@ -1098,10 +1123,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   async #resolveWayvnc(): Promise<string> {
     if (this.#resolvedWayvnc === undefined && this.options.runtimeSupply !== undefined) {
       this.#resolvedWayvnc = (await resolveSwayRuntimeBinaries({
-        ...(this.options.swayBin === undefined ? {} : { swayOverride: this.options.swayBin }),
-        ...(this.options.swaymsgBin === undefined ? {} : { swaymsgOverride: this.options.swaymsgBin }),
-        ...(this.options.wayvncBin === undefined ? {} : { wayvncOverride: this.options.wayvncBin }),
-        ...(this.options.wlrRandrBin === undefined ? {} : { wlrRandrOverride: this.options.wlrRandrBin }),
+        ...swayRuntimeOverrides(this.options),
         supply: this.options.runtimeSupply,
       })).wayvncBin;
     }

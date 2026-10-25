@@ -93,9 +93,15 @@ export async function main(options: MainOptions = {}): Promise<{
     ...(process.env.OMARCHY_BOT_WLR_RANDR_BIN === undefined
       ? {}
       : { wlrRandrBin: process.env.OMARCHY_BOT_WLR_RANDR_BIN }),
+    ...(process.env.OMARCHY_BOT_XWAYLAND_BIN === undefined
+      ? {}
+      : { xwaylandBin: process.env.OMARCHY_BOT_XWAYLAND_BIN }),
     ...(process.env.OMARCHY_BOT_GRIM_BIN === undefined
       ? {}
       : { grimBin: process.env.OMARCHY_BOT_GRIM_BIN }),
+    ...(process.env.OMARCHY_BOT_DBUS_DAEMON_BIN === undefined
+      ? {}
+      : { dbusDaemonBin: process.env.OMARCHY_BOT_DBUS_DAEMON_BIN }),
     ...(process.env.OMARCHY_BOT_INPUT_HELPER_BIN === undefined
       ? {}
       : { inputHelperBin: process.env.OMARCHY_BOT_INPUT_HELPER_BIN }),
