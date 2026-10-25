@@ -239,3 +239,31 @@ test("skips extended headers and applies the following PAX path", async () => {
   extractRuntimeArchive(archive, destination);
   expect(readFileSync(path.join(destination, "scripts/serve.sh"), "utf8")).toBe("serve\n");
 });
+
+test("applies GNU long names and long link targets the packager's tar emits", () => {
+  // GNU tar writes ././@LongLink records (types L and K) for names and link
+  // targets beyond 100 bytes; node_modules/.bun paths routinely exceed that.
+  const source = path.join(root, "source");
+  const deep = `node_modules/.bun/${"scope+package@1.0.0/".repeat(4)}node_modules/@scope/package/dist`;
+  mkdirSync(path.join(source, deep), { recursive: true });
+  writeFileSync(path.join(source, deep, "index.js"), "export {};\n");
+  writeFileSync(path.join(source, deep, "other.js"), "export {};\n");
+  mkdirSync(path.join(source, "node_modules/@scope"), { recursive: true });
+  const target = `../.bun/${"scope+package@1.0.0/".repeat(4)}node_modules/@scope/package`;
+  symlinkSync(target, path.join(source, "node_modules/@scope/package"));
+  expect(deep.length).toBeGreaterThan(100);
+  expect(target.length).toBeGreaterThan(100);
+
+  const tarball = path.join(root, "runtime.tar");
+  const packed = Bun.spawnSync(["tar", "--format=gnu", "-C", source, "-cf", tarball, "."]);
+  expect(packed.exitCode).toBe(0);
+  const archive = path.join(root, "runtime.tar.zst");
+  writeFileSync(archive, Bun.zstdCompressSync(readFileSync(tarball)));
+  const destination = path.join(root, "runtime");
+  extractRuntimeArchive(archive, destination);
+
+  expect(readFileSync(path.join(destination, deep, "index.js"), "utf8")).toBe("export {};\n");
+  expect(readFileSync(path.join(destination, deep, "other.js"), "utf8")).toBe("export {};\n");
+  expect(readlinkSync(path.join(destination, "node_modules/@scope/package"))).toBe(target);
+  expect(readFileSync(path.join(destination, "node_modules/@scope/package/dist/index.js"), "utf8")).toBe("export {};\n");
+});

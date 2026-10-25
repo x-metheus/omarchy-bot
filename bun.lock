@@ -13,6 +13,13 @@
         "typescript": "^5.7.0",
       },
     },
+    "apps/cli": {
+      "name": "@omarchy-bot/cli",
+      "version": "0.1.0",
+      "bin": {
+        "omarchy-bot": "./src/main.ts",
+      },
+    },
     "apps/daemon": {
       "name": "@omarchy-bot/daemon",
       "version": "0.1.0",
@@ -495,6 +502,8 @@
     "@omarchy-bot/agent-contract": ["@omarchy-bot/agent-contract@workspace:packages/agent-contract"],
 
     "@omarchy-bot/api-client": ["@omarchy-bot/api-client@workspace:packages/api-client"],
+
+    "@omarchy-bot/cli": ["@omarchy-bot/cli@workspace:apps/cli"],
 
     "@omarchy-bot/daemon": ["@omarchy-bot/daemon@workspace:apps/daemon"],
 

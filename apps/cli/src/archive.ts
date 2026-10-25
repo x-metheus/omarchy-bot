@@ -33,6 +33,12 @@ export function extractRuntimeArchive(archivePath: string, destination: string):
 
   let offset = 0;
   let paxPath: string | undefined;
+  let paxLink: string | undefined;
+  // GNU tar stores names and link targets beyond 100 bytes in ././@LongLink records.
+  const longField = (content: Buffer): string => {
+    const end = content.indexOf(0);
+    return content.subarray(0, end === -1 ? content.length : end).toString("utf8");
+  };
   for (; offset + 512 <= bytes.length;) {
     const header = bytes.subarray(offset, offset + 512);
     if (header.every((byte) => byte === 0)) {
@@ -57,13 +63,18 @@ export function extractRuntimeArchive(archivePath: string, destination: string):
           if (space < index || !Number.isSafeInteger(length) || length <= space - index + 1 || index + length > content.length) unsafe();
           const record = content.subarray(space + 1, index + length - 1).toString("utf8");
           if (record.startsWith("path=")) paxPath = record.slice(5);
+          if (record.startsWith("linkpath=")) paxLink = record.slice(9);
           index += length;
         }
       }
+      if (type === 76) paxPath = longField(content);
+      if (type === 75) paxLink = longField(content);
       continue;
     }
     const fullName = paxPath ?? (prefix ? `${prefix}/${name}` : name);
+    const longLink = paxLink;
     paxPath = undefined;
+    paxLink = undefined;
     if (!name || fullName.includes("\\") || path.posix.isAbsolute(fullName) || path.win32.isAbsolute(fullName)
       || fullName.split("/").includes("..")) unsafe();
     const relative = path.posix.normalize(fullName).replace(/\/$/, "");
@@ -74,7 +85,7 @@ export function extractRuntimeArchive(archivePath: string, destination: string):
     const directory = type === 53;
     const mode = octal(header.subarray(100, 108));
     if (directory && size !== 0) unsafe();
-    const link = type === 50 ? nameField(header.subarray(157, 257)) : undefined;
+    const link = type === 50 ? longLink ?? nameField(header.subarray(157, 257)) : undefined;
     if (link !== undefined && (!link || path.isAbsolute(link) || path.win32.isAbsolute(link) || link.includes("\\"))) unsafe();
     const previous = entries.get(relative);
     if (previous && (!directory || !previous.directory)) unsafe();
