@@ -23,15 +23,11 @@ while IFS='=' read -r key value; do
     break
   fi
 done < "$os_release"
+# The plugin package is Omarchy-only; the generic serve entry is not.
 if [[ $distribution_id != omarchy || $(uname -m) != x86_64 ]]; then
   printf 'Omarchy Bot supports Omarchy on x86_64 only\n' >&2
   exit 1
 fi
-
-runtime_dir=${XDG_RUNTIME_DIR:?Omarchy Bot requires XDG_RUNTIME_DIR}
-mkdir -p "$runtime_dir/omarchy-bot"
-exec 9>"$runtime_dir/omarchy-bot/plugin.lock"
-flock 9
 
 data_home=${XDG_DATA_HOME:-${HOME:?Omarchy Bot requires HOME}/.local/share}
 omarchy_home=${OMARCHY_BOT_HOME:-$data_home/omarchy-bot}
@@ -148,6 +144,11 @@ resolve_bun() {
   fi
 }
 
+# Serialize pinned-Bun installation. The Service lock is taken after Bun exists
+# because claiming the shared /tmp directory needs it.
+mkdir -p "$omarchy_home/runtime"
+exec {bun_lock_fd}>>"$omarchy_home/runtime/bun.lock"
+flock "$bun_lock_fd"
 bun_bin=
 resolve_bun
 bun_version=$("$bun_bin" --version 2>/dev/null || true)
@@ -157,6 +158,36 @@ if [[ ! $bun_version =~ ^([0-9]+)\.([0-9]+) ]] \
   printf 'Omarchy Bot requires Bun 1.4 or newer (found %s)\n' "${bun_version:-unknown}" >&2
   exit 1
 fi
+flock -u "$bun_lock_fd"
+
+# Preparation replaces app_root, so it must not run while a Service started from
+# it is alive. Same per-user lock as serve.sh. Descriptor 9 carries it through
+# the supervisor into serve, which adopts it.
+uid=$(id -u)
+service_lock_dir=/tmp/omarchy-bot-$uid
+if [[ ! -d $service_lock_dir || -L $service_lock_dir ]]; then
+  (umask 077 && mkdir -p -- "$service_lock_dir" 2>/dev/null) || true
+fi
+if ! "$bun_bin" -e '
+const fs = require("fs");
+let fd;
+try {
+  fd = fs.openSync(process.argv[1], fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+} catch {
+  process.exit(1);
+}
+if (fs.fstatSync(fd).uid !== process.getuid()) process.exit(1);
+fs.fchmodSync(fd, 0o700);
+' -- "$service_lock_dir"; then
+  printf 'Omarchy Bot requires an owned, non-symlink directory: %s\n' "$service_lock_dir" >&2
+  exit 1
+fi
+if [[ -L $service_lock_dir/service.lock ]]; then
+  printf 'Omarchy Bot refuses to follow a symlinked lock: %s\n' "$service_lock_dir/service.lock" >&2
+  exit 1
+fi
+exec 9>>"$service_lock_dir/service.lock"
+flock 9
 
 revision=${OMARCHY_BOT_PLUGIN_REVISION:-$(git -C "$plugin_root" rev-parse HEAD)}
 app_root="$apps_root/$revision"
@@ -212,6 +243,10 @@ try_runtime() {
     printf 'Omarchy Bot plugin runtime is missing the web client or package manifest\n' >&2
     exit 1
   fi
+  if [[ ! -f $staging/scripts/serve.sh ]]; then
+    printf 'Omarchy Bot plugin runtime is missing the serve entry\n' >&2
+    exit 1
+  fi
   local helper
   for helper in \
     apps/daemon/dist/native-pointer/omarchy-bot-wayland-input \
@@ -236,7 +271,7 @@ source_build() {
   "$bun_bin" apps/daemon/native/bot-desktop/build.ts
 }
 
-if [[ ! -f $ready || $(<"$ready") != "$revision" ]]; then
+if [[ ! -f $ready || $(<"$ready") != "$revision" || ! -f $app_root/scripts/serve.sh ]]; then
   staging="$apps_root/.stage-$revision-$$"
   rm -rf "$staging" "$app_root"
   mkdir -p "$staging"
@@ -256,5 +291,6 @@ for candidate in "$apps_root"/.stage-* "$apps_root"/*; do
 done
 
 export PATH="$(dirname -- "$bun_bin"):$PATH"
+export OMARCHY_BOT_BUN=$bun_bin
 cd "$app_root"
-exec "$bun_bin" "$launcher_dir/supervise.ts"
+exec "$bun_bin" "$launcher_dir/supervise.ts" "$app_root/scripts/serve.sh"

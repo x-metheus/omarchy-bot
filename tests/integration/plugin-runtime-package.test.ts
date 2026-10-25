@@ -131,7 +131,8 @@ function createFixture(): { root: string; cache: string; output: string } {
   write(
     root,
     "apps/daemon/src/bootstrap/main.ts",
-    `import { nativeHelper, runtimeValue } from "fixture-runtime-dependency";
+    `import { writeFileSync } from "node:fs";
+import { nativeHelper, runtimeValue } from "fixture-runtime-dependency";
 
 if (runtimeValue !== "runtime dependency resolved") throw new Error("runtime dependency did not resolve");
 const native = Bun.spawnSync([nativeHelper.pathname], { stdout: "pipe", stderr: "pipe" });
@@ -152,9 +153,17 @@ if (process.env.EXPECT_DEVELOPMENT_DEPENDENCY === "1") {
 } else if (developmentValue !== undefined) {
   throw new Error("development-only dependency leaked into production runtime");
 }
+if (process.env.OMARCHY_BOT_SERVE_FIXTURE_MARKER !== undefined) {
+  writeFileSync(process.env.OMARCHY_BOT_SERVE_FIXTURE_MARKER, String(process.pid));
+}
 `,
   );
   write(root, "apps/web/dist/index.html", "<!doctype html><title>built web fixture</title>\n");
+  writeExecutable(
+    root,
+    "scripts/serve.sh",
+    readFileSync(path.join(projectRoot, "scripts", "serve.sh"), "utf8"),
+  );
   for (const helper of helperPaths) {
     writeExecutable(root, helper, `#!/bin/sh\nprintf '%s\\n' ${path.basename(helper)}\n`);
   }
@@ -202,6 +211,32 @@ test("packages a runnable production dependency tree without mutating the source
     env: installEnv,
   });
   assertSucceeded(packagedConsumer, "packaged daemon consumer");
+
+  // The archive must ship a runnable entry, so run it exactly as a Launcher
+  // would: fixture home, isolated per-user lock, real Bun from PATH.
+  const runRoot = path.join(fixture.root, "serve-run");
+  const uid = 930_000 + process.pid;
+  const lockDir = `/tmp/omarchy-bot-${uid}`;
+  writeExecutable(runRoot, "bin/id", `#!/bin/sh\nprintf '%s\\n' ${uid}\n`);
+  try {
+    const marker = path.join(runRoot, "service-ran");
+    const packagedServe = run(["bash", "scripts/serve.sh"], {
+      cwd: extracted,
+      env: {
+        ...installEnv,
+        PATH: `${path.join(runRoot, "bin")}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+        HOME: path.join(runRoot, "home"),
+        XDG_RUNTIME_DIR: path.join(runRoot, "runtime"),
+        OMARCHY_BOT_HOME: path.join(runRoot, "data"),
+        OMARCHY_BOT_STATE: path.join(runRoot, "state"),
+        OMARCHY_BOT_SERVE_FIXTURE_MARKER: marker,
+      },
+    });
+    assertSucceeded(packagedServe, "packaged serve entry");
+    expect(readFileSync(marker, "utf8")).toMatch(/^\d+$/);
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
 
   expect(readFileSync(path.join(fixture.root, "bun.lock"))).toEqual(lockBefore);
   const sourceAfter = run(["bun", "apps/daemon/src/bootstrap/main.ts"], {

@@ -14,6 +14,7 @@ import path from "node:path";
 const projectRoot = path.resolve(import.meta.dir, "../..");
 const launcher = path.join(projectRoot, "plugin", "launch.sh");
 const roots: string[] = [];
+const lockDirs: string[] = [];
 
 const helperPaths = [
   "apps/daemon/dist/native-pointer/omarchy-bot-wayland-input",
@@ -23,6 +24,7 @@ const helperPaths = [
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  for (const lockDir of lockDirs.splice(0)) rmSync(lockDir, { recursive: true, force: true });
 });
 
 function writeExecutable(file: string, contents: string): void {
@@ -168,6 +170,7 @@ function fixture(): {
   env: Record<string, string | undefined>;
   invocations: string;
   revision: string;
+  lockDir: string;
 } {
   const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-plugin-"));
   roots.push(root);
@@ -180,8 +183,14 @@ function fixture(): {
   mkdirSync(pluginRoot);
   mkdirSync(runtime);
   mkdirSync(binDir);
+  // serve derives the per-user lock from `id -u`; a fixture uid keeps this
+  // suite off the real Service lock.
+  const uid = 910_000 + process.pid * 10 + roots.length;
+  const lockDir = `/tmp/omarchy-bot-${uid}`;
+  lockDirs.push(lockDir);
   // Absence tests must not consult the host mise configuration or network.
   writeExecutable(path.join(binDir, "mise"), "#!/bin/sh\nexit 1\n");
+  writeExecutable(path.join(binDir, "id"), `#!/bin/sh\nprintf '%s\\n' ${uid}\n`);
   writeZstdShim(binDir);
   const osRelease = path.join(root, "os-release");
   writeFileSync(osRelease, 'NAME="Omarchy"\nID=omarchy\nID_LIKE=arch\n');
@@ -189,11 +198,26 @@ function fixture(): {
   const bun = path.join(root, "bun");
   writeExecutable(
     bun,
-    "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.4.1; exit 0; fi\nif [ \"$OMARCHY_BOT_PLUGIN_TEST_NO_BUILD\" = \"1\" ]; then\n  case \"$1\" in install|run|apps/daemon/native/*) exit 72 ;; esac\nfi\nprintf \"%s|%s\\n\" \"$PWD\" \"$*\" >> \"$OMARCHY_BOT_PLUGIN_TEST_LOG\"\n",
+    `#!/bin/sh
+if [ "$1" = "--version" ]; then echo 1.4.1; exit 0; fi
+if [ "$1" = "-e" ]; then exec ${JSON.stringify(process.execPath)} "$@"; fi
+if [ "$OMARCHY_BOT_PLUGIN_TEST_NO_BUILD" = "1" ]; then
+  case "$1" in install|run|apps/daemon/native/*) exit 72 ;; esac
+fi
+printf '%s|%s\n' "$PWD" "$*" >> "$OMARCHY_BOT_PLUGIN_TEST_LOG"
+`,
   );
   const curl = path.join(root, "curl");
   writeCurlShim(curl);
   writeFileSync(path.join(pluginRoot, "fixture.txt"), "tracked plugin source\n");
+  writeExecutable(
+    path.join(pluginRoot, "scripts", "serve.sh"),
+    readFileSync(path.join(projectRoot, "scripts", "serve.sh"), "utf8"),
+  );
+  writeExecutable(
+    path.join(pluginRoot, "apps", "daemon", "src", "bootstrap", "main.ts"),
+    "// fixture Service entry\n",
+  );
 
   for (const args of [
     ["init", "--quiet"],
@@ -212,6 +236,7 @@ function fixture(): {
     bun,
     invocations,
     revision,
+    lockDir,
     env: {
       ...process.env,
       PATH: `${binDir}:/usr/bin:/bin`,
@@ -263,6 +288,11 @@ function writeRuntimeTree(tree: string): void {
   mkdirSync(path.join(tree, "node_modules"), { recursive: true });
   writeFileSync(path.join(tree, "package.json"), `${JSON.stringify({ scripts: { start: "true" } })}\n`);
   writeFileSync(path.join(tree, "apps", "web", "dist", "index.html"), "ok\n");
+  // The published archive carries the launcher-neutral entry.
+  writeExecutable(
+    path.join(tree, "scripts", "serve.sh"),
+    readFileSync(path.join(projectRoot, "scripts", "serve.sh"), "utf8"),
+  );
   for (const helper of helperPaths) {
     writeExecutable(path.join(tree, helper), "#!/bin/sh\nexit 0\n");
   }
@@ -322,7 +352,7 @@ test("a prepared revision remains usable without downloads or build tools", asyn
   expect(Bun.spawnSync(["git", "-C", setup.pluginRoot, "status", "--porcelain"]).stdout.toString()).toBe("");
 });
 
-test("plugin tracked process owns the daemon and plugin lock lifetime", async () => {
+test("plugin tracked process owns the daemon and Service lock lifetime", async () => {
   const setup = fixture();
   writeRuntimeTree(setup.appRoot);
   writeFileSync(path.join(setup.appRoot, ".omarchy-bot-plugin-ready"), `${setup.revision}\n`);
@@ -331,17 +361,13 @@ test("plugin tracked process owns the daemon and plugin lock lifetime", async ()
   setup.env.OMARCHY_BOT_PLUGIN_TEST_STARTED = started;
   setup.env.OMARCHY_BOT_PLUGIN_TEST_STOPPED = stopped;
   setup.env.OMARCHY_BOT_PLUGIN_BUN = process.execPath;
-  writeFileSync(
-    path.join(setup.appRoot, "package.json"),
-    `${JSON.stringify({ scripts: { start: `${JSON.stringify(process.execPath)} apps/daemon/src/bootstrap/main.ts` } })}\n`,
-  );
   const daemonEntry = path.join(setup.appRoot, "apps", "daemon", "src", "bootstrap", "main.ts");
   mkdirSync(path.dirname(daemonEntry), { recursive: true });
   writeFileSync(
     daemonEntry,
     `import { writeFileSync } from "node:fs";
 
-writeFileSync(process.env.OMARCHY_BOT_PLUGIN_TEST_STARTED!, "");
+writeFileSync(process.env.OMARCHY_BOT_PLUGIN_TEST_STARTED!, String(process.pid));
 async function shutdown() {
   process.off("SIGTERM", shutdown);
   process.off("SIGINT", shutdown);
@@ -369,12 +395,17 @@ setInterval(() => {}, 60_000);
         await Bun.sleep(20);
       }
       expect(existsSync(started)).toBeTrue();
+      // serve holds the per-user lock for the Service pid it started.
+      const daemonPid = Number(readFileSync(started, "utf8"));
+      const held = Bun.spawnSync(["flock", "--timeout", "1", path.join(setup.lockDir, "service.lock"), "true"]);
+      expect(held.exitCode).not.toBe(0);
+      expect(Number(readFileSync(path.join(setup.lockDir, "service.lock"), "utf8"))).toBe(daemonPid);
 
       if (signal === "process-group") process.kill(-tracked.pid, "SIGTERM");
       else tracked.kill(signal);
       await tracked.exited;
 
-      const lock = path.join(setup.env.XDG_RUNTIME_DIR!, "omarchy-bot", "plugin.lock");
+      const lock = path.join(setup.lockDir, "service.lock");
       const probe = Bun.spawnSync(["flock", "--timeout", "3", lock, "true"]);
       expect(probe.exitCode).toBe(0);
       expect(existsSync(stopped)).toBeTrue();
@@ -384,6 +415,66 @@ setInterval(() => {}, 60_000);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
+    }
+  }
+});
+
+test("a competing plugin launch never disturbs the running Service's runtime", async () => {
+  const setup = fixture();
+  writeRuntimeTree(setup.appRoot);
+  writeFileSync(path.join(setup.appRoot, ".omarchy-bot-plugin-ready"), `${setup.revision}\n`);
+  const started = path.join(setup.root, "daemon-started");
+  const stopped = path.join(setup.root, "daemon-stopped");
+  setup.env.OMARCHY_BOT_PLUGIN_TEST_STARTED = started;
+  setup.env.OMARCHY_BOT_PLUGIN_TEST_STOPPED = stopped;
+  setup.env.OMARCHY_BOT_PLUGIN_BUN = process.execPath;
+  const daemonEntry = path.join(setup.appRoot, "apps", "daemon", "src", "bootstrap", "main.ts");
+  mkdirSync(path.dirname(daemonEntry), { recursive: true });
+  writeFileSync(
+    daemonEntry,
+    `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.OMARCHY_BOT_PLUGIN_TEST_STARTED!, String(process.pid));
+const shutdown = () => { writeFileSync(process.env.OMARCHY_BOT_PLUGIN_TEST_STOPPED!, ""); process.exit(0); };
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+setInterval(() => {}, 60_000);
+`,
+  );
+
+  const first = Bun.spawn(["setsid", "bash", launcher], {
+    env: setup.env,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    for (let attempt = 0; attempt < 200 && !existsSync(started); attempt += 1) {
+      await Bun.sleep(20);
+    }
+    expect(existsSync(started)).toBeTrue();
+    const runtimeMarker = path.join(setup.appRoot, "apps", "web", "dist", "index.html");
+
+    // The second launcher must wait on the Service lock, not prepare or prune
+    // app_root while the first Service is running from it.
+    const second = Bun.spawn(["bash", launcher], {
+      env: setup.env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await Bun.sleep(500);
+    expect(second.exitCode).toBeNull();
+    expect(readFileSync(runtimeMarker, "utf8")).toBe("ok\n");
+    expect(existsSync(path.join(setup.appRoot, ".omarchy-bot-plugin-ready"))).toBeTrue();
+    expect(existsSync(started)).toBeTrue();
+
+    second.kill("SIGKILL");
+    await second.exited;
+  } finally {
+    try {
+      process.kill(-first.pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     }
   }
 });
