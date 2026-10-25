@@ -125,6 +125,51 @@ function writeSwayConfig(configHome: string): string {
   return configPath;
 }
 
+/**
+ * A private session bus config: the standard session policy and limits, but no
+ * service dirs, so the bus can never activate host session services.
+ */
+function writeSessionBusConfig(runtimeDir: string): string {
+  const configPath = path.join(runtimeDir, "session-bus.conf");
+  writeFileSync(
+    configPath,
+    [
+      '<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"',
+      ' "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">',
+      "<busconfig>",
+      "  <type>session</type>",
+      "  <keep_umask/>",
+      // dbus-daemon rejects a config without a listen element; --address overrides it.
+      `  <listen>unix:path=${path.join(runtimeDir, "bus")}</listen>`,
+      "  <auth>EXTERNAL</auth>",
+      '  <policy context="default">',
+      '    <allow send_destination="*" eavesdrop="true"/>',
+      '    <allow eavesdrop="true"/>',
+      '    <allow own="*"/>',
+      "  </policy>",
+      '  <limit name="max_incoming_bytes">1000000000</limit>',
+      '  <limit name="max_incoming_unix_fds">250000000</limit>',
+      '  <limit name="max_outgoing_bytes">1000000000</limit>',
+      '  <limit name="max_outgoing_unix_fds">250000000</limit>',
+      '  <limit name="max_message_size">1000000000</limit>',
+      '  <limit name="service_start_timeout">120000</limit>',
+      '  <limit name="auth_timeout">240000</limit>',
+      '  <limit name="pending_fd_timeout">150000</limit>',
+      '  <limit name="max_completed_connections">100000</limit>',
+      '  <limit name="max_incomplete_connections">10000</limit>',
+      '  <limit name="max_connections_per_user">100000</limit>',
+      '  <limit name="max_pending_service_starts">10000</limit>',
+      '  <limit name="max_names_per_connection">50000</limit>',
+      '  <limit name="max_match_rules_per_connection">50000</limit>',
+      '  <limit name="max_replies_per_connection">50000</limit>',
+      "</busconfig>",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  return configPath;
+}
+
 function sessionEnvironment(input: {
   runtimeDir: string;
   waylandDisplay: string;
@@ -141,6 +186,9 @@ function sessionEnvironment(input: {
     SWAYSOCK: input.swaySock,
     DBUS_SESSION_BUS_ADDRESS: input.dbusAddress,
     XDG_CURRENT_DESKTOP: "sway",
+    // Keep AT-SPI and GTK accessibility from starting host session services.
+    NO_AT_BRIDGE: "1",
+    GTK_A11Y: "none",
   };
 }
 
@@ -338,6 +386,7 @@ export class BotComputerRuntime {
     try {
       const sockets = await this.#discoverSockets(runtimeDir, swayProcess);
       const dbusPath = path.join(runtimeDir, "bus");
+      const sessionBusConfig = writeSessionBusConfig(runtimeDir);
       const childEnv = sessionEnvironment({
         runtimeDir,
         waylandDisplay: sockets.waylandDisplay,
@@ -352,7 +401,7 @@ export class BotComputerRuntime {
       dbusProcess = Bun.spawn([
         ...this.#units.computerCommand(generation, "session-bus", childEnv),
         tools.dbusDaemon,
-        "--session",
+        `--config-file=${sessionBusConfig}`,
         "--nofork",
         "--nopidfile",
         `--address=unix:path=${dbusPath}`,
