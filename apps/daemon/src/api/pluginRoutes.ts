@@ -19,7 +19,7 @@ function html(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-export async function handlePluginRequest(request: Request, plugins: PluginsService, pathname: string): Promise<Response | undefined> {
+export async function handlePluginRequest(request: Request, plugins: PluginsService, pathname: string, initiatingOrigin?: string): Promise<Response | undefined> {
   if (pathname !== "/api/plugins" && !pathname.startsWith("/api/plugins/")) return undefined;
   const url = new URL(request.url);
   const route = pathname.slice("/api/plugins".length);
@@ -51,7 +51,7 @@ export async function handlePluginRequest(request: Request, plugins: PluginsServ
   const parsed = row.body ? await body(request, row.body as z.ZodType<Record<string, unknown>>) : {};
   if (row.action === "authorize_service") {
     const returnUrl = new URL(String(parsed.returnUrl ?? ""));
-    const origin = request.headers.get("origin") ?? url.origin;
+    const origin = request.headers.get("origin") ?? initiatingOrigin ?? url.origin;
     if (returnUrl.origin !== origin || returnUrl.pathname !== "/" || returnUrl.search || returnUrl.hash || returnUrl.username || returnUrl.password) throw new HttpError(400, "Authorization must return to the initiating client origin");
   }
   const call = (row.action === "save_mcp"

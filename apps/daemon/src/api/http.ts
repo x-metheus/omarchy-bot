@@ -32,6 +32,7 @@ import type { PairingService } from "../modules/pairing/pairing.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { isIPv4 } from "node:net";
 import { CreateBotBody, PatchBotBody, SendMessageBody } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
 import { AGENT_IDS, type AgentId } from "@omarchy-bot/domain";
@@ -119,6 +120,15 @@ function notFound(message: string): Response {
 
 const isLoopbackAddress = (address: string): boolean =>
   address === "::1" || address === "127.0.0.1" || address.startsWith("127.") || address.startsWith("::ffff:127.");
+
+export function publicOrigin(cfg: Config, peerAddress: string | undefined, headers: Headers, listenerUrl: URL): string {
+  const proxy = cfg.trustedProxy;
+  if (!proxy || (peerAddress !== proxy && !(isIPv4(proxy) && peerAddress === `::ffff:${proxy}`))) return listenerUrl.origin;
+  const scheme = headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const host = headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  if ((scheme !== "https" && (scheme !== "http" || cfg.tlsCert)) || !host || /[\s\\/@?#]/.test(host)) return listenerUrl.origin;
+  try { return new URL(`${scheme}://${host}`).origin; } catch { return listenerUrl.origin; }
+}
 
 const PairingCodeBody = z.object({ name: z.string().trim().min(1).max(80) });
 const PairingExchangeBody = z.object({
@@ -238,7 +248,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     }
 
     if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION });
-    const pluginResponse = await handlePluginRequest(req, svc.plugins, pathname);
+    const pluginResponse = await handlePluginRequest(req, svc.plugins, pathname, publicOrigin(svc.cfg, server.requestIP(req)?.address, req.headers, url));
     if (pluginResponse !== undefined) return pluginResponse;
 
     if (pathname === "/api/agents" && req.method === "GET") return json(svc.agents.list());
@@ -337,8 +347,8 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     if (existsSync(dist) && req.method === "GET" && !pathname.startsWith("/api/")) {
       const file = pathname === "/" ? "/index.html" : pathname;
       const f = Bun.file(path.join(dist, file));
-      if (await f.exists()) return new Response(f);
-      return new Response(Bun.file(path.join(dist, "index.html")));
+      const document = await f.exists() ? f : Bun.file(path.join(dist, "index.html"));
+      return new Response(document, { headers: { "referrer-policy": "no-referrer", ...(document.type.startsWith("text/html") ? { "cache-control": "no-store" } : {}) } });
     }
 
     return notFound("not found");
@@ -356,6 +366,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
   const server = Bun.serve<WsData>({
     port: svc.cfg.port,
     hostname: svc.cfg.host,
+    ...(svc.cfg.tlsCert && svc.cfg.tlsKey ? { tls: { key: Bun.file(svc.cfg.tlsKey), cert: Bun.file(svc.cfg.tlsCert) } } : {}),
     fetch: handle,
     websocket: {
       open(ws) {

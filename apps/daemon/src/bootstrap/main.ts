@@ -140,7 +140,7 @@ export async function main(options: MainOptions = {}): Promise<{
     return worker.request({ type: "mcp.control", cwd: cfg.sharedWorkspaceDir, ...input }, 90_000);
   }, () => {
     const host = cfg.host.includes(":") && !cfg.host.startsWith("[") ? `[${cfg.host}]` : cfg.host;
-    const origin = new URL(`http://${host}:${http.port}`);
+    const origin = new URL(`${cfg.tlsCert ? "https" : "http"}://${host}:${http.port}`);
     if (origin.hostname === "0.0.0.0") origin.hostname = "127.0.0.1";
     if (origin.hostname === "[::]") origin.hostname = "[::1]";
     return origin.origin;
@@ -281,7 +281,7 @@ export async function main(options: MainOptions = {}): Promise<{
   }, 2000);
   statusTimer.unref?.();
 
-  console.log(`omarchy-bot daemon listening on http://${cfg.host}:${http.port}`);
+  console.log(`omarchy-bot daemon listening on ${cfg.tlsCert ? "https" : "http"}://${cfg.host}:${http.port}`);
 
   let stopping = false;
   const onInterrupt = (): void => void stop();

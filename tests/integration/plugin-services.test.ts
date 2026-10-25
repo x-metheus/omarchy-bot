@@ -6,7 +6,7 @@ import path from "node:path";
 import { PLUGIN_PROVIDERS } from "../../packages/protocol/src/pluginProviders.ts";
 import type { InstalledSkillDto, PluginAccountDto, PluginStateDto, SkillCommandDto } from "../../packages/protocol/src/plugins.ts";
 import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
-import { api, apiStatus, startDaemon, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, authedFetch, startDaemon, type Harness } from "./helpers/harness.ts";
 
 const publisher = "https://service-publisher.invalid";
 const driveScope = "https://www.googleapis.com/auth/drive.readonly";
@@ -72,13 +72,15 @@ async function startServices() {
   const grants = new Map<string, { actor: string; scopes: string[]; token: string }>();
   const tokens = new Map<string, string>();
   let pending: { localState: string; callbackUrl: string; brokerState: string } | undefined;
+  let oauthStartRequests = 0;
   globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
     if (url.origin === publisher) {
+      if (url.pathname === "/api/plugins/oauth/start") oauthStartRequests++;
       const copy = request.clone();
       const response = await handlePluginCloudRequest(request);
-      if (url.pathname === "/api/plugins/oauth/start") {
+      if (url.pathname === "/api/plugins/oauth/start" && response.ok) {
         const sent = await copy.json() as { localState: string; callbackUrl: string };
         const payload = await response.clone().json() as { url: string };
         pending = { ...sent, brokerState: new URL(payload.url).searchParams.get("state") ?? "" };
@@ -119,16 +121,11 @@ async function startServices() {
     return result;
   }
 
-  async function authorize(actor: string, scopes = [driveScope, gmailScope], accountId?: string): Promise<PluginAccountDto> {
+  async function finishAuthorization(actor: string, scopes = [driveScope, gmailScope], accountId?: string) {
     const code = `fixture-code-${crypto.randomUUID()}`;
     const token = `fixture-access-private-${crypto.randomUUID()}`;
     grants.set(code, { actor, scopes, token });
     tokens.set(token, actor);
-    pending = undefined;
-    const authorization = await api<{ url: string }>(h, "POST", "/api/plugins/authorize", {
-      providerId: "google", returnUrl: h.baseUrl, ...(accountId ? { accountId } : {}),
-    });
-    expect(new URL(authorization.url).origin).toBe("https://accounts.google.com");
     // The publisher captures daemon-generated state; no private daemon state is seeded.
     const transaction = pending as { localState: string; callbackUrl: string; brokerState: string } | undefined;
     if (!transaction) throw new Error("Publisher did not receive an OAuth start request");
@@ -136,7 +133,8 @@ async function startServices() {
     callback.searchParams.set("state", transaction.localState);
     callback.searchParams.set("code", code);
     callback.searchParams.set("brokerState", transaction.brokerState);
-    const response = await fetch(callback);
+    // The fixture delivers the public callback through the local listener.
+    const response = await fetch(new URL(`${callback.pathname}${callback.search}`, h.baseUrl));
     const page = await response.text();
     expect(response.status).toBe(200);
     expect(page).not.toContain(token);
@@ -145,10 +143,57 @@ async function startServices() {
     expect(account.status).toBe("connected");
     expect(account.label).toBe(`${actor}@example.invalid`);
     if (accountId) expect(account.id).toBe(accountId);
-    return account;
+    return { account, callback, response, page, token };
   }
-  return { h, sources, state, authorize };
+
+  async function authorize(actor: string, scopes = [driveScope, gmailScope], accountId?: string): Promise<PluginAccountDto> {
+    pending = undefined;
+    const authorization = await api<{ url: string }>(h, "POST", "/api/plugins/authorize", {
+      providerId: "google", returnUrl: h.baseUrl, ...(accountId ? { accountId } : {}),
+    });
+    expect(new URL(authorization.url).origin).toBe("https://accounts.google.com");
+    return (await finishAuthorization(actor, scopes, accountId)).account;
+  }
+  return { h, sources, state, authorize, finishAuthorization, pendingAuthorization: () => pending, oauthStarts: () => oauthStartRequests };
 }
+
+test("a Paired Device authorizes from a remote client origin and returns there without leaking credentials", async () => {
+  const { h, finishAuthorization, pendingAuthorization } = await startServices();
+  expect(h.token).not.toBe("");
+  const authorization = await authedFetch(h, `${h.baseUrl}/api/plugins/authorize`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://remote.example" },
+    body: JSON.stringify({ providerId: "google", returnUrl: "https://remote.example/" }),
+  });
+  const authorizationBody = await authorization.json() as { url: string };
+  expect(authorization.status, JSON.stringify(authorizationBody)).toBe(200);
+  expect(new URL(authorizationBody.url).origin).toBe("https://accounts.google.com");
+  const transaction = pendingAuthorization();
+  if (!transaction) throw new Error("Publisher did not receive an OAuth start request");
+  expect(transaction.callbackUrl).toBe("https://remote.example/api/plugins/oauth/callback");
+
+  const { response, page, token } = await finishAuthorization("fixture-actor-remote");
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  const returnLink = page.match(/<a href="([^"]+)">Return to Omarchy Bot<\/a>/)?.[1];
+  expect(returnLink).toBeDefined();
+  expect(new URL(returnLink!).href).toBe("https://remote.example/");
+  expect(page).not.toContain(token);
+  expect(page).not.toContain(h.token);
+}, 40_000);
+
+test.each(["https://evil.example/", "https://remote.example/next"])("remote OAuth rejects return URL %s before contacting the publisher", async (returnUrl) => {
+  const { h, oauthStarts } = await startServices();
+  const response = await authedFetch(h, `${h.baseUrl}/api/plugins/authorize`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://remote.example" },
+    body: JSON.stringify({ providerId: "google", returnUrl }),
+  });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "Authorization must return to the initiating client origin" });
+  expect(oauthStarts()).toBe(0);
+}, 40_000);
 
 async function usable(h: Harness, state: PluginStateDto, name: string, result: number): Promise<InstalledSkillDto> {
   const skill = state.skills.find((entry) => entry.name === name);
