@@ -281,8 +281,11 @@ accounts before presenting these connectors as publicly available.
 | **Wayland headers, `wayland-scanner`, C compiler, `pkg-config`** | Native capture/input helpers |
 | **`computer-use-linux`** | Real desktop control |
 | **Voxtype** | Composer dictation |
+| **Network on first graphical use** | Checksum-verified portable browser and font supply inside the Bot Computer profile |
 
 Sway is an internal desktop runtime, not a portability layer. On first graphical use, the plugin uses an installed `sway` / `wlr-randr` / `wayvnc` set when available. Otherwise, it downloads pinned Arch packages appropriate to Omarchy, verifies their SHA-256 digests, and prepares them under `OMARCHY_BOT_HOME`. Explicit development overrides remain authoritative.
+
+The Bot Computer also supplies its own browser and fonts, so `open_url` works on a Service Host with no browser and pages render Latin and CJK text without host fonts. A natively installed browser is still preferred; snap-confined browsers are never launched, because a snap cannot see the Bot Computer's private home. The portable browser and its fonts are checksum-verified downloads prepared inside the Bot Computer profile, never installed on the host, and every Screen shares the one browser profile so sign-ins and session state carry over. Each `open_url` opens a new window routed to the requesting Screen.
 
 ### Useful checks
 
@@ -297,6 +300,19 @@ Real Pi conformance makes model calls and requires a configured Agent:
 ```bash
 bun test tests/conformance/pi.test.ts
 ```
+
+Real portable-browser conformance runs one private Sway Bot Computer on a fixture host with no browser on `PATH` and no visible host desktop entries, captures a Latin/Chinese/Japanese/Korean page from two Screens, and asserts real glyphs rather than empty boxes, one shared browser profile, and no snap launch. It needs a Sway runtime, `grim`, and `dbus-daemon`, downloads the pinned browser and fonts on first use, and skips without the flag:
+
+```bash
+OMARCHY_BOT_REAL_PORTABLE_BROWSER=1 \
+OMARCHY_BOT_SWAY_BIN=$PWD/.lane/sway-cached/bin/sway \
+OMARCHY_BOT_SWAYMSG_BIN=$PWD/.lane/sway-cached/bin/swaymsg \
+OMARCHY_BOT_WLR_RANDR_BIN=$PWD/.lane/sway-cached/bin/wlr-randr \
+OMARCHY_BOT_WAYVNC_BIN=$PWD/.lane/sway-cached/bin/wayvnc \
+bun test tests/integration/bot-screen-portable-browser-conformance.test.ts
+```
+
+`OMARCHY_BOT_GRIM_BIN` and `OMARCHY_BOT_DBUS_DAEMON_BIN` override `grim` and `dbus-daemon` when they are not on `PATH`.
 
 ## Bot-to-Bot mail
 

@@ -4,7 +4,9 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -51,11 +53,17 @@ import {
 } from "./botScreenWaylandHelpers.ts";
 import { BOT_DESKTOP_APP_ID, listApplicationToplevels, SwayIpcClient } from "./swayIpc.ts";
 import { resolveSwayRuntimeBinaries } from "./swayRuntimeSupply.ts";
+import {
+  PortableBotComputerAssets,
+  type BotComputerAssetSupply,
+} from "./botComputerAssets.ts";
 
 export interface SwayAdapterOptions extends BotComputerOptions {
   /** Test hook. The scripted fixture blocks here so an in-flight launch stays pending. */
   onLaunch?: () => Promise<void>;
   applicationCwd?: string;
+  /** Portable browser and font supply; defaults to the Bot Computer profile. */
+  assetSupply?: BotComputerAssetSupply;
 }
 
 type SwayProcess = DetachedProcess;
@@ -152,24 +160,178 @@ function desktopApplicationCommand(
   if (argv.length === 0) throw new Error(`application desktop entry has no executable: ${application}`);
   return argv;
 }
-function browserCommand(url: string, environment: Record<string, string>): string[] {
-  for (const desktopEntry of [
-    "brave-browser.desktop",
-    "google-chrome.desktop",
-    "chromium.desktop",
-    "firefox.desktop",
-  ]) {
+const BROWSER_DESKTOP_ENTRIES = [
+  "brave-browser.desktop",
+  "google-chrome.desktop",
+  "chromium.desktop",
+  "firefox.desktop",
+];
+const BROWSER_BINARIES = ["brave", "google-chrome", "chromium", "firefox"];
+/** Headless pixman Sway has no GPU and no desktop session for first-run UI. */
+const PORTABLE_BROWSER_FLAGS = [
+  "--ozone-platform=wayland",
+  "--disable-gpu",
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--disable-sync",
+  "--password-store=basic",
+];
+
+/**
+ * Snap confinement needs the real home and runtime directory the Bot Computer
+ * never shares, so a snap browser can only fail there. Detect it from the path,
+ * the resolved symlink, or a small Ubuntu wrapper script, never by executing it.
+ */
+function snapConfined(candidate: string): boolean {
+  const paths = [candidate];
+  try {
+    paths.push(realpathSync(candidate));
+  } catch {
+    // An unresolvable path cannot be a snap target.
+  }
+  if (paths.some((entry) =>
+    entry.startsWith("/snap/")
+    || entry.startsWith("/var/lib/snapd/")
+    || path.basename(entry) === "snap"
+  )) {
+    return true;
+  }
+  try {
+    if (statSync(candidate).size > 8_192) return false;
+    const text = readFileSync(candidate, "utf8");
+    if (!text.startsWith("#!")) return false;
+    // Ubuntu wraps snap-backed browsers in a tiny script. Match a snap-target
+    // command word so unrelated flags or comments do not count.
+    return text.split("\n").some((line) => {
+      const command = line.trim();
+      if (command === "" || command.startsWith("#")) return false;
+      return command.split(/\s+/).some((token, index) => {
+        if (index > 2) return false;
+        const word = token.replace(/^["']|["']$/g, "");
+        return path.basename(word) === "snap"
+          || word.startsWith("/snap/")
+          || word.startsWith("/var/lib/snapd/");
+      });
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** Desktop entries routinely prefix the real command with `env VAR=value …`. */
+const ENV_WRAPPER = "env";
+
+type EnvWrapper =
+  | { kind: "not-env" }
+  | { kind: "unsupported" }
+  | { kind: "command"; command: string };
+
+/**
+ * Only `env [--] NAME=value… command` is understood. Env *options* (`-S`,
+ * `--split-string=`, `-i`, …) and a `PATH` assignment both change which binary
+ * env would actually execute, so an entry using them is unsupported rather than
+ * classified from argv[0]. Guessing there would launch a snap-confined browser.
+ */
+function envWrapper(argv: readonly string[]): EnvWrapper {
+  let tokens = [...argv];
+  let wrapped = false;
+  while (path.basename(tokens[0] ?? "") === ENV_WRAPPER) {
+    wrapped = true;
+    let index = 1;
+    if (tokens[index] === "--") index += 1;
+    let command: string | undefined;
+    for (; index < tokens.length; index += 1) {
+      const token = tokens[index]!;
+      const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token);
+      if (assignment === null) {
+        if (token.startsWith("-")) return { kind: "unsupported" };
+        command = token;
+        break;
+      }
+      if (assignment[1] === "PATH") return { kind: "unsupported" };
+    }
+    if (command === undefined) return { kind: "unsupported" };
+    tokens = tokens.slice(index);
+  }
+  return wrapped ? { kind: "command", command: tokens[0]! } : { kind: "not-env" };
+}
+
+/** Chromium and Firefox families open a routable new window with `--new-window`. */
+const ROUTABLE_BROWSER_BASENAMES = /^(brave|brave-browser|google-chrome|chromium|chrome|firefox)(-[a-z0-9-]+)?$/;
+
+function isExecutableFile(candidate: string): boolean {
+  try {
+    return statSync(candidate).isFile() && (statSync(candidate).mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+/** The installed native browser command line, without a URL argument. */
+function nativeBrowserCommand(
+  environment: Record<string, string>,
+): { argv: string[]; routable: boolean } | undefined {
+  const searchPath = environment.PATH;
+  const which = (name: string): string | null =>
+    searchPath === undefined ? Bun.which(name) : Bun.which(name, { PATH: searchPath });
+  const runnable = (candidate: string): string | undefined => {
+    const resolved = candidate.includes("/") ? candidate : which(candidate);
+    if (resolved === null || !isExecutableFile(resolved)) return undefined;
+    return resolved;
+  };
+  for (const desktopEntry of BROWSER_DESKTOP_ENTRIES) {
     try {
-      return [...desktopApplicationCommand(desktopEntry, environment), url];
+      const argv = desktopApplicationCommand(desktopEntry, environment);
+      // `env NAME=value browser` is a legitimate native launch, so classify the
+      // command env would run. Anything env does beyond plain assignments is
+      // unsupported: fall through and let the portable browser handle the URL.
+      const wrapper = envWrapper(argv);
+      if (wrapper.kind === "unsupported") continue;
+      const target = runnable(wrapper.kind === "command" ? wrapper.command : argv[0]!);
+      if (target !== undefined && !snapConfined(target)) {
+        return {
+          argv,
+          routable: ROUTABLE_BROWSER_BASENAMES.test(path.basename(target)),
+        };
+      }
     } catch {
       // Try the next installed browser.
     }
   }
-  for (const binary of ["brave", "google-chrome", "chromium", "firefox"]) {
-    const resolved = Bun.which(binary);
-    if (resolved !== null) return [resolved, url];
+  for (const binary of BROWSER_BINARIES) {
+    const resolved = runnable(binary);
+    if (resolved !== undefined && !snapConfined(resolved)) return { argv: [resolved], routable: true };
   }
-  return ["xdg-open", url];
+  return undefined;
+}
+
+/** Native browser first, otherwise the portable browser on the shared Bot Computer profile. */
+async function browserCommand(
+  url: string,
+  environment: Record<string, string>,
+  assets: BotComputerAssetSupply,
+  profileDir: string,
+): Promise<string[]> {
+  const native = nativeBrowserCommand(environment);
+  if (native !== undefined) {
+    // Without this a running native browser reuses a tab, so no new window can
+    // be routed to the requesting Screen.
+    return native.routable
+      ? [...native.argv, "--new-window", url]
+      : [...native.argv, url];
+  }
+  const { browserBin } = await assets.ensureBrowser();
+  // Chromium's own XDG default is <XDG_CONFIG_HOME>/chromium; naming it keeps
+  // one persistent profile no matter which Chromium-compatible binary ships.
+  const userDataDir = path.join(profileDir, "config", "chromium");
+  mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
+  return [
+    browserBin,
+    `--user-data-dir=${userDataDir}`,
+    ...PORTABLE_BROWSER_FLAGS,
+    "--new-window",
+    url,
+  ];
 }
 
 
@@ -213,10 +375,15 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #inputLeaseOwner: SurfaceId | undefined;
   #inputLeaseRelease: (() => void) | undefined;
   #resolvedWayvnc: string | undefined;
+  #assets: BotComputerAssetSupply;
 
   constructor(private readonly options: SwayAdapterOptions) {
     this.#units = new ApplicationUnits(options.hostRuntimeDir);
-    this.#computer = new BotComputerRuntime(options);
+    this.#assets = options.assetSupply
+      ?? new PortableBotComputerAssets({
+        profileDir: path.join(options.profileRoot, "computer"),
+      });
+    this.#computer = new BotComputerRuntime({ ...options, assetSupply: this.#assets });
   }
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
@@ -905,9 +1072,16 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const before = new Set(
       listApplicationToplevels(await swayIpc.getTree()).map((window) => window.id),
     );
+    // Fonts are only needed by graphical children, so fake-runtime tests stay offline.
+    await session.computer.ensureFonts();
     const argv = request.app !== undefined
       ? desktopApplicationCommand(request.app, session.computer.childEnv)
-      : browserCommand(request.url!, session.computer.childEnv);
+      : await browserCommand(
+        request.url!,
+        session.computer.childEnv,
+        this.#assets,
+        session.computer.profileDir,
+      );
     const text = request.app !== undefined ? `launched ${request.app}` : `opened ${request.url}`;
     const role = `application-${++session.computer.applicationSequence}` as const;
     const application = Bun.spawn([
@@ -928,7 +1102,9 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     });
     session.computer.applicationProcesses.add(application);
     void application.exited.then(() => session.computer.applicationProcesses.delete(application));
-    const deadline = Date.now() + 5_000;
+    // A cold portable Chromium can take longer than 5s to map its window, and the
+    // window is routed only once it exists.
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline && session.computer.running()) {
       const windows = listApplicationToplevels(await swayIpc.getTree());
       const created = windows.filter((window) => !before.has(window.id));

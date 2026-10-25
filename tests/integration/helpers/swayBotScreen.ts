@@ -9,6 +9,7 @@ import type {
 } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { ComputerWindowListItem } from "../../../packages/agent-contract/src/computer-protocol.ts";
 import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./fakeSwayIpc.ts";
+import { createFixtureAssetSupply } from "./botComputerAssetsFixture.ts";
 
 const LIVE_UNICODE_TITLE = "未保存 你好";
 
@@ -229,10 +230,19 @@ await serveFakeSwayIpc({
     "while :; do sleep 60; done",
     "",
   ].join("\n"));
+  const assets = createFixtureAssetSupply({
+    directory: path.join(root, "assets"),
+    browserScript: (logPath) => `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");
+await Promise.withResolvers<void>().promise;
+`,
+  });
   const inner = new SwayBotScreenRuntimeAdapter({
     runtimeRoot,
     profileRoot,
     applicationCwd,
+    assetSupply: assets,
     swayBin: sway,
     wlrRandrBin: executable(bin, "wlr-randr", "#!/bin/sh\nexit 0\n"),
     grimBin: executable(bin, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),

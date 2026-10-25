@@ -36,6 +36,10 @@ import {
   resolveSwayRuntimeBinaries,
   type SwayRuntimeSupply,
 } from "./swayRuntimeSupply.ts";
+import {
+  PortableBotComputerAssets,
+  type BotComputerAssetSupply,
+} from "./botComputerAssets.ts";
 
 type SwayProcess = DetachedProcess;
 export type ApplicationProcess = Bun.Subprocess<"ignore", "ignore", "ignore">;
@@ -56,6 +60,8 @@ export interface BotComputerOptions {
   wayvncBin?: string;
   dbusDaemonBin?: string;
   runtimeSupply?: SwayRuntimeSupply;
+  /** Portable browser and font supply; defaults to the Bot Computer profile. */
+  assetSupply?: BotComputerAssetSupply;
   capacity?: number;
 }
 
@@ -75,6 +81,8 @@ export interface BotComputer {
   surfaceIds: Set<SurfaceId>;
   applicationProcesses: Set<ApplicationProcess>;
   applicationSequence: number;
+  /** Lazily supplies the profile fonts and exports them to graphical children. */
+  ensureFonts(): Promise<void>;
   running(): boolean;
   exited(): Promise<number>;
   busExited(): Promise<number>;
@@ -144,9 +152,15 @@ export class BotComputerRuntime {
   #units: ApplicationUnits;
   #capacity: number;
   #computer: LiveComputer | undefined;
+  #assets: BotComputerAssetSupply;
+  #fontConfigFile: string | undefined;
 
   constructor(private readonly options: BotComputerOptions) {
     this.#units = new ApplicationUnits(options.hostRuntimeDir);
+    this.#assets = options.assetSupply
+      ?? new PortableBotComputerAssets({
+        profileDir: path.join(options.profileRoot, "computer"),
+      });
     this.#capacity = options.capacity ?? 8;
     if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {
       throw new Error("Bot Computer output capacity must be a positive integer");
@@ -234,6 +248,7 @@ export class BotComputerRuntime {
       surfaceIds: new Set(),
       applicationProcesses: new Set(),
       applicationSequence: 0,
+      ensureFonts: () => this.#ensureFonts(computer),
       running: () => this.#running(computer),
       exited: () => this.#exited(computer),
       busExited: () => this.#busExited(computer),
@@ -378,6 +393,7 @@ export class BotComputerRuntime {
         surfaceIds: new Set(),
         applicationProcesses: new Set(),
         applicationSequence: 0,
+        ensureFonts: () => this.#ensureFonts(computer),
         running: () => this.#running(computer),
         exited: () => this.#exited(computer),
         busExited: () => this.#busExited(computer),
@@ -433,6 +449,13 @@ export class BotComputerRuntime {
       ));
     }
     rmSync(runtimeComputerDir, { recursive: true, force: true });
+  }
+
+  async #ensureFonts(computer: LiveComputer): Promise<void> {
+    const fontConfigFile = this.#fontConfigFile
+      ?? (await this.#assets.ensureFonts()).fontConfigFile;
+    this.#fontConfigFile = fontConfigFile;
+    computer.childEnv.FONTCONFIG_FILE = fontConfigFile;
   }
 
   #running(computer: LiveComputer): boolean {
