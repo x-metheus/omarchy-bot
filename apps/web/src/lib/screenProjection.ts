@@ -12,6 +12,7 @@ import {
   type ScreenProjectionModeDto,
   type ScreenProjectionPreviewFrameHeaderDto as PreviewFrameHeader,
 } from "@omarchy-bot/protocol";
+import { withDeviceToken } from "./deviceToken.ts";
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const CONNECTION_TIMEOUT_MS = 10_000;
@@ -745,7 +746,7 @@ export class ScreenProjectionConnection {
     const endpoint = new URL(this.endpoint, window.location.href);
     endpoint.searchParams.set("botId", this.owner.botId);
     endpoint.searchParams.set("surfaceId", this.owner.surfaceId);
-    return endpoint.href;
+    return withDeviceToken(endpoint.href);
   }
 
   #resolveSessionSocketUrl(raw: string, label: string): string {
@@ -760,7 +761,7 @@ export class ScreenProjectionConnection {
       || resolved.searchParams.get("sessionId") !== this.#sessionId
     ) throw new Error(`The Bot Screen returned an invalid ${label} connection.`);
     resolved.protocol = resolved.protocol === "https:" ? "wss:" : "ws:";
-    return resolved.href;
+    return withDeviceToken(resolved.href);
   }
 
   #resolveSnapshotUrl(raw: string): string {
@@ -772,13 +773,13 @@ export class ScreenProjectionConnection {
       || resolved.searchParams.get("botId") !== this.owner.botId
       || resolved.searchParams.get("surfaceId") !== this.owner.surfaceId
     ) throw new Error("The Bot Screen returned an invalid snapshot connection.");
-    return resolved.href;
+    return withDeviceToken(resolved.href);
   }
 
   #defaultSnapshotUrl(): string {
     const snapshot = new URL(this.#projectionEndpoint());
     snapshot.pathname = snapshot.pathname.replace(/\/projection$/, "/snapshot");
-    return snapshot.href;
+    return withDeviceToken(snapshot.href);
   }
 
   #matchesSession(value: { sessionId: string; surfaceId: string; runtimeGeneration: number }): boolean {

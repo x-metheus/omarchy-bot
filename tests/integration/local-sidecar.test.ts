@@ -22,7 +22,7 @@ describe("outbound Local Sidecar device roster", () => {
   }
 
   async function connect(): Promise<LocalSidecarFixture> {
-    const sidecar = await LocalSidecarFixture.connect(h!.port);
+    const sidecar = await LocalSidecarFixture.connect(h!.port, h!.token);
     sidecars.push(sidecar);
     return sidecar;
   }
@@ -115,7 +115,7 @@ describe("outbound Local Sidecar device roster", () => {
 
   test("keeps the device channel off the event stream", async () => {
     const harness = await boot();
-    const events = new WebSocket(`ws://127.0.0.1:${harness.port}/api/events`);
+    const events = new WebSocket(`ws://127.0.0.1:${harness.port}/api/events?access_token=${encodeURIComponent(harness.token)}`);
     const eventFrames: string[] = [];
     await new Promise<void>((resolve, reject) => {
       events.addEventListener("open", () => resolve(), { once: true });
@@ -149,7 +149,7 @@ describe("approved local.run on this-device", () => {
   });
 
   async function connect(): Promise<LocalSidecarFixture> {
-    const sidecar = await LocalSidecarFixture.connect(h!.port);
+    const sidecar = await LocalSidecarFixture.connect(h!.port, h!.token);
     sidecars.push(sidecar);
     return sidecar;
   }

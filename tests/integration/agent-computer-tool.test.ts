@@ -4,7 +4,7 @@ import path from "node:path";
 import type { SurfaceId } from "../../packages/domain/src/index.ts";
 import type { MessageDto } from "../../packages/protocol/src/index.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
-import { api, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 import { createComputerTool } from "../../workers/pi/src/computer-tool.ts";
 import { until } from "./helpers/bot-screen-load-observe.ts";
 
@@ -22,7 +22,7 @@ async function computerRequest(
   path: string,
 ): Promise<{ response: Response; body: ComputerView | { error: string } }> {
   const query = `botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`;
-  const response = await fetch(`${h.baseUrl}${path}?${query}`, { method });
+  const response = await authedFetch(h, `${h.baseUrl}${path}?${query}`, { method });
   return { response, body: await response.json() };
 }
 

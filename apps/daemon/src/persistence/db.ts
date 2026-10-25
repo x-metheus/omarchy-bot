@@ -985,6 +985,24 @@ ALTER TABLE computer_surface_coordination_next RENAME TO computer_surface_coordi
 `);
     },
   },
+  {
+    // Paired Device tokens and one-time pairings codes; only SHA-256 hashes are stored.
+    name: "0021-paired-devices",
+    sql: `
+CREATE TABLE paired_devices (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE TABLE pairing_codes (
+  code_hash TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });

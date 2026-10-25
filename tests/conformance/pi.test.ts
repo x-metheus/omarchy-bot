@@ -422,6 +422,7 @@ describe("pi conformance (10 steps, real model)", () => {
       expect(terminal.status).toBe("completed");
       const transcript = await fetch(
         `${daemon.baseUrl}/api/threads/${sent.threadId}/messages`,
+        { headers: { authorization: `Bearer ${daemon.token}` } },
       ).then((response) => response.json()) as Array<{
         kind: string;
         text?: string;

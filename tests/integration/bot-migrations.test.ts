@@ -7,7 +7,7 @@ import { applyMigration, MIGRATIONS, openDb } from "../../apps/daemon/src/persis
 import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
 import { AVATAR_RENDERER_ID, AvatarRecipeDto, type MessageDto, type ToolCallSummaryDto } from "../../packages/protocol/src/index.ts";
 import { isToolCallSummary, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "../../packages/domain/src/index.ts";
-import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 import { BotScreenManager } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 
@@ -81,7 +81,7 @@ function deployedArchivelessDatabase(): { dbPath: string; home: string } {
 
 describe("integration: deployed schema convergence", () => {
   test("keeps Bot Screen and divergent-ledger migrations in dependency order", () => {
-    expect(MIGRATIONS.slice(-14).map((migration) => migration.name)).toEqual([
+    expect(MIGRATIONS.slice(-15).map((migration) => migration.name)).toEqual([
       "0010-bot-computer-surfaces",
       "0011-redacted-input-diagnostics",
       "0012-bot-screen-contract",
@@ -96,6 +96,7 @@ describe("integration: deployed schema convergence", () => {
       "0018-durable-bot-mail",
       "0019-legacy-tool-call-summaries",
       "0020-drop-controller-epoch",
+      "0021-paired-devices",
     ]);
   });
 
@@ -719,14 +720,14 @@ describe("integration: Bot provenance migrations", () => {
       migrated.close();
 
       firstDaemon = await startDaemon(home);
-      const firstBootBot = await fetch(`${firstDaemon.baseUrl}/api/bots/bot_11111111111111111111111111111111`)
+      const firstBootBot = await authedFetch(firstDaemon, `${firstDaemon.baseUrl}/api/bots/bot_11111111111111111111111111111111`)
         .then((response) => response.json()) as { surfaceId: string };
       expect(firstBootBot.surfaceId).toBe(surfaces[0]!.surface_id);
       await firstDaemon.stop();
       firstDaemon = undefined;
 
       secondDaemon = await startDaemon(home);
-      const secondBootBot = await fetch(`${secondDaemon.baseUrl}/api/bots/bot_11111111111111111111111111111111`)
+      const secondBootBot = await authedFetch(secondDaemon, `${secondDaemon.baseUrl}/api/bots/bot_11111111111111111111111111111111`)
         .then((response) => response.json()) as { surfaceId: string };
       expect(secondBootBot.surfaceId).toBe(surfaces[0]!.surface_id);
     } finally {
@@ -888,10 +889,10 @@ describe("integration: archived Bot cutover", () => {
       expect(messages).toContainEqual(expect.objectContaining({ text: "Preserved message" }));
       expect(h.svc.threads.getNativeSession(threadId)).toBe("native-legacy");
 
-      const attachment = await fetch(`${h.baseUrl}/api/attachments/${attachmentId}`);
+      const attachment = await authedFetch(h, `${h.baseUrl}/api/attachments/${attachmentId}`);
       expect(attachment.status).toBe(200);
       expect(await attachment.text()).toBe("preserved bytes");
-      const avatar = await fetch(`${h.baseUrl}/api/bots/${botId}/avatar`);
+      const avatar = await authedFetch(h, `${h.baseUrl}/api/bots/${botId}/avatar`);
       expect(avatar.status).toBe(200);
       expect(await avatar.text()).toBe("preserved avatar");
 

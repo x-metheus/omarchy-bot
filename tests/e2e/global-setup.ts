@@ -1,8 +1,45 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { AUTH_STORAGE_STATE } from "./fixtures.ts";
+
+async function pairForToken(origin: string, stateDir: string): Promise<string> {
+  const secret = readFileSync(path.join(stateDir, "pairing-host-secret"), "utf8").trim();
+  const issued = await fetch(`${origin}/api/pairing/codes`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+    body: JSON.stringify({ name: "e2e" }),
+  });
+  if (!issued.ok) throw new Error(`e2e pairing code issue -> ${issued.status}: ${await issued.text()}`);
+  const issuedBody: unknown = await issued.json();
+  if (typeof issuedBody !== "object" || issuedBody === null || !("code" in issuedBody) || typeof issuedBody.code !== "string") {
+    throw new Error("e2e pairing code issue returned no code");
+  }
+  const exchanged = await fetch(`${origin}/api/pairing/exchange`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code: issuedBody.code, name: "e2e" }),
+  });
+  if (exchanged.status !== 201) throw new Error(`e2e pairing exchange -> ${exchanged.status}: ${await exchanged.text()}`);
+  const exchangedBody: unknown = await exchanged.json();
+  if (typeof exchangedBody !== "object" || exchangedBody === null || !("token" in exchangedBody) || typeof exchangedBody.token !== "string") {
+    throw new Error("e2e pairing exchange returned no token");
+  }
+  return exchangedBody.token;
+}
+
+/** The web client reads its device token from localStorage; Playwright seeds it per origin. */
+function writeStorageState(token: string, origin: string): void {
+  writeFileSync(AUTH_STORAGE_STATE, JSON.stringify({
+    cookies: [],
+    origins: [{
+      origin: new URL(origin).origin,
+      localStorage: [{ name: "omarchy-bot.device-token", value: token }],
+    }],
+  }));
+}
 
 /**
  * Build the web once for this run, then boot the real daemon with the fake
@@ -62,9 +99,24 @@ export default async function globalSetup(): Promise<void> {
     });
     await ready.promise;
 
+    const origin = process.env.OMARCHY_BOT_E2E_BASE_URL ?? `http://127.0.0.1:${port}`;
+    // Health is the only unauthenticated route, so readiness is polled there.
+    let healthDeadline = Date.now() + 20_000;
+    for (;;) {
+      const health = await fetch(`${origin}/api/health`).catch(() => undefined);
+      if (health?.ok) break;
+      if (Date.now() > healthDeadline) throw new Error("e2e daemon never answered /api/health");
+      await delay(150);
+    }
+
+    const token = await pairForToken(origin, stateDir);
+    writeStorageState(token, origin);
+
     const deadline = Date.now() + 20_000;
     for (;;) {
-      const response = await fetch(`http://127.0.0.1:${port}/api/agents`);
+      const response = await fetch(`${origin}/api/agents`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
       const agents: unknown = await response.json();
       if (
         Array.isArray(agents) &&

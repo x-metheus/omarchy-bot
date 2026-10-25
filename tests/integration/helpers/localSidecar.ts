@@ -72,8 +72,9 @@ export class LocalSidecarFixture {
     });
   }
 
-  static async connect(port: number): Promise<LocalSidecarFixture> {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/devices`);
+  static async connect(port: number, token?: string): Promise<LocalSidecarFixture> {
+    const query = token ? `?access_token=${encodeURIComponent(token)}` : "";
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/devices${query}`);
     await waitOpen(ws);
     return new LocalSidecarFixture(ws, mkdtempSync(path.join(os.tmpdir(), "omarchy-local-sidecar-")));
   }

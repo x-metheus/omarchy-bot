@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "../fixtures.ts";
 
 function botNavigation(page: Page) {
   return page.getByRole("navigation", { name: "Bot navigation" });

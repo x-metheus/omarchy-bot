@@ -377,7 +377,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
     });
 
     const viewerSampleMs = Math.min(durationMs, 1_500);
-    const compact = await ProjectionClient.connect(harness.baseUrl, selected, "normal-use-compact");
+    const compact = await ProjectionClient.connect(harness.baseUrl, selected, "normal-use-compact", harness.token);
     clients.push(compact);
     await compact.setMode("preview");
     const compactFrame = await compact.waitForPreviewFrame();
@@ -420,7 +420,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       },
     });
 
-    const expanded = await ProjectionClient.connect(harness.baseUrl, selected, "normal-use-expanded");
+    const expanded = await ProjectionClient.connect(harness.baseUrl, selected, "normal-use-expanded", harness.token);
     clients.push(expanded);
     await expanded.setMode("expanded");
     const expandedMedia = await until(
@@ -472,7 +472,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
 
     await expanded.close();
     clients.pop();
-    const switched = await ProjectionClient.connect(harness.baseUrl, backgroundA, "normal-use-switch-a");
+    const switched = await ProjectionClient.connect(harness.baseUrl, backgroundA, "normal-use-switch-a", harness.token);
     clients.push(switched);
     await switched.setMode("expanded");
     await until(
@@ -485,7 +485,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
     );
     await switched.close();
     clients.pop();
-    const switchedB = await ProjectionClient.connect(harness.baseUrl, backgroundB, "normal-use-switch-b");
+    const switchedB = await ProjectionClient.connect(harness.baseUrl, backgroundB, "normal-use-switch-b", harness.token);
     clients.push(switchedB);
     await switchedB.setMode("expanded");
     await until(
@@ -518,7 +518,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
 
     await switchedB.close().catch(() => undefined);
     clients.splice(0, clients.length);
-    const firstRemaining = await ProjectionClient.connect(harness.baseUrl, backgroundB, "normal-use-remaining-1");
+    const firstRemaining = await ProjectionClient.connect(harness.baseUrl, backgroundB, "normal-use-remaining-1", harness.token);
     clients.push(firstRemaining);
     await firstRemaining.setMode("preview");
     await until(
@@ -528,7 +528,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
     );
     let secondRemaining: ProjectionClient | undefined;
     try {
-      secondRemaining = await ProjectionClient.connect(harness.baseUrl, backgroundB, "normal-use-remaining-2");
+      secondRemaining = await ProjectionClient.connect(harness.baseUrl, backgroundB, "normal-use-remaining-2", harness.token);
       clients.push(secondRemaining);
       await secondRemaining.setMode("preview");
       await until(

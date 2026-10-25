@@ -5,7 +5,7 @@ import { BotScreenInputRejectedError } from "../../apps/daemon/src/modules/compu
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
-import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 import { createScriptedSwayFixture, type ScriptedSwayFixture } from "./helpers/swayBotScreen.ts";
 
 const SURFACE = "surf_55555555555555555555555555555555" as SurfaceId;
@@ -244,7 +244,8 @@ function envelope(session: ProjectionSession): object {
 }
 
 async function createProjection(h: Harness, owner: ComputerSurfaceOwner): Promise<ProjectionSession> {
-  const response = await fetch(
+  const response = await authedFetch(
+    h,
     `${h.baseUrl}/api/computer/projection?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
     {
       method: "POST",
@@ -257,7 +258,10 @@ async function createProjection(h: Harness, owner: ComputerSurfaceOwner): Promis
 }
 
 async function openProjectionSocket(h: Harness, path: string): Promise<SocketInbox> {
-  const socket = new WebSocket(`${h.baseUrl.replace(/^http/, "ws")}${path}`);
+  const url = new URL(path, h.baseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  if (h.token) url.searchParams.set("access_token", h.token);
+  const socket = new WebSocket(url.href);
   const inbox = new SocketInbox(socket);
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("projection WebSocket did not open")), 5_000);
@@ -366,7 +370,8 @@ test("WayVNC failure fails only projection and leaves the Sway desktop ready", a
       reason: "rfb-bridge-failed",
       snapshotFallback: true,
     });
-    const status = await fetch(
+    const status = await authedFetch(
+      harness,
       `${harness.baseUrl}/api/computer/projection?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}&sessionId=${encodeURIComponent(projection.sessionId)}`,
     );
     expect(await status.json()).toMatchObject({ state: "failed", failure: "rfb-bridge-failed" });

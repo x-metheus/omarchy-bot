@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { InstalledSkillDto, McpConnectionDto, PluginStateDto, SkillCommandDto } from "../../packages/protocol/src/plugins.ts";
-import { api, apiStatus, startDaemon, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, apiStatus, startDaemon, type Harness } from "./helpers/harness.ts";
 
 let harness: Harness | undefined;
 const originalFetch = globalThis.fetch;
@@ -21,7 +21,7 @@ async function startPlugins(): Promise<Harness> {
   }, { preconnect: originalFetch.preconnect });
   const h = await startDaemon();
   harness = h;
-  const configured = await fetch(`${h.baseUrl}/api/plugins/settings`, {
+  const configured = await authedFetch(h, `${h.baseUrl}/api/plugins/settings`, {
     method: "PUT", headers: { "content-type": "application/json" },
     body: JSON.stringify({ cloudUrl: "https://plugin-catalog.invalid" }),
   });

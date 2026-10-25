@@ -17,7 +17,7 @@ describe("same-host viewers have no This Device", () => {
 
   test("an untagged viewer does not get local even when another Sidecar is online", async () => {
     h = await startDaemon();
-    const sidecar = await LocalSidecarFixture.connect(h.port);
+    const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
     await sidecar.register({ deviceId: DEVICE_A, hostname: "other-laptop", capabilities: ["shell"] });
     expect(await api<DeviceDto[]>(h, "GET", "/api/devices")).toHaveLength(1);
@@ -39,7 +39,7 @@ describe("same-host viewers have no This Device", () => {
 
   test("an off-host fixture registers on loopback transport as a distinct machine", async () => {
     h = await startDaemon();
-    const sidecar = await LocalSidecarFixture.connect(h.port);
+    const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
     await sidecar.register({
       deviceId: DEVICE_A,

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AttachmentDto, MessageDto } from "../../packages/protocol/src/index.ts";
-import { api, apiStatus, makeBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, apiStatus, makeBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 
@@ -15,7 +15,7 @@ async function stage(
 ): Promise<{ status: number; body: AttachmentDto | { error: string }; draftToken: string }> {
   const form = new FormData();
   form.set("file", file, name);
-  const response = await fetch(`${h.baseUrl}/api/attachments/stage`, {
+  const response = await authedFetch(h, `${h.baseUrl}/api/attachments/stage`, {
     method: "POST",
     headers: {
       "x-bot-id": botId,
@@ -32,7 +32,7 @@ async function stage(
 }
 
 async function staged(h: Harness, id: string, draftToken: string): Promise<{ status: number; body?: AttachmentDto }> {
-  const response = await fetch(`${h.baseUrl}/api/attachments/staged/${id}`, {
+  const response = await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${id}`, {
     headers: { "x-attachment-draft-token": draftToken },
   });
   return {
@@ -85,11 +85,11 @@ describe("managed attachments", () => {
     );
     expect(malformed.status).toBe(400);
     expect(malformed.body).toEqual({ error: "x-attachment-draft-token header must be a UUID" });
-    const missing = await fetch(`${h.baseUrl}/api/attachments/staged/att_00000000000000000000000000000000`);
+    const missing = await authedFetch(h, `${h.baseUrl}/api/attachments/staged/att_00000000000000000000000000000000`);
     expect(missing.status).toBe(400);
 
 
-    const response = await fetch(`${h.baseUrl}/api/attachments/staged/att_00000000000000000000000000000000`, {
+    const response = await authedFetch(h, `${h.baseUrl}/api/attachments/staged/att_00000000000000000000000000000000`, {
       headers: { "x-attachment-draft-token": "x".repeat(129) },
     });
     expect(response.status).toBe(400);
@@ -137,7 +137,7 @@ describe("managed attachments", () => {
     const otherDraftToken = crypto.randomUUID();
 
     expect((await staged(h, attachment.id, otherDraftToken)).status).toBe(404);
-    const deleted = await fetch(`${h.baseUrl}/api/attachments/staged/${attachment.id}`, {
+    const deleted = await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${attachment.id}`, {
       method: "DELETE",
       headers: { "x-attachment-draft-token": otherDraftToken },
     });
@@ -182,7 +182,7 @@ describe("managed attachments", () => {
     });
     await waitThreadIdle(h, sent.threadId);
 
-    const response = await fetch(`${h.baseUrl}/api/attachments/${attachment.id}`);
+    const response = await authedFetch(h, `${h.baseUrl}/api/attachments/${attachment.id}`);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("text/plain");
     expect(response.headers.get("cache-control")).toContain("immutable");
@@ -225,7 +225,7 @@ describe("managed attachments", () => {
     await waitThreadIdle(h, sent.threadId);
     h.svc.db.query("UPDATE attachments SET draft_token = NULL WHERE id = ?").run(staleAttachment.id);
     expect((await staged(h, staleAttachment.id, stale.draftToken)).status).toBe(404);
-    const unstageLegacy = await fetch(`${h.baseUrl}/api/attachments/staged/${staleAttachment.id}`, {
+    const unstageLegacy = await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${staleAttachment.id}`, {
       method: "DELETE",
       headers: { "x-attachment-draft-token": stale.draftToken },
     });
@@ -239,6 +239,6 @@ describe("managed attachments", () => {
     );
     expect(h.svc.attachments.gcStaged()).toBe(1);
     expect((await staged(h, staleAttachment.id, stale.draftToken)).status).toBe(404);
-    expect((await fetch(`${h.baseUrl}/api/attachments/${managedAttachment.id}`)).status).toBe(200);
+    expect((await authedFetch(h, `${h.baseUrl}/api/attachments/${managedAttachment.id}`)).status).toBe(200);
   });
 });

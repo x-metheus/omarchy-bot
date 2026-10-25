@@ -71,8 +71,11 @@ export async function executeLocalJob(
     }
     if (job.action === "run") {
       if (job.command === undefined) return { ok: false, error: "local.run requires a command" };
+      const env = { ...process.env };
+      delete env.OMARCHY_BOT_DEVICE_TOKEN;
       const proc = Bun.spawn(["/bin/sh", "-c", GROUP_LEADER, "sh", job.command], {
         cwd: root,
+        env,
         stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",

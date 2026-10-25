@@ -6,6 +6,7 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Text } from "@astryxdesign/core/Text";
 import { avatarStatusScope, avatarStatusStyles } from "./avatarStatus.stylex.ts";
 import { renderAvatarRecipe, type AvatarPresentation } from "./avatarRenderer.ts";
+import { withDeviceToken } from "../lib/deviceToken.ts";
 
 export type { AvatarPresentation } from "./avatarRenderer.ts";
 
@@ -36,7 +37,7 @@ const styles = stylex.create({
 });
 function avatarSource(avatar: AvatarDto, presentation: AvatarPresentation): string | undefined {
   if (avatar.kind !== "upload") return renderAvatarRecipe(avatar.recipe, presentation);
-  return /^\/api\/bots\/[\w-]+\/avatar$/.test(avatar.url) ? avatar.url : undefined;
+  return /^\/api\/bots\/[\w-]+\/avatar$/.test(avatar.url) ? withDeviceToken(avatar.url) : undefined;
 }
 
 function avatarTestId(avatar: AvatarDto): string {

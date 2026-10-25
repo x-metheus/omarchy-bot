@@ -6,6 +6,7 @@ import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/compu
 import {
   api,
   apiStatus,
+  authedFetch,
   makeBot,
   sendToBot,
   sendToThread,
@@ -26,7 +27,7 @@ function computerPath(owner: Pick<BotDto, "id" | "surfaceId">): string {
 async function waitForState(h: Harness, owner: Pick<BotDto, "id" | "surfaceId">, state: ComputerViewDto["state"]): Promise<ComputerViewDto> {
   const deadline = Date.now() + 5_000;
   for (;;) {
-    const response = await fetch(`${h.baseUrl}${computerPath(owner)}`);
+    const response = await authedFetch(h, `${h.baseUrl}${computerPath(owner)}`);
     if (response.status === 200) {
       const view = await response.json() as ComputerViewDto;
       if (view.state === state) return view;
@@ -39,7 +40,8 @@ async function activateScreen(
   h: Harness,
   owner: Pick<BotDto, "id" | "surfaceId">,
 ): Promise<ComputerViewDto> {
-  const snapshot = await fetch(
+  const snapshot = await authedFetch(
+    h,
     `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
   );
   expect(snapshot.status).toBe(200);
@@ -166,7 +168,8 @@ describe("Bot Screen lifecycle", () => {
       surfaceId: unaffected.surfaceId,
     });
     expect(adapter.running(unaffected.surfaceId)).toEqual({ generation: 1 });
-    const unaffectedPreview = await fetch(
+    const unaffectedPreview = await authedFetch(
+      h,
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(unaffected.id)}&surfaceId=${encodeURIComponent(unaffected.surfaceId)}`,
     );
     expect(unaffectedPreview.status).toBe(200);
@@ -192,7 +195,8 @@ describe("Bot Screen lifecycle", () => {
       { name: "open_app", args: { app: "missing.desktop" } },
     )).rejects.toThrow("fake application launch failed");
     expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
-    expect((await fetch(
+    expect((await authedFetch(
+      h,
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
     )).status).toBe(200);
   });
@@ -209,7 +213,8 @@ describe("Bot Screen lifecycle", () => {
       state: "ready",
     });
     expect(adapter.applicationExits).toEqual([{ surfaceId: affected.surfaceId, runtimeGeneration: 1 }]);
-    expect((await fetch(
+    expect((await authedFetch(
+      h,
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(affected.id)}&surfaceId=${encodeURIComponent(affected.surfaceId)}`,
     )).status).toBe(200);
 
@@ -254,7 +259,8 @@ describe("Bot Screen lifecycle", () => {
       await expect(staleSource!.capture()).rejects.toThrow("stale");
       await expect(staleStream.next()).rejects.toThrow();
       expect(await waitForState(h, unaffected, "ready")).toMatchObject({ surfaceId: unaffected.surfaceId });
-      expect((await fetch(
+      expect((await authedFetch(
+        h,
         `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(unaffected.id)}&surfaceId=${encodeURIComponent(unaffected.surfaceId)}`,
       )).status).toBe(200);
 
@@ -328,10 +334,12 @@ describe("Bot Screen lifecycle", () => {
     expect(await waitForState(h, unaffected, "ready")).toMatchObject({
       surfaceId: unaffected.surfaceId,
     });
-    expect((await fetch(
+    expect((await authedFetch(
+      h,
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(affected.id)}&surfaceId=${encodeURIComponent(affected.surfaceId)}`,
     )).status).toBe(200);
-    expect((await fetch(
+    expect((await authedFetch(
+      h,
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(unaffected.id)}&surfaceId=${encodeURIComponent(unaffected.surfaceId)}`,
     )).status).toBe(200);
   });
@@ -458,7 +466,7 @@ describe("Bot Screen lifecycle", () => {
     });
     expect(adapter.starts).toHaveLength(startsBeforeRejection);
     expect(await waitForState(h, first, "ready")).toMatchObject({ surfaceId: first.surfaceId });
-    expect((await fetch(`${h.baseUrl}/api/computer/snapshot?botId=${first.id}&surfaceId=${first.surfaceId}`)).status)
+    expect((await authedFetch(h, `${h.baseUrl}/api/computer/snapshot?botId=${first.id}&surfaceId=${first.surfaceId}`)).status)
       .toBe(200);
 
     await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${first.id}`, {});
@@ -629,7 +637,8 @@ describe("Bot Screen lifecycle", () => {
     const owner = await bot(h, await makeBot(h, "Concurrent first use"));
     adapter.blockStarts();
 
-    const view = fetch(
+    const view = authedFetch(
+      h,
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
     );
     const action = h.svc.screens.act(
@@ -715,7 +724,8 @@ describe("Bot Screen lifecycle", () => {
     const sibling = await bot(h, await makeBot(h, "Provision sibling"));
     adapter.failStart(failed.surfaceId, "fake provision failed");
 
-    const rejected = await fetch(
+    const rejected = await authedFetch(
+      h,
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(failed.id)}&surfaceId=${encodeURIComponent(failed.surfaceId)}`,
     );
     expect(rejected.status).toBe(503);
@@ -767,7 +777,8 @@ describe("Bot Screen lifecycle", () => {
     expect(adapter.destroyed.has(owner.surfaceId)).toBeFalse();
     expect(h.svc.db.query(`SELECT 1 FROM bot_surfaces WHERE surface_id = ?`).get(owner.surfaceId)).not.toBeNull();
     expect(readFileSync(sentinel, "utf8")).toBe("shared work");
-    expect((await fetch(
+    expect((await authedFetch(
+      h,
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
     )).status).toBe(200);
 
@@ -999,13 +1010,14 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
         state: "starting",
       });
 
-      const snapshot = fetch(
+      const snapshot = authedFetch(
+        h,
         `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
       );
       const seen = new Set<ComputerViewDto["state"]>();
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline) {
-        const response = await fetch(`${h.baseUrl}${computerPath(owner)}`);
+        const response = await authedFetch(h, `${h.baseUrl}${computerPath(owner)}`);
         if (response.status === 200) {
           const view = await response.json() as ComputerViewDto;
           seen.add(view.state);
@@ -1043,8 +1055,8 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
       const owner = await bot(h, await makeBot(h, "Sway concurrent first use"));
       const [first, second] = await Promise.all([
-        fetch(`${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`),
-        fetch(`${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`),
+        authedFetch(h, `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`),
+        authedFetch(h, `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`),
       ]);
       expect(first.status).toBe(200);
       expect(second.status).toBe(200);
@@ -1074,7 +1086,8 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       const sibling = await bot(h, await makeBot(h, "Sway provision sibling"));
       writeFileSync(fixture.failSurfacePath, failed.surfaceId);
 
-      const rejected = await fetch(
+      const rejected = await authedFetch(
+        h,
         `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(failed.id)}&surfaceId=${encodeURIComponent(failed.surfaceId)}`,
       );
       expect(rejected.status).toBe(503);
@@ -1122,7 +1135,8 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
         viewers: 0,
         captureActive: false,
       });
-      expect((await fetch(
+      expect((await authedFetch(
+        h,
         `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
       )).status).toBe(200);
       const shot = await h.svc.screens.act(
@@ -1456,7 +1470,8 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       });
       expect(fixture.starts.filter((start) => start.surfaceId === owner.surfaceId)).toHaveLength(1);
       expect(screenGenerations(fixture, owner.surfaceId)).toEqual([computerGeneration(fixture)]);
-      expect((await fetch(
+      expect((await authedFetch(
+        h,
         `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
       )).status).toBe(200);
       const after = await h.svc.screens.act(

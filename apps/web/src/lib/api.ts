@@ -1,5 +1,6 @@
 import { ApiClient, randomUuid } from "@omarchy-bot/api-client";
 import { isDeviceId } from "@omarchy-bot/domain";
+import { deviceToken } from "./deviceToken.ts";
 export { randomUuid };
 
 /**
@@ -21,7 +22,12 @@ function localSidecarDeviceId(): string | undefined {
  * The browser talks to the daemon it was served from — no hardcoded origin.
  * In dev the Vite proxy forwards /api to 127.0.0.1:7321.
  */
-export const api = new ApiClient({ baseUrl: "", localSidecarDeviceId: localSidecarDeviceId() });
+export const api = new ApiClient({
+  baseUrl: "",
+  localSidecarDeviceId: localSidecarDeviceId(),
+  // Read at request time: pairing happens after this module is loaded.
+  deviceToken: deviceToken,
+});
 
 export function trimSendText(text: string): string {
   return text.replace(/\s+$/, "");

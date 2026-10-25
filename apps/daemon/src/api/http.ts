@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { z } from "zod";
+import { z } from "zod";
 import type { Config } from "../bootstrap/config.ts";
 import type { EventLog } from "../modules/events/eventLog.ts";
 import type { AgentsRegistry } from "../modules/agents/registry.ts";
@@ -28,6 +28,7 @@ import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import { handlePluginRequest } from "./pluginRoutes.ts";
 import type { PluginsService } from "../modules/plugins/plugins.ts";
 import type { DevicePort, SidecarBroker } from "../modules/devices/sidecarBroker.ts";
+import type { PairingService } from "../modules/pairing/pairing.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -56,6 +57,9 @@ export interface DaemonServices {
   screens: BotScreenManager;
   projections: ScreenProjectionService;
   devices: SidecarBroker;
+  pairing: PairingService;
+  /** Mode-0600 Service Host secret. Required to mint pairing codes; never logged. */
+  pairingHostSecret: string;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
   supervisor: Supervisor;
 }
@@ -82,7 +86,20 @@ interface DeviceWsData {
   deviceId?: string;
 }
 
-type WsData = EventsWsData | ProjectionWsData | DeviceWsData;
+type WsData = (EventsWsData | ProjectionWsData | DeviceWsData) & { pairedDeviceId: string | undefined };
+
+/**
+ * Device token from `Authorization: Bearer` or `?access_token=`; the header wins
+ * when it parses. A malformed header falls through to the query.
+ */
+function presentedToken(req: Request, url: URL): string | null {
+  const header = req.headers.get("authorization");
+  if (header !== null) {
+    const match = /^Bearer (\S+)$/i.exec(header);
+    if (match !== null) return match[1]!;
+  }
+  return url.searchParams.get("access_token");
+}
 
 /** Parse a JSON body with zod; 400 with the first issue on failure. */
 async function parseBody<T>(req: Request, schema: z.ZodType<T>): Promise<T> {
@@ -100,24 +117,86 @@ function notFound(message: string): Response {
   return json({ error: message }, 404);
 }
 
+const isLoopbackAddress = (address: string): boolean =>
+  address === "::1" || address === "127.0.0.1" || address.startsWith("127.") || address.startsWith("::ffff:127.");
+
+const PairingCodeBody = z.object({ name: z.string().trim().min(1).max(80) });
+const PairingExchangeBody = z.object({
+  code: z.string().trim().min(1),
+  name: z.string().trim().min(1).max(80).optional(),
+});
+
 /**
- * REST + WS listener. Loopback-only by default; non-loopback binding is an
- * explicit deployment choice because the control API is unauthenticated.
+ * REST + WS listener. Every route and socket requires a Paired Device token;
+ * loopback is not exempt (ADR 0014).
  */
 export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; port: number } {
+  // Only what Bun.serve needs from a socket: revoke closes these directly.
+  const pairedSockets = new Map<string, Set<{ close(code?: number, reason?: string): void }>>();
+
+  /** The Service Host is the loopback peer; a null address is only trusted on a loopback bind. */
+  const fromServiceHost = (req: Request): boolean => {
+    const address = server.requestIP(req)?.address;
+    if (address === undefined) return svc.cfg.host === "127.0.0.1" || svc.cfg.host === "::1" || svc.cfg.host === "localhost";
+    return isLoopbackAddress(address);
+  };
+
+
   const route = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const pathname = url.pathname;
 
+    // Gate first: no Bot, Thread, or host data, and no upgrade, before a token is proven.
+    // Public: health, the pairing exchange, and the provider's browser redirect (its state is single-use).
+    // Code issue needs the host secret or an already-paired device.
+    let pairedDeviceId: string | undefined;
+    const pairingExchange = pathname === "/api/pairing/exchange" && req.method === "POST";
+    const oauthCallback = pathname === "/api/plugins/oauth/callback" && req.method === "GET";
+    if (pathname.startsWith("/api/") && !(pathname === "/api/health" && req.method === "GET") && !pairingExchange && !oauthCallback) {
+      const device = svc.pairing.authenticate(presentedToken(req, url));
+      if (device === null && !(pathname === "/api/pairing/codes" && req.method === "POST")) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      if (device !== null) pairedDeviceId = device.id;
+    }
+
+    if (pathname === "/api/pairing/codes" && req.method === "POST") {
+      const hostAuthorized = fromServiceHost(req) && svc.pairing.hostSecretMatches(presentedToken(req, url), svc.pairingHostSecret);
+      if (pairedDeviceId === undefined && !hostAuthorized) return json({ error: "unauthorized" }, 401);
+      const body = await parseBody(req, PairingCodeBody);
+      return json(svc.pairing.issueCode(body.name));
+    }
+
+    if (pathname === "/api/pairing/exchange" && req.method === "POST") {
+      const body = await parseBody(req, PairingExchangeBody);
+      const paired = svc.pairing.exchange(body.code, body.name);
+      return paired === null ? json({ error: "unauthorized" }, 401) : json(paired, 201);
+    }
+
+    if (pathname === "/api/devices/paired" && req.method === "GET") return json({ devices: svc.pairing.list() });
+
+    const pairedRevoke = pathname.match(/^\/api\/devices\/paired\/([\w-]+)\/revoke$/);
+    if (pairedRevoke && req.method === "POST") {
+      const id = pairedRevoke[1]!;
+      if (!svc.pairing.revoke(id)) return notFound(`unknown paired device ${id}`);
+      for (const socket of pairedSockets.get(id) ?? []) socket.close(1008, "revoked");
+      pairedSockets.delete(id);
+      return new Response(null, { status: 204 });
+    }
+
     if (pathname === "/api/events") {
-      const upgraded = server.upgrade(req, { data: { kind: "events", svc } satisfies EventsWsData });
+      const upgraded = server.upgrade(req, {
+        data: { kind: "events", svc, pairedDeviceId } satisfies WsData,
+      });
       if (upgraded) return undefined as unknown as Response;
       return json({ error: "expected websocket upgrade" }, 426);
     }
 
     if (pathname === "/api/devices") {
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-        const upgraded = server.upgrade(req, { data: { kind: "device", svc } satisfies DeviceWsData });
+        const upgraded = server.upgrade(req, {
+          data: { kind: "device", svc, pairedDeviceId } satisfies WsData,
+        });
         if (upgraded) return undefined as unknown as Response;
         return json({ error: "expected websocket upgrade" }, 426);
       }
@@ -146,7 +225,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
         return json({ error: "Screen Projection socket is not available in its current state" }, 409);
       }
       const upgraded = server.upgrade(req, {
-        data: { kind: "projection", svc, reservation } satisfies ProjectionWsData,
+        data: { kind: "projection", svc, reservation, pairedDeviceId } satisfies WsData,
       });
       if (upgraded) return undefined as unknown as Response;
       svc.projections.cancelSocketReservation(reservation);
@@ -276,12 +355,27 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     websocket: {
       open(ws) {
         const data = ws.data;
+        // A revoke can land between the upgrade gate and this callback.
+        if (data.pairedDeviceId !== undefined && !data.svc.pairing.isActive(data.pairedDeviceId)) {
+          ws.close(1008, "revoked");
+          return;
+        }
+        if (data.pairedDeviceId !== undefined) {
+          const registered = pairedSockets.get(data.pairedDeviceId);
+          if (registered === undefined) pairedSockets.set(data.pairedDeviceId, new Set([ws]));
+          else registered.add(ws);
+        }
         if (data.kind === "projection" && !data.svc.projections.openSocket(data.reservation, ws)) {
           ws.close(1008, "Screen Projection socket is no longer valid");
         }
       },
       message(ws, raw) {
         const data = ws.data;
+        if (data.pairedDeviceId !== undefined && !data.svc.pairing.isActive(data.pairedDeviceId)) {
+          if (data.kind === "events") data.sub?.();
+          ws.close(1008, "revoked");
+          return;
+        }
         if (data.kind === "projection") {
           const message = typeof raw === "string"
             ? raw
@@ -341,6 +435,11 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       },
       close(ws) {
         const data = ws.data;
+        if (data.pairedDeviceId !== undefined) {
+          const registered = pairedSockets.get(data.pairedDeviceId);
+          registered?.delete(ws);
+          if (registered?.size === 0) pairedSockets.delete(data.pairedDeviceId);
+        }
         if (data.kind === "events") data.sub?.();
         else if (data.kind === "device" && data.port !== undefined) data.svc.devices.disconnect(data.port, data.deviceId);
         else if (data.kind === "projection") data.svc.projections.socketClosed(data.reservation);

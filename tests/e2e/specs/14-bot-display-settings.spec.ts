@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "../fixtures.ts";
 
 async function createBot(page: Page, name: string): Promise<string> {
   await page.goto("/");

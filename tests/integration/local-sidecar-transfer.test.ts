@@ -9,6 +9,12 @@ import { LocalSidecarFixture } from "./helpers/localSidecar.ts";
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const sidecarMain = path.resolve(import.meta.dir, "../../apps/sidecar/src/main.ts");
 
+/** Paired-device token; the Harness field may not be typed yet, so narrow at runtime. */
+const pairedToken = (h: Harness): string => {
+  if (!("token" in h) || typeof h.token !== "string") throw new Error("harness did not pair");
+  return h.token;
+};
+
 describe("transfer files between Sidecar and Shared Workspace", () => {
   let h: Harness | undefined;
   const sidecars: LocalSidecarFixture[] = [];
@@ -26,7 +32,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
   });
 
   async function connect(): Promise<LocalSidecarFixture> {
-    const sidecar = await LocalSidecarFixture.connect(h!.port);
+    const sidecar = await LocalSidecarFixture.connect(h!.port, h!.token);
     sidecars.push(sidecar);
     return sidecar;
   }
@@ -120,6 +126,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
         ...process.env,
         OMARCHY_BOT_DAEMON_PORT: String(h.port),
         OMARCHY_BOT_DEVICE_ID: DEVICE_A,
+        OMARCHY_BOT_DEVICE_TOKEN: pairedToken(h),
         OMARCHY_BOT_HOSTNAME: "laptop",
         OMARCHY_BOT_SIDECAR_ROOT: root,
       },

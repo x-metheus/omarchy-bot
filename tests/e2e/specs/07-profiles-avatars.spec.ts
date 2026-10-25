@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "../fixtures.ts";
 
 async function createBot(page: Page, name: string): Promise<string> {
   await page.goto("/");
@@ -131,7 +131,7 @@ test.describe("Bot profiles and avatars", () => {
 
     await page.getByLabel("Choose an avatar image").setInputFiles({ name: "avatar.png", mimeType: "image/png", buffer: onePixelPng });
     await expect
-      .poll(() => botSettings.getByRole("img", { name: "Renamed Profile Bot" }).locator("img").getAttribute("src"))
+      .poll(async () => new URL((await profileAvatar.getAttribute("src")) ?? "http://invalid/", page.url()).pathname)
       .toBe(`/api/bots/${botId}/avatar`);
   });
 
@@ -388,7 +388,7 @@ test.describe("Bot profiles and avatars", () => {
     await composer.press("Enter");
     const workingAvatar = page.getByTestId("working-avatar");
     const uploadedAvatar = workingAvatar.getByTestId("avatar-upload");
-    await expect(uploadedAvatar.locator("img")).toHaveAttribute("src", `/api/bots/${botId}/avatar`);
+    await expect.poll(async () => new URL((await uploadedAvatar.locator("img").getAttribute("src")) ?? "http://invalid/", page.url()).pathname).toBe(`/api/bots/${botId}/avatar`);
     await expect(uploadedAvatar).not.toHaveCSS("animation-name", "none");
 
     await page.emulateMedia({ reducedMotion: "reduce" });

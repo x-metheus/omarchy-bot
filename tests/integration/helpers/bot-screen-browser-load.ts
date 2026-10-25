@@ -352,11 +352,16 @@ export class BrowserSurfaceSession {
     lanEndpoint: string,
     owner: BrowserOwner,
     failureLookup?: ProjectionFailureLookup,
+    token?: string,
   ): Promise<BrowserSurfaceSession> {
     const context = await browser.newContext({
       viewport: { width: 1920, height: 1080 },
       ignoreHTTPSErrors: true,
     });
+    if (token) {
+      // The web client reads its device token from localStorage; seed it before the app boots.
+      await context.addInitScript((value) => localStorage.setItem("omarchy-bot.device-token", value), token);
+    }
     const page = await context.newPage();
     await page.addInitScript(installBrowserInstrumentation);
     await page.goto(`${lanEndpoint}/?bot=${encodeURIComponent(owner.botId)}`, { waitUntil: "domcontentloaded" });
@@ -707,6 +712,7 @@ export class FinalWebBrowserHarness {
     browserName: string,
     tlsRoot: string,
     private readonly failureLookup?: ProjectionFailureLookup,
+    private readonly token?: string,
   ) {
     this.#browser = browser;
     this.#proxy = proxy;
@@ -719,6 +725,7 @@ export class FinalWebBrowserHarness {
   static async start(
     upstreamBaseUrl: string,
     failureLookup?: ProjectionFailureLookup,
+    token?: string,
   ): Promise<FinalWebBrowserHarness> {
     const selected = selectNonLoopbackLanAddress(os.networkInterfaces(), process.env.OMARCHY_BOT_LOAD_LAN_INTERFACE);
     const tlsRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-load-tls-"));
@@ -781,6 +788,7 @@ export class FinalWebBrowserHarness {
         path.basename(executablePath),
         tlsRoot,
         failureLookup,
+        token,
       );
     } catch (error) {
       proxy.stop(true);
@@ -790,7 +798,7 @@ export class FinalWebBrowserHarness {
   }
 
   open(owner: BrowserOwner): Promise<BrowserSurfaceSession> {
-    return BrowserSurfaceSession.open(this.#browser, this.lanEndpoint, owner, this.failureLookup);
+    return BrowserSurfaceSession.open(this.#browser, this.lanEndpoint, owner, this.failureLookup, this.token);
   }
 
   async close(): Promise<void> {

@@ -69,13 +69,14 @@ function projectionEndpoint(baseUrl: string, owner: ProjectionOwner): URL {
   return endpoint;
 }
 
-function websocketUrl(value: string, baseUrl: string): string {
+function websocketUrl(value: string, baseUrl: string, token?: string): string {
   const url = new URL(value, baseUrl);
   if (url.protocol === "http:") url.protocol = "ws:";
   else if (url.protocol === "https:") url.protocol = "wss:";
   else if (url.protocol !== "ws:" && url.protocol !== "wss:") {
     throw new Error(`unsupported projection WebSocket protocol ${url.protocol}`);
   }
+  if (token) url.searchParams.set("access_token", token);
   return url.href;
 }
 
@@ -271,6 +272,7 @@ export class ProjectionClient {
     readonly session: ProjectionSession,
     endpoint: URL,
     controlSocket: WebSocket,
+    readonly token?: string,
   ) {
     this.endpoint = endpoint;
     this.controlSocket = controlSocket;
@@ -279,11 +281,16 @@ export class ProjectionClient {
     });
   }
 
-  static async connect(baseUrl: string, owner: ProjectionOwner, label: string = owner.surfaceId): Promise<ProjectionClient> {
+  static async connect(
+    baseUrl: string,
+    owner: ProjectionOwner,
+    label: string = owner.surfaceId,
+    token?: string,
+  ): Promise<ProjectionClient> {
     const endpoint = projectionEndpoint(baseUrl, owner);
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify({ version: PROJECTION_VERSION }),
     });
     if (response.status !== 201) {
@@ -298,9 +305,9 @@ export class ProjectionClient {
       || typeof session.rfbUrl !== "string"
     ) throw new Error(`projection session creation returned an invalid v3 descriptor for ${label}`);
 
-    const controlSocket = new WebSocket(websocketUrl(session.controlUrl, endpoint.href));
+    const controlSocket = new WebSocket(websocketUrl(session.controlUrl, endpoint.href, token));
     controlSocket.binaryType = "arraybuffer";
-    const client = new ProjectionClient(owner, session, endpoint, controlSocket);
+    const client = new ProjectionClient(owner, session, endpoint, controlSocket, token);
     await waitForOpen(controlSocket, `projection control WebSocket for ${label}`);
     await waitUntil(
       () => client.#mode,
@@ -334,7 +341,7 @@ export class ProjectionClient {
   async openRfb(): Promise<RfbViewProbe> {
     if (this.#mode !== "expanded") throw new Error("projection must acknowledge expanded mode before RFB opens");
     if (this.rfb !== undefined && this.rfb.socket.readyState === WebSocket.OPEN) return this.rfb;
-    this.rfb = await RfbViewProbe.open(websocketUrl(this.session.rfbUrl, this.endpoint.href));
+    this.rfb = await RfbViewProbe.open(websocketUrl(this.session.rfbUrl, this.endpoint.href, this.token));
     return this.rfb;
   }
 
@@ -386,7 +393,7 @@ export class ProjectionClient {
     try {
       response = await fetch(this.endpoint, {
         method: "DELETE",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) },
         body: JSON.stringify({ sessionId: this.session.sessionId }),
       });
     } finally {

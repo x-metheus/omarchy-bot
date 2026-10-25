@@ -442,7 +442,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       `observe/list/focus/click/scroll/chord passed; sibling title preserved under the shared seat; exact browser and terminal Unicode=${UNICODE_SAMPLE}`,
     ));
 
-    const viewer = await ProjectionClient.connect(harness.baseUrl, owners[0]!, "sway-conformance-viewer");
+    const viewer = await ProjectionClient.connect(harness.baseUrl, owners[0]!, "sway-conformance-viewer", harness.token);
     let rfbReady = false;
     try {
       expect(viewer.session.security).toEqual({ authentication: "none", httpsRequired: false });
@@ -517,7 +517,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
         rfbDidNotMutate && brokerMutated ? undefined : "RFB view-only or Broker mutation was not proven",
       ));
 
-      const secondViewer = await ProjectionClient.connect(harness.baseUrl, owners[0]!, "sway-conformance-second-viewer");
+      const secondViewer = await ProjectionClient.connect(harness.baseUrl, owners[0]!, "sway-conformance-second-viewer", harness.token);
       try {
         await secondViewer.setMode("expanded");
         const secondReady = secondViewer.rfb?.serverInit !== undefined;
@@ -564,7 +564,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     }
 
     try {
-      const switchViewer = await ProjectionClient.connect(harness.baseUrl, owners[1]!, "sway-conformance-switch-b");
+      const switchViewer = await ProjectionClient.connect(harness.baseUrl, owners[1]!, "sway-conformance-switch-b", harness.token);
       try {
         await switchViewer.setMode("expanded");
         const switchedToB = switchViewer.rfb?.serverInit !== undefined;
@@ -583,7 +583,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     }
 
     if (rfbReady) {
-      const fallback = await ProjectionClient.connect(harness.baseUrl, owners[0]!, "sway-conformance-fallback");
+      const fallback = await ProjectionClient.connect(harness.baseUrl, owners[0]!, "sway-conformance-fallback", harness.token);
       try {
         const failed = fallback.waitForFailure().catch((error: Error) => {
           limitations.push(`projection-failure was not observed: ${error.message}`);
@@ -625,7 +625,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     const switchCosts = await measureSwayCosts([owners[0]!, owners[1]!], RESOURCE_WINDOW_MS, async () => {
       for (let index = 0; index < 4; index += 1) {
         const owner = owners[index % 2]!;
-        const client = await ProjectionClient.connect(harness!.baseUrl, owner, `sway-conformance-switch-${index}`);
+        const client = await ProjectionClient.connect(harness!.baseUrl, owner, `sway-conformance-switch-${index}`, harness!.token);
         const startedAt = performance.now();
         await client.setMode("preview");
         await client.waitForPreviewFrame();
@@ -652,6 +652,10 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     const webBrowser = await chromium.launch({ headless: true });
     try {
       const page = await webBrowser.newPage();
+      await page.addInitScript(
+        (token) => localStorage.setItem("omarchy-bot.device-token", token),
+        harness.token,
+      );
       await page.goto(`${harness.baseUrl}/?bot=${owners[0]!.botId}`);
       await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
       await page.getByRole("button", { name: "Open Web Control", exact: true }).waitFor();
@@ -705,7 +709,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       const state = await browserFixtureState(owners[1]!, "BOT-B");
       return state?.value === unsavedValue ? state : undefined;
     }, 8_000, "unsaved browser field");
-    const detachedViewer = await ProjectionClient.connect(harness.baseUrl, owners[1]!, "unsaved-before-detach");
+    const detachedViewer = await ProjectionClient.connect(harness.baseUrl, owners[1]!, "unsaved-before-detach", harness.token);
     await detachedViewer.setMode("expanded");
     const retainedGeneration = detachedViewer.session.runtimeGeneration;
     await detachedViewer.close();
@@ -713,7 +717,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       const state = await browserFixtureState(owners[1]!, "BOT-B");
       return state !== undefined && state.counter > beforeDetach.counter + 1 ? state : undefined;
     }, 8_000, "background counter while all viewers are closed");
-    const reopenedViewer = await ProjectionClient.connect(harness.baseUrl, owners[1]!, "unsaved-after-reopen");
+    const reopenedViewer = await ProjectionClient.connect(harness.baseUrl, owners[1]!, "unsaved-after-reopen", harness.token);
     await reopenedViewer.setMode("preview");
     await reopenedViewer.waitForPreviewFrame();
     const afterReopen = await browserFixtureState(owners[1]!, "BOT-B");

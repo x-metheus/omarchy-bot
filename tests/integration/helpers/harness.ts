@@ -2,7 +2,7 @@
  * Daemon harness for integration tests: boots the real daemon in-process with
  * an isolated data dir, random port, and the scripted fake workers.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
@@ -13,6 +13,8 @@ import type { MessageDto } from "../../../packages/protocol/src/index.ts";
 export interface Harness {
   baseUrl: string;
   port: number;
+  /** Paired-device token; empty only when the pairing routes are not installed. */
+  token: string;
   home: string;
   svc: DaemonServices;
   stop: () => Promise<void>;
@@ -30,6 +32,54 @@ export interface HarnessOptions {
   waitForAgentReady?: boolean;
   /** Worker tree override; defaults to the shared fake workers. */
   workersDir?: string;
+}
+
+/**
+ * Issue a pairing code on the loopback Service Host and exchange it for a
+ * device token. The Service Host secret is mode 0600 in the state dir.
+ * Returns "" when the pairing routes are not installed yet, so the harness
+ * still boots against a daemon without the gate.
+ */
+export async function pairForToken(baseUrl: string, stateDir: string, name = "test"): Promise<string> {
+  const secret = readFileSync(path.join(stateDir, "pairing-host-secret"), "utf8").trim();
+  const issued = await fetch(`${baseUrl}/api/pairing/codes`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+    body: JSON.stringify({ name }),
+  });
+  if (issued.status === 404) return "";
+  if (issued.status !== 200 && issued.status !== 201) {
+    throw new Error(`pairing code issue -> ${issued.status}: ${(await issued.text()).slice(0, 300)}`);
+  }
+  const issuedBody: unknown = await issued.json();
+  if (typeof issuedBody !== "object" || issuedBody === null || !("code" in issuedBody) || typeof issuedBody.code !== "string") {
+    throw new Error("pairing code issue returned no code");
+  }
+  const exchanged = await fetch(`${baseUrl}/api/pairing/exchange`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code: issuedBody.code, name }),
+  });
+  if (exchanged.status !== 201) {
+    throw new Error(`pairing exchange -> ${exchanged.status}: ${(await exchanged.text()).slice(0, 300)}`);
+  }
+  const exchangedBody: unknown = await exchanged.json();
+  if (typeof exchangedBody !== "object" || exchangedBody === null || !("token" in exchangedBody) || typeof exchangedBody.token !== "string") {
+    throw new Error("pairing exchange returned no token");
+  }
+  return exchangedBody.token;
+}
+
+/** Authorization header for a harness; empty when no token was issued. */
+export function authHeaders(h: Harness): Record<string, string> {
+  return h.token ? { authorization: `Bearer ${h.token}` } : {};
+}
+
+/** Raw fetch against the daemon that carries the harness device token. */
+export function authedFetch(h: Harness, input: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (h.token && !headers.has("authorization")) headers.set("authorization", `Bearer ${h.token}`);
+  return fetch(input, { ...init, headers });
 }
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
@@ -72,16 +122,18 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   const base: Harness = {
     baseUrl: `http://127.0.0.1:${port}`,
     port,
+    token: "",
     home,
     svc,
     stop,
     disconnectForRestart,
   };
+  base.token = await pairForToken(base.baseUrl, state);
   if (options.waitForAgentReady !== false) {
     // Wait until the fake pi agent finishes its probe and reports ready.
     const deadline = Date.now() + 20_000;
     for (;;) {
-      const agents = (await fetch(`${base.baseUrl}/api/agents`).then((r) => r.json())) as { id: string; status: string }[];
+      const agents = (await fetch(`${base.baseUrl}/api/agents`, { headers: authHeaders(base) }).then((r) => r.json())) as { id: string; status: string }[];
       const pi = agents.find((a) => a.id === "pi");
       if (pi?.status === "ready") break;
       if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
@@ -95,7 +147,7 @@ export async function api<T>(h: Harness, method: string, p: string, body?: unkno
   const res = await fetch(`${h.baseUrl}${p}`, {
     method,
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID() },
+    headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID(), ...authHeaders(h) },
   });
   if (!res.ok && res.status !== 409 && res.status !== 503) {
     const text = (await res.text()).slice(0, 300);
@@ -112,7 +164,7 @@ export async function apiStatus(h: Harness, method: string, p: string, body?: un
   const res = await fetch(`${h.baseUrl}${p}`, {
     method,
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID() },
+    headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID(), ...authHeaders(h) },
   });
   const text = await res.text();
   let bodyJson: unknown = text;

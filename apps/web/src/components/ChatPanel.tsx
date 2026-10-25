@@ -44,6 +44,7 @@ import type {
 import { isTerminalTurn } from "@omarchy-bot/domain";
 import { api, apiErrorMessage, randomUuid, trimSendText } from "../lib/api.ts";
 import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
+import { withDeviceToken } from "../lib/deviceToken.ts";
 import { insertDictationTranscript } from "../lib/dictation.ts";
 import {
   thinkingBoundaryAnnouncements,
@@ -291,8 +292,10 @@ function attachmentErrorMessage(error: unknown, fileName: string): string {
 }
 
 function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentDto; previewUrl?: string }): JSX.Element {
+  // The daemon route needs the token; object URLs used for staged previews do not.
+  const downloadUrl = attachment.url === undefined ? undefined : withDeviceToken(attachment.url);
   const imageUrl = attachment.mediaType.startsWith("image/")
-    ? previewUrl ?? attachment.url
+    ? previewUrl ?? downloadUrl
     : undefined;
   const metadata = `${attachment.mediaType} · ${formatAttachmentSize(attachment.size)}`;
   if (imageUrl !== undefined) {
@@ -313,8 +316,8 @@ function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentD
       label={attachment.name}
       description={metadata}
       density="compact"
-      {...(attachment.url !== undefined ? { href: attachment.url } : {})}
-      data-testid={attachment.url !== undefined ? "message-file-attachment" : "staged-file-row"}
+      {...(downloadUrl !== undefined ? { href: downloadUrl } : {})}
+      data-testid={downloadUrl !== undefined ? "message-file-attachment" : "staged-file-row"}
     />
   );
 }

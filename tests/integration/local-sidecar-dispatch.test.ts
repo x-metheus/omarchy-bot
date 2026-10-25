@@ -16,7 +16,7 @@ describe("local dispatch once per tool call", () => {
 
   test("a second local tool.request for one tool call creates no second Sidecar job", async () => {
     h = await startDaemon();
-    const sidecar = await LocalSidecarFixture.connect(h.port);
+    const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
     await sidecar.register({
       deviceId: DEVICE_A,
@@ -77,7 +77,7 @@ describe("local dispatch Turn identity", () => {
 
   test("forged bot or turn identity is rejected before any extra Sidecar job", async () => {
     h = await startDaemon();
-    const sidecar = await LocalSidecarFixture.connect(h.port);
+    const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
     await sidecar.register({
       deviceId: DEVICE_A,
