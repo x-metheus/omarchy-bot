@@ -471,6 +471,8 @@ export function explicitEnvironment(input: {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
+  // Desktop-entry lookup must see the same data directories the Service does.
+  if (process.env.XDG_DATA_DIRS !== undefined) env.XDG_DATA_DIRS = process.env.XDG_DATA_DIRS;
   return env;
 }
 

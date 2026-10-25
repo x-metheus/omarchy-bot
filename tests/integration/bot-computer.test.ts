@@ -15,6 +15,7 @@ interface FakeComputerBins {
   capture: string;
   desktop: string;
   dbusDaemon: string;
+  dbusArgv: string;
 }
 
 interface ComputerState {
@@ -66,7 +67,10 @@ await serveFakeSwayIpc({
   controlDir: ${JSON.stringify(controlDir)},
 });
 `);
+  const dbusArgv = path.join(directory, "dbus-argv");
   const dbusDaemon = executable(directory, "dbus-daemon", `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(dbusArgv)}, process.argv.slice(2).join("\\n") + "\\n");
 const address = process.argv.find((argument) => argument.startsWith("--address=")) ?? "";
 const socketPath = address.slice("--address=".length).replace("unix:path=", "");
 Bun.listen({ unix: socketPath, socket: { data() {} } });
@@ -81,6 +85,7 @@ await new Promise(() => {});
     capture: executable(directory, "capture", "#!/bin/sh\nwhile :; do sleep 60; done\n"),
     desktop: executable(directory, "bot-desktop", "#!/bin/sh\nprintf 'READY %s %s\\n' \"$1\" \"$2\"\nwhile :; do sleep 60; done\n"),
     dbusDaemon,
+    dbusArgv,
   };
 }
 
@@ -160,6 +165,36 @@ test("ensure starts one computer and a second ensure reuses the same generation"
   expect(readFileSync(bin.swayStarts, "utf8").trim().split("\n")).toHaveLength(1);
 
   await runtime.stop();
+});
+
+test("the session bus runs from a private config with no host service dirs", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-"));
+  const bin = installFakeComputerBins(path.join(root, "bin"));
+  const runtime = new BotComputerRuntime(computerOptions(bin));
+
+  const computer = await runtime.ensure();
+  const argv = readFileSync(bin.dbusArgv, "utf8").trim().split("\n");
+  try {
+    expect(argv).not.toContain("--session");
+    const configFlag = argv.find((argument) => argument.startsWith("--config-file="));
+    expect(configFlag).toBeDefined();
+    const configPath = (configFlag ?? "").slice("--config-file=".length);
+    expect(path.resolve(configPath).startsWith(`${path.resolve(computer.runtimeDir)}${path.sep}`)).toBeTrue();
+    expect(existsSync(configPath)).toBeTrue();
+    const config = readFileSync(configPath, "utf8");
+    expect(config).not.toContain("servicedir");
+    expect(config).not.toContain("standard_session_servicedirs");
+    expect(config).not.toContain("<include");
+    expect(config).not.toContain("/usr/share/dbus-1");
+    expect(config).toContain("<type>session</type>");
+    expect(config).toContain("<auth>EXTERNAL</auth>");
+    expect(config).toContain('<allow own="*"/>');
+    expect(config).toContain(`<listen>unix:path=${path.join(computer.runtimeDir, "bus")}</listen>`);
+    expect(computer.childEnv.NO_AT_BRIDGE).toBe("1");
+    expect(computer.childEnv.GTK_A11Y).toBe("none");
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("a fresh runtime reattaches the live computer at the same generation and profile", async () => {

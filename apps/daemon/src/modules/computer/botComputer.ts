@@ -41,6 +41,10 @@ import {
   type SwayRuntimeBinaries,
   type SwayRuntimeSupply,
 } from "./swayRuntimeSupply.ts";
+import {
+  PortableBotComputerAssets,
+  type BotComputerAssetSupply,
+} from "./botComputerAssets.ts";
 
 type SwayProcess = DetachedProcess;
 export type ApplicationProcess = OwnedChild;
@@ -62,6 +66,8 @@ export interface BotComputerOptions {
   wayvncBin?: string;
   dbusDaemonBin?: string;
   runtimeSupply?: SwayRuntimeSupply;
+  /** Portable browser and font supply; defaults to the Bot Computer profile. */
+  assetSupply?: BotComputerAssetSupply;
   capacity?: number;
 }
 
@@ -102,6 +108,8 @@ export interface BotComputer {
   surfaceIds: Set<SurfaceId>;
   applicationProcesses: Set<ApplicationProcess>;
   applicationSequence: number;
+  /** Lazily supplies the profile fonts and exports them to graphical children. */
+  ensureFonts(): Promise<void>;
   running(): boolean;
   exited(): Promise<number>;
   busExited(): Promise<number>;
@@ -183,6 +191,51 @@ function writeSwayConfig(configHome: string): string {
   return configPath;
 }
 
+/**
+ * A private session bus config: the standard session policy and limits, but no
+ * service dirs, so the bus can never activate host session services.
+ */
+function writeSessionBusConfig(runtimeDir: string): string {
+  const configPath = path.join(runtimeDir, "session-bus.conf");
+  writeFileSync(
+    configPath,
+    [
+      '<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"',
+      ' "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">',
+      "<busconfig>",
+      "  <type>session</type>",
+      "  <keep_umask/>",
+      // dbus-daemon rejects a config without a listen element; --address overrides it.
+      `  <listen>unix:path=${path.join(runtimeDir, "bus")}</listen>`,
+      "  <auth>EXTERNAL</auth>",
+      '  <policy context="default">',
+      '    <allow send_destination="*" eavesdrop="true"/>',
+      '    <allow eavesdrop="true"/>',
+      '    <allow own="*"/>',
+      "  </policy>",
+      '  <limit name="max_incoming_bytes">1000000000</limit>',
+      '  <limit name="max_incoming_unix_fds">250000000</limit>',
+      '  <limit name="max_outgoing_bytes">1000000000</limit>',
+      '  <limit name="max_outgoing_unix_fds">250000000</limit>',
+      '  <limit name="max_message_size">1000000000</limit>',
+      '  <limit name="service_start_timeout">120000</limit>',
+      '  <limit name="auth_timeout">240000</limit>',
+      '  <limit name="pending_fd_timeout">150000</limit>',
+      '  <limit name="max_completed_connections">100000</limit>',
+      '  <limit name="max_incomplete_connections">10000</limit>',
+      '  <limit name="max_connections_per_user">100000</limit>',
+      '  <limit name="max_pending_service_starts">10000</limit>',
+      '  <limit name="max_names_per_connection">50000</limit>',
+      '  <limit name="max_match_rules_per_connection">50000</limit>',
+      '  <limit name="max_replies_per_connection">50000</limit>',
+      "</busconfig>",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  return configPath;
+}
+
 function sessionEnvironment(input: {
   runtimeDir: string;
   waylandDisplay: string;
@@ -203,6 +256,9 @@ function sessionEnvironment(input: {
     ...(input.x11Display === undefined || input.x11Display === ""
       ? {}
       : { DISPLAY: input.x11Display }),
+    // Keep AT-SPI and GTK accessibility from starting host session services.
+    NO_AT_BRIDGE: "1",
+    GTK_A11Y: "none",
   };
 }
 
@@ -261,9 +317,15 @@ export class BotComputerRuntime {
   #units: ApplicationUnits;
   #capacity: number;
   #computer: LiveComputer | undefined;
+  #assets: BotComputerAssetSupply;
+  #fontConfigFile: string | undefined;
 
   constructor(private readonly options: BotComputerOptions) {
     this.#units = new ApplicationUnits(options.hostRuntimeDir);
+    this.#assets = options.assetSupply
+      ?? new PortableBotComputerAssets({
+        profileDir: path.join(options.profileRoot, "computer"),
+      });
     this.#capacity = options.capacity ?? 8;
     if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {
       throw new Error("Bot Computer output capacity must be a positive integer");
@@ -361,6 +423,7 @@ export class BotComputerRuntime {
       surfaceIds: new Set(),
       applicationProcesses: new Set(),
       applicationSequence: 0,
+      ensureFonts: () => this.#ensureFonts(computer),
       running: () => this.#running(computer),
       exited: () => this.#exited(computer),
       busExited: () => this.#busExited(computer),
@@ -457,6 +520,7 @@ export class BotComputerRuntime {
       const x11Display = tools.bundleRoot === undefined
         ? recordedX11Display(runtimeDir)
         : await awaitX11Display(runtimeDir, swayProcess.exited);
+      const sessionBusConfig = writeSessionBusConfig(runtimeDir);
       const childEnv = bundleEnvironment(
         sessionEnvironment({
           runtimeDir,
@@ -476,7 +540,7 @@ export class BotComputerRuntime {
         argv: [
           ...this.#units.computerCommand(generation, "session-bus", childEnv),
           tools.dbusDaemon,
-          "--session",
+          `--config-file=${sessionBusConfig}`,
           "--nofork",
           "--nopidfile",
           `--address=unix:path=${dbusPath}`,
@@ -518,6 +582,7 @@ export class BotComputerRuntime {
         surfaceIds: new Set(),
         applicationProcesses: new Set(),
         applicationSequence: 0,
+        ensureFonts: () => this.#ensureFonts(computer),
         running: () => this.#running(computer),
         exited: () => this.#exited(computer),
         busExited: () => this.#busExited(computer),
@@ -589,6 +654,13 @@ export class BotComputerRuntime {
       return;
     }
     await terminateOwnedChild({ process });
+  }
+
+  async #ensureFonts(computer: LiveComputer): Promise<void> {
+    const fontConfigFile = this.#fontConfigFile
+      ?? (await this.#assets.ensureFonts()).fontConfigFile;
+    this.#fontConfigFile = fontConfigFile;
+    computer.childEnv.FONTCONFIG_FILE = fontConfigFile;
   }
 
   #running(computer: LiveComputer): boolean {
