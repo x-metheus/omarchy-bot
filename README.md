@@ -16,7 +16,7 @@ Create named Bots, work together in Threads, and see their desktop work in Bot S
 
 ---
 
-Omarchy Bot is an Omarchy plugin for local AI teammates, not a general-purpose Linux application. It integrates with Omarchy's Shell lifecycle, desktop services, application environment, and installed Agents.
+Omarchy Bot's headless Service owns the Bots, Threads, Agents, Shared Workspace, and Bot Computer. Launchers start an installed runtime through one `serve` entry on x86_64 Linux; the existing Omarchy plugin uses that entry after preparing the runtime.
 
 | Work with teammates | Keep the context |
 | :--- | :--- |
@@ -27,7 +27,7 @@ Omarchy Bot is an Omarchy plugin for local AI teammates, not a general-purpose L
 | **Hand work to another Bot** | Durable, asynchronous 1:1 mail creates a target-owned Thread without forwarding the source conversation. |
 
 > [!IMPORTANT]
-> **Current support:** Omarchy on **x86_64**, with **Pi** as the current Agent backend. Other Agents require an adapter and a passing versioned conformance inventory before becoming selectable. Omarchy Bot (Tauri) is planned, not shipped.
+> **Current support:** the Service entry supports **x86_64 Linux**. The current installer is Omarchy's plugin manager; portable Bot Computer bundles and distribution conformance are tracked by the [standalone Linux Service specification](.scratch/standalone-linux-service/spec.md). **Pi** is the current Agent backend. Other Agents require an adapter and a passing versioned conformance inventory before becoming selectable. Omarchy Bot (Tauri) is planned, not shipped.
 
 ## Installation
 
@@ -56,9 +56,24 @@ Startup log:
 ~/.local/state/omarchy-bot/plugin-launch.log
 ```
 
-Set `XDG_STATE_HOME` to relocate the log. No host packages or Omarchy files are changed. Standalone service installation, other Linux distributions, and generic Linux release archives are outside the supported product contract.
+Set `XDG_STATE_HOME` to relocate the plugin log. No host packages or Omarchy files are changed. The installed runtime also supports direct Service startup without Omarchy Shell; see below.
 
 </details>
+
+### Start an installed runtime
+
+From an unpacked runtime, start the Service in the foreground:
+
+```bash
+bash /path/to/runtime/scripts/serve.sh
+```
+
+In a checkout, `bun run serve` calls the same entry. It requires Linux x86_64, Bash, Bun 1.4+, and `flock`; it performs no installation or downloads. Set `OMARCHY_BOT_BUN` to select a Bun executable. The Service logs to stdout/stderr and listens on `127.0.0.1:7321` by default. Existing `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `OMARCHY_BOT_HOST`, and `OMARCHY_BOT_PORT` settings apply.
+
+Without `XDG_RUNTIME_DIR`, the entry creates `/tmp/ob-<uid>` with mode 0700 and exports it for transient sockets and the Bot Computer runtime. The short path leaves room for Linux's Unix-socket pathname limit. A per-user Service lock lives under `/tmp/omarchy-bot-<uid>/`, independent of login sessions and launcher settings. A second launch fails promptly and reports the running Service's PID. The Omarchy plugin queues behind cleanup through the same entry and retains its supervisor lifeline until its installer-only cutover.
+
+`GET /api/health` accepts no token and returns only liveness and the Service version, for example `{"ok":true,"version":"0.1.0"}`. Pairing and remote TLS are separate tickets; keep the current control API on loopback.
+
 
 ## Product model
 
@@ -282,7 +297,7 @@ accounts before presenting these connectors as publicly available.
 | **`computer-use-linux`** | Real desktop control |
 | **Voxtype** | Composer dictation |
 
-Sway is an internal desktop runtime, not a portability layer. On first graphical use, the plugin uses an installed `sway` / `wlr-randr` / `wayvnc` set when available. Otherwise, it downloads pinned Arch packages appropriate to Omarchy, verifies their SHA-256 digests, and prepares them under `OMARCHY_BOT_HOME`. Explicit development overrides remain authoritative.
+The Bot Computer uses private headless Sway. The current runtime supply uses an installed `sway` / `wlr-randr` / `wayvnc` set when available, or downloads checksum-verified pinned Arch packages. The launcher-neutral Service entry does not make that existing runtime supply portable; a self-contained bundle and distribution conformance are separate tickets in the [standalone Linux Service specification](.scratch/standalone-linux-service/spec.md). Explicit development overrides remain authoritative.
 
 ### Useful checks
 
@@ -319,7 +334,7 @@ Mail does not forward the source Thread, Native Session, memory, attachments, or
 | :--- | :--- |
 | Product data, managed attachments, avatar uploads | `~/.local/share/omarchy-bot/` |
 | Persistent runtime state and launch logs | `~/.local/state/omarchy-bot/` |
-| Transient sockets and Voxtype transcript handoff | `$XDG_RUNTIME_DIR`, where appropriate |
+| Transient sockets and Voxtype transcript handoff | `$XDG_RUNTIME_DIR`; `serve` uses private `/tmp/ob-<uid>` when absent |
 | Shared Workspace | User work files, separate from plugin source and conversation data |
 | Native Sessions | Owned by the selected Agent, not erased by Bot deletion |
 

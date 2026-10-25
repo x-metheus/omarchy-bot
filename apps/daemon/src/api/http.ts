@@ -34,6 +34,10 @@ import path from "node:path";
 import { CreateBotBody, PatchBotBody, SendMessageBody } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
 import { AGENT_IDS, type AgentId } from "@omarchy-bot/domain";
+import daemonPackage from "../../package.json" with { type: "json" };
+
+/** Service version reported by the health probe; the daemon manifest is the single source. */
+const DAEMON_VERSION: string = daemonPackage.version;
 
 export interface DaemonServices {
   cfg: Config;
@@ -149,7 +153,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       return json({ error: "expected websocket upgrade" }, 426);
     }
 
-    if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, ts: new Date().toISOString() });
+    if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION });
     const pluginResponse = await handlePluginRequest(req, svc.plugins, pathname);
     if (pluginResponse !== undefined) return pluginResponse;
 

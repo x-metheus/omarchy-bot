@@ -16,6 +16,7 @@ required=(
   package.json
   bun.lock
   node_modules
+  scripts/serve.sh
 )
 for path in "${required[@]}"; do
   if [[ ! -e $root/$path ]]; then
@@ -48,6 +49,7 @@ payload=(
   packages
   workers
   patches
+  scripts/serve.sh
 )
 existing=()
 for path in "${payload[@]}"; do

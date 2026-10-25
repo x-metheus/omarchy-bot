@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "bun run --filter='@omarchy-bot/daemon' --filter='@omarchy-bot/web' dev",
     "start": "bun run --filter='@omarchy-bot/daemon' start",
+    "serve": "bash scripts/serve.sh",
     "site:dev": "bun run --filter='@omarchy-bot/site' dev",
     "site:build": "bun run --filter='@omarchy-bot/site' build",
     "build": "bun run --filter='*' build",
