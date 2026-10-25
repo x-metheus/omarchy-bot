@@ -144,7 +144,9 @@ export function anchoredSessionCommand(argv: readonly string[], token: string): 
   if (!/^[A-Za-z0-9_-]+$/.test(token)) throw new Error("owned session token has invalid characters");
   const script = [
     "trap '' HUP TERM",
-    `( ${ANCHOR_ENV}='${token}' exec sh -c 'trap \"\" HUP TERM; while :; do sleep 3600; done' ) >/dev/null 2>&1 </dev/null &`,
+    // The child's PATH may hold only bundle or fixture directories, so the marker
+    // resolves its shell and sleep without it.
+    `( ${ANCHOR_ENV}='${token}' PATH=/usr/bin:/bin exec /bin/sh -c 'trap \"\" HUP TERM; while :; do sleep 3600; done' ) >/dev/null 2>&1 </dev/null &`,
     "trap - HUP TERM",
     'exec "$@"',
   ].join("\n");

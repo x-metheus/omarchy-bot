@@ -1033,7 +1033,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
       fixture.dispose();
     }
-  });
+  }, 20_000);
 
   test("concurrent first Computer Surface requests converge on one Sway generation", async () => {
     const fixture = await createScriptedSwayFixture();

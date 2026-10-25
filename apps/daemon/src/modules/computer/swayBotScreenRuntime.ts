@@ -1143,7 +1143,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     });
     // A cold portable Chromium can take longer than 5s to map its window, and the
     // window is routed only once it exists.
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + (request.app !== undefined ? 5_000 : 30_000);
     while (Date.now() < deadline && session.computer.running()) {
       const windows = listApplicationToplevels(await swayIpc.getTree());
       const created = windows.filter((window) => !before.has(window.id));

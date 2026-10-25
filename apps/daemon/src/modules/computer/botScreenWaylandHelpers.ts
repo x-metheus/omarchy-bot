@@ -587,7 +587,30 @@ export async function terminateOwnedChild(child: OwnedChild | undefined): Promis
     return;
   }
   await terminateOwnedSession(child.session);
+  // A session whose marker is missing cannot be proven and was not signalled;
+  // stop the process group the detached leader still leads.
+  if (child.process.exitCode === null && child.process.signalCode === null) {
+    await terminateLeaderGroup(child.process.pid, child.process.exited);
+  }
   await child.process.exited;
+}
+
+async function terminateLeaderGroup(pid: number, exited: Promise<number>): Promise<void> {
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  const stopped = await Promise.race([
+    exited.then(() => true),
+    Bun.sleep(3_000).then(() => false),
+  ]);
+  if (stopped) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // already gone
+  }
 }
 
 /** Releases a session anchor once the leader and every descendant have exited. */
