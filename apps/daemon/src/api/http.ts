@@ -148,13 +148,18 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
 
     // Gate first: no Bot, Thread, or host data, and no upgrade, before a token is proven.
     // Public: health, the pairing exchange, and the provider's browser redirect (its state is single-use).
-    // Code issue needs the host secret or an already-paired device.
+    // Code issue and paired-device management need the host secret or an already-paired device.
     let pairedDeviceId: string | undefined;
     const pairingExchange = pathname === "/api/pairing/exchange" && req.method === "POST";
     const oauthCallback = pathname === "/api/plugins/oauth/callback" && req.method === "GET";
     if (pathname.startsWith("/api/") && !(pathname === "/api/health" && req.method === "GET") && !pairingExchange && !oauthCallback) {
       const device = svc.pairing.authenticate(presentedToken(req, url));
-      if (device === null && !(pathname === "/api/pairing/codes" && req.method === "POST")) {
+      const hostRoute = (pathname === "/api/pairing/codes" && req.method === "POST")
+        || (pathname === "/api/devices/paired" && req.method === "GET")
+        || (/^\/api\/devices\/paired\/([\w-]+)\/revoke$/.test(pathname) && req.method === "POST");
+      const hostAuthorized = hostRoute && fromServiceHost(req)
+        && svc.pairing.hostSecretMatches(presentedToken(req, url), svc.pairingHostSecret);
+      if (device === null && !hostAuthorized) {
         return json({ error: "unauthorized" }, 401);
       }
       if (device !== null) pairedDeviceId = device.id;

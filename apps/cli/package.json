@@ -1,0 +1,7 @@
+{
+  "name": "@omarchy-bot/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": { "omarchy-bot": "./src/main.ts" }
+}
