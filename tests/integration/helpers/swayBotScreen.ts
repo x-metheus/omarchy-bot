@@ -10,6 +10,7 @@ import type {
 import type { ComputerWindowListItem } from "../../../packages/agent-contract/src/computer-protocol.ts";
 import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./fakeSwayIpc.ts";
 import { createFixtureAssetSupply } from "./botComputerAssetsFixture.ts";
+import { SWAY_RUNTIME_BUNDLE, SWAY_RUNTIME_RELEASE } from "../../../apps/daemon/src/modules/computer/swayRuntimeSupply.ts";
 
 const LIVE_UNICODE_TITLE = "未保存 你好";
 
@@ -214,11 +215,15 @@ await Promise.withResolvers<void>().promise;
   const helperPath = path.resolve(import.meta.dir, "fakeSwayIpc.ts");
   const sway = executable(bin, "sway", `#!/usr/bin/env bun
 import path from "node:path";
+import { writeFileSync } from "node:fs";
 import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
 const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "";
 const wayland = path.join(runtimeDir, ${JSON.stringify(options?.waylandDisplay ?? "wayland-0")});
 const swaySock = process.env.SWAYSOCK ?? path.join(runtimeDir, "sway-ipc.sock");
 Bun.listen({ unix: wayland, socket: { data() {} } });
+if (process.env.OMARCHY_BOT_DISPLAY_FILE !== undefined) {
+  writeFileSync(process.env.OMARCHY_BOT_DISPLAY_FILE, ":123");
+}
 await serveFakeSwayIpc({
   socketPath: swaySock,
   controlDir: ${JSON.stringify(controlDir)},
@@ -288,6 +293,29 @@ for await (const chunk of Bun.stdin.stream()) {
       if (blockActions) await actionGate.promise;
     },
   });
+  // A local extracted bundle supplies the two tools omitted from the explicit overrides.
+  const bundleDir = path.join(root, "sway");
+  const bundleBin = path.join(bundleDir, "bin");
+  mkdirSync(bundleBin, { recursive: true });
+  for (const [name, source] of Object.entries({
+    sway,
+    swaymsg,
+    wayvnc,
+    "wlr-randr": path.join(bin, "wlr-randr"),
+    grim: path.join(bin, "grim"),
+    "omarchy-bot-wayland-input": path.join(bin, "input"),
+    "omarchy-bot-wayland-capture": path.join(bin, "capture"),
+    "omarchy-bot-desktop": desktop,
+  })) {
+    executable(bundleBin, name, `#!/bin/sh\nexec ${JSON.stringify(source)} "$@"\n`);
+  }
+  executable(bundleBin, "Xwayland", "#!/bin/sh\nexit 0\n");
+  executable(bundleBin, "dbus-daemon", `#!/usr/bin/env bun
+const address = process.argv.find((arg) => arg.startsWith("--address=unix:path="));
+if (address === undefined) throw new Error("missing private session bus address");
+Bun.listen({ unix: address.slice("--address=unix:path=".length), socket: { data() {} } });
+`);
+  writeFileSync(path.join(bundleDir, ".omarchy-bot-runtime"), `${SWAY_RUNTIME_RELEASE}\n${SWAY_RUNTIME_BUNDLE.sha256}\n`);
   const starts: BotScreenProvision[] = [];
   const stops: Array<{ surfaceId: string; runtimeGeneration: number }> = [];
   let blockActions = false;
@@ -342,6 +370,7 @@ for await (const chunk of Bun.stdin.stream()) {
     wayvncBin: wayvnc,
     application,
     binEnv: {
+      OMARCHY_BOT_SWAY_BUNDLE_DIR: bundleDir,
       OMARCHY_BOT_SWAY_BIN: sway,
       OMARCHY_BOT_SWAYMSG_BIN: swaymsg,
       OMARCHY_BOT_WAYVNC_BIN: wayvnc,

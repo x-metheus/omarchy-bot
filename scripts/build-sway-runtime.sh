@@ -4,8 +4,9 @@
 #   scripts/build-sway-runtime.sh [out-dir]
 #
 # Everything compiles inside the pinned Alpine build image; the host needs only
-# Docker. Output: <out-dir>/omarchy-bot-sway-runtime-<release>-x86_64.tar.gz and
-# its .sha256 sidecar. The default out-dir is .lane/dist.
+# Docker. Output: <out-dir>/omarchy-bot-sway-runtime-<release>-x86_64.tar.gz,
+# its .sha256 sidecar, and the checksum-prepared development directory <out-dir>/sway.
+# The default out-dir is .lane/dist.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -39,6 +40,8 @@ archive=$out_dir/omarchy-bot-sway-runtime-$release-x86_64.tar.gz
 echo "Verifying $(basename "$archive") in a clean container" >&2
 docker run --rm -v "$out_dir:/out:ro" -v "$root/scripts/sway-runtime:/scripts:ro" "$base" \
   sh /scripts/selfcheck.sh "/out/$(basename "$archive")"
+
+bash "$root/scripts/sway-runtime/prepare.sh" "$archive"
 
 echo "Artifact: $archive"
 cat "$archive.sha256"

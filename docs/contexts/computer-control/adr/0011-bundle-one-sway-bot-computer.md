@@ -1,6 +1,6 @@
 # Bundle one Sway Bot Computer for every Linux host
 
-Status: accepted on 2026-10-24. Extends [Computer ADR 0009](0009-adopt-sway-bot-desktops.md); it does not change the shared Bot Computer, routed Screens, or serialized seat. Implementation is tracked by [the standalone Linux Service specification](../../../../.scratch/standalone-linux-service/spec.md).
+Status: accepted on 2026-10-24; amended on 2026-10-26 so the checksum-verified bundle ships extracted inside the runtime archive rather than as a separate release. Extends [Computer ADR 0009](0009-adopt-sway-bot-desktops.md); it does not change the shared Bot Computer, routed Screens, or serialized seat. Implementation is tracked by [the standalone Linux Service specification](../../../../.scratch/standalone-linux-service/spec.md).
 
 Every Service Host runs the same Bot Computer: a headless Sway with the pixman renderer, regardless of whether the user's own desktop is GNOME, KDE, Hyprland, X11, or absent. The Service ships that runtime itself as one checksum-verified, self-contained bundle (Sway, wlroots, WayVNC, wlr-randr, Xwayland, grim, a D-Bus daemon, and the capture/input/bot-desktop helpers) built to run on any glibc or musl x86_64 Linux, replacing the downloads of Arch Linux packages. Users watch Bot Screens through the Computer Surface rather than in their own desktop, and the applications inside are ordinary GTK/Qt/Chromium programs that behave the same under any compositor, so matching the host desktop would multiply backends without visible benefit.
 

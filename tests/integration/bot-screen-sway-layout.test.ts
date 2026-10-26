@@ -185,8 +185,8 @@ realTest("two Screen workspaces render full-width tabbed windows with readable t
   mkdirSync(workspace, { recursive: true, mode: 0o700 });
   const launch = buildFixture(root);
   const binaries = await new PortableSwayRuntimeSupply({
-    rootDir: process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
-      ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply"),
+    rootDir: process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "sway"),
   }).ensure();
   adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),

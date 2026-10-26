@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -61,11 +63,24 @@ function assertSucceeded(result: CommandResult, operation: string): void {
   );
 }
 
-function createFixture(): { root: string; cache: string; output: string } {
+function createFixture(): { root: string; cache: string; output: string; bundle: string; bundleSha256: string } {
   const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-runtime-package-"));
   roots.push(root);
   const cache = path.join(root, ".bun-cache");
   const output = path.join(root, "output");
+  const bundle = path.join(root, "sway-runtime.tar.gz");
+  const bundleRoot = path.join(root, "sway-bundle");
+  for (const launcher of ["sway", "swaymsg"]) {
+    writeExecutable(bundleRoot, `bin/${launcher}`, `#!/bin/sh\nprintf '%s\\n' ${launcher}\n`);
+  }
+  const archive = run(["tar", "-czf", bundle, "-C", bundleRoot, "."], { cwd: root });
+  assertSucceeded(archive, "Sway fixture archiving");
+  const bundleSha256 = createHash("sha256").update(readFileSync(bundle)).digest("hex");
+  write(
+    root,
+    "apps/daemon/src/modules/computer/swayRuntimeSupply.ts",
+    `export const SWAY_RUNTIME_RELEASE = "sway-fixture-v1";\nexport const SWAY_RUNTIME_BUNDLE = { sha256: "${bundleSha256}" };\n`,
+  );
 
   write(
     root,
@@ -168,7 +183,7 @@ if (process.env.OMARCHY_BOT_SERVE_FIXTURE_MARKER !== undefined) {
     writeExecutable(root, helper, `#!/bin/sh\nprintf '%s\\n' ${path.basename(helper)}\n`);
   }
 
-  return { root, cache, output };
+  return { root, cache, output, bundle, bundleSha256 };
 }
 
 test("packages a runnable production dependency tree without mutating the source install", () => {
@@ -185,7 +200,7 @@ test("packages a runnable production dependency tree without mutating the source
   const lockBefore = readFileSync(path.join(fixture.root, "bun.lock"));
 
   const revision = "0123456789abcdef0123456789abcdef01234567";
-  const packaged = run(["bash", packager, fixture.root, fixture.output], {
+  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle], {
     cwd: projectRoot,
     env: { ...installEnv, OMARCHY_BOT_PLUGIN_REVISION: revision },
   });
@@ -205,6 +220,14 @@ test("packages a runnable production dependency tree without mutating the source
     cwd: fixture.root,
   });
   assertSucceeded(extract, "runtime extraction");
+
+  expect(readFileSync(path.join(extracted, "sway/.omarchy-bot-runtime"), "utf8"))
+    .toBe(`sway-fixture-v1\n${fixture.bundleSha256}\n`);
+  for (const launcher of ["sway", "swaymsg"]) {
+    const launched = run([path.join(extracted, "sway/bin", launcher)], { cwd: extracted });
+    assertSucceeded(launched, `packaged ${launcher} launcher`);
+    expect(launched.stdout.toString()).toBe(`${launcher}\n`);
+  }
 
   const packagedConsumer = run(["bun", "apps/daemon/src/bootstrap/main.ts"], {
     cwd: extracted,
@@ -245,3 +268,26 @@ test("packages a runnable production dependency tree without mutating the source
   });
   assertSucceeded(sourceAfter, "source fixture consumer after packaging");
 }, 60_000);
+
+test("refuses a Sway bundle that does not match the pinned checksum without writing an archive", () => {
+  const fixture = createFixture();
+  const installEnv = { ...process.env, BUN_INSTALL_CACHE_DIR: fixture.cache };
+  assertSucceeded(run(["bun", "install"], { cwd: fixture.root, env: installEnv }), "fixture dependency install");
+  const expected = "0".repeat(64);
+  write(
+    fixture.root,
+    "apps/daemon/src/modules/computer/swayRuntimeSupply.ts",
+    `export const SWAY_RUNTIME_RELEASE = "sway-fixture-v1";\nexport const SWAY_RUNTIME_BUNDLE = { sha256: "${expected}" };\n`,
+  );
+  const revision = "wrong-checksum";
+  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle], {
+    cwd: projectRoot,
+    env: { ...installEnv, OMARCHY_BOT_PLUGIN_REVISION: revision },
+  });
+
+  expect(packaged.exitCode).not.toBe(0);
+  expect(packaged.stderr.toString()).toContain(`expected ${expected}`);
+  expect(packaged.stderr.toString()).toContain(`received ${fixture.bundleSha256}`);
+  expect(existsSync(path.join(fixture.output, `omarchy-bot-runtime-${revision}-x86_64.tar.zst`)))
+    .toBe(false);
+});
