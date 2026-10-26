@@ -4,7 +4,7 @@
 
 **Blocked by:** 13 (resolved)
 
-**Status:** open
+**Status:** resolved
 
 Spec: [standalone Linux Service](../spec.md)
 
