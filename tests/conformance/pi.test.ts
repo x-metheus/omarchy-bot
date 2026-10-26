@@ -358,6 +358,7 @@ describe("pi conformance (10 steps, real model)", () => {
         "botMail",
         "nativeEventFamilies",
         "nativeThreadActions",
+        "plugins",
         "steering",
         "thinking",
         "version",
