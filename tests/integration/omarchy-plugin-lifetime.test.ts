@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pairForToken } from "./helpers/harness.ts";
@@ -30,7 +30,7 @@ async function waitForFile(file: string) {
   throw new Error(`timed out waiting for ${file}`);
 }
 
-test("SIGKILL of the plugin session leaves a real scripted Turn working in the separately managed Service", async () => {
+test.each(["SIGKILL", "graceful restart"])("%s of the plugin session leaves the same Service and real scripted Turn running", async teardown => {
   const root = mkdtempSync(path.join(tmpdir(), "ob-plugin-lifetime-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, "bin");
@@ -62,6 +62,12 @@ test("SIGKILL of the plugin session leaves a real scripted Turn working in the s
   };
   mkdirSync(env.HOME!, { recursive: true });
   writeFileSync(env.OMARCHY_BOT_PLUGIN_OS_RELEASE!, 'ID="omarchy"\n');
+  const source = path.join(root, "plugin"); mkdirSync(source);
+  copyFileSync(path.join(projectRoot, "packages/omarchy-plugin/entry.sh"), path.join(source, "entry.sh"));
+  const shellConfig = path.join(env.HOME!, ".config/omarchy/shell.json");
+  mkdirSync(path.dirname(shellConfig), { recursive: true });
+  const enabledConfig = JSON.stringify({ version: 1, plugins: [{ id: "io.github.xmethues.omarchy-bot" }] });
+  writeFileSync(shellConfig, enabledConfig);
   mkdirSync(path.join(env.OMARCHY_BOT_HOME!, "conformance"), { recursive: true });
   writeFileSync(path.join(env.OMARCHY_BOT_HOME!, "conformance/pi-fake-pi-1.json"), JSON.stringify({ ok: true, image: "verified" }));
   const manager = path.join(env.XDG_RUNTIME_DIR!, "systemd");
@@ -69,10 +75,14 @@ test("SIGKILL of the plugin session leaves a real scripted Turn working in the s
   const socket = Bun.listen({ unix: path.join(manager, "private"), socket: { data() {} } });
   cleanups.push(() => socket.stop(true));
   const control = path.join(root, "systemctl.ts");
-  writeFileSync(control, `import {appendFileSync,readFileSync,writeFileSync} from "node:fs";
+  writeFileSync(control, `import {appendFileSync,existsSync,readFileSync,writeFileSync} from "node:fs";
 const args=process.argv.slice(2);
 appendFileSync(process.env.CALLS!,args.join(" ")+"\\n");
+if(args.includes("stop")||args.includes("disable")){
+  try{process.kill(Number(readFileSync(process.env.SERVICE_PID!,"utf8")),"SIGINT")}catch{}
+}
 if(args.includes("enable")||args.includes("start")){
+  if(existsSync(process.env.SERVICE_PID!)){try{process.kill(Number(readFileSync(process.env.SERVICE_PID!,"utf8")),0);process.exit(0)}catch{}}
   const unit=readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/omarchy-bot.service","utf8");
   const env={...process.env};
   for(const line of unit.split("\\n")){
@@ -123,7 +133,7 @@ process.once("SIGINT",async()=>{await daemon.stop();process.exit(0)});
   const pluginReady = path.join(root, "plugin-ready");
   const pluginOutput = path.join(root, "plugin-output");
   const pluginError = path.join(root, "plugin-error");
-  const plugin = Bun.spawn(["setsid", "bash", "-c", 'bash "$1" enable > "$2" 2> "$3" || exit $?; printf ready > "$4"; exec sleep 300', "quickshell", path.join(projectRoot, "packages/omarchy-plugin/entry.sh"), pluginOutput, pluginError, pluginReady], {
+  const plugin = Bun.spawn(["setsid", "bash", "-c", 'bash "$1" enable > "$2" 2> "$3" || exit $?; printf ready > "$4"; exec sleep 300', "quickshell", path.join(source, "entry.sh"), pluginOutput, pluginError, pluginReady], {
     env, stdin: "ignore", stdout: "ignore", stderr: "ignore",
   });
   cleanups.push(async () => { try { process.kill(-plugin.pid, "SIGKILL"); } catch {} await plugin.exited; });
@@ -163,20 +173,39 @@ process.once("SIGINT",async()=>{await daemon.stop();process.exit(0)});
   const threadRoute = `/api/threads/${sent.threadId}`;
   await until(async () => (await api<{ activeTurn?: { id: string; status: string } }>(threadRoute)).activeTurn?.status === "working");
 
-  process.kill(-plugin.pid, "SIGKILL");
-  await plugin.exited;
-  expect(plugin.signalCode).toBe("SIGKILL");
+  if (teardown === "SIGKILL") {
+    process.kill(-plugin.pid, "SIGKILL");
+    await plugin.exited;
+    expect(plugin.signalCode).toBe("SIGKILL");
+  } else {
+    // Simulate QML onDestruction's detached installed entry, followed by the next Shell.
+    const settling = Bun.spawn(["setsid", "bash", path.join(env.OMARCHY_BOT_HOME!, "runtime/plugin-entry.sh"), "settle", source, shellConfig, "io.github.xmethues.omarchy-bot"], { env, stdout: "pipe", stderr: "pipe" });
+    cleanups.push(async () => { try { process.kill(-settling.pid, "SIGKILL"); } catch {} await settling.exited; });
+    process.kill(-plugin.pid, "SIGTERM");
+    await plugin.exited;
+    // The bash watcher and daemon run outside JS timers; observe the gap before re-enable.
+    await Bun.sleep(1_200);
+    expect(readFileSync(env.CALLS!, "utf8")).not.toContain("--user stop ");
+    expect(relationship(servicePid)).toEqual(service);
+    expect((await api<{ activeTurn?: { id: string; status: string } }>(threadRoute)).activeTurn).toMatchObject({ id: sent.turnId, status: "working" });
+    writeFileSync(shellConfig, enabledConfig);
+    const enabling = Bun.spawn(["bash", path.join(source, "entry.sh"), "enable"], { env, stdout: "pipe", stderr: "pipe" });
+    expect(await enabling.exited).toBe(0);
+    expect(await new Response(enabling.stderr).text()).toBe("");
+    expect(await settling.exited).toBe(0);
+    expect(await new Response(settling.stderr).text()).toBe("");
+    expect(Number(readFileSync(env.SERVICE_PID!, "utf8"))).toBe(servicePid);
+  }
   expect(() => process.kill(plugin.pid, 0)).toThrow();
-  // SIGKILL cannot execute QML onDestruction; survival comes from the manager's separate session.
   expect(() => process.kill(servicePid, 0)).not.toThrow();
   expect(relationship(servicePid)).toEqual(service);
   expect((await api<{ activeTurn?: { id: string; status: string } }>(threadRoute)).activeTurn).toMatchObject({ id: sent.turnId, status: "working" });
-  await api(`${threadRoute}/messages`, { text: "finish after plugin death" });
+  await api(`${threadRoute}/messages`, { text: "finish after plugin teardown" });
   await until(async () => (await api<{ activeTurn?: unknown }>(threadRoute)).activeTurn === undefined);
   expect((await api<{ latestTurn: { id: string; status: string } }>(threadRoute)).latestTurn).toMatchObject({ id: sent.turnId, status: "completed" });
   const messages = await api<Array<{ text?: string }>>(`${threadRoute}/messages`);
-  expect(messages.some(message => message.text?.includes("finish after plugin death"))).toBe(true);
-  expect(readFileSync(env.CALLS!, "utf8").trim().split("\n")).toEqual(["--user daemon-reload", "--user enable --now omarchy-bot.service"]);
+  expect(messages.some(message => message.text?.includes("finish after plugin teardown"))).toBe(true);
+  expect(readFileSync(env.CALLS!, "utf8")).not.toMatch(/--user (?:stop|disable) /);
   const health = await fetch(`${baseUrl}/api/health`);
   expect(health.status).toBe(200);
 }, 20_000);

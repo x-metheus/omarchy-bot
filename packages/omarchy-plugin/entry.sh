@@ -82,12 +82,13 @@ if [[ -z $bun_bin ]]; then
   bun_bin=$pinned
 fi
 export PATH="$(dirname -- "$bun_bin"):$PATH"
-plugin_enabled() {
+plugin_status() {
   "$bun_bin" -e '
 try {
   const config=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));
-  process.exit(config.version===1 && Array.isArray(config.plugins) && config.plugins.some(entry=>entry?.id===process.argv[2]) ? 0 : 1);
-} catch { process.exit(1); }
+  console.log(config.version===1 && Array.isArray(config.plugins)
+    ? (config.plugins.some(entry=>entry?.id===process.argv[2]) ? "enabled" : "disabled") : "unknown");
+} catch { console.log("unknown"); }
 ' "$config" "$plugin_id"
 }
 
@@ -129,22 +130,28 @@ await new Bun.Archive(Bun.zstdDecompressSync(bytes)).extract(destination);
     source_dir=${2:?Plugin source directory is required}
     config=${3:?Omarchy shell config path is required}
     plugin_id=${4:?Plugin id is required}
-    # Shell destroys QML before persisting disable, so its enabled set is unsafe here.
-    "$bun_bin" "$cli" stop
+    stopped=false
     flock -u "$plugin_lock_fd"
-    # Remove disables before deleting too; only disappearance proves removal.
-    while [[ -d $source_dir ]]; do
-      if [[ $generation != "$(cat "$generation_file" 2>/dev/null || true)" ]] || plugin_enabled; then
-        exit 0
+    # Destruction precedes persistence; wait for disable, re-enable, or source removal.
+    while true; do
+      [[ $generation == "$(cat "$generation_file" 2>/dev/null || true)" ]] || exit 0
+      status=$(plugin_status)
+      if [[ ! -d $source_dir || ( $status == disabled && $stopped == false ) ]]; then
+        flock "$plugin_lock_fd"
+        [[ $generation == "$(cat "$generation_file" 2>/dev/null || true)" && -f $cli ]] || exit 0
+        status=$(plugin_status)
+        if [[ ! -d $source_dir ]]; then
+          [[ $status != enabled ]] || exit 0
+          exec "$bun_bin" "$cli" uninstall
+        elif [[ $status == disabled && $stopped == false ]]; then
+          "$bun_bin" "$cli" stop
+          stopped=true
+        fi
+        flock -u "$plugin_lock_fd"
       fi
+      [[ $stopped == false || $status != enabled ]] || exit 0
       sleep 2
     done
-    flock "$plugin_lock_fd"
-    if [[ $generation != "$(cat "$generation_file" 2>/dev/null || true)" ]] || plugin_enabled; then
-      exit 0
-    fi
-    [[ -f $cli ]] || exit 0
-    exec "$bun_bin" "$cli" uninstall
     ;;
   *) printf 'Usage: entry.sh enable|disable|settle <source-dir> <shell-config> <plugin-id>\n' >&2; exit 2 ;;
 esac
