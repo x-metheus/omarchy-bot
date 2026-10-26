@@ -45,6 +45,7 @@ import {
   PortableBotComputerAssets,
   type BotComputerAssetSupply,
 } from "./botComputerAssets.ts";
+import { listApplicationToplevels, SwayIpcClient } from "./swayIpc.ts";
 
 type SwayProcess = DetachedProcess;
 export type ApplicationProcess = OwnedChild;
@@ -606,6 +607,14 @@ export class BotComputerRuntime {
   async #stopComputer(computer: LiveComputer): Promise<void> {
     if (this.#computer !== computer) return;
     this.#computer = undefined;
+    // Closing windows lets applications save profile data before their child processes are stopped.
+    const ipc = new SwayIpcClient(computer.sockets.swaySock);
+    const windows = await ipc.getTree().then(listApplicationToplevels).catch(() => []);
+    await Promise.allSettled(windows.map((window) => ipc.runCommand(`[con_id=${window.id}] kill`)));
+    await Promise.race([
+      Promise.allSettled([...computer.applicationProcesses].map((application) => application.process.exited)),
+      Bun.sleep(3_000),
+    ]);
     await this.#units.stopComputer(computer.generation).catch(() => {});
     await Promise.allSettled(
       [...computer.applicationProcesses].map((application) =>
