@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import path from "node:path";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import type { MessageDto, ThreadDto } from "../../packages/protocol/src/api.ts";
 
 const image = process.env.OMARCHY_BOT_CONTAINER_IMAGE;
@@ -166,3 +168,46 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
     expect(await docker("volume", "ls", "--quiet", "--filter", `name=^${volume}$`)).toBe("");
   }
 }, 300_000);
+
+containerTest("fresh TLS image prints a one-time pairing URL and exec CLI supports HTTPS", async () => {
+  const name = `ob-container-tls-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+  const volume = `${name}-state`;
+  const root = mkdtempSync(path.join(tmpdir(), "ob-container-tls-"));
+  const cert = path.join(root, "cert.pem"), key = path.join(root, "key.pem");
+  try {
+    expect(Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key, "-out", cert, "-days", "1", "-nodes", "-subj", "/CN=localhost"]).exitCode).toBe(0);
+    chmodSync(root, 0o755); chmodSync(key, 0o644);
+    await docker("volume", "create", volume);
+    await docker("run", "-d", "--pull=never", "--name", name, "--network=none",
+      "--mount", `type=volume,source=${volume},target=/var/lib/omarchy-bot`,
+      "--mount", `type=bind,source=${root},target=/fixture-tls,readonly`,
+      "--env", "OMARCHY_BOT_TLS_CERT=/fixture-tls/cert.pem", "--env", "OMARCHY_BOT_TLS_KEY=/fixture-tls/key.pem", image!);
+    const lines = await until(async () => {
+      const lines = (await docker("logs", name)).split("\n").filter(line => line.startsWith("pairing:"));
+      return lines.length ? lines : undefined;
+    }, "TLS first-start pairing URL");
+    expect(lines).toHaveLength(1);
+    const url = new URL(lines[0]!.slice("pairing: ".length));
+    expect(url.origin).toBe("https://127.0.0.1:7321");
+    const code = url.searchParams.get("code");
+    const exchange = await docker("exec", name, "bun", "-e", `
+      const response=await fetch("https://127.0.0.1:7321/api/pairing/exchange",{tls:{rejectUnauthorized:false},method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code:process.argv[1],name:"TLS container client"})});
+      const body=await response.json();console.log(JSON.stringify({status:response.status,id:body.device?.id}));`, code!);
+    const paired = JSON.parse(exchange) as { status: number; id: string };
+    expect(paired.status).toBe(201);
+    const execCli = (...args: string[]) => docker("exec", name, "bun", `${runtime}/apps/cli/src/main.ts`, ...args);
+    expect(await execCli("devices")).toContain(`${paired.id}\tTLS container client`);
+    expect(await execCli("pair")).toMatch(/^pairing: https:\/\/127\.0\.0\.1:7321\/pair\?code=/);
+    await until(async () => await docker("inspect", "--format", "{{.State.Health.Status}}", name) === "healthy" ? true : undefined, "TLS Docker health");
+    await docker("restart", "--time", "20", name);
+    await until(async () => { try { return (await execCli("devices")).includes(paired.id) ? true : undefined; } catch { return undefined; } }, "paired TLS restart");
+    expect((await docker("logs", name)).split("\n").filter(line => line.startsWith("pairing:"))).toHaveLength(1);
+    await execCli("revoke", paired.id);
+    await docker("stop", "--time", "20", name);
+    expect(await docker("inspect", "--format", "{{.State.ExitCode}}", name)).toBe("0");
+  } finally {
+    await docker("rm", "--force", name).catch(() => {});
+    await docker("volume", "rm", volume).catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 120_000);

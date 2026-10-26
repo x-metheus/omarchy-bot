@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { startDaemon, type Harness } from "./helpers/harness.ts";
 import daemonPkg from "../../apps/daemon/package.json" with { type: "json" };
+import { networkInterfaces, tmpdir } from "node:os";
+import { startHttp } from "../../apps/daemon/src/api/http.ts";
 
 let h: Harness;
 
@@ -244,4 +246,38 @@ describe("paired device tokens", () => {
     });
     expect(res.status).toBe(404);
   });
+});
+
+test("interface-bound TLS CLI management retains loopback host authorization and certificate validation", async () => {
+  const address = Object.values(networkInterfaces()).flat().find(entry => entry?.family === "IPv4" && !entry.internal)?.address;
+  if (!address) throw new Error("A local IPv4 interface is required");
+  const root = mkdtempSync(path.join(tmpdir(), "ob-interface-tls-"));
+  const cert = path.join(root, "cert.pem"), key = path.join(root, "key.pem");
+  expect(Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key, "-out", cert, "-days", "1", "-nodes", "-subj", "/CN=localhost", "-addext", `subjectAltName=IP:${address}`]).exitCode).toBe(0);
+  const listener = startHttp({ ...h.svc, cfg: { ...h.svc.cfg, host: address, port: 0, tlsCert: cert, tlsKey: key } });
+  const origin = `https://${address}:${listener.port}`;
+  const env = { ...process.env, HOME: h.home, OMARCHY_BOT_HOME: h.svc.cfg.dataDir, OMARCHY_BOT_STATE: h.svc.cfg.stateDir, OMARCHY_BOT_HOST: address, OMARCHY_BOT_PORT: String(listener.port), OMARCHY_BOT_TLS_CERT: cert, OMARCHY_BOT_TLS_KEY: key, NODE_EXTRA_CA_CERTS: cert };
+  const cli = async (args: string[], trusted = true) => {
+    const child = Bun.spawn([process.execPath, path.resolve(import.meta.dir, "../../apps/cli/src/main.ts"), ...args], { env: { ...env, NODE_EXTRA_CA_CERTS: trusted ? cert : "" }, stdout: "pipe", stderr: "pipe" });
+    const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    return { code, stdout, stderr };
+  };
+  try {
+    expect((await fetch(`${origin}/api/devices/paired`, { headers: bearer(await hostSecret()), tls: { rejectUnauthorized: false } })).status).toBe(401);
+    const issued = await cli(["pair"]);
+    expect(issued.code).toBe(0);
+    expect(issued.stderr).toBe("");
+    expect(issued.stdout).toStartWith(`pairing: ${origin}/pair?code=`);
+    const code = new URL(issued.stdout.trim().slice("pairing: ".length)).searchParams.get("code");
+    const exchanged = await fetch(`${origin}/api/pairing/exchange`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, name: "Interface browser" }), tls: { rejectUnauthorized: false } });
+    expect(exchanged.status).toBe(201);
+    const { device } = await exchanged.json() as { device: { id: string } };
+    expect((await cli(["devices"])).stdout).toContain(`${device.id}\tInterface browser`);
+    expect((await cli(["doctor"])).stdout).not.toContain("pairing:");
+    expect((await cli(["revoke", device.id])).code).toBe(0);
+    expect((await cli(["pair"], false)).code).toBe(1);
+  } finally {
+    await listener.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

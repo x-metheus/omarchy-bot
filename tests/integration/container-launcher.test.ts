@@ -84,3 +84,58 @@ test("container health probe follows configured IPv4, IPv6 and wildcard listener
     expect((await new Response(child.stdout).text()).trim()).toBe(`${tls ? "https" : "http"}://${address}:17321/api/health`);
   }
 });
+
+test("fresh TLS container prints one pairing URL, retains paired state and forwards shutdown", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ob-container-pairing-")); roots.push(root);
+  const image = path.join(root, "image"), runtime = path.join(image, "runtime");
+  mkdirSync(path.join(runtime, "scripts"), { recursive: true });
+  mkdirSync(path.join(runtime, "apps/cli/src"), { recursive: true });
+  for (const file of ["main", "layout", "lifecycle", "archive"]) writeFileSync(path.join(runtime, `apps/cli/src/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/cli/src/${file}.ts`)));
+  mkdirSync(path.join(runtime, "apps/daemon/src/modules/computer"), { recursive: true });
+  for (const file of ["swayRuntimeSupply", "botComputerAssets"]) writeFileSync(path.join(runtime, `apps/daemon/src/modules/computer/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/daemon/src/modules/computer/${file}.ts`)));
+  mkdirSync(path.join(runtime, "apps/daemon/src/bootstrap"), { recursive: true });
+  writeFileSync(path.join(runtime, "apps/daemon/src/bootstrap/listenerConfig.ts"), readFileSync(path.resolve(import.meta.dir, "../../apps/daemon/src/bootstrap/listenerConfig.ts")));
+  const cert = path.join(root, "cert.pem"), key = path.join(root, "key.pem");
+  expect(Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key, "-out", cert, "-days", "1", "-nodes", "-subj", "/CN=localhost"]).exitCode).toBe(0);
+  let paired = false;
+  let listed = Promise.withResolvers<void>();
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, tls: { cert: Bun.file(cert), key: Bun.file(key) }, fetch(request) {
+    const route = new URL(request.url).pathname;
+    if (route === "/api/health") return Response.json({ ok: true });
+    expect(request.headers.get("authorization")).toBe("Bearer container-private-secret");
+    if (route === "/api/devices/paired") { listed.resolve(); return Response.json({ devices: paired ? [{ revokedAt: null }] : [] }); }
+    return Response.json({ url: "/pair?code=FRESH234" });
+  } });
+  const env = { ...process.env, HOME: path.join(root, "home"), XDG_RUNTIME_DIR: path.join(root, "run"), OMARCHY_BOT_HOME: path.join(root, "data"), OMARCHY_BOT_STATE: path.join(root, "state"), OMARCHY_BOT_HOST: "0.0.0.0", OMARCHY_BOT_PORT: String(server.port), OMARCHY_BOT_TLS_CERT: cert, OMARCHY_BOT_TLS_KEY: key };
+  mkdirSync(env.OMARCHY_BOT_STATE, { recursive: true });
+  writeFileSync(path.join(env.OMARCHY_BOT_STATE, "pairing-host-secret"), "container-private-secret");
+  writeFileSync(path.join(runtime, "scripts/serve.sh"), `#!/bin/sh\nexec '${process.execPath}' -e 'process.on("SIGINT",()=>{console.log("fixture stopped");process.exit(0)});Bun.serve({port:0,fetch:()=>new Response()})'\n`);
+  const installed = path.join(image, "entrypoint.sh"); writeFileSync(installed, readFileSync(path.resolve(import.meta.dir, "../../scripts/container-image/entrypoint.sh")));
+  try {
+    for (const state of [false, true]) {
+      paired = state;
+      listed = Promise.withResolvers<void>();
+      const child = Bun.spawn(["bash", installed], { env, stdout: "pipe", stderr: "pipe" });
+      const errors = new Response(child.stderr).text();
+      const reader = child.stdout.getReader();
+      try {
+        if (!paired) {
+          // Read the pairing line before signalling the private service.
+          const first = await Promise.race([reader.read(), child.exited.then(() => ({ value: undefined }))]);
+          expect(new TextDecoder().decode(first.value)).toBe(`pairing: https://127.0.0.1:${server.port}/pair?code=FRESH234\n`);
+        } else await listed.promise;
+        const issued = Bun.spawn([process.execPath, path.join(runtime, "apps/cli/src/main.ts"), "pair"], { env, stdout: "pipe", stderr: "pipe" });
+        expect(await issued.exited).toBe(0);
+        expect(await new Response(issued.stdout).text()).toContain("pairing: https://");
+        child.kill("SIGINT");
+        expect(await child.exited).toBe(0);
+        const remaining: Uint8Array[] = [];
+        for (;;) { const next = await reader.read(); if (next.done) break; remaining.push(next.value); }
+        const output = Buffer.concat(remaining).toString();
+        expect(output).toContain("fixture stopped");
+        expect(output).not.toContain("pairing:");
+        expect(output + await errors).not.toContain("container-private-secret");
+      } finally { child.kill("SIGKILL"); await child.exited; }
+    }
+  } finally { server.stop(true); }
+}, 10000);

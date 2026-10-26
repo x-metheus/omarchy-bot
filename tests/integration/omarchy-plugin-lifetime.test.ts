@@ -125,6 +125,8 @@ process.once("SIGINT",async()=>{await daemon.stop();process.exit(0)});
     "apps/daemon/src/bootstrap/main.ts": daemon,
   };
   for (const name of ["main", "layout", "archive", "lifecycle"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(projectRoot, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   writeFileSync(env.ARCHIVE!, Bun.zstdCompressSync(await new Bun.Archive(files).bytes()));
   writeFileSync(`${env.ARCHIVE}.sha256`, `${createHash("sha256").update(readFileSync(env.ARCHIVE!)).digest("hex")}  runtime.tar.zst\n`);
   shim(bin, "curl", 'while [[ $1 != -o ]]; do shift; done\ndest=$2; url=$3\nif [[ $url == *.sha256 ]]; then cp "$ARCHIVE.sha256" "$dest"; else cp "$ARCHIVE" "$dest"; fi');

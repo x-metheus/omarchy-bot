@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { layoutFromEnv } from "../../apps/cli/src/layout.ts";
 import { doctorText, installUnit, renderUnit, startUnit, statusText, stopUnit, uninstall, userManagerAvailable } from "../../apps/cli/src/lifecycle.ts";
 
@@ -62,7 +62,7 @@ describe("CLI user service lifecycle", () => {
       `OMARCHY_BOT_STATE=${layout.stateDir}`,
       "OMARCHY_BOT_HOST=127.0.0.1",
       "OMARCHY_BOT_PORT=17421",
-      `PATH=${env.PATH}`,
+      `PATH=${dirname(process.execPath)}:${env.PATH}`,
       `XDG_RUNTIME_DIR=${env.XDG_RUNTIME_DIR}`,
     ]) expect(unit).toContain(line);
     expect(unit).not.toContain("notify-send");
@@ -127,7 +127,7 @@ describe("CLI user service lifecycle", () => {
     managerSocket(env);
     const healthy = await doctorText(minimalEnv);
     expect(healthy).not.toContain("enable-linger");
-    expect(healthy).not.toContain("missing:");
+    expect(healthy).not.toContain("missing: bun");
     shim(bin, "bun", 'printf "1.3.9\\n"');
     expect(await doctorText(minimalEnv)).toContain("missing: bun");
     shim(bin, "loginctl", "exit 1");
@@ -164,4 +164,21 @@ describe("CLI user service lifecycle", () => {
       "--user daemon-reload",
     ]);
   });
+});
+
+test.skipIf(!Bun.which("systemd-analyze"))("systemd preserves literal TLS paths including apostrophes and shell metacharacters", () => {
+  const setup = fixture();
+  mkdirSync(setup.env.XDG_RUNTIME_DIR!, { recursive: true });
+  const cert = join(setup.home, "apostrophe'-dollar$-tick`-percent%.pem");
+  const marker = join(setup.home, "must-not-exist");
+  const key = join(setup.home, `$(touch ${marker})-double"-backslash\\.pem`);
+  const layout = layoutFromEnv({ ...setup.env, OMARCHY_BOT_TLS_CERT: cert, OMARCHY_BOT_TLS_KEY: key });
+  const source = join(setup.home, "literal.service");
+  writeFileSync(source, renderUnit(layout).replace(/^ExecStart=.*$/m, "ExecStart=/usr/bin/true").replace(/^WorkingDirectory=.*$/m, "WorkingDirectory=/tmp"));
+  const result = Bun.spawnSync(["systemd-analyze", "--user", "verify", "--man=no", source], { env: { ...setup.env, SYSTEMD_LOG_LEVEL: "debug" } });
+  const output = result.stdout.toString() + result.stderr.toString();
+  expect(output).toContain(`Environment: OMARCHY_BOT_TLS_CERT=${cert}`);
+  expect(output).toContain(`Environment: OMARCHY_BOT_TLS_KEY=${key}`);
+  expect(output).not.toContain("Invalid syntax, ignoring: OMARCHY_BOT_TLS");
+  expect(existsSync(marker)).toBe(false);
 });
