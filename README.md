@@ -74,7 +74,45 @@ In a checkout, `bun run serve` calls the same entry. It requires Linux x86_64, B
 
 Without `XDG_RUNTIME_DIR`, the entry creates `/tmp/ob-<uid>` with mode 0700 and exports it for transient sockets and the Bot Computer runtime. The short path leaves room for Linux's Unix-socket pathname limit. A per-user Service lock lives under `/tmp/omarchy-bot-<uid>/`, independent of login sessions and launcher settings. A second launch fails promptly and reports the running Service's PID. The Omarchy plugin starts and stops the Service through its systemd user unit. Shell hot reload keeps the plugin loaded, and a crash or SIGKILL leaves the Service running. A graceful Quickshell teardown also leaves the Service and its active Turns running: the teardown helper waits instead of stopping, and only a persisted disable stops the Service while removal of the plugin source directory uninstalls it and keeps user data.
 
-`GET /api/health` accepts no token and returns only liveness and the Service version, for example `{"ok":true,"version":"0.1.0"}`. Pairing and remote TLS are separate tickets; keep the current control API on loopback.
+`GET /api/health` accepts no token and returns only liveness and the Service version, for example `{"ok":true,"version":"0.1.0"}`. Control requests require a Paired Device token, including on loopback. Non-loopback listeners require TLS or a declared TLS-terminating proxy.
+
+### Container on a headless Linux host
+
+Build an x86_64 image from a published runtime archive and its adjacent `.sha256` sidecar:
+
+```bash
+bash scripts/build-container-image.sh /path/to/omarchy-bot-runtime-<sha>-x86_64.tar.zst omarchy-bot:local
+docker run -d --name omarchy-bot --network host --shm-size=512m \
+  --security-opt seccomp=unconfined \
+  --mount type=volume,source=omarchy-bot-state,target=/var/lib/omarchy-bot \
+  omarchy-bot:local
+docker logs omarchy-bot
+docker exec omarchy-bot bun /opt/omarchy-bot/runtime/apps/cli/src/main.ts pair
+```
+
+Open the pairing URL on the Service Host, or forward `7321` with `ssh -L 7321:127.0.0.1:7321 user@host` and open the URL locally. The default listener is loopback; host networking makes it reachable through that tunnel on Linux. No public registry image is published by this build command. Docker and Bun 1.4+, `curl`, and `unzip` are build prerequisites. The optional third build argument selects the asset cache (default `.lane/container-assets`); cache misses fetch checksum-pinned Bun and Chrome for Testing inputs. Docker build itself runs without network access, using the pinned Ubuntu 22.04 base; pull that base once if absent.
+
+The Service runs as UID/GID 1000. The single named volume contains its database, pairing identity, Threads, artifacts, Shared Workspace, Agent credentials, and Bot Computer application/browser profile. Back up the volume while the container is stopped; recreate containers with the same volume to retain state. A bind mount must already be writable by UID 1000. Keep `HOME`, `OMARCHY_BOT_HOME`, and `OMARCHY_BOT_STATE` at their image defaults so state stays on that volume. Runtime locks and sockets are temporary. The image's browser binaries and fonts are installed at build time, so opening a local page in a Bot Screen needs no downloads. Docker stops use SIGINT so the Service closes the Bot Computer and flushes its application profile before exiting.
+
+Use one running container per state volume. On startup the entrypoint clears Chromium's three transient singleton links, whose hostname and temporary socket refer to the previous container; browser profile data remains on the volume.
+
+Before creating a Bot with the real Pi Agent, configure Pi's provider credentials in the persisted home and provision an authentic passing Pi conformance record for the image's exact Agent version. Credentials alone leave a fresh Agent `unconfigured`. A paired `GET /api/agents` reports the Pi entry's `version` field; use the record produced by a successful `bun test tests/conformance/pi.test.ts` against the matching runtime revision and Pi version (the suite prints its output path). Never create a success record manually or reuse the scripted worker's test record. Copy that record into the state volume, then restart the container to recheck readiness:
+
+```bash
+docker exec omarchy-bot mkdir -p /var/lib/omarchy-bot/data/conformance
+docker cp /path/to/passing/pi-<version>.json omarchy-bot:/var/lib/omarchy-bot/data/conformance/
+docker restart omarchy-bot
+```
+
+For an existing Service, a paired `POST /api/agents/pi/recheck` also reruns the probe; confirm `GET /api/agents` reports Pi `ready`. The image includes the production worker only. Its offline acceptance test mounts a separate scripted worker and proves container wiring rather than real provider authentication or model conformance.
+
+`--shm-size=512m` gives Chromium sufficient shared memory. Chromium's namespace sandbox needs a host that permits unprivileged user namespaces and Docker's `--security-opt seccomp=unconfined`; this relaxes Docker's syscall filtering, so run the Service only with trusted Agent workloads. The browser's own sandbox remains enabled. The image never uses `--privileged`, mounts a desktop socket, or requires a host graphical session.
+
+For remote HTTPS, set `OMARCHY_BOT_HOST=0.0.0.0` and mount a readable certificate/key with `OMARCHY_BOT_TLS_CERT` and `OMARCHY_BOT_TLS_KEY`. Alternatively, use `OMARCHY_BOT_TRUSTED_PROXY=<proxy-IP>` behind your TLS-terminating proxy and restrict network access to that proxy. Pairing remains required in both cases. `OMARCHY_BOT_PORT` changes the listener and health probe port. Docker's health check calls `/api/health`; `docker logs` receives Service stdout/stderr.
+
+The local health probe sends no credentials and checks liveness only. With HTTPS it skips certificate identity validation so operator-managed self-signed certificates and certificates for the external DNS name still work; validate public TLS separately from container health.
+
+Maintainers can run the real, offline acceptance test with `OMARCHY_BOT_CONTAINER_IMAGE=omarchy-bot:local bun test tests/integration/container-image.test.ts`. It mounts the scripted worker as a test fixture, pairs a client, creates a Bot and Thread, opens a real Bot Screen/browser, then recreates and restarts the container with the same volume and checks browser localStorage, conversations, and the paired token. It removes its private containers and volume on completion.
 
 
 ## Product model

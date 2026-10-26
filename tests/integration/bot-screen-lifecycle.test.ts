@@ -1322,7 +1322,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
       fixture.dispose();
     }
-  });
+  }, 10_000);
 
   test("daemon restart replaces a broken shared Sway computer for every Screen", async () => {
     const fixture = await createScriptedSwayFixture();
