@@ -6,6 +6,7 @@ import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/compute
 import { waitScreenReady } from "./helpers/bot-screen-load-observe.ts";
 import { api, authedFetch, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
 import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./helpers/fakeSwayIpc.ts";
+import { createFixtureFontSupply } from "./helpers/fontFixture.ts";
 
 function ownerOf(bot: { id: string; surfaceId: string }): ComputerSurfaceOwner {
   return { botId: bot.id, surfaceId: bot.surfaceId as ComputerSurfaceOwner["surfaceId"] };
@@ -139,8 +140,11 @@ async function useFakeSwayProductionBins(): Promise<string> {
 }
 
 test("production Sway serves a Computer Surface, Agent-only use, and deletion", async () => {
-  await useFakeSwayProductionBins();
-  harness = await startDaemon(undefined, { useProductionBotScreen: true });
+  const bins = await useFakeSwayProductionBins();
+  harness = await startDaemon(undefined, {
+    useProductionBotScreen: true,
+    botComputerAssetSupply: createFixtureFontSupply(bins),
+  });
 
   const botId = await makeBot(harness, "Cutover public");
   const sent = await sendToBot(harness, botId, "agent-only later");

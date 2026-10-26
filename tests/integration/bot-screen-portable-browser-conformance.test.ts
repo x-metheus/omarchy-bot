@@ -198,11 +198,11 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
     throw new Error(`prerequisites: set OMARCHY_BOT_SWAY_BIN and OMARCHY_BOT_WLR_RANDR_BIN, and provide grim and dbus-daemon. Run: ${COMMAND}`);
   }
 
-  // Built before the fixture PATH replaces the host one: their build needs the C toolchain.
+  // Resolve bundled helpers before the browser-less fixture hides the host PATH.
   const [inputHelperBin, captureHelperBin, botDesktopBin] = await Promise.all([
-    ensureInputHelper(),
-    ensureCaptureHelper(),
-    ensureBotDesktop(),
+    process.env.OMARCHY_BOT_INPUT_HELPER_BIN ?? ensureInputHelper(),
+    process.env.OMARCHY_BOT_CAPTURE_HELPER_BIN ?? ensureCaptureHelper(),
+    process.env.OMARCHY_BOT_DESKTOP_BIN ?? ensureBotDesktop(),
   ]);
 
   root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-portable-browser-"));

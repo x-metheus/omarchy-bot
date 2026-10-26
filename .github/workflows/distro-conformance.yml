@@ -1,0 +1,77 @@
+name: distro-conformance
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build runtime archive (no publication)
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Read distribution matrix
+        id: matrix
+        run: echo "matrix=$(bun -e 'console.log(JSON.stringify({include:await Bun.file("scripts/distro-conformance/matrix.json").json()}))')" >> "$GITHUB_OUTPUT"
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libwayland-dev libxkbcommon-dev pkg-config wayland-protocols zstd
+      - name: Build pinned runtime contents
+        run: |
+          bun install --frozen-lockfile
+          bash scripts/build-sway-runtime.sh .lane/dist
+          bash scripts/prepare-fonts.sh .lane/fonts
+          bun run --filter=@omarchy-bot/web build
+          bun apps/daemon/native/pointer-helper/build.ts
+          bun apps/daemon/native/capture-helper/build.ts
+          bun apps/daemon/native/bot-desktop/build.ts
+          source scripts/sway-runtime/sources.lock
+          bash scripts/package-plugin-runtime.sh . dist-runtime ".lane/dist/omarchy-bot-sway-runtime-$SWAY_RUNTIME_RELEASE-x86_64.tar.gz" .lane/fonts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distro-runtime
+          path: dist-runtime/*
+          if-no-files-found: error
+
+  conformance:
+    name: Conformance (${{ matrix.id }})
+    needs: package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.package.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: actions/download-artifact@v4
+        with:
+          name: distro-runtime
+          path: dist-runtime
+      - name: Prepare distribution container
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+          FAMILY: ${{ matrix.family }}
+          DISTRO: ${{ matrix.id }}
+        run: |
+          docker pull "$DISTRO_IMAGE"
+          docker build --pull=false --build-arg "DISTRO_IMAGE=$DISTRO_IMAGE" --build-arg "FAMILY=$FAMILY" \
+            -f scripts/distro-conformance/Dockerfile -t "omarchy-bot-distro-conformance:$DISTRO" .
+      - name: Install, serve, pair, exercise Screen, and run Seam 3
+        env:
+          DISTRO: ${{ matrix.id }}
+        run: |
+          archives=(dist-runtime/*.tar.zst)
+          test "${#archives[@]}" -eq 1
+          bun scripts/distro-conformance/run.ts "$DISTRO" "${archives[0]}"

@@ -706,6 +706,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
           const binding = computerTurnContext(msg.computer);
           const parts = text.split(":");
           const toolCallId = `computer-${command.turnId}`;
+          respond(msg.requestId!, { accepted: true });
           write({
             type: "event",
             event: {
@@ -732,11 +733,15 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               : toolCallId;
             const action = parts[1] === "click"
               ? { name: "click", args: { x: 4, y: 5 } }
-              : parts[1] === "open_url"
-                ? { name: "open_url", args: { url: parts.slice(2).join(":") } }
-                : parts[1] === "screenshot"
-                  ? { name: "screenshot", args: {} }
-                  : { name: "observe", args: {} };
+              : parts[1] === "type"
+                ? { name: "type", args: { text: parts.slice(2).join(":") } }
+                : parts[1] === "open_url"
+                  ? { name: "open_url", args: { url: parts.slice(2).join(":") } }
+                  : parts[1] === "list_windows"
+                    ? { name: "list_windows", args: {} }
+                    : parts[1] === "screenshot"
+                      ? { name: "screenshot", args: {} }
+                      : { name: "observe", args: {} };
             s.streaming = true;
             const result = await requestComputer(
               context,
@@ -776,7 +781,6 @@ readJsonl(Bun.stdin.stream(), (raw) => {
           } finally {
             s.streaming = false;
           }
-          respond(msg.requestId!, { accepted: true });
           return;
         }
         if (text === "attachment-echo") {

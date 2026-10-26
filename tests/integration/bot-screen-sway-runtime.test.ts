@@ -80,6 +80,7 @@ const wayland = path.join(runtimeDir, ${JSON.stringify(options.waylandDisplay ??
 const swaySock = process.env.SWAYSOCK ?? path.join(runtimeDir, "sway-ipc.sock");
 const swayPid = ${JSON.stringify(options.swayPid ?? "")};
 if (swayPid !== "") writeFileSync(swayPid, String(process.pid));
+writeFileSync(path.join(${JSON.stringify(directory)}, "compositor-font-config"), process.env.FONTCONFIG_FILE ?? "");
 Bun.listen({ unix: wayland, socket: { data() {} } });
 await serveFakeSwayIpc({
   socketPath: swaySock,
@@ -133,9 +134,12 @@ test("two Screens share one private Bot Computer session and persistent profile"
   process.env.SWAYSOCK = "/host/sway-ipc.sock";
   process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/run/user/1000/bus";
   const bins = installFakeSwayBins(bin, { png });
+  const assets = createFixtureFontSupply(path.join(root, "assets"));
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot,
     profileRoot,
+    fontDir: path.join(root, "assets", "fonts"),
+    assetSupply: assets,
     swayBin: bins.sway,
     wlrRandrBin: bins.wlrRandr,
     grimBin: bins.grim,
@@ -160,6 +164,8 @@ test("two Screens share one private Bot Computer session and persistent profile"
   };
   const first = await adapter.start(provision(SURFACE_A));
   const second = await adapter.start(provision(SURFACE_B));
+  expect(readFileSync(path.join(bin, "compositor-font-config"), "utf8"))
+    .toBe((await assets.ensureFonts()).fontConfigFile);
   expect(first.readiness).toEqual(expectedReadiness);
   expect(second.readiness).toEqual({
     ...expectedReadiness,

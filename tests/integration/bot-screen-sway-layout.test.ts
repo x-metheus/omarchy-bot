@@ -178,7 +178,7 @@ async function brightColumns(image: Uint8Array, top: number, height: number, col
 }
 
 realTest("two Screen workspaces render full-width tabbed windows with readable titles and a centered dialog", async () => {
-  const grim = Bun.which("grim");
+  const grim = process.env.OMARCHY_BOT_GRIM_BIN ?? Bun.which("grim");
   if (grim === null) throw new Error("host grim is required");
   root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-layout-"));
   const workspace = path.join(root, "workspace");
@@ -189,6 +189,7 @@ realTest("two Screen workspaces render full-width tabbed windows with readable t
       ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "sway"),
   }).ensure();
   adapter = new SwayBotScreenRuntimeAdapter({
+    runtimeSupply: new PortableSwayRuntimeSupply({ rootDir: path.dirname(path.dirname(binaries.swayBin)) }),
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "screens"),
     fontDir: process.env.OMARCHY_BOT_FONT_DIR
@@ -198,6 +199,11 @@ realTest("two Screen workspaces render full-width tabbed windows with readable t
     swaymsgBin: binaries.swaymsgBin,
     wayvncBin: binaries.wayvncBin,
     wlrRandrBin: binaries.wlrRandrBin,
+    inputHelperBin: binaries.inputHelperBin,
+    captureHelperBin: binaries.captureHelperBin,
+    botDesktopBin: binaries.botDesktopBin,
+    dbusDaemonBin: binaries.dbusDaemonBin,
+    xwaylandBin: binaries.xwaylandBin,
     grimBin: grim,
     // Unused headless outputs stay at the origin and paint over the Screen.
     capacity: 2,
