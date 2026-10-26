@@ -2,11 +2,11 @@
 
 # Omarchy Bot
 
-**Your AI teammates. Your work files. Built for Omarchy.**
+**Your AI teammates. Your work files. Runs on x86_64 Linux.**
 
 Create named Bots, work together in Threads, and see their desktop work in Bot Screens.
 
-[![Platform: Omarchy x86_64](https://img.shields.io/badge/Omarchy-x86__64-183D32?style=flat-square)](#installation)
+[![Platform: x86_64 Linux](https://img.shields.io/badge/Linux-x86__64-183D32?style=flat-square)](#installation)
 [![Runtime: Bun 1.4+](https://img.shields.io/badge/Bun-1.4%2B-183D32?style=flat-square)](#development)
 [![License: MIT](https://img.shields.io/badge/License-MIT-183D32?style=flat-square)](LICENSE)
 
@@ -27,9 +27,13 @@ Omarchy Bot's headless Service owns the Bots, Threads, Agents, Shared Workspace,
 | **Hand work to another Bot** | Durable, asynchronous 1:1 mail creates a target-owned Thread without forwarding the source conversation. |
 
 > [!IMPORTANT]
-> **Current support:** the Service entry supports **x86_64 Linux**. The current installer is Omarchy's plugin manager; portable Bot Computer bundles and distribution conformance are tracked by the [standalone Linux Service specification](.scratch/standalone-linux-service/spec.md). **Pi** is the current Agent backend. Other Agents require an adapter and a passing versioned conformance inventory before becoming selectable. Omarchy Bot (Tauri) is planned, not shipped.
+> **Current support:** the Service runs on **x86_64 Linux** with or without a desktop. Install paths are the Omarchy plugin, the generic `install` command, and the container image ([ADR 0013](docs/adr/0013-run-a-standalone-linux-service.md)). The runtime archive ships the Bot Computer bundle and fonts; the configured distribution matrix runs in CI. **Not supported:** arm64, macOS, and Windows Service Hosts, including a VM-hosted Bot Computer. **Pi** is the current Agent backend. Other Agents require an adapter and a passing versioned conformance inventory before becoming selectable. Omarchy Bot (Tauri) is planned, not shipped.
 
 ## Installation
+
+Three install paths share one runtime archive and one `install` command. The Omarchy plugin is the one-step path for Omarchy hosts; the generic installer serves any x86_64 Linux host with a systemd user manager; the container image serves headless and non-systemd hosts.
+
+### Omarchy plugin
 
 Install and enable through Omarchy's official plugin manager:
 
@@ -48,9 +52,9 @@ The repository root manifest points Omarchy's plugin manager at `packages/omarch
 
 - **Bun resolution:** PATH, then mise, then a checksum-verified official Bun 1.4.2 download under `OMARCHY_BOT_HOME`.
 - **Release artifacts:** `omarchy-bot-runtime-<sha>-x86_64.tar.zst` and its SHA-256 sidecar, published under `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<sha>/`.
-- **Runtime location:** `$XDG_DATA_HOME/omarchy-bot/runtime/current/`, or `$OMARCHY_BOT_HOME/runtime/current/` when overridden. Extraction is atomic and keeps the checkout clean and fast-forwardable.
+- **Runtime location:** `~/.local/share/omarchy-bot/runtime/current/`, or `$OMARCHY_BOT_HOME/runtime/current/` when overridden. Extraction is atomic and keeps the checkout clean and fast-forwardable.
 - **No source fallback:** a network, server, or integrity failure stops startup rather than silently compiling.
-- **Failure handling:** there is no supervisor lifeline and no `notify-send`; Quickshell does not parent the daemon. Install, startup, and unit failures go to the Service log and to `omarchy-bot status`.
+- **Failure handling:** there is no supervisor lifeline, no `notify-send` path, and Quickshell does not parent the Service. Install, startup, and unit failures go to the Service log, `omarchy-bot status` (unit state, address, last startup failure), and `omarchy-bot doctor` (missing prerequisites). See [Service CLI](#service-cli).
 
 Service log:
 
@@ -61,6 +65,22 @@ Service log:
 Set `OMARCHY_BOT_STATE` to relocate the log and other state. No host packages or Omarchy files are changed. The installed runtime also supports direct Service startup without Omarchy Shell; see below.
 
 </details>
+
+### Any x86_64 Linux host with systemd
+
+The same installer serves every distribution, with no root and no host package manager. Download `omarchy-bot-runtime-<sha>-x86_64.tar.zst` and its `.sha256` sidecar from `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<sha>/`, then run the installer from a checkout or from an extracted archive:
+
+```bash
+bun apps/cli/src/main.ts install \
+  --archive omarchy-bot-runtime-<sha>-x86_64.tar.zst \
+  --checksum omarchy-bot-runtime-<sha>-x86_64.tar.zst.sha256
+```
+
+It requires Bun 1.4+, Bash, `flock`, a systemd user manager socket (`$XDG_RUNTIME_DIR/systemd/private`), and a non-root user. `install` verifies the checksum, extracts atomically into `~/.local/share/omarchy-bot/runtime/current/`, writes `$XDG_CONFIG_HOME/systemd/user/omarchy-bot.service` with `ExecStart=<dataDir>/runtime/current/scripts/serve.sh`, enables and starts that unit, waits for `GET /api/health`, then prints a one-time `pairing: http://…/pair?code=…` URL and opens it with `xdg-open` (set `OMARCHY_BOT_OPEN` for a different opener). An already-installed runtime is reused instead of replaced. The installer registers no desktop hook and installs no global `omarchy-bot` binary: run the CLI by path, as shown in [Service CLI](#service-cli).
+
+A host without a systemd user manager cannot use `install`; start the Service with the container path below or with `scripts/serve.sh` directly.
+
+The generated unit carries a fixed environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `OMARCHY_BOT_HOST`, `OMARCHY_BOT_PORT`, `PATH`, and `XDG_RUNTIME_DIR`, captured when the unit is first written. `OMARCHY_BOT_TLS_CERT`, `OMARCHY_BOT_TLS_KEY`, and `OMARCHY_BOT_TRUSTED_PROXY` are not in it, and `install`/`update` reuse an existing unit instead of rewriting it, so setting those variables before installing has no effect. A TLS or proxied listener therefore needs a systemd drop-in, or direct `scripts/serve.sh`/container startup — see [Remote access](#remote-access).
 
 ### Start an installed runtime
 
@@ -108,12 +128,41 @@ For an existing Service, a paired `POST /api/agents/pi/recheck` also reruns the 
 
 `--shm-size=512m` gives Chromium sufficient shared memory. Chromium's namespace sandbox needs a host that permits unprivileged user namespaces and Docker's `--security-opt seccomp=unconfined`; this relaxes Docker's syscall filtering, so run the Service only with trusted Agent workloads. The browser's own sandbox remains enabled. The image never uses `--privileged`, mounts a desktop socket, or requires a host graphical session.
 
-For remote HTTPS, set `OMARCHY_BOT_HOST=0.0.0.0` and mount a readable certificate/key with `OMARCHY_BOT_TLS_CERT` and `OMARCHY_BOT_TLS_KEY`. Alternatively, use `OMARCHY_BOT_TRUSTED_PROXY=<proxy-IP>` behind your TLS-terminating proxy and restrict network access to that proxy. Pairing remains required in both cases. `OMARCHY_BOT_PORT` changes the listener and health probe port. Docker's health check calls `/api/health`; `docker logs` receives Service stdout/stderr.
+For remote HTTPS, set `OMARCHY_BOT_HOST` to the interface address you mean (use `0.0.0.0` only when every interface is intended) and mount a readable certificate/key with `OMARCHY_BOT_TLS_CERT` and `OMARCHY_BOT_TLS_KEY`, passing all three as `-e` variables to `docker run`. Alternatively, use `OMARCHY_BOT_TRUSTED_PROXY=<proxy-IP>` behind your TLS-terminating proxy and restrict network access to that proxy. Startup fails on a non-loopback address otherwise. Pairing remains required in both cases. `OMARCHY_BOT_PORT` changes the listener and health probe port. Docker's health check calls `/api/health`; `docker logs` receives Service stdout/stderr. The CLI inside a TLS-bound container keeps using plain HTTP, so `docker exec … pair` fails there. Pair the client while the container still uses loopback HTTP, before enabling TLS and restarting with the same volume; a fresh TLS-only container cannot issue a pairing code through this CLI, so reuse an existing paired token or provision a code through the paired API.
 
 The local health probe sends no credentials and checks liveness only. With HTTPS it skips certificate identity validation so operator-managed self-signed certificates and certificates for the external DNS name still work; validate public TLS separately from container health.
 
 Maintainers can run the real, offline acceptance test with `OMARCHY_BOT_CONTAINER_IMAGE=omarchy-bot:local bun test tests/integration/container-image.test.ts`. It mounts the scripted worker as a test fixture, pairs a client, creates a Bot and Thread, opens a real Bot Screen/browser, then recreates and restarts the container with the same volume and checks browser localStorage, conversations, and the paired token. It removes its private containers and volume on completion.
 
+## Service CLI
+
+The installer writes no global `omarchy-bot` binary. Invoke the CLI from an installed runtime (or a checkout) by path:
+
+```bash
+bun ~/.local/share/omarchy-bot/runtime/current/apps/cli/src/main.ts <command>
+```
+
+Prose elsewhere names the command as `omarchy-bot <command>`; that always means this path invocation. There is no `--help`; an unknown or missing command prints `Commands: …` to stderr and exits 2.
+
+| Command | Effect |
+| :--- | :--- |
+| `install --archive <path> --checksum <path>` | Verify the archive, extract into `runtime/current/`, install and enable the user unit, start it, wait for health, print and open the pairing URL. Reuses an installed runtime. |
+| `update --archive <path> --checksum <path>` | Stop the unit, replace `runtime/current/`, keep the unit, start it, wait for health, print the pairing URL. |
+| `start` / `stop` | Start or stop `omarchy-bot.service` in the user manager. |
+| `status` | Print `state:` (`active`, `failed`, or `inactive`), `address:`, and, when not active, `startup failure:` from the last relevant Service log line. |
+| `doctor` | Print one `missing:` line per unmet prerequisite, or `All prerequisites available.` A linger hint (`enable lingering: loginctl enable-linger <user>`) is advisory and is not a `missing:` line. |
+| `pair` | Print a one-time `pairing:` URL. |
+| `devices` | List Paired Devices as `id<TAB>name`. |
+| `revoke <id>` | Revoke one Paired Device. |
+| `uninstall` | Disable and stop the unit, remove it and `runtime/`, and keep user data. |
+
+`install` and `update` refuse to run without a systemd user manager; `start`, `stop`, and `uninstall` act on `omarchy-bot.service` in that manager. `status` shells out to `systemctl --user is-active omarchy-bot.service`: with `systemctl` on `PATH` but no reachable user manager it reports `state: inactive` and the last Service log line, while a `PATH` without `systemctl` makes the command fail with exit 1 instead. `doctor` reports the container's missing pieces by design: inside the container use `scripts/serve.sh` and `GET /api/health` instead.
+
+`doctor` checks only prerequisites: Bun ≥ 1.4, `bash`, `flock`, `systemctl`, x86_64 Linux, the user manager socket, `loginctl`, and a lingering hint (`enable lingering: loginctl enable-linger <user>`). It does not check the installed runtime, checksum or bundle markers, fonts, unit state, health, or pairing. Use `status` for unit state, address, and the last startup failure, and `GET /api/health` for liveness.
+
+`pair`, `devices`, and `revoke` read the host secret from `<state>/pairing-host-secret` and call `http://<host>:<port>` directly, with no TLS support. Run them on the Service Host, or against a loopback listener. A TLS-bound remote Service cannot be managed with these commands from another machine.
+
+CLI environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR`, `OMARCHY_BOT_HOST`, `OMARCHY_BOT_PORT`, `OMARCHY_BOT_OPEN`, `PATH`, and `USER`.
 
 ## Product model
 
@@ -122,7 +171,7 @@ Maintainers can run the real, offline acceptance test with `OMARCHY_BOT_CONTAINE
 ```text
                          Bot Client · Web
                                 |
-                       Localhost Bun daemon
+                       Service (Bun + SQLite)
                       /         |          \
                  Threads     Agent workers  Computer Broker
                  SQLite         Pi                |
@@ -144,13 +193,13 @@ The accepted [product specification](docs/workspace-redesign.md), [shared Bot Co
 
 ## Status
 
-The current implementation includes a Bun daemon, React web client, SQLite persistence, isolated Agent workers, and the computer worker. Shared Sway runtime, routed Screens, shared application state, and selected-view projection are implemented.
+The current implementation includes a Bun daemon, React web client, SQLite persistence, and isolated Agent workers. Shared Sway runtime, routed Screens, shared application state, and selected-view projection are implemented.
 
 **Host Session acceptance remains open.** Automated real-Sway conformance covers two routed Screens, shared profile/runtime markers, Agent control, projection, URL reuse, deletion/reprovision, and host environment isolation. It does not prove the user's top bar, shortcuts, or ordinary physical-input experience. See the [runtime decision and evidence](docs/contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md).
 
 Omarchy Bot (Tauri) will reuse the Web frontend while execution stays in the Service. [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md) define that contract; Tauri packaging and WebView compatibility are not implemented or verified by the current client. The application is Omarchy Bot, not a Desktop SKU.
 
-A Local Sidecar host is external to this repository. The client shell that starts one must set the Sidecar's `OMARCHY_BOT_DEVICE_ID` to a `dev_<32hex>` identity and install the same value as `globalThis.__OMARCHY_BOT_DEVICE_ID__` before the Web bundle loads; the Web client then tags each send with it so the daemon can resolve that Sidecar as **This Device**. A browser tab, a mobile-class client, and Omarchy Bot on the Service Host install nothing and send no tag, so their Turns have no This Device. See [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md#client-side-device-identity) for the full shell contract.
+A Local Sidecar host is external to this repository. The client shell that starts one must set the Sidecar's `OMARCHY_BOT_DEVICE_ID` to a `dev_<32hex>` identity, its `OMARCHY_BOT_DEVICE_TOKEN` (the Paired Device token it registered), `OMARCHY_BOT_DAEMON_PORT`, and `OMARCHY_BOT_SIDECAR_ROOT`, and install the same device identity as `globalThis.__OMARCHY_BOT_DEVICE_ID__` before the Web bundle loads; the Web client then tags each send with it so the Service can resolve that Sidecar as **This Device**. A browser tab, a mobile-class client, and Omarchy Bot on the Service Host install nothing and send no tag, so their Turns have no This Device. See [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md#client-side-device-identity) for the full shell contract.
 
 ## Development
 
@@ -331,13 +380,14 @@ accounts before presenting these connectors as publicly available.
 
 | Dependency | Used for |
 | :--- | :--- |
-| **Bun 1.4+** | Workspace dependencies, daemon, and development commands |
+| **Bun 1.4+** | Workspace dependencies, Service, CLI, and development commands |
+| **Bash and `flock`** | `scripts/serve.sh` and the Omarchy plugin entry script |
+| **systemd user manager** | `install`, `start`, `stop`, and `uninstall`, plus the manager socket `$XDG_RUNTIME_DIR/systemd/private`; `status` needs the `systemctl` binary and reads a stopped manager as `inactive` |
+| **`curl` and `unzip`** | Omarchy plugin runtime download and container image asset preparation |
 | **Configured Pi installation** | Real Agent execution and Pi conformance |
-| **`tar` with gzip support** | Extracting the checksum-verified Bot Computer bundle |
-| **Docker** | Building the portable Bot Computer runtime and running its container conformance |
-| **`computer-use-linux`** | Real desktop control |
+| **Docker** | Building the container image and running its conformance |
 | **Voxtype** | Composer dictation |
-| **Network on first graphical use** | Checksum-verified portable browser download into the Bot Computer profile; the font supply ships inside the runtime archive |
+| **Network on first graphical use** | Checksum-verified portable browser download into the Bot Computer profile, needed only when the host has no usable non-snap browser; fonts ship inside the runtime archive |
 
 On first graphical use, the Service uses the SHA-256-pinned Bot Computer bundle shipped inside its runtime archive under `<dataDir>/runtime/current/sway`. It contains Sway, wlroots, WayVNC, wlr-randr, Xwayland, grim, a private D-Bus daemon, and prebuilt capture/input/desktop helpers with their loader, libraries, and runtime data. The same archive runs on glibc and musl x86_64 Linux hosts; host grim, D-Bus, and a C toolchain are unnecessary. Point `OMARCHY_BOT_SWAY_BUNDLE_DIR` at the checksum-prepared `.lane/dist/sway` directory output by `bash scripts/build-sway-runtime.sh .lane/dist` to develop against a local bundle, and explicit binary overrides remain available.
 
@@ -345,7 +395,14 @@ The bundled `dbus-daemon` launcher defaults to its private `share/dbus-1/session
 
 When runtime fonts are configured, the Service verifies them before starting Sway and passes their private fontconfig file to the compositor as well as applications, so tab titles render on hosts with no fonts installed.
 
-Maintainers build the pinned sources and verify the resulting library closure with `bash scripts/build-sway-runtime.sh .lane/dist`. Run `sh scripts/sway-runtime/conformance/run.sh <archive.tar.gz>` for bundle-only Ubuntu 22.04 Bot Screen conformance and an Alpine loader smoke check. CI requires the built archive to match the checksum in `swayRuntimeSupply.ts`, and `bash scripts/package-plugin-runtime.sh . dist-runtime <archive.tar.gz>` embeds that verified bundle in the runtime archive; no separate Sway release is published.
+Maintainers build the pinned sources and verify the resulting library closure with `bash scripts/build-sway-runtime.sh .lane/dist`, which writes the archive, its `.sha256`, and the checksum-prepared development directory `.lane/dist/sway`. Run `sh scripts/sway-runtime/conformance/run.sh <archive.tar.gz> [font-dir]` for bundle-only Ubuntu 22.04 Bot Screen conformance and an Alpine loader smoke check; without the optional font directory it prepares `.lane/fonts` with `bash scripts/prepare-fonts.sh .lane/fonts`, which needs network access. CI requires the built archive to match the checksum in `swayRuntimeSupply.ts`, and packaging embeds that verified bundle plus checksum-verified fonts in the runtime archive:
+
+```bash
+bash scripts/prepare-fonts.sh .lane/fonts
+bash scripts/package-plugin-runtime.sh . dist-runtime <archive.tar.gz> .lane/fonts
+```
+
+The fourth argument (or `OMARCHY_BOT_FONT_ASSETS_DIR`) is required; packaging refuses to run without a font directory whose files match the pinned `FONT_ASSETS` checksums. No separate Sway release is published.
 
 The `distro-conformance` pull-request/manual workflow builds the same runtime archive without publishing it, then runs named jobs for Ubuntu 22.04/24.04, Debian 12, Fedora, Arch, openSUSE, and Alpine. Each installs the checksum-verified archive with the shared CLI extraction code and starts `scripts/serve.sh` under a container entrypoint (including Alpine's non-systemd path). A paired scripted Agent opens a real Screen, captures PNGs, opens a local page in the portable browser, and types text that the page reports back. Seam 3 runs the bundle/Xwayland/isolation suite, the tabbed-layout/dialog suite, and the portable-browser/CJK/shared-profile/snap-avoidance suite against that installed archive. Sway always uses headless pixman; no host compositor, display socket, GPU, systemd manager, or host configuration is mounted.
 
@@ -379,18 +436,32 @@ Real Pi conformance makes model calls and requires a configured Agent:
 bun test tests/conformance/pi.test.ts
 ```
 
-Real portable-browser conformance runs one private Sway Bot Computer on a fixture host with no browser on `PATH` and no visible host desktop entries, captures a Latin/Chinese/Japanese/Korean page from two Screens, and asserts real glyphs rather than empty boxes, one shared browser profile, and no snap launch. It needs a Sway runtime, `grim`, and `dbus-daemon`, downloads the pinned browser on first use, and skips without the flag:
+Real portable-browser conformance runs one private Sway Bot Computer on a fixture host with no browser on `PATH` and no visible host desktop entries, captures a Latin/Chinese/Japanese/Korean page from two Screens, and asserts real glyphs rather than empty boxes, one shared browser profile, and no snap launch. It needs a prepared Sway bundle and a prepared font directory, downloads the pinned browser on first use, and skips without the flag. Prepare both once (the bundle build needs Docker; `prepare-fonts.sh` downloads the pinned fonts over HTTPS):
 
 ```bash
+bash scripts/build-sway-runtime.sh .lane/dist    # writes .lane/dist/sway with relocatable launchers
+bash scripts/prepare-fonts.sh .lane/fonts
+```
+
+Each bundle launcher relocates from its own path, so pointing the variables at `.lane/dist/sway/bin` runs no host compiler and needs no host Sway, grim, or D-Bus:
+
+```bash
+sway=$PWD/.lane/dist/sway
 OMARCHY_BOT_REAL_PORTABLE_BROWSER=1 \
-OMARCHY_BOT_SWAY_BIN=$PWD/.lane/sway-cached/bin/sway \
-OMARCHY_BOT_SWAYMSG_BIN=$PWD/.lane/sway-cached/bin/swaymsg \
-OMARCHY_BOT_WLR_RANDR_BIN=$PWD/.lane/sway-cached/bin/wlr-randr \
-OMARCHY_BOT_WAYVNC_BIN=$PWD/.lane/sway-cached/bin/wayvnc \
+OMARCHY_BOT_SWAY_BIN=$sway/bin/sway \
+OMARCHY_BOT_SWAYMSG_BIN=$sway/bin/swaymsg \
+OMARCHY_BOT_WLR_RANDR_BIN=$sway/bin/wlr-randr \
+OMARCHY_BOT_WAYVNC_BIN=$sway/bin/wayvnc \
+OMARCHY_BOT_GRIM_BIN=$sway/bin/grim \
+OMARCHY_BOT_DBUS_DAEMON_BIN=$sway/bin/dbus-daemon \
+OMARCHY_BOT_INPUT_HELPER_BIN=$sway/bin/omarchy-bot-wayland-input \
+OMARCHY_BOT_CAPTURE_HELPER_BIN=$sway/bin/omarchy-bot-wayland-capture \
+OMARCHY_BOT_DESKTOP_BIN=$sway/bin/omarchy-bot-desktop \
+OMARCHY_BOT_FONT_DIR=$PWD/.lane/fonts \
 bun test tests/integration/bot-screen-portable-browser-conformance.test.ts
 ```
 
-`OMARCHY_BOT_GRIM_BIN` and `OMARCHY_BOT_DBUS_DAEMON_BIN` override `grim` and `dbus-daemon` when they are not on `PATH`.
+`OMARCHY_BOT_SWAY_BIN` and `OMARCHY_BOT_WLR_RANDR_BIN` are required; `grim` and `dbus-daemon` come from `OMARCHY_BOT_GRIM_BIN` and `OMARCHY_BOT_DBUS_DAEMON_BIN` or from `PATH`. The three helper overrides avoid building the native helpers from source; without them the test compiles them, which needs a C toolchain and Wayland development files.
 
 ## Bot-to-Bot mail
 
@@ -420,24 +491,39 @@ Mail does not forward the source Thread, Native Session, memory, attachments, or
 “Local” describes the application and its storage, not a promise of offline inference. Model connectivity depends on the configured Agent and provider.
 
 > [!WARNING]
-> **The control API has no application authentication.** Keep the default loopback binding unless you deliberately need trusted-LAN access. Anyone who can reach a non-loopback listener can access the control API, observe Screens, and send desktop input. Private Wayland sockets are neither remote authentication nor an adversarial security sandbox.
+> **Every control request needs a Paired Device.** Every `/api/` control route and every WebSocket upgrade — projection, RFB, and the Sidecar device channel — requires a device token, including on loopback. The unauthenticated exceptions are `GET /api/health`, `POST /api/pairing/exchange` (a one-time code), the provider `GET /api/plugins/oauth/callback` (guarded by single-use OAuth state), and the static Bot Client files with the `/pair` page needed to pair. Pairing-code issue and Paired Device listing/revocation need either an authenticated Paired Device token or, from the Service Host's loopback peer, the Service Host secret from `<state>/pairing-host-secret`. Binding a non-loopback address requires your TLS certificate or a declared TLS-terminating proxy; otherwise startup fails. Private Wayland sockets are neither remote authentication nor an adversarial security sandbox. See [ADR 0014](docs/adr/0014-require-paired-device-tokens.md).
 
-<details>
-<summary><strong>Trusted-LAN access</strong></summary>
+## Remote access
 
-Opt both the daemon and Vite into non-loopback listeners:
+Three supported paths reach a Service from another machine. All three require a Paired Device.
 
-```bash
-OMARCHY_BOT_HOST=0.0.0.0 bun run dev
-```
+- **SSH tunnel.** Keep the default loopback bind and forward the port: `ssh -L 7321:127.0.0.1:7321 user@host`. Open `http://127.0.0.1:7321` locally; the Service sees a loopback peer.
+- **Private network.** Reach the Service Host over your VPN or overlay. Keep the loopback bind and forward the port there, or bind the private interface with TLS as below.
+- **TLS binding.** Set `OMARCHY_BOT_HOST` to the interface address and provide `OMARCHY_BOT_TLS_CERT` and `OMARCHY_BOT_TLS_KEY`, or declare `OMARCHY_BOT_TRUSTED_PROXY=<proxy-IP>` for a TLS-terminating proxy you control. Only a Launcher that inherits your shell environment (the container entrypoint, `scripts/serve.sh`, a checkout `bun run dev`) sees these variables; the generated `omarchy-bot.service` records a fixed environment instead, so a systemd host needs a drop-in:
 
-Open `http://<host-lan-ip>:7322` for development, or the configured production daemon address. Do not expose this listener to an untrusted network. HTTPS/WSS encrypts transport but does not establish application peer identity.
+  ```bash
+  systemctl --user edit omarchy-bot.service
+  ```
 
-Projection protocol v3 uses one WebSocket for PNG preview and Broker-authorized control/input, plus a separate bidirectional RFB WebSocket consumed by bundled noVNC 1.7 in view-only mode. WayVNC remote input and clipboard are disabled. `/api/computer/snapshot` remains a read-only fallback. There is no separate WebRTC/UDP listener.
+  ```ini
+  [Service]
+  Environment=OMARCHY_BOT_HOST=192.0.2.10
+  Environment=OMARCHY_BOT_TLS_CERT=/home/me/tls/cert.pem
+  Environment=OMARCHY_BOT_TLS_KEY=/home/me/tls/key.pem
+  ```
 
-See the [transport security decision](docs/adr/0004-defer-web-control-transport-security.md).
+  Then activate it explicitly — a drop-in edit does not change a running unit:
 
-</details>
+  ```bash
+  systemctl --user daemon-reload
+  systemctl --user restart omarchy-bot.service
+  ```
+
+  The `pair`, `devices`, and `revoke` CLI commands, and the health wait inside `install`/`update`, speak plain HTTP to `<host>:<port>`, so none of them works against a TLS-bound listener; pair with the one-time URL in a browser and manage devices before the TLS drop-in is in place.
+
+Pairing is required in every case. [ADR 0014](docs/adr/0014-require-paired-device-tokens.md) supersedes the [earlier transport decision](docs/adr/0004-defer-web-control-transport-security.md); [ADR 0013](docs/adr/0013-run-a-standalone-linux-service.md) records the standalone Service these paths reach.
+
+Projection protocol v3 uses one WebSocket for PNG preview and Broker-authorized control/input, plus a separate bidirectional RFB WebSocket consumed by bundled noVNC 1.7 in view-only mode. WayVNC remote input and clipboard are disabled. `/api/computer/snapshot` remains a read-only fallback. There is no separate WebRTC/UDP listener. Every one of these connections requires the device token.
 
 <details>
 <summary><strong>Screen capacity and resolution</strong></summary>
@@ -457,11 +543,10 @@ Eight Screens at 1080p are rejected before any excess Screen is provisioned. The
 ```text
 apps/
   web/                     React conversation workspace
-  daemon/                  Local API, persistence, orchestration
-  cli/                     Install, unit, and status commands
+  daemon/                  Service API, persistence, orchestration
+  cli/                     Install, unit, pairing, device, status, doctor, update, uninstall commands
 workers/
   pi/                      Pi SDK adapter
-  computer/                Bot Screen computer backend
 packages/
   domain/                  Domain types and state transitions
   protocol/                REST and WebSocket schemas
@@ -484,6 +569,7 @@ The daemon is the only SQLite writer. Agent SDKs and native protocols run behind
 | [Technology selection](docs/technology-selection.md) | Runtime and frontend choices |
 | [Context map](CONTEXT-MAP.md) | Domain vocabulary and documentation routing |
 | [Architecture decisions](docs/adr/) · [Domain contexts](docs/contexts/) | System-wide and context-specific decisions |
+| [Service ADR 0013](docs/adr/0013-run-a-standalone-linux-service.md) · [Pairing ADR 0014](docs/adr/0014-require-paired-device-tokens.md) · [Bot Computer ADR 0011](docs/contexts/computer-control/adr/0011-bundle-one-sway-bot-computer.md) | Standalone Service and install-only plugin, paired device tokens and the remote-access contract, one bundled Sway Bot Computer |
 | [Research](docs/research/) | Focused primary-source investigations |
 
 ## License

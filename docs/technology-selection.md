@@ -12,7 +12,7 @@ Web UI:                React 19 + Vite
 Design system:         Astryx through an omarchy-bot semantic adapter
 Styling:               Astryx tokens with product-owned layout styles
 Frontend data:         TanStack Router + Query + Virtual where needed
-Desktop integration:   systemd user service + localhost API
+Launchers:             systemd user unit or container entrypoint (scripts/serve.sh)
 Computer backend:      daemon Sway runtime; no computer worker
 Bot Screen runtime:    one on-demand pure-headless Sway Bot Computer; output/workspace per Screen
 Screen Projection:     selected-view PNG preview + Broker control and view-only RFB over separate WebSockets
@@ -22,7 +22,7 @@ Persistence:           SQLite + daemon-managed local media
 
 ## Runtime boundary
 
-The daemon owns product state, SQLite, the REST/WebSocket API, process supervision, notifications, dictation, attachments, and Computer coordination. Agent workers isolate vendor SDKs, native processes, crashes, and version changes. Workers never open product SQLite or import web code.
+The Service owns product state, SQLite, the REST/WebSocket API, process supervision, dictation, attachments, and Computer coordination. Bot-completion notifications belong to the Bot Client, and startup diagnostics are the Service log plus `status` and `doctor`. Agent workers isolate vendor SDKs, native processes, crashes, and version changes. Workers never open product SQLite or import web code.
 
 Workers start on demand by Agent, not by visible Bot. Several user-created Bots may share one Agent worker/runtime while retaining independent native sessions.
 
@@ -30,7 +30,7 @@ Deployment follows the [Omarchy plugin contract](../README.md#installation): the
 
 Bot Screens do not inherit the user's Wayland display. The daemon provisions one private Sway runtime with headless outputs, one private D-Bus bus and persistent application profile, and workspace-scoped Screen routing. No runtime selector or fallback compositor is supported. The HTTP PNG snapshot remains a read-only recovery path and never substitutes an interactive live transport.
 
-The [accepted product boundary](workspace-redesign.md#shared-workspace-and-plugin-boundary) separates Shared Workspace files, Agent-owned execution, the shared Bot Computer, routed Bot Screens, and client projections. [System ADR 0009](adr/0009-share-work-files-isolate-bot-screens.md) governs on-demand lifetime, shared application state, serialized input, deletion, and resource acceptance.
+The [accepted product boundary](workspace-redesign.md#shared-workspace-and-plugin-boundary) separates Shared Workspace files, Agent-owned execution, the shared Bot Computer, routed Bot Screens, and client projections. [System ADR 0009](adr/0009-share-work-files-isolate-bot-screens.md) governs on-demand lifetime, shared application state, serialized input, deletion, and resource acceptance. [ADR 0013](adr/0013-run-a-standalone-linux-service.md) defines the standalone Service and Launchers, [ADR 0014](adr/0014-require-paired-device-tokens.md) pairing and remote access, and [Computer ADR 0011](contexts/computer-control/adr/0011-bundle-one-sway-bot-computer.md) the bundled Bot Computer runtime.
 
 ## Agent integration rule
 
@@ -40,7 +40,7 @@ Use the richest official interface for each Agent. Every installed version must 
 
 Use React 19 because Astryx and the stable TanStack React adapters cover the required accessible conversation interactions. Streaming updates are buffered, transcript rows subscribe selectively, and long histories may use TanStack Virtual. Computer frames do not flow through ordinary React message state.
 
-The Web frontend is also the foundation of Omarchy Bot, as recorded in [ADR 0010](adr/0010-reuse-web-client-in-tauri.md). Reuse its UI and daemon-facing behavior; keep native shell details out of shared business logic and keep execution on Omarchy. This is a present architecture constraint, not a requirement to add Tauri dependencies or native scaffolding now; actual WebView codec/input compatibility must be verified when that client is built.
+The Web frontend is also the foundation of Omarchy Bot, as recorded in [ADR 0010](adr/0010-reuse-web-client-in-tauri.md). Reuse its UI and daemon-facing behavior; keep native shell details out of shared business logic and keep execution in the Service. This is a present architecture constraint, not a requirement to add Tauri dependencies or native scaffolding now; actual WebView codec/input compatibility must be verified when that client is built.
 
 ### Astryx policy
 
@@ -76,7 +76,7 @@ Token deltas update the projection directly and do not trigger query refetches.
 - SQLite is written only by the daemon.
 - Managed attachments and avatar uploads stay under the local product data directory.
 - Voxtype audio is handled by Voxtype; omarchy-bot retains only the resulting draft text.
-- The current API binds to `127.0.0.1`.
+- The API binds to `127.0.0.1` by default; a non-loopback bind requires operator TLS or a declared TLS-terminating proxy (`apps/daemon/src/bootstrap/config.ts`).
 - Uploaded images are re-encoded; Agent-generated Avatar Recipes are validated data, never executable SVG.
 
 ## Rejected choices
@@ -84,7 +84,7 @@ Token deltas update the projection directly and do not trigger query refetches.
 - Browser speech recognition/audio upload: Voxtype is the local speech-to-text provider.
 - Multiple design systems: Astryx is the sole component system.
 - TanStack Start: the Bun daemon already owns the server/API.
-- Public network listener or desktop runtime inside the browser: out of scope for the current local product.
+- Public network listener or desktop runtime inside the browser: a public listener requires pairing plus TLS; the unauthenticated mode is retired ([ADR 0014](adr/0014-require-paired-device-tokens.md)).
 
 ## Primary references
 
@@ -93,6 +93,9 @@ Token deltas update the projection directly and do not trigger query refetches.
 - Current implementation specification: [`../.scratch/shared-workspace-desktop-boundary/spec.md`](../.scratch/shared-workspace-desktop-boundary/spec.md)
 - Historical vs current requirement homes: [`../.scratch/shared-workspace-desktop-boundary/requirement-map.md`](../.scratch/shared-workspace-desktop-boundary/requirement-map.md)
 - Shared files / isolated Screens: [`adr/0009-share-work-files-isolate-bot-screens.md`](adr/0009-share-work-files-isolate-bot-screens.md)
+- Standalone Service and install-only plugin: [`adr/0013-run-a-standalone-linux-service.md`](adr/0013-run-a-standalone-linux-service.md)
+- Paired device tokens and remote access: [`adr/0014-require-paired-device-tokens.md`](adr/0014-require-paired-device-tokens.md)
+- One bundled Sway Bot Computer: [`contexts/computer-control/adr/0011-bundle-one-sway-bot-computer.md`](contexts/computer-control/adr/0011-bundle-one-sway-bot-computer.md)
 - Omarchy Bot (Tauri): [`adr/0010-reuse-web-client-in-tauri.md`](adr/0010-reuse-web-client-in-tauri.md)
 - Local Sidecar only off-host: [`adr/0011-local-sidecar-only-off-host.md`](adr/0011-local-sidecar-only-off-host.md)
 - Agent inventory: [`agents-integration.md`](agents-integration.md)

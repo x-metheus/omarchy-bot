@@ -6,7 +6,7 @@ The plugin daemon stays bound to Omarchy Shell. Agents, Native Sessions, Shared 
 
 Omarchy Bot starts a Bun Local Sidecar only when it is not connected to the plugin daemon on the same machine. Omarchy Bot on the plugin host is a viewer; native Agent tools already see that OS, so a Sidecar would duplicate execution and blur Host versus Bot Computer. The Sidecar is an outbound TypeScript process from the plugin runtime, not a compiled binary, listener, Agent worker, or daemon. Off-host OS work (commands, search, files, transfer) uses a plugin-owned `local` tool mapped like `computer`, not a relocation of native shell, MCP, or Screen control onto the client. Unqualified GUI still targets the owning Bot Screen; `computer` never falls back to the Host Session.
 
-This ADR records architecture for Omarchy Bot on other machines. Sidecar execution is TypeScript run by the plugin-runtime Bun. It does not ship Tauri or pairing, and it does not weaken [ADR 0004](0004-defer-web-control-transport-security.md): non-loopback access needs a breaking auth/pairing cutover, not `OMARCHY_BOT_HOST=0.0.0.0`.
+This ADR records architecture for Omarchy Bot on other machines. Sidecar execution is TypeScript run by the plugin-runtime Bun. It does not ship Tauri. The pairing cutover it anticipated shipped in [ADR 0014](0014-require-paired-device-tokens.md): every client is a Paired Device, and non-loopback binding requires TLS. Setting `OMARCHY_BOT_HOST=0.0.0.0` alone neither authenticates nor encrypts anything.
 
 ## Considered Options
 
@@ -27,7 +27,7 @@ This ADR records architecture for Omarchy Bot on other machines. Sidecar executi
 
 A Turn's **This Device** is the Sidecar of the install that sent the message starting it, so the client that starts a Sidecar must state that identity on every send. The client shell is outside this repository; it owns the contract:
 
-- It starts the Sidecar with `OMARCHY_BOT_DEVICE_ID` set to a `dev_<32hex>` identity (the Sidecar also requires `OMARCHY_BOT_DAEMON_PORT` and `OMARCHY_BOT_SIDECAR_ROOT`; `OMARCHY_BOT_HOSTNAME` is optional) and registers that same identity with the daemon over the device channel.
+- It starts the Sidecar with `OMARCHY_BOT_DEVICE_ID` set to a `dev_<32hex>` identity (the Sidecar also requires `OMARCHY_BOT_DEVICE_TOKEN`, `OMARCHY_BOT_DAEMON_PORT`, and `OMARCHY_BOT_SIDECAR_ROOT`; `OMARCHY_BOT_HOSTNAME` is optional) and registers that same identity with the daemon over the device channel.
 - It installs the identical value as `globalThis.__OMARCHY_BOT_DEVICE_ID__` before the Web UI bundle loads. The Web client reads it once at load time and tags each `message.send` with it; `ApiClient` accepts the same identity as `localSidecarDeviceId`.
 - The tag is a claim, not a registration: the daemon resolves it against the online Sidecar roster when a `local` job is dispatched. A Sidecar that has not finished registering yet is "offline or unknown" and the job fails closed; nothing waits for it, and no other device is substituted.
 - The claim and the registered identity must match exactly. `ApiClient` refuses a malformed identity, and it is the only tag authority: a body claim cannot override the client's own identity, and a client without one sends no tag at all.
