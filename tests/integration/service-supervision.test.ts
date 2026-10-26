@@ -173,6 +173,7 @@ describe("Service supervision without a user manager", () => {
     seedHostSession();
     harness = await startDaemon(undefined, {
       useProductionBotScreen: true,
+      botComputerAssetSupply: createFixtureFontSupply(scratchRoot("screen-fonts")),
       useHostApplicationUnits: false,
     });
     const botId = await makeBot(harness, "Supervised Screen");
@@ -275,6 +276,7 @@ describe("Service supervision without a user manager", () => {
     const before = hostSession();
     harness = await startDaemon(undefined, {
       useProductionBotScreen: true,
+      botComputerAssetSupply: createFixtureFontSupply(scratchRoot("environment-fonts")),
       useHostApplicationUnits: false,
     });
     const botId = await makeBot(harness, "Explicit environment");
@@ -416,6 +418,7 @@ describe("Service supervision ownership safety", () => {
     sentinel = startUnrelatedSentinel(scratchRoot("sentinel"));
     harness = await startDaemon(undefined, {
       useProductionBotScreen: true,
+      botComputerAssetSupply: createFixtureFontSupply(scratchRoot("ownership-fonts")),
       useHostApplicationUnits: false,
     });
     const botId = await makeBot(harness, "Sentinel neighbour");

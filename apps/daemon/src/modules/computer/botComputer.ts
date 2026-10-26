@@ -481,6 +481,9 @@ export class BotComputerRuntime {
       throw new Error(`Bot Computer runtime path is too long for a private Wayland socket: ${runtimeDir}`);
     }
     const configPath = writeSwayConfig(path.join(runtimeDir, "compositor-config"));
+    if (this.options.fontDir !== undefined) {
+      this.#fontConfigFile ??= (await this.#assets.ensureFonts()).fontConfigFile;
+    }
     const bootstrapEnv = bundleEnvironment({
       ...explicitEnvironment({
         runtimeDir,
@@ -492,6 +495,7 @@ export class BotComputerRuntime {
         cacheHome,
       }),
       XDG_CURRENT_DESKTOP: "sway",
+      ...(this.#fontConfigFile === undefined ? {} : { FONTCONFIG_FILE: this.#fontConfigFile }),
       WLR_BACKENDS: "headless",
       WLR_HEADLESS_OUTPUTS: String(this.#capacity),
       WLR_LIBINPUT_NO_DEVICES: "1",

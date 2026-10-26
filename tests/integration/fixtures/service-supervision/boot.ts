@@ -5,6 +5,7 @@
  */
 import path from "node:path";
 import { main } from "../../../../apps/daemon/src/bootstrap/main.ts";
+import { createFixtureFontSupply } from "../../helpers/fontFixture.ts";
 
 const dataDir = process.env.OMARCHY_BOT_HOME;
 const runtimeRoot = process.env.OMARCHY_BOT_SCREEN_RUNTIME_DIR;
@@ -13,6 +14,7 @@ if (dataDir === undefined || runtimeRoot === undefined) {
 }
 const { port } = await main({
   useHostApplicationUnits: true,
+  botComputerAssetSupply: createFixtureFontSupply(path.join(dataDir, "font-fixture")),
   botScreenRuntimeDir: path.resolve(runtimeRoot),
 });
 console.log(`SERVICE_READY ${port}`);

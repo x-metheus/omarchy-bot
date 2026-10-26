@@ -305,7 +305,25 @@ On first graphical use, the Service uses the SHA-256-pinned Bot Computer bundle 
 
 The bundled `dbus-daemon` launcher defaults to its private `share/dbus-1/session.conf`; a caller-supplied `--config-file` takes precedence so the Bot Computer can use its own session configuration.
 
+When runtime fonts are configured, the Service verifies them before starting Sway and passes their private fontconfig file to the compositor as well as applications, so tab titles render on hosts with no fonts installed.
+
 Maintainers build the pinned sources and verify the resulting library closure with `bash scripts/build-sway-runtime.sh .lane/dist`. Run `sh scripts/sway-runtime/conformance/run.sh <archive.tar.gz>` for bundle-only Ubuntu 22.04 Bot Screen conformance and an Alpine loader smoke check. CI requires the built archive to match the checksum in `swayRuntimeSupply.ts`, and `bash scripts/package-plugin-runtime.sh . dist-runtime <archive.tar.gz>` embeds that verified bundle in the runtime archive; no separate Sway release is published.
+
+The `distro-conformance` pull-request/manual workflow builds the same runtime archive without publishing it, then runs named jobs for Ubuntu 22.04/24.04, Debian 12, Fedora, Arch, openSUSE, and Alpine. Each installs the checksum-verified archive with the shared CLI extraction code and starts `scripts/serve.sh` under a container entrypoint (including Alpine's non-systemd path). A paired scripted Agent opens a real Screen, captures PNGs, opens a local page in the portable browser, and types text that the page reports back. Seam 3 runs the bundle/Xwayland/isolation suite, the tabbed-layout/dialog suite, and the portable-browser/CJK/shared-profile/snap-avoidance suite against that installed archive. Sway always uses headless pixman; no host compositor, display socket, GPU, systemd manager, or host configuration is mounted.
+
+To repeat one job locally, prepare its image explicitly and supply a runtime archive plus its `.sha256` sidecar:
+
+```bash
+# Docker, Bun 1.4+, a cached base image, and network for image prerequisites are required.
+# Replace the id with any entry in scripts/distro-conformance/matrix.json.
+OMARCHY_BOT_DISTRO_BUILD=1 bun scripts/distro-conformance/run.ts ubuntu-22.04 /path/to/runtime.tar.zst
+# Reuse the prepared image without pulling or rebuilding:
+bun scripts/distro-conformance/run.ts ubuntu-22.04 /path/to/runtime.tar.zst
+```
+
+The image provides Bash, Bun (the native musl build on Alpine), `flock`, and development files only for the X11/Wayland test clients. The application and production dependencies come from the archive; tests never reinstall them. First browser use still needs the pinned Chrome and library download URLs. `OMARCHY_BOT_DISTRO_NETWORK=none` disables container networking to diagnose offline prerequisites; an uncached browser then fails explicitly. Runs use read-only inputs, a private temporary home/runtime/profile, no host ports or Docker volumes, and `--rm --init` for targeted process cleanup. The production CLI's systemd lifecycle is covered separately by installer fixtures; this matrix exercises the documented unpacked-runtime/container Launcher path.
+
+The test container relaxes Docker's seccomp profile so Chromium can create its own user-namespace sandbox; it still runs as uid 1000 without privileged mode or host devices. Hosts that disable unprivileged user namespaces must enable them in their container/CI environment before browser conformance can pass; the runner does not change host sysctls or disable Chromium's sandbox.
 
 The Bot Computer also supplies its own browser and fonts, so `open_url` works on a Service Host with no browser and pages render Latin and CJK text without host fonts. A natively installed browser is still preferred; snap-confined browsers are never launched, because a snap cannot see the Bot Computer's private home. The portable browser is a checksum-verified download prepared inside the Bot Computer profile, never installed on the host, and every Screen shares the one browser profile so sign-ins and session state carry over. The fonts are not downloaded: they ship inside the runtime archive at `<dataDir>/runtime/current/fonts`, and `OMARCHY_BOT_FONT_DIR` points at a locally prepared font directory for development. Each `open_url` opens a new window routed to the requesting Screen.
 

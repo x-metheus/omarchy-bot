@@ -32,12 +32,16 @@ import { PNG_SIGNATURE, until } from "./helpers/sway-conformance.ts";
  * runs this suite inside an Ubuntu 22.04 container that has no Sway, grim,
  * D-Bus daemon, Xwayland, or compiler, so every tool it exercises must come
  * from the archive.
+ * The distribution matrix instead sets OMARCHY_BOT_DISTRO_SWAY_DIR to the
+ * checksum-verified runtime archive's installed sway/ directory. Its compiler
+ * builds test clients only; compositor tools must still come from the bundle.
  */
 const BUNDLE_ENV = "OMARCHY_BOT_SWAY_BUNDLE";
 const X11_FIXTURE_ENV = "OMARCHY_BOT_X11_FIXTURE";
-const bundleOnly = process.env[BUNDLE_ENV] === undefined ? test.skip : test;
+const installedBundle = process.env.OMARCHY_BOT_DISTRO_SWAY_DIR;
+const bundleOnly = process.env[BUNDLE_ENV] === undefined && installedBundle === undefined ? test.skip : test;
 
-/** Host tools the bundle must replace; their absence is the point of the suite. */
+/** Host tools shadowed by failing guards when testing an ordinary distro. */
 const FORBIDDEN_HOST_TOOLS = [
   "sway",
   "swaymsg",
@@ -162,22 +166,46 @@ function work(): string {
   return workRoot;
 }
 
-bundleOnly("the conformance host has no Sway, grim, D-Bus, Xwayland, or compiler", () => {
-  const present = [...FORBIDDEN_HOST_TOOLS, ...FORBIDDEN_HOST_COMPILERS]
-    .filter((name) => Bun.which(name) !== null);
-  expect(present).toEqual([]);
+function guardedHostPath(): { searchPath: string; log: string; binDir: string } {
+  const binDir = path.join(work(), "host-tools");
+  const log = path.join(work(), "host-tools.log");
+  mkdirSync(binDir, { recursive: true, mode: 0o700 });
+  for (const tool of FORBIDDEN_HOST_TOOLS) {
+    writeFileSync(path.join(binDir, tool), `#!/bin/sh\nprintf '%s\\n' '${tool}' >> '${log}'\nexit 125\n`, { mode: 0o700 });
+  }
+  return { searchPath: `${binDir}:${process.env.PATH ?? "/usr/bin:/bin"}`, log, binDir };
+}
+
+bundleOnly("the conformance fixture prevents compositor tools from falling back to the host", async () => {
+  if (installedBundle === undefined) {
+    const present = [...FORBIDDEN_HOST_TOOLS, ...FORBIDDEN_HOST_COMPILERS]
+      .filter((name) => Bun.which(name) !== null);
+    expect(present).toEqual([]);
+    return;
+  }
+  // Ordinary distro bases may include D-Bus; poison host resolution instead.
+  const guard = guardedHostPath();
+  for (const tool of FORBIDDEN_HOST_TOOLS) {
+    expect(Bun.which(tool, { PATH: guard.searchPath })).toBe(path.join(guard.binDir, tool));
+  }
+  const probe = await run([path.join(guard.binDir, "dbus-daemon"), "--version"], { PATH: guard.searchPath });
+  expect(probe.status).toBe(125);
+  expect(readFileSync(guard.log, "utf8")).toBe("dbus-daemon\n");
+  rmSync(guard.log);
 });
 
 bundleOnly("the published bundle carries executable, relocatable launchers", async () => {
-  const archive = process.env[BUNDLE_ENV]!;
-  expect(existsSync(archive)).toBeTrue();
-  const extract = path.join(work(), "launcher-check");
-  mkdirSync(extract, { recursive: true, mode: 0o700 });
-  const extracted = await run(["tar", "--extract", "--gzip", "--file", archive, "--directory", extract], {
-    PATH: process.env.PATH ?? "/usr/bin:/bin",
-  });
-  expect({ status: extracted.status, error: /error|cannot|failed/i.test(extracted.stderr) })
-    .toEqual({ status: 0, error: false });
+  const extract = installedBundle ?? path.join(work(), "launcher-check");
+  if (installedBundle === undefined) {
+    const archive = process.env[BUNDLE_ENV]!;
+    expect(existsSync(archive)).toBeTrue();
+    mkdirSync(extract, { recursive: true, mode: 0o700 });
+    const extracted = await run(["tar", "--extract", "--gzip", "--file", archive, "--directory", extract], {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+    });
+    expect({ status: extracted.status, error: /error|cannot|failed/i.test(extracted.stderr) })
+      .toEqual({ status: 0, error: false });
+  }
 
   // The archive root is the bundle root (build contract); no wrapper directory.
   const binDir = path.join(extract, "bin");
@@ -210,30 +238,30 @@ bundleOnly("the published bundle carries executable, relocatable launchers", asy
 });
 
 bundleOnly("two bundle-only Bot Screens isolate X11 clients, input, and projection", async () => {
-  const archive = process.env[BUNDLE_ENV]!;
   const root = work();
   const x11Fixture = process.env[X11_FIXTURE_ENV];
   expect(x11Fixture).toBeDefined();
   expect((statSync(x11Fixture!).mode & 0o111) !== 0).toBeTrue();
 
-  const digest = new Bun.CryptoHasher("sha256").update(await Bun.file(archive).arrayBuffer()).digest("hex");
-  const supplyDir = path.join(root, "supply");
-  mkdirSync(supplyDir, { recursive: true, mode: 0o700 });
-  const extracted = await run(["tar", "--extract", "--gzip", "--file", archive, "--directory", supplyDir], {
-    PATH: process.env.PATH ?? "/usr/bin:/bin",
-  });
-  expect({ status: extracted.status, stderr: extracted.stderr }).toEqual({ status: 0, stderr: "" });
-  writeFileSync(path.join(supplyDir, ".omarchy-bot-runtime"), `${SWAY_RUNTIME_RELEASE}\n${digest}\n`);
+  const supplyDir = installedBundle ?? path.join(root, "supply");
+  let digest: string | undefined;
+  if (installedBundle === undefined) {
+    const archive = process.env[BUNDLE_ENV]!;
+    digest = new Bun.CryptoHasher("sha256").update(await Bun.file(archive).arrayBuffer()).digest("hex");
+    mkdirSync(supplyDir, { recursive: true, mode: 0o700 });
+    const extracted = await run(["tar", "--extract", "--gzip", "--file", archive, "--directory", supplyDir], {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+    });
+    expect({ status: extracted.status, stderr: extracted.stderr }).toEqual({ status: 0, stderr: "" });
+    writeFileSync(path.join(supplyDir, ".omarchy-bot-runtime"), `${SWAY_RUNTIME_RELEASE}\n${digest}\n`);
+  }
   const supply = new PortableSwayRuntimeSupply({
     rootDir: supplyDir,
-    bundle: {
-      release: SWAY_RUNTIME_RELEASE,
-      sha256: digest,
-    },
+    ...(digest === undefined ? {} : { bundle: { release: SWAY_RUNTIME_RELEASE, sha256: digest } }),
   });
   const binaries = await supply.ensure();
   const binDir = path.dirname(binaries.swayBin);
-  expect(binDir.startsWith(path.join(root, "supply"))).toBeTrue();
+  expect(binDir).toBe(path.join(supplyDir, "bin"));
   expect(readdirSync(binDir)).toEqual(expect.arrayContaining([...BUNDLE_ENTRIES]));
 
   const applicationCwd = path.join(root, "workspace");
@@ -258,6 +286,9 @@ bundleOnly("two bundle-only Bot Screens isolate X11 clients, input, and projecti
   // Screen down; the adapter owns the shared compositor and session bus.
   let runtimeA: BotScreenRuntime | undefined;
   let runtimeB: BotScreenRuntime | undefined;
+  const priorPath = process.env.PATH;
+  const guard = installedBundle === undefined ? undefined : guardedHostPath();
+  if (guard !== undefined) process.env.PATH = guard.searchPath;
   try {
     runtimeA = await adapter.start(provision(SURFACE_A));
     runtimeB = await adapter.start(provision(SURFACE_B));
@@ -283,6 +314,9 @@ bundleOnly("two bundle-only Bot Screens isolate X11 clients, input, and projecti
     expect(sessionEnv.DISPLAY).toBeDefined();
     expect(sessionEnv.DISPLAY).not.toBe(process.env.DISPLAY ?? "");
     expect(sessionEnv.PATH!.split(":")).toContain(binDir);
+    for (const tool of FORBIDDEN_HOST_TOOLS) {
+      expect(Bun.which(tool, { PATH: sessionEnv.PATH })).toBe(path.join(binDir, tool));
+    }
 
     // The processes that serve the Screen come from the bundle, not the host.
     // Launchers may exec a bundled loader with an absolute libexec path, so
@@ -301,6 +335,7 @@ bundleOnly("two bundle-only Bot Screens isolate X11 clients, input, and projecti
     }
     expect({ sway: bundleExecutables.has("sway"), desktop: bundleExecutables.has("omarchy-bot-desktop") })
       .toEqual({ sway: true, desktop: true });
+    expect(bundleExecutables.has("dbus-daemon")).toBeTrue();
 
     // Bundled grim produces each Screen's PNG at its configured geometry.
     const emptyA = await screenA.capture();
@@ -439,7 +474,10 @@ bundleOnly("two bundle-only Bot Screens isolate X11 clients, input, and projecti
     await runtimeA?.stop().catch(() => {});
     await adapter.destroy(SURFACE_B).catch(() => {});
     await adapter.destroy(SURFACE_A).catch(() => {});
+    if (priorPath === undefined) delete process.env.PATH;
+    else process.env.PATH = priorPath;
   }
+  if (guard !== undefined) expect(existsSync(guard.log)).toBeFalse();
 
   // Targeted teardown: no Screen tree, no shared computer tree (compositor and
   // session bus only carry the runtime dir, not a surface id), and no process

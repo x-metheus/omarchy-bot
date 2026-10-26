@@ -1,0 +1,9 @@
+[
+  { "id": "ubuntu-22.04", "image": "ubuntu:22.04", "family": "deb" },
+  { "id": "ubuntu-24.04", "image": "ubuntu:24.04", "family": "deb" },
+  { "id": "debian-12", "image": "debian:12", "family": "deb" },
+  { "id": "fedora", "image": "fedora:latest", "family": "rpm" },
+  { "id": "arch", "image": "archlinux:latest", "family": "arch" },
+  { "id": "opensuse", "image": "opensuse/leap:15.6", "family": "suse" },
+  { "id": "alpine", "image": "alpine:3.21.3", "family": "alpine" }
+]
