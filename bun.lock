@@ -117,6 +117,10 @@
       "name": "@omarchy-bot/domain",
       "version": "0.1.0",
     },
+    "packages/omarchy-plugin": {
+      "name": "@omarchy-bot/omarchy-plugin",
+      "version": "0.1.0",
+    },
     "packages/protocol": {
       "name": "@omarchy-bot/protocol",
       "version": "0.1.0",
@@ -510,6 +514,8 @@
     "@omarchy-bot/domain": ["@omarchy-bot/domain@workspace:packages/domain"],
 
     "@omarchy-bot/e2e": ["@omarchy-bot/e2e@workspace:tests/e2e"],
+
+    "@omarchy-bot/omarchy-plugin": ["@omarchy-bot/omarchy-plugin@workspace:packages/omarchy-plugin"],
 
     "@omarchy-bot/protocol": ["@omarchy-bot/protocol@workspace:packages/protocol"],
 

@@ -50,6 +50,7 @@ jobs:
       - name: Install and build the plugin runtime
         run: |
           bun install --frozen-lockfile
+          bun run lint:boundaries
           bun run --filter=@omarchy-bot/web build
           bun apps/daemon/native/pointer-helper/build.ts
           bun apps/daemon/native/capture-helper/build.ts
@@ -82,7 +83,7 @@ jobs:
           tag="runtime-${GITHUB_SHA}"
           notes="Omarchy plugin runtime for \`${GITHUB_SHA}\` (x86_64).
 
-          This is the same Omarchy plugin payload consumed by \`plugin/launch.sh\`, not a standalone application.
+          This is the runtime payload installed by \`packages/omarchy-plugin\`, not a standalone application.
 
           Download:
 

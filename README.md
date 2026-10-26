@@ -16,7 +16,7 @@ Create named Bots, work together in Threads, and see their desktop work in Bot S
 
 ---
 
-Omarchy Bot's headless Service owns the Bots, Threads, Agents, Shared Workspace, and Bot Computer. Launchers start an installed runtime through one `serve` entry on x86_64 Linux; the existing Omarchy plugin uses that entry after preparing the runtime.
+Omarchy Bot's headless Service owns the Bots, Threads, Agents, Shared Workspace, and Bot Computer. Launchers start an installed runtime through one `serve` entry on x86_64 Linux; the existing Omarchy plugin installs that runtime and starts its systemd user unit.
 
 | Work with teammates | Keep the context |
 | :--- | :--- |
@@ -39,24 +39,26 @@ omarchy plugin add https://github.com/XMethues/omarchy-bot.git --enable
 
 Published runtimes include the built web client, native helpers, application source, and production dependencies. First enable uses a SHA-256-verified release artifact instead of running an install or compiler.
 
+The plugin package only installs the Service. Enable runs the shared installer from the published runtime archive, reuses an already-installed Service, then starts the `omarchy-bot.service` user unit; disable stops that unit and leaves an installed helper watching until re-enable or checkout removal; removing the checkout uninstalls the Service and keeps user data. Shell hot reload keeps the plugin loaded. The package refuses hosts that are not Omarchy on x86_64; the generic `serve` entry checks no distribution.
+
 <details>
 <summary><strong>Runtime delivery and startup diagnostics</strong></summary>
 
-The repository root is the plugin contract; Omarchy Shell loads `plugin/Service.qml`.
+The repository root manifest points Omarchy's plugin manager at `packages/omarchy-plugin`, and Omarchy Shell loads its `Service.qml`.
 
 - **Bun resolution:** PATH, then mise, then a checksum-verified official Bun 1.4.2 download under `OMARCHY_BOT_HOME`.
 - **Release artifacts:** `omarchy-bot-runtime-<sha>-x86_64.tar.zst` and its SHA-256 sidecar, published under `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<sha>/`.
-- **Runtime location:** `$XDG_DATA_HOME/omarchy-bot/app/<sha>/`, or `$OMARCHY_BOT_HOME/app/<sha>/` when overridden. Preparation is atomic and keeps the checkout clean and fast-forwardable.
-- **Source fallback:** only for a confirmed missing artifact, such as a local or unpublished SHA. Network, server, and integrity failures stop startup rather than silently compiling.
-- **Failure handling:** `notify-send` reports startup failures. A private supervisor lifeline requests graceful daemon cleanup when Quickshell destroys the plugin process; the startup lock remains held until cleanup finishes.
+- **Runtime location:** `$XDG_DATA_HOME/omarchy-bot/runtime/current/`, or `$OMARCHY_BOT_HOME/runtime/current/` when overridden. Extraction is atomic and keeps the checkout clean and fast-forwardable.
+- **No source fallback:** a network, server, or integrity failure stops startup rather than silently compiling.
+- **Failure handling:** there is no supervisor lifeline and no `notify-send`; Quickshell does not parent the daemon. Install, startup, and unit failures go to the Service log and to `omarchy-bot status`.
 
-Startup log:
+Service log:
 
 ```text
-~/.local/state/omarchy-bot/plugin-launch.log
+~/.local/state/omarchy-bot/service.log
 ```
 
-Set `XDG_STATE_HOME` to relocate the plugin log. No host packages or Omarchy files are changed. The installed runtime also supports direct Service startup without Omarchy Shell; see below.
+Set `OMARCHY_BOT_STATE` to relocate the log and other state. No host packages or Omarchy files are changed. The installed runtime also supports direct Service startup without Omarchy Shell; see below.
 
 </details>
 
@@ -70,7 +72,7 @@ bash /path/to/runtime/scripts/serve.sh
 
 In a checkout, `bun run serve` calls the same entry. It requires Linux x86_64, Bash, Bun 1.4+, and `flock`; it performs no installation or downloads. Set `OMARCHY_BOT_BUN` to select a Bun executable. The Service logs to stdout/stderr and listens on `127.0.0.1:7321` by default. Existing `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `OMARCHY_BOT_HOST`, and `OMARCHY_BOT_PORT` settings apply.
 
-Without `XDG_RUNTIME_DIR`, the entry creates `/tmp/ob-<uid>` with mode 0700 and exports it for transient sockets and the Bot Computer runtime. The short path leaves room for Linux's Unix-socket pathname limit. A per-user Service lock lives under `/tmp/omarchy-bot-<uid>/`, independent of login sessions and launcher settings. A second launch fails promptly and reports the running Service's PID. The Omarchy plugin queues behind cleanup through the same entry and retains its supervisor lifeline until its installer-only cutover.
+Without `XDG_RUNTIME_DIR`, the entry creates `/tmp/ob-<uid>` with mode 0700 and exports it for transient sockets and the Bot Computer runtime. The short path leaves room for Linux's Unix-socket pathname limit. A per-user Service lock lives under `/tmp/omarchy-bot-<uid>/`, independent of login sessions and launcher settings. A second launch fails promptly and reports the running Service's PID. The Omarchy plugin starts and stops the Service through its systemd user unit. Shell hot reload keeps the plugin loaded, and a crash or SIGKILL leaves the Service running. A graceful Quickshell teardown destroys the plugin and stops the Service: the Shell persists the enabled set after QML destruction, so the teardown hook cannot safely distinguish shutdown from disable.
 
 `GET /api/health` accepts no token and returns only liveness and the Service version, for example `{"ok":true,"version":"0.1.0"}`. Pairing and remote TLS are separate tickets; keep the current control API on loopback.
 
@@ -98,7 +100,7 @@ Without `XDG_RUNTIME_DIR`, the entry creates `/tmp/ob-<uid>` with mode 0700 and 
 - **Tabbed Bot Screens.** Each workspace shows one full-width application with readable titles for the other open windows. Dialogs and file pickers float centered above the application.
 - **Coordinated desktop input.** The runtime serializes actions across Screens. Human Web Control holds the shared input seat until control is returned; background applications can continue running.
 - **Viewing is not execution.** Closing a viewer does not stop the Screen's applications. WayVNC supplies on-demand, view-only RFB projection; Computer Broker remains the input authority.
-- **Work files outlive a Bot.** Deleting a Bot removes its plugin-owned data and targeted Screen runtime/workspace, not Shared Workspace files, Agent-owned Native Sessions, or the shared Bot Computer profile.
+- **Work files outlive a Bot.** Deleting a Bot removes its Service-owned data and targeted Screen runtime/workspace, not Shared Workspace files, Agent-owned Native Sessions, or the shared Bot Computer profile.
 
 The accepted [product specification](docs/workspace-redesign.md), [shared Bot Computer decision](docs/adr/0009-share-work-files-isolate-bot-screens.md), and [domain context map](CONTEXT-MAP.md) define the boundaries.
 
@@ -108,9 +110,9 @@ The current implementation includes a Bun daemon, React web client, SQLite persi
 
 **Host Session acceptance remains open.** Automated real-Sway conformance covers two routed Screens, shared profile/runtime markers, Agent control, projection, URL reuse, deletion/reprovision, and host environment isolation. It does not prove the user's top bar, shortcuts, or ordinary physical-input experience. See the [runtime decision and evidence](docs/contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md).
 
-Omarchy Bot (Tauri) will reuse the Web frontend while execution stays on the plugin. [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md) define that contract; Tauri packaging and WebView compatibility are not implemented or verified by the current client. The application is Omarchy Bot, not a Desktop SKU.
+Omarchy Bot (Tauri) will reuse the Web frontend while execution stays in the Service. [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md) define that contract; Tauri packaging and WebView compatibility are not implemented or verified by the current client. The application is Omarchy Bot, not a Desktop SKU.
 
-A Local Sidecar host is external to this repository. The client shell that starts one must set the Sidecar's `OMARCHY_BOT_DEVICE_ID` to a `dev_<32hex>` identity and install the same value as `globalThis.__OMARCHY_BOT_DEVICE_ID__` before the Web bundle loads; the Web client then tags each send with it so the daemon can resolve that Sidecar as **This Device**. A browser tab, a mobile-class client, and Omarchy Bot on the plugin host install nothing and send no tag, so their Turns have no This Device. See [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md#client-side-device-identity) for the full shell contract.
+A Local Sidecar host is external to this repository. The client shell that starts one must set the Sidecar's `OMARCHY_BOT_DEVICE_ID` to a `dev_<32hex>` identity and install the same value as `globalThis.__OMARCHY_BOT_DEVICE_ID__` before the Web bundle loads; the Web client then tags each send with it so the daemon can resolve that Sidecar as **This Device**. A browser tab, a mobile-class client, and Omarchy Bot on the Service Host install nothing and send no tag, so their Turns have no This Device. See [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md#client-side-device-identity) for the full shell contract.
 
 ## Development
 
@@ -398,6 +400,7 @@ Eight Screens at 1080p are rejected before any excess Screen is provisioned. The
 apps/
   web/                     React conversation workspace
   daemon/                  Local API, persistence, orchestration
+  cli/                     Install, unit, and status commands
 workers/
   pi/                      Pi SDK adapter
   computer/                Bot Screen computer backend
@@ -406,7 +409,7 @@ packages/
   protocol/                REST and WebSocket schemas
   agent-contract/          Daemon / Agent worker protocol
   api-client/              Typed client
-plugin/                    Omarchy Shell service and runtime launcher
+  omarchy-plugin/          Install-only Omarchy plugin package
 scripts/                   Plugin runtime packaging
 tests/                     Unit, integration, E2E, and conformance checks
 docs/                      Product design, ADRs, research, inventories

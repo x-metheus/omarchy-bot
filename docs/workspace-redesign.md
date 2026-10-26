@@ -105,9 +105,9 @@ There is no persistent global TopNav.
 
 ### Future Omarchy Bot
 
-The current Web frontend will be reused for Omarchy Bot, not replaced by an independently implemented interface or a "Desktop" product. Conversation UI, Bot selection, Computer Surface behavior, and daemon-facing HTTP/WebSocket contracts stay shared; Agents, Native Sessions, the Bot Computer, routed Screens, and capture/input execution remain on the Omarchy plugin. A Local Sidecar starts only when Omarchy Bot is not connected to the plugin daemon on the same machine; on the plugin host it is a viewer.
+The current Web frontend will be reused for Omarchy Bot, not replaced by an independently implemented interface or a "Desktop" product. Conversation UI, Bot selection, Computer Surface behavior, and daemon-facing HTTP/WebSocket contracts stay shared; Agents, Native Sessions, the Bot Computer, routed Screens, and capture/input execution remain in the Service. A Local Sidecar starts only when Omarchy Bot is not connected to the Service on the same machine; on the Service Host it is a viewer.
 
-[ADR 0010](adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](adr/0011-local-sidecar-only-off-host.md) record this accepted evolution contract. Preserve the client/execution separation now without adding unused native scaffolding. Tauri packaging and pairing are later work; the Local Sidecar daemon contract is TypeScript run by the plugin-runtime Bun. Actual WebView media/input support must be tested then rather than inferred from Chromium tests. This does not change current Omarchy plugin lifecycle ownership, loopback network policy, or application-state ownership.
+[ADR 0010](adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](adr/0011-local-sidecar-only-off-host.md) record this accepted evolution contract. Preserve the client/execution separation now without adding unused native scaffolding. Tauri packaging and pairing are later work; the Local Sidecar daemon contract is TypeScript run by the plugin-runtime Bun. Actual WebView media/input support must be tested then rather than inferred from Chromium tests. This does not change loopback network policy or application-state ownership; the Service's lifecycle belongs to its systemd user unit ([ADR 0013](adr/0013-run-a-standalone-linux-service.md)), not to the Omarchy plugin.
 
 ## 3. Sidebar
 

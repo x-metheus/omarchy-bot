@@ -135,6 +135,19 @@ function start(setup: Fixture, env = setup.env) {
   });
 }
 
+test("serve rejects the retired preload flag", async () => {
+  const setup = fixture();
+  const child = Bun.spawn(["bash", setup.serve, "--preload", "missing"], {
+    env: setup.env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(await child.exited).toBe(2);
+  expect(await new Response(child.stderr).text()).toContain("unknown argument --preload");
+  expect(existsSync(setup.started)).toBeFalse();
+});
+
 test("serve starts an installed runtime without a plugin checkout", async () => {
   const setup = fixture();
   const child = start(setup);
