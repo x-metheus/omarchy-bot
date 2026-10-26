@@ -340,6 +340,11 @@ The composer uses Astryx's native slash-trigger menu. The pinned
 when that input is a combobox; Bun applies it during installation, and runtime
 archives include the patch. Reassess it when upgrading Astryx.
 
+The Message input is a combobox while Skill commands are available, and a
+textbox for multiword drafts, offline Agents, and active Turns. End-to-end tests
+combine both roles with the exact accessible name so the same locator survives
+typing and sending; a dedicated test verifies the owned Skill commands listbox.
+
 #### Publisher deployment (maintainers)
 
 Clients use `https://omarchy-bot-site-ymlq.vercel.app` automatically. Both new
@@ -429,6 +434,15 @@ bun run typecheck
 bun test
 bun run build
 ```
+
+Workspace visual checks run with `bun run test:e2e 13-responsive-accessible-visual-qa.spec.ts`.
+They use fixed fixtures, viewports, themes, and the installed Playwright Chromium.
+The capture helper also pauses native DiceBear animations inside SVG image data
+URIs: page-level animation controls cannot freeze those separate image documents.
+Avatars remain visible, normal-motion media stays enabled for its cases, and the
+reduced-motion case asserts the product's static working avatar before capture.
+Review snapshot differences before updating; browser and system-font changes can
+still affect raster output.
 
 Real Pi conformance makes model calls and requires a configured Agent:
 

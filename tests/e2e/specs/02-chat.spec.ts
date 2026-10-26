@@ -16,7 +16,8 @@ async function createBot(page: Page, name: string): Promise<string> {
 }
 
 function composerInput(page: Page): Locator {
-  return page.getByRole("textbox", { name: "Message input" });
+  return page.getByRole("textbox", { name: "Message input", exact: true })
+    .or(page.getByRole("combobox", { name: "Message input", exact: true }));
 }
 
 async function send(page: Page, text: string): Promise<void> {
@@ -82,6 +83,35 @@ async function expectCardAboveComposer(page: Page): Promise<void> {
 }
 
 test.describe("chat through a bot", () => {
+  test("owns the Skill commands popup and sends a multiword draft across input roles", async ({ page }) => {
+    await page.goto("/");
+    await createBot(page, "Composer Roles Bot");
+
+    const input = composerInput(page);
+    const combobox = page.getByRole("combobox", { name: "Message input", exact: true });
+    const textbox = page.getByRole("textbox", { name: "Message input", exact: true });
+    const skills = page.getByRole("listbox", { name: "Skill commands", exact: true });
+    await expect(combobox).toHaveAttribute("aria-haspopup", "listbox");
+    await expect(combobox).toHaveAttribute("aria-expanded", "false");
+
+    await input.fill("/");
+    await expect(skills).toBeVisible();
+    await expect(combobox).toHaveAttribute("aria-expanded", "true");
+    const popupId = await skills.getAttribute("id");
+    expect(popupId).not.toBeNull();
+    await expect(combobox).toHaveAttribute("aria-controls", popupId!);
+    await input.press("Escape");
+    await expect(skills).toHaveCount(0);
+    await expect(combobox).toHaveAttribute("aria-expanded", "false");
+
+    await input.fill("say: multiple words");
+    await expect(textbox).toHaveText("say: multiple words");
+    await expect(textbox).not.toHaveAttribute("aria-haspopup");
+    await input.press("Enter");
+    await expect(page.getByTestId("assistant-message").last()).toContainText("multiple words");
+    await expect(combobox).toHaveText("");
+  });
+
   test("abandons a blank draft without creating a thread", async ({ page, request }) => {
     await page.goto("/");
     const botId = await createBot(page, "Blank Conversation Bot");
@@ -123,40 +153,37 @@ test.describe("chat through a bot", () => {
       backgroundColor: string;
       borderWidth: string;
       boxShadow: string;
-    }> => composer.evaluate((root) => {
-      const editable = root.querySelector<HTMLElement>('[role="textbox"]');
-      const actions = ["Attach files", "Start voice recording", "Send"].map((label) =>
-        [...root.querySelectorAll<HTMLButtonElement>("button")].find(
-          (button) => button.getAttribute("aria-label") === label || button.textContent?.trim() === label,
-        ),
-      );
-      if (editable === null || actions.some((action) => action === undefined)) {
-        throw new Error("Composer controls are incomplete");
-      }
-      let surface: HTMLElement | null = editable.parentElement;
-      while (surface !== null && !actions.every((action) => action !== undefined && surface?.contains(action))) {
-        surface = surface.parentElement;
-      }
-      if (surface === null) throw new Error("Composer controls do not share one dock surface");
-      const style = getComputedStyle(surface);
-      return {
-        actionBoxes: actions.map((action) => {
-          const box = action!.getBoundingClientRect();
-          const actionStyle = getComputedStyle(action!);
-          return {
-            x: box.x,
-            width: box.width,
-            height: box.height,
-            centerY: box.y + box.height / 2,
-            radius: Number.parseFloat(actionStyle.borderTopLeftRadius),
-            transitionDuration: actionStyle.transitionDuration,
-          };
-        }),
-        backgroundColor: style.backgroundColor,
-        borderWidth: style.borderTopWidth,
-        boxShadow: style.boxShadow,
-      };
-    });
+    }> => {
+      const actions = await Promise.all([attach, microphone, sendButton].map((action) => action.elementHandle()));
+      return input.evaluate((editable, actions) => {
+        if (actions.some((action) => action === null)) {
+          throw new Error("Composer controls are incomplete");
+        }
+        let surface: HTMLElement | null = editable.parentElement;
+        while (surface !== null && !actions.every((action) => action !== null && surface?.contains(action))) {
+          surface = surface.parentElement;
+        }
+        if (surface === null) throw new Error("Composer controls do not share one dock surface");
+        const style = getComputedStyle(surface);
+        return {
+          actionBoxes: actions.map((action) => {
+            const box = action!.getBoundingClientRect();
+            const actionStyle = getComputedStyle(action!);
+            return {
+              x: box.x,
+              width: box.width,
+              height: box.height,
+              centerY: box.y + box.height / 2,
+              radius: Number.parseFloat(actionStyle.borderTopLeftRadius),
+              transitionDuration: actionStyle.transitionDuration,
+            };
+          }),
+          backgroundColor: style.backgroundColor,
+          borderWidth: style.borderTopWidth,
+          boxShadow: style.boxShadow,
+        };
+      }, actions);
+    };
 
     const lightDock = await dockPresentation();
     expect(lightDock.borderWidth).toBe("0px");
@@ -793,6 +820,7 @@ test.describe("chat through a bot", () => {
       await expect(card).toContainText("Restart the daemon or check the worker logs.");
       await expect(composerInput(page)).toHaveAttribute("aria-disabled", "true");
       await expect(composerInput(page)).toHaveAttribute("contenteditable", "false");
+      await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeVisible();
 
       await card.getByRole("button", { name: "Close" }).click();
       await expect(card).toHaveCount(0);
@@ -801,6 +829,7 @@ test.describe("chat through a bot", () => {
       setFakeProbe({});
       expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
       await expect(composerInput(page)).not.toHaveAttribute("aria-disabled");
+      await expect(page.getByRole("combobox", { name: "Message input", exact: true })).toBeVisible();
 
       setFakeProbe({ fakeProbe: "offline" });
       expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
@@ -831,6 +860,7 @@ test.describe("chat through a bot", () => {
     await waitForPersistedThread(page);
     await expect(page.getByTestId("working-avatar")).toBeVisible();
     await expect(composerInput(page)).toBeEnabled();
+    await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeVisible();
 
     await send(page, "redirect e2e");
     await expect(page.getByTestId("assistant-message").last()).toContainText("steered: redirect e2e", { timeout: 15_000 });

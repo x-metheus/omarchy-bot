@@ -266,7 +266,7 @@ export class WorkerClient {
     this.#stopping = true;
     if (this.alive) {
       try {
-        this.write({ type: "shutdown", requestId: randomUUID() });
+        this.#proc?.stdin.end();
       } catch {
         /* already gone */
       }

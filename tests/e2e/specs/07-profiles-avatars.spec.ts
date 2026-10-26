@@ -185,7 +185,9 @@ test.describe("Bot profiles and avatars", () => {
     await headerAvatar.hover();
     await expect(page.getByTestId("header-working-status")).toHaveCount(0);
 
-    const composer = page.getByRole("textbox", { name: "Message input" });
+    const composer = page
+      .getByRole("textbox", { name: "Message input", exact: true })
+      .or(page.getByRole("combobox", { name: "Message input", exact: true }));
     await composer.fill("steer-echo");
     await composer.press("Enter");
     await expect(sidebarRow.getByTestId("sidebar-activity-point")).toBeVisible();
@@ -333,7 +335,9 @@ test.describe("Bot profiles and avatars", () => {
   test("ellipsizes only a maximum-length working Bot name at narrow widths", async ({ page }) => {
     const name = "Working Avatar ".padEnd(80, "W");
     await createBot(page, name);
-    const composer = page.getByRole("textbox", { name: "Message input" });
+    const composer = page
+      .getByRole("textbox", { name: "Message input", exact: true })
+      .or(page.getByRole("combobox", { name: "Message input", exact: true }));
     await composer.fill("steer-echo");
     await composer.press("Enter");
     const workingAvatar = page.getByTestId("working-avatar");
@@ -383,7 +387,9 @@ test.describe("Bot profiles and avatars", () => {
     });
     await page.getByRole("button", { name: "Close bot settings" }).click();
 
-    const composer = page.getByRole("textbox", { name: "Message input" });
+    const composer = page
+      .getByRole("textbox", { name: "Message input", exact: true })
+      .or(page.getByRole("combobox", { name: "Message input", exact: true }));
     await composer.fill("steer-echo");
     await composer.press("Enter");
     const workingAvatar = page.getByTestId("working-avatar");
@@ -434,7 +440,9 @@ test.describe("Bot profiles and avatars", () => {
 
   test("keeps both waiting states active and removes the working avatar for every terminal state", async ({ page, request }) => {
     const botId = await createBot(page, "Turn State Avatar Bot");
-    const composer = page.getByRole("textbox", { name: "Message input" });
+    const composer = page
+      .getByRole("textbox", { name: "Message input", exact: true })
+      .or(page.getByRole("combobox", { name: "Message input", exact: true }));
     await composer.fill("say: completed history");
     await composer.press("Enter");
     await expect(page.getByTestId("assistant-message").last()).toContainText("completed history", { timeout: 15_000 });

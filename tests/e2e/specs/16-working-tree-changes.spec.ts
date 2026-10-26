@@ -49,7 +49,9 @@ async function createBot(page: Page, name: string): Promise<string> {
 }
 
 async function sendMessage(page: Page, text: string): Promise<string> {
-  const input = page.getByRole("textbox", { name: "Message input" });
+  const input = page
+    .getByRole("textbox", { name: "Message input", exact: true })
+    .or(page.getByRole("combobox", { name: "Message input", exact: true }));
   await input.fill(text);
   await input.press("Enter");
   await page.waitForURL((url) => {
@@ -201,7 +203,11 @@ test.describe("Changes absent and Computer retained", () => {
     await page.getByRole("button", { name: /Thread one workspace/ }).click();
     await expect(page).toHaveURL(new RegExp(`thread=${threadOneId}`));
     await expect(capabilities.getByRole("heading", { name: "Isolation Bot A’s screen" })).toBeVisible();
-    await expect(page.getByRole("textbox", { name: "Message input" })).toBeVisible();
+    await expect(
+      page
+        .getByRole("textbox", { name: "Message input", exact: true })
+        .or(page.getByRole("combobox", { name: "Message input", exact: true }))
+    ).toBeVisible();
 
     await page.getByRole("button", { name: "Isolation Bot B", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`bot=${botBId}`));

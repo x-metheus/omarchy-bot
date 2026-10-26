@@ -13,7 +13,9 @@ async function createBot(page: Page, name: string): Promise<string> {
 }
 
 function composerInput(page: Page): Locator {
-  return page.getByRole("textbox", { name: "Message input" });
+  return page
+    .getByRole("textbox", { name: "Message input", exact: true })
+    .or(page.getByRole("combobox", { name: "Message input", exact: true }));
 }
 
 async function sendAndWait(page: Page, text: string): Promise<string> {

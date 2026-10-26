@@ -100,6 +100,10 @@ type AgentCommand =
 
 The exact accepted commands are versioned. An adapter may report an operation unavailable; it may not silently route it through a weaker headless or PTY transport.
 
+Graceful worker shutdown closes its stdin. Adapters dispose native sessions on
+EOF; the Service then reaps every owned descendant, using bounded TERM/KILL
+escalation if a worker or descendant remains alive.
+
 ### Native plugin discovery and runtime
 
 `plugins: true` describes the adapter's exercised native plugin integration and

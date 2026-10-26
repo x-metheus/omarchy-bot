@@ -412,7 +412,9 @@ async function expectWorkspaceContract(page: Page): Promise<void> {
   await expect(page.getByLabel("Choose files to attach")).toBeHidden();
   await expect(page.getByRole("button", { name: "Attach files" })).toHaveCount(1);
 
-  const composerInput = page.getByRole("textbox", { name: "Message input" });
+  const composerInput = page
+    .getByRole("textbox", { name: "Message input", exact: true })
+    .or(page.getByRole("combobox", { name: "Message input", exact: true }));
   await expect(composerInput).toBeEnabled();
   await composerInput.fill("A keyboard-ready draft");
   await expect(composerInput).toHaveText("A keyboard-ready draft");
@@ -436,6 +438,16 @@ async function prepareVisualCapture(page: Page): Promise<void> {
   });
   await page.evaluate(async () => {
     await document.fonts.ready;
+    // Page screenshot animation controls do not reach SVG image documents.
+    await Promise.all([...document.images].map(async (image) => {
+      if (!image.src.startsWith("data:image/svg+xml")) return;
+      const svg = decodeURIComponent(image.src.slice(image.src.indexOf(",") + 1));
+      if (svg.includes("@keyframes")) {
+        const pausedSvg = svg.replace("</svg>", "<style>*, *::before, *::after { animation-play-state: paused !important; animation-delay: 0s !important; }</style></svg>");
+        image.src = `data:image/svg+xml,${encodeURIComponent(pausedSvg)}`;
+      }
+      await image.decode();
+    }));
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
   });
 }
@@ -644,7 +656,11 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(unavailableNotice).toContainText("Claude worker is disconnected.");
     await expect(unavailableNotice).toContainText("Reconnect Claude before sending a message.");
     await expect(conversationWorkspace.getByRole("alert")).toHaveCount(1);
-    await expect(page.getByRole("textbox", { name: "Message input" })).toHaveAttribute("contenteditable", "false");
+    await expect(
+      page
+        .getByRole("textbox", { name: "Message input", exact: true })
+        .or(page.getByRole("combobox", { name: "Message input", exact: true }))
+    ).toHaveAttribute("contenteditable", "false");
 
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const computer = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
