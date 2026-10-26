@@ -14,7 +14,7 @@ Each adapter maintains a versioned **Agent Capability Inventory**. The inventory
 - treats Native Sessions as Agent-owned, so Bot deletion removes local mappings without invoking an Agent worker or deleting native data;
 - marks an Agent unavailable when its installed version fails its adapter conformance suite.
 
-Working-directory and desktop bindings follow the [Shared Workspace and plugin boundary](workspace-redesign.md#shared-workspace-and-plugin-boundary). A Native Session, the shared Bot Computer, a routed Bot Screen, and a Screen Projection are different lifetimes: changing the viewed Bot does not end its Agent or graphical work. The shared default cwd is `~/.omarchy-bot/workspace`; application/browser profile state is shared inside the private Bot Computer; the plugin does not add work-file locks or application-internal synchronization.
+Working-directory and desktop bindings follow the [Shared Workspace and plugin boundary](workspace-redesign.md#shared-workspace-and-plugin-boundary). A Native Session, the shared Bot Computer, a routed Bot Screen, and a Screen Projection are different lifetimes: changing the viewed Bot does not end its Agent or graphical work. The shared default cwd is `~/.omarchy-bot/workspace`; application/browser profile state is shared inside the private Bot Computer; the Service does not add work-file locks or application-internal synchronization.
 
 ## Adapter baseline
 

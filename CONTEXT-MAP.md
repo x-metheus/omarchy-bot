@@ -6,7 +6,7 @@ Read every context whose concepts or code paths intersect the work. Cross-contex
 | --- | --- | --- | --- |
 | Workspace | `docs/contexts/workspace/CONTEXT.md` | `docs/contexts/workspace/adr/` | Bot Client and Web/Tauri evolution, Bot identity and lifecycle, Shared Workspace and work-file ownership, profiles and avatars, Threads, Composer drafts, steering, conversation UI, attachments, notifications |
 | Agent Integration | `docs/contexts/agent-integration/CONTEXT.md` | `docs/contexts/agent-integration/adr/` | Agent registry, adapters, worker protocol, Native Sessions versus desktop sessions, working-directory selection, readiness, conformance, capability inventory |
-| Computer Control | `docs/contexts/computer-control/CONTEXT.md` | `docs/contexts/computer-control/adr/` | Host Session protection, Bot Screens and desktop sessions, Screen Projection, per-Screen input coordination, Takeover, Computer Surface, computer worker |
+| Computer Control | `docs/contexts/computer-control/CONTEXT.md` | `docs/contexts/computer-control/adr/` | Host Session protection, Bot Screens and desktop sessions, Screen Projection, per-Screen input coordination, Takeover, Computer Surface |
 
 ## Code routing
 
@@ -37,6 +37,6 @@ Glossaries define terms. Product rules and acceptance live in [the product bound
 
 ## Current and historical documentation
 
-Current authority is the product boundary, system ADR 0009, system ADR 0010, Computer ADR 0009, the three glossaries, and [the Shared Workspace / Bot Desktop implementation specification](.scratch/shared-workspace-desktop-boundary/spec.md). Computer ADR 0008 is historical Cage evidence; production Bot Desktop Sessions use Sway, bundled identically for every Service Host by [Computer ADR 0011](docs/contexts/computer-control/adr/0011-bundle-one-sway-bot-computer.md). For Service, Launcher, pairing, or non-Omarchy host work, read [the standalone Linux Service specification](.scratch/standalone-linux-service/spec.md).
+Current authority is the product boundary, system ADR 0009, system ADR 0010, system ADR 0013, system ADR 0014, Computer ADR 0009, the three glossaries, and [the Shared Workspace / Bot Desktop implementation specification](.scratch/shared-workspace-desktop-boundary/spec.md). Computer ADR 0008 is historical Cage evidence; production Bot Desktop Sessions use Sway, bundled identically for every Service Host by [Computer ADR 0011](docs/contexts/computer-control/adr/0011-bundle-one-sway-bot-computer.md). For Service, Launcher, pairing, or non-Omarchy host work, read [the standalone Linux Service specification](.scratch/standalone-linux-service/spec.md).
 
 Older specifications, tickets, and research notes are historical unless they agree with the documents above. [The requirement map](.scratch/shared-workspace-desktop-boundary/requirement-map.md) lists each mixed or superseded document, where its still-valid requirements live, and which measurements remain evidence only. Do not implement Changes, a single shared input seat, nested Hyprland, or per-Bot browser/profile/login policy from those older sources. Four-stream capacity results are not current Host Session or normal-use-cost acceptance.

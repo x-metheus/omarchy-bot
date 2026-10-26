@@ -1,8 +1,8 @@
 # AI teammate workspace redesign
 
-Status: accepted product design; the Shared Workspace and plugin-boundary revision was confirmed on 2026-09-05. Implementation gaps below now distinguish landed runtime work from the still-open human host-acceptance gate.
+Status: accepted product design; the Shared Workspace and plugin-boundary revision was confirmed on 2026-09-05. Amended 2026-10-26: the Service is standalone and the Omarchy plugin only installs it ([ADR 0013](adr/0013-run-a-standalone-linux-service.md)); every client is a Paired Device ([ADR 0014](adr/0014-require-paired-device-tokens.md)); one bundled Bot Computer serves every Service Host ([Computer ADR 0011](contexts/computer-control/adr/0011-bundle-one-sway-bot-computer.md)). Implementation gaps below now distinguish landed runtime work from the still-open human host-acceptance gate.
 
-This document defines the accepted product and interaction design. Omarchy Bot is an Omarchy plugin inspired by Grok Bot's user-created teammates, not a generic coding dashboard or a second full desktop session; earlier drafts and feature tickets are authoritative only where they agree with this specification and [ADR 0009](adr/0009-share-work-files-isolate-bot-screens.md). Historical specifications and their still-valid homes are accounted in [the requirement map](../.scratch/shared-workspace-desktop-boundary/requirement-map.md).
+This document defines the accepted product and interaction design. Omarchy Bot is a headless Service on x86_64 Linux with interchangeable Launchers; the Omarchy plugin only installs it. It is inspired by Grok Bot's user-created teammates, not a generic coding dashboard or a second full desktop session; earlier drafts and feature tickets are authoritative only where they agree with this specification and [ADR 0009](adr/0009-share-work-files-isolate-bot-screens.md). Historical specifications and their still-valid homes are accounted in [the requirement map](../.scratch/shared-workspace-desktop-boundary/requirement-map.md).
 
 > Bot activity, avatar activity presentation, archive/restore, and permanent-deletion decisions are superseded by [Binary Bot activity and direct deletion](../.scratch/bot-activity-lifecycle/spec.md). Transcript Activity, message rendering, and Agent-output structure are superseded by [Ordered rich transcript](../.scratch/ordered-rich-transcript/spec.md) and [ADR 0007](./adr/0007-preserve-ordered-agent-blocks.md).
 
@@ -23,7 +23,7 @@ This document defines the accepted product and interaction design. Omarchy Bot i
 All Bots default to the same `~/.omarchy-bot/workspace/` under the user's home directory, not `/workspace` at the filesystem root and not the plugin's checkout, installation, or daemon launch directory. A Bot's Threads share this default; a new conversation, another Agent, or another Bot Screen does not allocate a separate work-file space. It is an ordinary working directory, not a required Git repository, a file-access sandbox, or a mechanism that overrides an Agent's native ability to work elsewhere.
 
 ```text
-Omarchy user
+Service Host user (any x86_64 Linux desktop, or headless)
   ├─ Shared Workspace: work files common to all Bots
   ├─ user-created Bots
   │    └─ each Bot
@@ -35,18 +35,18 @@ Omarchy user
        ├─ serialized input seat
        └─ Screen Projection from each selected client view
 
-Host Session: the user's original Omarchy desktop, separate from the Bot Computer
+Host Session: the Service Host's own desktop, if any, separate from the Bot Computer
 ```
 
 | Concern | Owner and boundary |
 | --- | --- |
-| Default working directory | The plugin provides the Shared Workspace default; it never implicitly falls back to its own source or installation directory. |
-| Work files and concurrent edits | The user, Agents, and their tools manage their work. The plugin does not add file locks, task locks, Git worktrees, repository management, or file-authorship tracking. |
-| Bot and conversation data | The plugin owns Bot identity, Threads, messages, local session mappings, and explicitly managed media. These are not the Shared Workspace. |
+| Default working directory | The Service provides the Shared Workspace default; it never implicitly falls back to the plugin's source or installation directory. |
+| Work files and concurrent edits | The user, Agents, and their tools manage their work. The Service does not add file locks, task locks, Git worktrees, repository management, or file-authorship tracking. |
+| Bot and conversation data | The Service owns Bot identity, Threads, messages, local session mappings, and explicitly managed media. These are not the Shared Workspace. |
 | Native Session | The Agent owns conversation execution state. It is not a graphical session or a viewer connection. |
-| Bot desktop infrastructure | The plugin owns one on-demand Bot Computer, Screen identities, routed outputs/workspaces, private endpoints, capture, global seat scheduling, and human handoff. |
-| Applications | Applications share the Bot Computer profile and graphical session. Agents and applications still own their internal concurrency behavior; the plugin routes windows and preserves state but does not synchronize application data. |
-| Deletion | Deleting a Bot removes its plugin records and targeted Screen runtime/workspace, not shared work files, Agent-owned Native Sessions, or the shared Bot Computer profile. |
+| Bot desktop infrastructure | The Service owns the bundled Bot Computer, Screen identities, routed outputs/workspaces, private endpoints, capture, global seat scheduling, and human handoff. |
+| Applications | Applications share the Bot Computer profile and graphical session. Agents and applications still own their internal concurrency behavior; the Service routes windows and preserves state but does not synchronize application data. |
+| Deletion | Deleting a Bot removes its Service records and targeted Screen runtime/workspace, not shared work files, Agent-owned Native Sessions, or the shared Bot Computer profile. |
 
 `~/.omarchy-bot/memory/` is a future directory intention, not an implemented memory feature or a decision about memory semantics. This revision does not relocate existing databases, managed attachments, avatars, or other product data.
 
@@ -107,7 +107,7 @@ There is no persistent global TopNav.
 
 The current Web frontend will be reused for Omarchy Bot, not replaced by an independently implemented interface or a "Desktop" product. Conversation UI, Bot selection, Computer Surface behavior, and daemon-facing HTTP/WebSocket contracts stay shared; Agents, Native Sessions, the Bot Computer, routed Screens, and capture/input execution remain in the Service. A Local Sidecar starts only when Omarchy Bot is not connected to the Service on the same machine; on the Service Host it is a viewer.
 
-[ADR 0010](adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](adr/0011-local-sidecar-only-off-host.md) record this accepted evolution contract. Preserve the client/execution separation now without adding unused native scaffolding. Tauri packaging and pairing are later work; the Local Sidecar daemon contract is TypeScript run by the plugin-runtime Bun. Actual WebView media/input support must be tested then rather than inferred from Chromium tests. This does not change loopback network policy or application-state ownership; the Service's lifecycle belongs to its systemd user unit ([ADR 0013](adr/0013-run-a-standalone-linux-service.md)), not to the Omarchy plugin.
+[ADR 0010](adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](adr/0011-local-sidecar-only-off-host.md) record this accepted evolution contract. Preserve the client/execution separation now without adding unused native scaffolding. Tauri packaging remains future work; the Service already ships paired device tokens with TLS, SSH-tunnel, and private-network remote access ([ADR 0014](adr/0014-require-paired-device-tokens.md)). The Local Sidecar daemon contract is TypeScript run by the plugin-runtime Bun. Actual WebView media/input support must be tested then rather than inferred from Chromium tests. Application-state ownership is unchanged; the Service's lifecycle belongs to its systemd user unit ([ADR 0013](adr/0013-run-a-standalone-linux-service.md)), not to the Omarchy plugin.
 
 ## 3. Sidebar
 
@@ -127,7 +127,7 @@ Behavior:
 - Settings is fixed at the bottom of the Sidebar.
 - Per-Bot lifecycle actions are absent from rows; archiving is managed in Settings.
 
-Desktop notifications are sent when a background Bot completes work or needs user action. They are suppressed while the user is already viewing that Bot in a focused window.
+Desktop notifications are sent in the Bot Client when a background Bot completes work or needs user action. They are suppressed while the user is already viewing that Bot in a focused window. They are Web Notifications, not a Service capability: startup, launcher, and unit failures are reported by the Service log, `omarchy-bot status`, and `omarchy-bot doctor` instead.
 
 ## 4. Bot creation and lifecycle
 ### Create Bot surfaces
@@ -263,7 +263,7 @@ Each Bot owns one stable Bot Screen identity. A Screen is a routed headless outp
 - The glyph toggles a right-side Astryx `LayoutPanel` at every window width with a low-frequency, lossless, read-only Computer Preview and plain-language activity.
 - Expanding the preview opens Web Control. Production uses an on-demand, view-only WayVNC RFB Screen Projection through a dedicated WebSocket. The browser client is bundled noVNC; HTTP PNG remains an explicit read-only fallback.
 - Show **Take control** only when human input is relevant. While the user controls a Screen, hold the shared runtime seat until **Return to Bot** and re-observe before resuming automation.
-- Permanent deletion removes plugin-owned Screen runtime/workspace before its Screen identity. It preserves Shared Workspace files, Agent Native Sessions, and the shared Bot Computer profile.
+- Permanent deletion removes Service-owned Screen runtime/workspace before its Screen identity. It preserves Shared Workspace files, Agent Native Sessions, and the shared Bot Computer profile.
 - Screen coordination does not approve or filter Agent capabilities, and same-UID compositor/socket routing is not an adversarial security boundary.
 
 ### Desktop implementation and host boundary
@@ -280,7 +280,7 @@ Each Bot owns one stable Bot Screen identity. A Screen is a routed headless outp
 
 ### Required host-safety and resource evidence
 
-Separate plugin desktop overhead (compositor, desktop surface, helpers, capture, encoder, and daemon) from Agent/application workloads; report the whole scenario as well, and identify test-harness overhead rather than assigning it to the compositor. The historical four-active-Screen result of about 2 GiB PSS and 4.13 CPU cores is not an accepted normal-use budget or proof that desktop isolation itself requires that cost.
+Separate Service desktop overhead (compositor, desktop surface, helpers, capture, encoder, and daemon) from Agent/application workloads; report the whole scenario as well, and identify test-harness overhead rather than assigning it to the compositor. The historical four-active-Screen result of about 2 GiB PSS and 4.13 CPU cores is not an accepted normal-use budget or proof that desktop isolation itself requires that cost.
 
 Acceptance must exercise unused Bots, several routed Screens in one Bot Computer with only one viewed, repeated A/B switches, shared browser state, serialized input, and no viewers while background work continues. Verify release of unused capture/encoding paths without destroying applications.
 
@@ -294,7 +294,7 @@ Settings opens from the bottom of the Sidebar and includes at least:
 
 - Voice, including Auto-send voice transcriptions;
 - Archived Bots, including restore and permanent deletion;
-- Appearance, showing that theme follows the current Omarchy/system preference;
+- Appearance, showing that theme follows the current system/desktop preference (Omarchy where present);
 - contextual setup guidance for unavailable local integrations.
 
 ## 12. Visual system
@@ -302,7 +302,7 @@ Settings opens from the bottom of the Sidebar and includes at least:
 - Direction: future, energetic, and fresh without looking like a generic AI template.
 - Information architecture may reference Grok Bot, but visual styling does not copy it.
 - Use cool neutral surfaces with one lively blue accent.
-- Support light and dark modes and follow Omarchy/system preference.
+- Support light and dark modes and follow the system/desktop preference.
 - Favor whitespace and hierarchy over cards; avoid dashboard density.
 - Use consistent soft radii and restrained borders.
 - Avoid neon, glassmorphism, purple AI gradients, excessive pills, decorative charts, and permanent ambient animation.

@@ -16,6 +16,6 @@ Binding to a non-loopback address requires TLS: either a certificate the operato
 
 ## Consequences
 
-- This is the breaking public-protocol cutover ADR 0004 anticipated. Unpaired clients receive 401 on every route except the pairing exchange and the unauthenticated health probe, which reveals no Bot, Thread, or host data.
+- This is the breaking public-protocol cutover ADR 0004 anticipated. Unpaired clients receive 401 on every `/api/` control route and every WebSocket upgrade, except the pairing exchange, the provider's OAuth callback (guarded by single-use state), the static Bot Client files and `/pair` page, and the unauthenticated health probe, which reveal no Bot, Thread, or host data. Pairing-code issue and Paired Device management accept either an authenticated Paired Device token or, from the loopback Service Host peer, the mode-0600 host secret.
 - Existing local use must pair once: installation, including through the Omarchy plugin, ends by opening the one-time pairing URL in the local browser, so ordinary local use stays one click.
 - Multiple Paired Devices may be connected at once; Takeover and input leases already arbitrate Bot Screen control between them.
