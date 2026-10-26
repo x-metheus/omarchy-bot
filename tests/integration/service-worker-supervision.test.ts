@@ -155,13 +155,14 @@ test("Service shutdown stops a worker and its TERM-resistant descendant", async 
   }
 }, 60_000);
 
-test("Service shutdown reaps descendants of a worker that exits on shutdown", async () => {
+test("Service shutdown closes worker stdin and reaps descendants after the worker exits", async () => {
   const { fixtureHome, started } = await boot("shutdown-exit");
   const descendant = await waitFor("worker descendant", () => descendantPid(fixtureHome, started.pid));
 
   await h!.stop();
   h = undefined;
 
+  expect(readFileSync(path.join(fixtureHome, "fixture-state", `stdin-closed-${started.pid}`), "utf8")).toBe("closed");
   await waitDead("worker", started.pid);
   await waitDead("worker descendant", descendant);
 }, 60_000);

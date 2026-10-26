@@ -18,7 +18,9 @@ function stagedAttachments(page: Page): Locator {
 }
 
 function composerInput(page: Page): Locator {
-  return page.getByRole("textbox", { name: "Message input" });
+  return page
+    .getByRole("textbox", { name: "Message input", exact: true })
+    .or(page.getByRole("combobox", { name: "Message input", exact: true }));
 }
 
 async function dropFile(page: Page, file: { name: string; mediaType: string; bytes: number[] }): Promise<void> {
@@ -76,6 +78,7 @@ test.describe("managed attachments", () => {
     const drawer = page.getByTestId("attachment-drawer");
     const file = { name: "motion.txt", mimeType: "text/plain", buffer: Buffer.from("motion draft") };
     await expect(drawer).toHaveAttribute("data-present", "false");
+    await expect.poll(() => drawer.evaluate((element) => element.getBoundingClientRect().height)).toBe(0);
     const [opening] = await Promise.all([
       sampleDrawerTransition(drawer, true),
       page.getByLabel("Choose files to attach").setInputFiles(file),

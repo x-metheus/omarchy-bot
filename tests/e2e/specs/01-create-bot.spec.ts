@@ -70,7 +70,11 @@ test.describe("create bot flow", () => {
     await expect(page.getByRole("heading", { level: 1, name: "E2E Bot" })).toBeVisible();
     await expect(page).toHaveURL(/(?:\?|&)bot=bot_[0-9a-f]{32}(?:&|$)/);
     await expect(page).toHaveURL(/(?:\?|&)thread=blank(?:&|$)/);
-    await expect(page.getByRole("textbox", { name: "Message input" })).toHaveText("");
+    await expect(
+      page
+        .getByRole("textbox", { name: "Message input", exact: true })
+        .or(page.getByRole("combobox", { name: "Message input", exact: true }))
+    ).toHaveText("");
     await expect(page.getByRole("log").getByRole("heading")).toHaveCount(0);
   });
 

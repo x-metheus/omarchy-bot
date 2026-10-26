@@ -3,7 +3,7 @@
  * `<OMARCHY_BOT_HOME>/fixture-mode` so one tree serves every case:
  *   resistant     – ignores SIGTERM and holds a TERM-resistant descendant
  *   scrubbed      – descendant clears its environment and ignores SIGTERM
- *   shutdown-exit – exits on the shutdown frame, leaving its descendant behind
+ *   shutdown-exit – exits on stdin EOF, leaving its descendant behind
  *   crash         – dies once after starting, leaving its descendant behind
  *   exit-early    – dies once before the handshake, leaving its descendant behind
  * State: `<home>/fixture-state/starts.log` and `descendant-<worker pid>.pid`.
@@ -67,12 +67,15 @@ const decoder = new TextDecoder();
 void (async () => {
   for (;;) {
     const { done, value } = await reader.read();
-    if (done) return;
+    if (done) {
+      if (mode === "resistant") return;
+      writeFileSync(path.join(stateDir, `stdin-closed-${process.pid}`), "closed");
+      // Leaves its descendant behind: teardown must reap it after the leader is gone.
+      process.exit(0);
+    }
     for (const line of decoder.decode(value).split("\n")) {
       if (line.trim() === "") continue;
       const frame = JSON.parse(line) as { type?: string; requestId?: string };
-      // Leaves its descendant behind: teardown must reap it after the leader is gone.
-      if (frame.type === "shutdown" && mode !== "resistant") process.exit(0);
       if (frame.requestId !== undefined) {
         write({ requestId: frame.requestId, ok: true, payload: { agentVersion: `fixture-${mode}-1` } });
       }
