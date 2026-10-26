@@ -1,3 +1,4 @@
+import type { BotComputerAssetSupply } from "../../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 /**
  * Daemon harness for integration tests: boots the real daemon in-process with
  * an isolated data dir, random port, and the scripted fake workers.
@@ -28,6 +29,7 @@ export interface HarnessOptions {
   /** Production-style user-systemd units. Default false; label those results harness-mode. */
   useHostApplicationUnits?: boolean;
   botScreenAdapter?: BotScreenRuntimeAdapter;
+  botComputerAssetSupply?: BotComputerAssetSupply;
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
   /** Worker tree override; defaults to the shared fake workers. */
@@ -110,6 +112,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     ? await main({
         useHostApplicationUnits: options.useHostApplicationUnits === true,
         botScreenRuntimeDir: path.join(home, "r"),
+        ...(options.botComputerAssetSupply === undefined ? {} : { botComputerAssetSupply: options.botComputerAssetSupply }),
         ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
       })
     : await main({

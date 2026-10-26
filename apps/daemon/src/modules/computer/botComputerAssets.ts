@@ -2,7 +2,6 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -182,7 +181,6 @@ export const FONT_ASSETS: readonly FontAsset[] = Object.freeze([
 ]);
 
 export const BROWSER_ASSETS_RELEASE = "chrome-for-testing-156.0.8078.47-linux64";
-export const FONT_ASSETS_RELEASE = "noto-latin-cjk-1";
 
 const READY_FILE = ".omarchy-bot-assets";
 const LOADER = "ld-linux-x86-64.so.2";
@@ -197,6 +195,7 @@ type AssetFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface PortableBotComputerAssetsOptions {
   profileDir: string;
+  fontDir?: string;
   browser?: PinnedAsset;
   libraries?: readonly PinnedAsset[];
   fonts?: readonly FontAsset[];
@@ -475,10 +474,8 @@ function browserShim(): string {
 }
 
 /**
- * A font configuration that reads only profile fonts. Without an explicit
- * configuration fontconfig would search host directories, so the profile
- * configuration both points at the supplied fonts and aliases the generic
- * families onto them.
+ * A font configuration that reads only the supplied runtime fonts and keeps
+ * its cache in the profile, without searching host font directories.
  */
 function fontConfig(fontDir: string, cacheDir: string): string {
   const xml = (value: string): string =>
@@ -506,13 +503,13 @@ function fontConfig(fontDir: string, cacheDir: string): string {
 }
 
 /**
- * Lazily provisions the pinned portable browser and Latin/CJK fonts into the
- * Bot Computer profile. Nothing is written outside `profileDir`, and the
- * constructor performs no I/O so a runtime can build one eagerly and pay for
- * assets only when a graphical application launches.
+ * Lazily provisions the portable browser and verifies the installed Latin/CJK
+ * fonts. Only browser assets, fontconfig, and its cache are written in the
+ * profile; the constructor performs no I/O.
  */
 export class PortableBotComputerAssets implements BotComputerAssetSupply {
   readonly #profileDir: string;
+  readonly #fontDir: string | undefined;
   readonly #browser: PinnedAsset;
   readonly #libraries: readonly PinnedAsset[];
   readonly #fonts: readonly FontAsset[];
@@ -524,6 +521,7 @@ export class PortableBotComputerAssets implements BotComputerAssetSupply {
 
   constructor(options: PortableBotComputerAssetsOptions) {
     this.#profileDir = options.profileDir;
+    this.#fontDir = options.fontDir;
     this.#browser = options.browser ?? BROWSER_ASSET;
     this.#libraries = options.libraries ?? BROWSER_LIBRARY_ASSETS;
     this.#fonts = options.fonts ?? FONT_ASSETS;
@@ -554,49 +552,33 @@ export class PortableBotComputerAssets implements BotComputerAssetSupply {
     return path.join(this.#profileDir, "assets");
   }
 
-  get #fontDir(): string {
-    return path.join(this.#assetsDir, "fonts");
-  }
-
   async #provisionFonts(): Promise<{ fontConfigFile: string }> {
-    const fontDir = this.#fontDir;
-    const fontConfigFile = path.join(this.#assetsDir, "fonts.conf");
-    const ready = this.#readyFonts(fontConfigFile, fontDir);
-    if (ready !== undefined) return ready;
-
-    mkdirSync(fontDir, { recursive: true, mode: 0o700 });
-    mkdirSync(path.join(this.#assetsDir, "font-cache"), { recursive: true, mode: 0o700 });
-    for (const font of this.#fonts) {
-      const destination = path.join(fontDir, font.file);
-      if (existsSync(destination) && (await sha256(destination)) === font.sha256) continue;
-      await this.#downloadVerified(font, destination);
-    }
-
-    writeFileSync(fontConfigFile, fontConfig(fontDir, path.join(this.#assetsDir, "font-cache")), {
-      mode: 0o600,
-    });
-    writeFileSync(path.join(this.#assetsDir, READY_FILE), `${FONT_ASSETS_RELEASE}\n`, {
-      mode: 0o600,
-    });
-    const published = this.#readyFonts(fontConfigFile, fontDir);
-    if (published === undefined) {
-      throw new Error(`portable fonts under ${fontDir} were not complete after publication`);
-    }
-    return published;
-  }
-
-  #readyFonts(fontConfigFile: string, fontDir: string): { fontConfigFile: string } | undefined {
+    const fontDir = this.#fontDir === undefined ? undefined : path.resolve(this.#fontDir);
+    let isDirectory = false;
     try {
-      if (
-        readFileSync(path.join(this.#assetsDir, READY_FILE), "utf8") !== `${FONT_ASSETS_RELEASE}\n`
-      ) return undefined;
-      if (!isFile(fontConfigFile)) return undefined;
-      const present = new Set(readdirSync(fontDir));
-      if (!this.#fonts.every((font) => present.has(font.file))) return undefined;
-      return { fontConfigFile };
+      isDirectory = fontDir !== undefined && statSync(fontDir).isDirectory();
     } catch {
-      return undefined;
+      // Report the supplied directory rather than a missing child font.
     }
+    if (fontDir === undefined || !isDirectory) {
+      throw new Error(`Bot Computer font directory is unavailable: ${fontDir ?? "<fontDir not configured>"}`);
+    }
+    for (const font of this.#fonts) {
+      const file = path.join(fontDir, font.file);
+      if (!isFile(file)) throw new Error(`Bot Computer font file is unavailable: ${file}`);
+      const received = await sha256(file);
+      if (received !== font.sha256) {
+        throw new Error(`Bot Computer font checksum mismatch at ${file} (expected ${font.sha256}, received ${received})`);
+      }
+    }
+    const cacheDir = path.join(this.#assetsDir, "font-cache");
+    mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+    const fontConfigFile = path.join(this.#assetsDir, "fonts.conf");
+    const config = fontConfig(fontDir, cacheDir);
+    if (!isFile(fontConfigFile) || readFileSync(fontConfigFile, "utf8") !== config) {
+      writeFileSync(fontConfigFile, config, { mode: 0o600 });
+    }
+    return { fontConfigFile };
   }
 
   async #provisionBrowser(): Promise<{ browserBin: string }> {

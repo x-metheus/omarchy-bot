@@ -297,13 +297,15 @@ accounts before presenting these connectors as publicly available.
 | **Docker** | Building the portable Bot Computer runtime and running its container conformance |
 | **`computer-use-linux`** | Real desktop control |
 | **Voxtype** | Composer dictation |
-| **Network on first graphical use** | Checksum-verified portable browser and font supply inside the Bot Computer profile |
+| **Network on first graphical use** | Checksum-verified portable browser download into the Bot Computer profile; the font supply ships inside the runtime archive |
 
 On first graphical use, the Service uses the SHA-256-pinned Bot Computer bundle shipped inside its runtime archive under `<dataDir>/runtime/current/sway`. It contains Sway, wlroots, WayVNC, wlr-randr, Xwayland, grim, a private D-Bus daemon, and prebuilt capture/input/desktop helpers with their loader, libraries, and runtime data. The same archive runs on glibc and musl x86_64 Linux hosts; host grim, D-Bus, and a C toolchain are unnecessary. Point `OMARCHY_BOT_SWAY_BUNDLE_DIR` at the checksum-prepared `.lane/dist/sway` directory output by `bash scripts/build-sway-runtime.sh .lane/dist` to develop against a local bundle, and explicit binary overrides remain available.
 
+The bundled `dbus-daemon` launcher defaults to its private `share/dbus-1/session.conf`; a caller-supplied `--config-file` takes precedence so the Bot Computer can use its own session configuration.
+
 Maintainers build the pinned sources and verify the resulting library closure with `bash scripts/build-sway-runtime.sh .lane/dist`. Run `sh scripts/sway-runtime/conformance/run.sh <archive.tar.gz>` for bundle-only Ubuntu 22.04 Bot Screen conformance and an Alpine loader smoke check. CI requires the built archive to match the checksum in `swayRuntimeSupply.ts`, and `bash scripts/package-plugin-runtime.sh . dist-runtime <archive.tar.gz>` embeds that verified bundle in the runtime archive; no separate Sway release is published.
 
-The Bot Computer also supplies its own browser and fonts, so `open_url` works on a Service Host with no browser and pages render Latin and CJK text without host fonts. A natively installed browser is still preferred; snap-confined browsers are never launched, because a snap cannot see the Bot Computer's private home. The portable browser and its fonts are checksum-verified downloads prepared inside the Bot Computer profile, never installed on the host, and every Screen shares the one browser profile so sign-ins and session state carry over. Each `open_url` opens a new window routed to the requesting Screen.
+The Bot Computer also supplies its own browser and fonts, so `open_url` works on a Service Host with no browser and pages render Latin and CJK text without host fonts. A natively installed browser is still preferred; snap-confined browsers are never launched, because a snap cannot see the Bot Computer's private home. The portable browser is a checksum-verified download prepared inside the Bot Computer profile, never installed on the host, and every Screen shares the one browser profile so sign-ins and session state carry over. The fonts are not downloaded: they ship inside the runtime archive at `<dataDir>/runtime/current/fonts`, and `OMARCHY_BOT_FONT_DIR` points at a locally prepared font directory for development. Each `open_url` opens a new window routed to the requesting Screen.
 
 ### Useful checks
 
@@ -319,7 +321,7 @@ Real Pi conformance makes model calls and requires a configured Agent:
 bun test tests/conformance/pi.test.ts
 ```
 
-Real portable-browser conformance runs one private Sway Bot Computer on a fixture host with no browser on `PATH` and no visible host desktop entries, captures a Latin/Chinese/Japanese/Korean page from two Screens, and asserts real glyphs rather than empty boxes, one shared browser profile, and no snap launch. It needs a Sway runtime, `grim`, and `dbus-daemon`, downloads the pinned browser and fonts on first use, and skips without the flag:
+Real portable-browser conformance runs one private Sway Bot Computer on a fixture host with no browser on `PATH` and no visible host desktop entries, captures a Latin/Chinese/Japanese/Korean page from two Screens, and asserts real glyphs rather than empty boxes, one shared browser profile, and no snap launch. It needs a Sway runtime, `grim`, and `dbus-daemon`, downloads the pinned browser on first use, and skips without the flag:
 
 ```bash
 OMARCHY_BOT_REAL_PORTABLE_BROWSER=1 \

@@ -22,6 +22,7 @@ import {
 } from "./helpers/harness.ts";
 import { waitScreenReady } from "./helpers/bot-screen-load-observe.ts";
 import { createScriptedSwayFixture, type ScriptedSwayFixture } from "./helpers/swayBotScreen.ts";
+import { createFixtureFontSupply } from "./helpers/fontFixture.ts";
 import {
   createFakeManager,
   fileLines,
@@ -206,6 +207,7 @@ describe("Service supervision without a user manager", () => {
     const application = writeOrphanApplication(scratch, pidFile);
     harness = await startDaemon(undefined, {
       useProductionBotScreen: true,
+      botComputerAssetSupply: createFixtureFontSupply(scratch),
       useHostApplicationUnits: false,
     });
     const botId = await makeBot(harness, "Orphan application");
@@ -232,6 +234,7 @@ describe("Service supervision without a user manager", () => {
     sentinel = startUnrelatedSentinel(scratch);
     harness = await startDaemon(undefined, {
       useProductionBotScreen: true,
+      botComputerAssetSupply: createFixtureFontSupply(scratch),
       useHostApplicationUnits: false,
     });
     const home = harness.home;

@@ -55,12 +55,15 @@ jobs:
           bun apps/daemon/native/capture-helper/build.ts
           bun apps/daemon/native/bot-desktop/build.ts
 
+      - name: Prepare pinned runtime fonts
+        run: bash scripts/prepare-fonts.sh .lane/fonts
+
       - name: Package the runtime archive
         id: package
         env:
           SWAY_BUNDLE: ${{ steps.sway.outputs.bundle }}
         run: |
-          archive=$(bash scripts/package-plugin-runtime.sh . dist-runtime "$SWAY_BUNDLE")
+          archive=$(bash scripts/package-plugin-runtime.sh . dist-runtime "$SWAY_BUNDLE" .lane/fonts)
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "sha256=$archive.sha256" >> "$GITHUB_OUTPUT"
 

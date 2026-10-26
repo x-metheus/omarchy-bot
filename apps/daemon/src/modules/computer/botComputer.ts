@@ -54,6 +54,7 @@ const COMPUTER_STATE_FILE = "computer.json";
 export interface BotComputerOptions {
   runtimeRoot: string;
   profileRoot: string;
+  fontDir?: string;
   hostRuntimeDir?: string;
   swayBin?: string;
   swaymsgBin?: string;
@@ -66,7 +67,7 @@ export interface BotComputerOptions {
   wayvncBin?: string;
   dbusDaemonBin?: string;
   runtimeSupply?: SwayRuntimeSupply;
-  /** Portable browser and font supply; defaults to the Bot Computer profile. */
+  /** Portable browser and font supply; fontDir supplies installed runtime fonts. */
   assetSupply?: BotComputerAssetSupply;
   capacity?: number;
 }
@@ -108,7 +109,7 @@ export interface BotComputer {
   surfaceIds: Set<SurfaceId>;
   applicationProcesses: Set<ApplicationProcess>;
   applicationSequence: number;
-  /** Lazily supplies the profile fonts and exports them to graphical children. */
+  /** Lazily verifies the runtime fonts and exports fontconfig to graphical children. */
   ensureFonts(): Promise<void>;
   running(): boolean;
   exited(): Promise<number>;
@@ -325,6 +326,7 @@ export class BotComputerRuntime {
     this.#assets = options.assetSupply
       ?? new PortableBotComputerAssets({
         profileDir: path.join(options.profileRoot, "computer"),
+        ...(options.fontDir === undefined ? {} : { fontDir: options.fontDir }),
       });
     this.#capacity = options.capacity ?? 8;
     if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {

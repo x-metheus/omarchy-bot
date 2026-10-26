@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -190,7 +190,7 @@ function served(bytes: Uint8Array, url: string): PinnedAsset {
 }
 
 describe("portable Bot Computer assets", () => {
-  test("provisions the browser and fonts from verified downloads only", async () => {
+  test("resolves verified runtime fonts offline and provisions the browser from verified downloads", async () => {
     const profileDir = temporaryProfile();
     const browserBytes = zip({
       "chrome-linux64/chrome": elfFixture(),
@@ -216,16 +216,20 @@ describe("portable Bot Computer assets", () => {
       url: "https://assets.invalid/font.ttf",
       sha256: hash(fontBytes),
     }];
+    const fontDir = path.join(root!, "runtime", "fonts");
+    mkdirSync(fontDir, { recursive: true });
+    writeFileSync(path.join(fontDir, "Fixture.ttf"), fontBytes);
     const assetFetch = (async (input: string | URL | Request): Promise<Response> => {
       const url = String(input);
       if (url === browser.url) return new Response(browserBytes as BodyInit);
       if (url === library.url) return new Response(libraryBytes as BodyInit);
       if (url === subdirLibrary.url) return new Response(subdirBytes as BodyInit);
-      return new Response(fontBytes as BodyInit);
+      throw new Error(`unexpected download: ${url}`);
     }) as unknown as typeof fetch;
 
     const supply = new PortableBotComputerAssets({
       profileDir,
+      fontDir,
       browser,
       libraries: [library, subdirLibrary],
       fonts,
@@ -236,10 +240,10 @@ describe("portable Bot Computer assets", () => {
 
     const { fontConfigFile } = await supply.ensureFonts();
     expect(fontConfigFile).toBe(path.join(profileDir, "assets", "fonts.conf"));
-    expect(readdirSync(path.join(profileDir, "assets", "fonts"))).toEqual(["Fixture.ttf"]);
+    expect(existsSync(path.join(profileDir, "assets", "fonts"))).toBe(false);
     const config = readFileSync(fontConfigFile, "utf8");
     expect(config).not.toContain("<include>");
-    expect(config).toContain(`<dir>${path.join(profileDir, "assets", "fonts")}</dir>`);
+    expect(config).toContain(`<dir>${fontDir}</dir>`);
     expect(config).toContain(`<cachedir>${path.join(profileDir, "assets", "font-cache")}</cachedir>`);
 
     const { browserBin } = await supply.ensureBrowser();
@@ -273,6 +277,7 @@ describe("portable Bot Computer assets", () => {
     let requests = 0;
     const countingSupply = new PortableBotComputerAssets({
       profileDir,
+      fontDir,
       browser,
       libraries: [library],
       fonts,
@@ -283,8 +288,13 @@ describe("portable Bot Computer assets", () => {
       platform: "linux",
       arch: "x64",
     });
+    const configMtime = statSync(fontConfigFile).mtimeMs;
     expect((await countingSupply.ensureFonts()).fontConfigFile).toBe(fontConfigFile);
+    expect(statSync(fontConfigFile).mtimeMs).toBe(configMtime);
     expect((await countingSupply.ensureBrowser()).browserBin).toBe(browserBin);
+    writeFileSync(fontConfigFile, "obsolete config");
+    await countingSupply.ensureFonts();
+    expect(readFileSync(fontConfigFile, "utf8")).toBe(config);
     expect(requests).toBe(0);
   });
 
@@ -308,38 +318,48 @@ describe("portable Bot Computer assets", () => {
     expect(existsSync(path.join(profileDir, "assets", "browser-bundle"))).toBe(false);
   });
 
-  test("refuses a font download whose bytes do not match the pin", async () => {
+  test("rejects a non-HTTPS browser artifact before downloading", async () => {
+    const supply = new PortableBotComputerAssets({
+      profileDir: temporaryProfile(),
+      browser: { name: "fixture-browser", url: "http://assets.invalid/browser.zip", sha256: "0".repeat(64) },
+      libraries: [],
+      fetch: async () => { throw new Error("must not download"); },
+    });
+    await expect(supply.ensureBrowser()).rejects.toThrow("must be downloaded over HTTPS");
+  });
+
+  test("refuses a runtime font whose bytes do not match the pin without fetching", async () => {
     const profileDir = temporaryProfile();
+    const fontDir = path.join(root!, "fonts");
+    mkdirSync(fontDir);
+    const fontPath = path.join(fontDir, "Fixture.ttf");
+    writeFileSync(fontPath, "tampered");
     const supply = new PortableBotComputerAssets({
       profileDir,
+      fontDir,
       fonts: [{
         name: "fixture-font",
         file: "Fixture.ttf",
         url: "https://assets.invalid/font.ttf",
         sha256: "0".repeat(64),
       }],
-      fetch: (async () => new Response("tampered")) as unknown as typeof fetch,
+      fetch: async () => { throw new Error("must not download"); },
     });
 
-    await expect(supply.ensureFonts()).rejects.toThrow("failed SHA-256 verification");
+    await expect(supply.ensureFonts()).rejects.toThrow(`checksum mismatch at ${fontPath}`);
     expect(existsSync(path.join(profileDir, "assets", "fonts.conf"))).toBe(false);
   });
 
-  test("rejects a non-HTTPS artifact before downloading", async () => {
+  test("reports a missing runtime font directory without fetching", async () => {
+    const profileDir = temporaryProfile();
+    const fontDir = path.join(root!, "missing-fonts");
     const supply = new PortableBotComputerAssets({
-      profileDir: temporaryProfile(),
-      fonts: [{
-        name: "fixture-font",
-        file: "Fixture.ttf",
-        url: "http://assets.invalid/font.ttf",
-        sha256: "0".repeat(64),
-      }],
-      fetch: (async () => {
-        throw new Error("must not download");
-      }) as unknown as typeof fetch,
+      profileDir,
+      fontDir,
+      fetch: async () => { throw new Error("must not download"); },
     });
-
-    await expect(supply.ensureFonts()).rejects.toThrow("must be downloaded over HTTPS");
+    await expect(supply.ensureFonts()).rejects.toThrow(`directory is unavailable: ${fontDir}`);
+    expect(existsSync(profileDir)).toBe(false);
   });
 
   test("builds assets lazily, so constructing a supply touches nothing", async () => {

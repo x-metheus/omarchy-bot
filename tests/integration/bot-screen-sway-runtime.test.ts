@@ -10,6 +10,7 @@ import { ProjectionClient } from "./helpers/projection-client.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 import { createFakeWayvncBin } from "./helpers/swayBotScreen.ts";
 import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./helpers/fakeSwayIpc.ts";
+import { createFixtureFontSupply } from "./helpers/fontFixture.ts";
 
 const SURFACE_A = "surf_11111111111111111111111111111111" as SurfaceId;
 const SURFACE_B = "surf_22222222222222222222222222222222" as SurfaceId;
@@ -605,6 +606,8 @@ realSway("real pinned Sway delivers an RFB banner through acquireExpandedView", 
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "profiles"),
+    fontDir: process.env.OMARCHY_BOT_FONT_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts"),
     runtimeSupply: supply,
   });
   const runtime = await adapter.start({
@@ -643,6 +646,8 @@ realSway("daemon-wrapped real Sway projection source delivers an RFB banner", as
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "r"),
     profileRoot: path.join(root, "screens"),
+    fontDir: process.env.OMARCHY_BOT_FONT_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts"),
     runtimeSupply: supply,
   });
   const harness = await startDaemon(root, {
@@ -680,6 +685,8 @@ realSway("WebSocket expanded view negotiates a real WayVNC RFB session", async (
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "r"),
     profileRoot: path.join(root, "screens"),
+    fontDir: process.env.OMARCHY_BOT_FONT_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts"),
     runtimeSupply: supply,
   });
   const harness = await startDaemon(root, {
@@ -721,6 +728,8 @@ realSway("WebSocket RFB survives preview teardown before expand", async () => {
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "r"),
     profileRoot: path.join(root, "screens"),
+    fontDir: process.env.OMARCHY_BOT_FONT_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts"),
     runtimeSupply: supply,
   });
   const harness = await startDaemon(root, {
@@ -865,6 +874,7 @@ exit 0
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "profiles"),
     applicationCwd: workspace,
+    assetSupply: createFixtureFontSupply(path.join(root, "assets")),
     swayBin: bins.sway,
     wlrRandrBin: bins.wlrRandr,
     grimBin: bins.grim,
@@ -903,6 +913,7 @@ while :; do sleep 1; done
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "profiles"),
     applicationCwd: workspace,
+    assetSupply: createFixtureFontSupply(path.join(root, "assets")),
     swayBin: bins.sway,
     wlrRandrBin: bins.wlrRandr,
     grimBin: bins.grim,

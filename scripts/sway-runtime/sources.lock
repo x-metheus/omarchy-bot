@@ -25,9 +25,7 @@ dbus|1.14.10|https://dbus.freedesktop.org/releases/dbus/dbus-1.14.10.tar.xz|ba1f
 # repository index for the pinned base image digest is the provenance: the
 # build records every resolved package version in the artifact manifest.
 APK_PACKAGES="
-mesa
 libdrm
-libinput
 libevdev
 libxkbcommon
 pixman
@@ -35,9 +33,6 @@ wayland
 wayland-protocols
 xkeyboard-config
 xkbcomp
-libdisplay-info
-libseat
-eudev
 libcap
 json-c
 pcre2
@@ -54,12 +49,9 @@ libxfont2
 libxkbfile
 libmd
 libtirpc
-libepoxy
 libxau
 libxdmcp
 libxshmfence
-libliftoff
-lcms2
 zlib
 expat
 fftw

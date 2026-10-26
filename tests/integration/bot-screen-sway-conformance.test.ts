@@ -276,6 +276,8 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     const adapter = new SwayBotScreenRuntimeAdapter({
       runtimeRoot: path.join(daemonHome, "r"),
       profileRoot: path.join(daemonHome, "screens"),
+      fontDir: process.env.OMARCHY_BOT_FONT_DIR
+        ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts"),
       applicationCwd,
       runtimeSupply: supply,
     });
@@ -319,8 +321,8 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     ].join(" ");
     const waylandAppEnv = "export LIBGL_ALWAYS_SOFTWARE=1 WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland HISTFILE=/dev/null";
     const launchers = [
-      createAppLauncher(fixtureRoot, "bot-a-term", `${waylandAppEnv}; printf '%s|%s|%s' "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" > "$XDG_CONFIG_HOME/isolation-profile-a"; exec ${JSON.stringify(terminal)} -t BOT-A-TERM -o colors.primary.background="'#8b1e3f'" -e bash --noprofile --norc`),
-      createAppLauncher(fixtureRoot, "bot-b-term", `${waylandAppEnv}; printf '%s|%s|%s' "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" > "$XDG_CONFIG_HOME/isolation-profile-b"; exec ${JSON.stringify(terminal)} -t BOT-B-TERM -o colors.primary.background="'#14532d'" -e bash --noprofile --norc`),
+      createAppLauncher(fixtureRoot, "bot-a-term", `${waylandAppEnv}; printf '%s|%s|%s' "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" > "$XDG_CONFIG_HOME/isolation-profile-a"; exec ${JSON.stringify(terminal)} ${path.basename(terminal) === "ghostty" ? "--title=BOT-A-TERM" : '-t BOT-A-TERM -o colors.primary.background="\'#8b1e3f\'"'} -e bash --noprofile --norc`),
+      createAppLauncher(fixtureRoot, "bot-b-term", `${waylandAppEnv}; printf '%s|%s|%s' "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" > "$XDG_CONFIG_HOME/isolation-profile-b"; exec ${JSON.stringify(terminal)} ${path.basename(terminal) === "ghostty" ? "--title=BOT-B-TERM" : '-t BOT-B-TERM -o colors.primary.background="\'#14532d\'"'} -e bash --noprofile --norc`),
       createAppLauncher(fixtureRoot, "bot-a-browser", `${waylandAppEnv}; exec ${JSON.stringify(browser)} ${braveFlags} --app="file://${pageA}"`),
       createAppLauncher(fixtureRoot, "bot-b-browser", `${waylandAppEnv}; exec ${JSON.stringify(browser)} ${braveFlags} --app="file://${pageB}"`),
     ];

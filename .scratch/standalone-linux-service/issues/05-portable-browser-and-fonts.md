@@ -18,6 +18,8 @@ Spec: [standalone Linux Service](../spec.md)
 
 `open_url` prefers a native host browser, skips snap-confined ones (including `env NAME=value` wrappers), and otherwise launches a checksum-verified Chrome for Testing build from the Bot Computer profile with `--user-data-dir` under `<profileRoot>/computer/config/chromium` and `--new-window`. Latin and CJK fonts are the same kind of verified download, and fontconfig is pointed only at that profile. The browser ELF names the bundled glibc loader via a `PT_INTERP` path placed after the segment's BSS, so the zygote sandbox stays on and host libraries are not required. Assets are fetched into the profile on first graphical use, not carried in the runtime archive and not installed on the host.
 
+Ticket 14 moved the font set out of the profile and into the runtime archive; the browser remains an on-demand verified download.
+
 ## Comments
 
 Real private-Sway conformance (`OMARCHY_BOT_REAL_PORTABLE_BROWSER=1`, production pins, fresh profile) passed after the BSS placement fix: 2 pass, 0 fail, 40 expects. That run covers a browser-less host, CJK glyph ink versus the missing-character cell, one shared profile across two Screens, and a snap entry that is never executed. Offline: `bun test tests/integration/bot-computer-assets.test.ts tests/integration/bot-screen-sway-control.test.ts tests/integration/bot-computer.test.ts tests/integration/bot-screen-sway-runtime.test.ts` → 41 pass, 4 skip, 0 fail; asset tests re-run after the BSS fix → 5 pass, 0 fail. `bun run typecheck` is clean. A script cannot be an ELF interpreter, so the unit test checks the mapped path and the zero BSS gap instead of executing the fixture.
