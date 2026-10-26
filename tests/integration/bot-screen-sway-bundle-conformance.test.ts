@@ -315,7 +315,7 @@ bundleOnly("two bundle-only Bot Screens isolate X11 clients, input, and projecti
     expect(sessionEnv.DISPLAY).not.toBe(process.env.DISPLAY ?? "");
     expect(sessionEnv.PATH!.split(":")).toContain(binDir);
     for (const tool of FORBIDDEN_HOST_TOOLS) {
-      expect(Bun.which(tool, { PATH: sessionEnv.PATH })).toBe(path.join(binDir, tool));
+      expect(Bun.which(tool, { PATH: sessionEnv.PATH! })).toBe(path.join(binDir, tool));
     }
 
     // The processes that serve the Screen come from the bundle, not the host.
