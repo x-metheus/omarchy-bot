@@ -41,6 +41,7 @@ import {
 } from "./helpers/serviceSupervision.ts";
 
 const BIN_KEYS = [
+  "OMARCHY_BOT_SWAY_BUNDLE_DIR",
   "OMARCHY_BOT_SWAY_BIN",
   "OMARCHY_BOT_SWAYMSG_BIN",
   "OMARCHY_BOT_WAYVNC_BIN",
@@ -110,9 +111,8 @@ function trackPid(pid: number): number {
 }
 
 /**
- * Production Screen binaries from the scripted fixture. The harness points a
- * production adapter at private paths, so the eight overrides are the only way
- * to run the real supervision path without touching the host compositor.
+ * Production Screen binaries and a local extracted bundle from the scripted
+ * fixture keep the supervision path inside private directories.
  */
 async function scriptedScreen(): Promise<ScriptedSwayFixture> {
   const fixture = await createScriptedSwayFixture();

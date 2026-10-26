@@ -599,8 +599,8 @@ const realSway = process.env.OMARCHY_BOT_REAL_SWAY === "1" ? test : test.skip;
 realSway("real pinned Sway delivers an RFB banner through acquireExpandedView", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "obw-"));
   const supply = new PortableSwayRuntimeSupply({
-    rootDir: process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
-      ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply"),
+    rootDir: process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "sway"),
   });
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
@@ -637,8 +637,8 @@ realSway("real pinned Sway delivers an RFB banner through acquireExpandedView", 
 realSway("daemon-wrapped real Sway projection source delivers an RFB banner", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "obd-"));
   const supply = new PortableSwayRuntimeSupply({
-    rootDir: process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
-      ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply"),
+    rootDir: process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "sway"),
   });
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "r"),
@@ -674,8 +674,8 @@ realSway("daemon-wrapped real Sway projection source delivers an RFB banner", as
 realSway("WebSocket expanded view negotiates a real WayVNC RFB session", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "obp-"));
   const supply = new PortableSwayRuntimeSupply({
-    rootDir: process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
-      ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply"),
+    rootDir: process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "sway"),
   });
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "r"),
@@ -715,8 +715,8 @@ realSway("WebSocket expanded view negotiates a real WayVNC RFB session", async (
 realSway("WebSocket RFB survives preview teardown before expand", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "obp-"));
   const supply = new PortableSwayRuntimeSupply({
-    rootDir: process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
-      ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply"),
+    rootDir: process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "sway"),
   });
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "r"),

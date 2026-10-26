@@ -246,9 +246,8 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       throw new Error("a host Wayland terminal is required");
     }
 
-    const supplyRoot = process.env.OMARCHY_BOT_SWAY_SUPPLY_DIR
-      ?? path.join(os.tmpdir(), "omarchy-bot-sway-runtime-supply");
-    mkdirSync(supplyRoot, { recursive: true, mode: 0o700 });
+    const supplyRoot = process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "sway");
     const supply = new PortableSwayRuntimeSupply({ rootDir: supplyRoot });
     const binaries = await supply.ensure();
     const swayVersion = Bun.spawnSync([binaries.swayBin, "-v"], { stdout: "pipe", stderr: "pipe" });

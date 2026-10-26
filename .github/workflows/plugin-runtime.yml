@@ -35,6 +35,18 @@ jobs:
         with:
           bun-version: 1.4.2
 
+      - name: Build the Sway bundle for the archive
+        id: sway
+        run: |
+          bash scripts/build-sway-runtime.sh .lane/dist
+          release=$(. scripts/sway-runtime/sources.lock && printf '%s' "$SWAY_RUNTIME_RELEASE")
+          bundle=".lane/dist/omarchy-bot-sway-runtime-$release-x86_64.tar.gz"
+          if [ ! -f "$bundle" ]; then
+            echo "::error::The Sway bundle build produced no archive at $bundle."
+            exit 1
+          fi
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+
       - name: Install and build the plugin runtime
         run: |
           bun install --frozen-lockfile
@@ -45,8 +57,10 @@ jobs:
 
       - name: Package the runtime archive
         id: package
+        env:
+          SWAY_BUNDLE: ${{ steps.sway.outputs.bundle }}
         run: |
-          archive=$(bash scripts/package-plugin-runtime.sh)
+          archive=$(bash scripts/package-plugin-runtime.sh . dist-runtime "$SWAY_BUNDLE")
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "sha256=$archive.sha256" >> "$GITHUB_OUTPUT"
 

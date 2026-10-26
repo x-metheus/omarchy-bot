@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Usage: bash scripts/package-plugin-runtime.sh <repo-root> <out-dir> <sway-bundle.tar.gz>
 set -euo pipefail
 
 root=$(CDPATH= cd -- "${1:-$(dirname -- "$0")/..}" && pwd)
@@ -35,6 +36,36 @@ do
   fi
 done
 
+sway_bundle=${3:-}
+if [[ -z $sway_bundle || ! -r $sway_bundle || ! -f $sway_bundle ]]; then
+  printf 'Omarchy Bot runtime package requires a readable Sway bundle: %s\n' "${sway_bundle:-<missing third argument>}" >&2
+  exit 1
+fi
+pin_file=$root/apps/daemon/src/modules/computer/swayRuntimeSupply.ts
+if [[ ! -r $pin_file ]]; then
+  printf 'Omarchy Bot runtime package cannot read Sway pin: %s\n' "$pin_file" >&2
+  exit 1
+fi
+pin_source=$(<"$pin_file")
+sha_pattern='sha256: "([0-9a-f]{64})"'
+release_pattern='SWAY_RUNTIME_RELEASE = "([^"]+)"'
+if [[ ! $pin_source =~ $sha_pattern ]]; then
+  printf 'Omarchy Bot runtime package is missing a valid Sway sha256 pin in %s\n' "$pin_file" >&2
+  exit 1
+fi
+sway_sha256=${BASH_REMATCH[1]}
+if [[ ! $pin_source =~ $release_pattern ]]; then
+  printf 'Omarchy Bot runtime package is missing SWAY_RUNTIME_RELEASE in %s\n' "$pin_file" >&2
+  exit 1
+fi
+sway_release=${BASH_REMATCH[1]}
+received_sha256=$(sha256sum -- "$sway_bundle")
+received_sha256=${received_sha256%% *}
+if [[ $received_sha256 != "$sway_sha256" ]]; then
+  printf 'Omarchy Bot Sway bundle checksum mismatch: expected %s, received %s\n' "$sway_sha256" "$received_sha256" >&2
+  exit 1
+fi
+
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 
@@ -64,6 +95,9 @@ tar -C "$root" --exclude=node_modules \
   --exclude=apps/site/api --exclude=apps/site/server --exclude=apps/site/.vercel \
   --exclude='apps/site/.env*' \
   -cf - "${existing[@]}" | tar -C "$staging" -xf -
+mkdir -p "$staging/sway"
+tar -xzf "$sway_bundle" -C "$staging/sway"
+printf '%s\n%s\n' "$sway_release" "$sway_sha256" > "$staging/sway/.omarchy-bot-runtime"
 printf 'Installing frozen production dependencies in runtime staging\n' >&2
 (
   cd "$staging"

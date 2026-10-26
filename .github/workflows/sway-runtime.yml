@@ -1,8 +1,9 @@
 name: sway-runtime
 
-# Builds and publishes the self-contained Sway runtime bundle that the Service
-# uses for Bot Computers (Computer ADR 0011). The archive is only published
-# after it reproduces the SHA-256 pinned in the runtime supply descriptor.
+# Builds and verifies the self-contained Sway runtime bundle that the Service
+# uses for Bot Computers (Computer ADR 0011). The bundle ships inside the
+# runtime archive, so this workflow only proves it reproduces the SHA-256 pinned
+# in the runtime supply descriptor and passes bundle conformance.
 on:
   push:
     branches: [main]
@@ -13,10 +14,18 @@ on:
       - ".github/workflows/sway-runtime.yml"
       - "apps/daemon/src/modules/computer/swayRuntimeSupply.ts"
       - "tests/integration/bot-screen-sway-bundle-conformance.test.ts"
+  pull_request:
+    paths:
+      - "scripts/sway-runtime/**"
+      - "scripts/build-sway-runtime.sh"
+      - "apps/daemon/native/**"
+      - ".github/workflows/sway-runtime.yml"
+      - "apps/daemon/src/modules/computer/swayRuntimeSupply.ts"
+      - "tests/integration/bot-screen-sway-bundle-conformance.test.ts"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: sway-runtime-${{ github.ref }}
@@ -48,12 +57,12 @@ jobs:
           actual=$(sha256sum ".lane/dist/$ASSET" | cut -d' ' -f1)
           pinned="${{ steps.pin.outputs.sha256 }}"
           if ! [[ "$pinned" =~ ^[0-9a-f]{64}$ ]] || [[ "$pinned" == "$(printf '0%.0s' {1..64})" ]]; then
-            echo "::error::A nonzero SHA-256 pin is required before publishing the runtime."
+            echo "::error::A nonzero SHA-256 pin is required before shipping the runtime."
             exit 1
           fi
           if [ "$actual" != "$pinned" ]; then
             echo "::error::Bundle hash $actual does not match pinned $pinned."
-            echo "::error::Update the runtime supply descriptor and pin together; not publishing."
+            echo "::error::Update the runtime supply descriptor and pin together; not shipping."
             exit 1
           fi
 
@@ -68,37 +77,3 @@ jobs:
             .lane/dist/${{ env.ASSET }}
             .lane/dist/${{ env.ASSET }}.sha256
           if-no-files-found: error
-
-      - name: Publish release asset
-        if: github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="sway-runtime-${{ steps.pin.outputs.sha256 }}"
-          checksum=$(cat ".lane/dist/$ASSET.sha256")
-          notes="Self-contained Sway Bot Computer runtime for \`$RELEASE\` (x86_64, musl).
-
-          Built from pinned upstream sources in Alpine 3.21.3; contains Sway, wlroots,
-          WayVNC, wlr-randr, Xwayland, grim, dbus-daemon, and the capture, input, and
-          bot-desktop helpers with their full non-libc library closure and XKB/D-Bus
-          runtime data.
-
-          Download:
-
-          \`https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${ASSET}\`
-
-          SHA-256:
-
-          \`\`\`
-          ${checksum}
-          \`\`\`
-          "
-          if gh release view "$tag" >/dev/null 2>&1; then
-            mkdir -p .lane/published
-            gh release download "$tag" --pattern "$ASSET" --pattern "$ASSET.sha256" --dir .lane/published
-            cmp ".lane/dist/$ASSET" ".lane/published/$ASSET"
-            cmp ".lane/dist/$ASSET.sha256" ".lane/published/$ASSET.sha256"
-          else
-            gh release create "$tag" ".lane/dist/$ASSET" ".lane/dist/$ASSET.sha256" \
-              --title "Sway runtime bundle" --notes "$notes" --target "$GITHUB_SHA"
-          fi

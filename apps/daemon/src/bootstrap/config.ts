@@ -30,7 +30,7 @@ export interface Config {
   /** Transient child sockets and retained Bot-owned application profiles. */
   botScreenRuntimeDir: string;
   botScreenProfileDir: string;
-  /** Lazy Bot Computer runtime bundle cache used by production Bot Desktop Sessions. */
+  /** Bot Computer bundle shipped inside the installed application runtime. */
   botScreenSwayRuntimeSupplyDir: string;
   conformanceDir: string;
   statusPath: string;
@@ -127,7 +127,7 @@ export function loadConfig(): Config {
       ? path.join(runtimeDir, "omarchy-bot", "screens")
       : path.join(stateDir, "screen-runtime"),
     botScreenProfileDir: path.join(dataDir, "screens"),
-    botScreenSwayRuntimeSupplyDir: path.join(dataDir, "runtime", "sway"),
+    botScreenSwayRuntimeSupplyDir: path.join(dataDir, "runtime", "current", "sway"),
     conformanceDir: path.join(dataDir, "conformance"),
     statusPath: path.join(stateDir, "status.json"),
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),

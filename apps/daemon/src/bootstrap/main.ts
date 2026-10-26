@@ -81,7 +81,10 @@ export async function main(options: MainOptions = {}): Promise<{
     profileRoot: cfg.botScreenProfileDir,
     capacity: cfg.botScreenCapacity,
     applicationCwd: prepareSharedWorkspace(cfg.sharedWorkspaceDir),
-    runtimeSupply: new PortableSwayRuntimeSupply({ rootDir: cfg.botScreenSwayRuntimeSupplyDir }),
+    // Development: point OMARCHY_BOT_SWAY_BUNDLE_DIR at an extracted, pinned bundle.
+    runtimeSupply: new PortableSwayRuntimeSupply({
+      rootDir: process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR ?? cfg.botScreenSwayRuntimeSupplyDir,
+    }),
     ...(applicationUnitRuntimeDir === undefined ? {} : { hostRuntimeDir: applicationUnitRuntimeDir }),
     ...(process.env.OMARCHY_BOT_SWAY_BIN === undefined
       ? {}

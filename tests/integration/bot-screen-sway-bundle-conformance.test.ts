@@ -217,14 +217,19 @@ bundleOnly("two bundle-only Bot Screens isolate X11 clients, input, and projecti
   expect((statSync(x11Fixture!).mode & 0o111) !== 0).toBeTrue();
 
   const digest = new Bun.CryptoHasher("sha256").update(await Bun.file(archive).arrayBuffer()).digest("hex");
+  const supplyDir = path.join(root, "supply");
+  mkdirSync(supplyDir, { recursive: true, mode: 0o700 });
+  const extracted = await run(["tar", "--extract", "--gzip", "--file", archive, "--directory", supplyDir], {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+  });
+  expect({ status: extracted.status, stderr: extracted.stderr }).toEqual({ status: 0, stderr: "" });
+  writeFileSync(path.join(supplyDir, ".omarchy-bot-runtime"), `${SWAY_RUNTIME_RELEASE}\n${digest}\n`);
   const supply = new PortableSwayRuntimeSupply({
-    rootDir: path.join(root, "supply"),
+    rootDir: supplyDir,
     bundle: {
       release: SWAY_RUNTIME_RELEASE,
-      url: "https://bundle.invalid/omarchy-bot-sway-runtime.tar.gz",
       sha256: digest,
     },
-    fetch: async () => new Response(Bun.file(archive)),
   });
   const binaries = await supply.ensure();
   const binDir = path.dirname(binaries.swayBin);
