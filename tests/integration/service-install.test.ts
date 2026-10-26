@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { layoutFromEnv } from "../../apps/cli/src/layout.ts";
@@ -17,7 +17,7 @@ function shim(bin: string, name: string, script: string) {
   chmodSync(file, 0o755);
 }
 
-async function fixture(options: { manager?: boolean; opener?: string } = {}) {
+async function fixture(options: { manager?: boolean; opener?: string; tls?: boolean; requireBun?: boolean } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "ob-install-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, "bin");
@@ -40,14 +40,15 @@ async function fixture(options: { manager?: boolean; opener?: string } = {}) {
     OPEN_CALLS: path.join(root, "open-calls"),
   };
   const launcher = path.join(root, "systemctl.ts");
-  writeFileSync(launcher, `import {readFileSync,existsSync,appendFileSync,writeFileSync} from "node:fs";
+  writeFileSync(launcher, `import {readFileSync,existsSync,appendFileSync,writeFileSync,rmSync} from "node:fs";
 const args=process.argv.slice(2); appendFileSync(process.env.SYSTEMCTL_CALLS!, args.join(" ")+"\\n");
 const pidFile=process.env.SYSTEMCTL_CALLS+".pid";
-if(args.includes("stop") || args.includes("disable")){if(existsSync(pidFile)){try{process.kill(Number(readFileSync(pidFile,"utf8")),"SIGTERM")}catch{}}}
-if(args.includes("enable") || args.includes("start")){
+if(args.includes("stop") || args.includes("disable") || args.includes("restart")){if(existsSync(pidFile)){try{process.kill(Number(readFileSync(pidFile,"utf8")),"SIGTERM");while(true){try{await fetch((process.env.OMARCHY_BOT_TLS_CERT?"https":"http")+"://127.0.0.1:"+process.env.OMARCHY_BOT_PORT+"/api/health",{tls:{rejectUnauthorized:false}})}catch{break}}}catch{}rmSync(pidFile,{force:true})}}
+if(args.includes("restart") && process.env.FAIL_RESTART_ONCE && existsSync(process.env.FAIL_RESTART_ONCE)){rmSync(process.env.FAIL_RESTART_ONCE);console.error("fixture activation failure");process.exit(1)}
+if(args.includes("enable") || args.includes("start") || args.includes("restart")){
 let running=false;if(existsSync(pidFile)){try{process.kill(Number(readFileSync(pidFile,"utf8")),0);running=true}catch{}}
 if(!running){const unit=readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/omarchy-bot.service","utf8");
-const env={...process.env};for(const line of unit.split("\\n")){if(line.startsWith("Environment=")){const value=line.slice(12);const index=value.indexOf("=");env[value.slice(0,index)]=value.slice(index+1)}}
+const env={...process.env};for(const key of ["OMARCHY_BOT_TLS_CERT","OMARCHY_BOT_TLS_KEY","OMARCHY_BOT_TRUSTED_PROXY"])delete env[key];for(const line of unit.split("\\n")){if(line.startsWith("Environment=")){const value=line.slice(12);const index=value.indexOf("=");env[value.slice(0,index)]=value.slice(index+1)}}
 const executable=unit.split("\\n").find(line=>line.startsWith("ExecStart="))!.slice(10);
 const child=Bun.spawn([executable],{env,stdin:"ignore",stdout:"ignore",stderr:"ignore"});writeFileSync(pidFile,String(child.pid));child.unref();}}
 `);
@@ -67,28 +68,39 @@ const child=Bun.spawn([executable],{env,stdin:"ignore",stdout:"ignore",stderr:"i
   env.OMARCHY_BOT_PORT = String(reservation.port);
   reservation.stop(true);
   const secret = "fixture-host-secret-never-print";
+  if (options.tls) {
+    env.OMARCHY_BOT_TLS_CERT = path.join(root, "cert.pem");
+    env.OMARCHY_BOT_TLS_KEY = path.join(root, "key.pem");
+    expect(Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", env.OMARCHY_BOT_TLS_KEY, "-out", env.OMARCHY_BOT_TLS_CERT, "-days", "1", "-nodes", "-subj", "/CN=localhost"]).exitCode).toBe(0);
+  }
   const layout = layoutFromEnv(env);
   const archive = path.join(root, "runtime.tar.zst");
   const checksum = `${archive}.sha256`;
   const serve = `#!/bin/bash
+${options.requireBun ? 'command -v bun >/dev/null || { echo "requires Bun in PATH" >&2; exit 1; }' : ""}
 exec '${process.execPath}' run - <<'SERVICE'
 import {mkdirSync,writeFileSync} from "node:fs";
 mkdirSync(process.env.OMARCHY_BOT_STATE,{recursive:true,mode:0o700});
 writeFileSync(process.env.OMARCHY_BOT_STATE+"/pairing-host-secret",${JSON.stringify(secret)},{mode:0o600});
-Bun.serve({hostname:"127.0.0.1",port:Number(process.env.OMARCHY_BOT_PORT),fetch(request){
+Bun.serve({hostname:"127.0.0.1",port:Number(process.env.OMARCHY_BOT_PORT),...(process.env.OMARCHY_BOT_TLS_CERT?{tls:{cert:Bun.file(process.env.OMARCHY_BOT_TLS_CERT),key:Bun.file(process.env.OMARCHY_BOT_TLS_KEY)}}:{}),fetch(request){
 const route=new URL(request.url).pathname;
 if(route==="/api/health" && request.method==="GET")return Response.json({ok:true});
 if(request.headers.get("authorization")!==${JSON.stringify(`Bearer ${secret}`)})return new Response("unauthorized",{status:401});
+if(route==="/api/devices/paired")return Response.json({devices:[]});
 if(route==="/api/pairing/codes" && request.method==="POST")return Response.json({code:"ABCD2345",url:"/pair?code=ABCD2345"});
 return new Response("not found",{status:404});}});
 SERVICE
 `;
-  const packed = await new Bun.Archive({ "scripts/serve.sh": serve }).bytes();
+  const files: Record<string, string> = { "scripts/serve.sh": serve };
+  for (const name of ["main", "layout", "archive", "lifecycle"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(projectRoot, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
+  const packed = await new Bun.Archive(files).bytes();
   writeFileSync(archive, Bun.zstdCompressSync(packed));
   writeFileSync(checksum, `${createHash("sha256").update(readFileSync(archive)).digest("hex")}  runtime.tar.zst\n`);
   const archiveArgs = ["--archive", archive, "--checksum", checksum];
   return { root, env, layout, archiveArgs, checksum, secret, serve,
-    pairingUrl: `http://127.0.0.1:${env.OMARCHY_BOT_PORT}/pair?code=ABCD2345` };
+    pairingUrl: `${options.tls ? "https" : "http"}://127.0.0.1:${env.OMARCHY_BOT_PORT}/pair?code=ABCD2345` };
 }
 
 async function cli(setup: { env: NodeJS.ProcessEnv }, args: string[]) {
@@ -110,6 +122,7 @@ test("installs on a non-Omarchy fixture, pairs, reuses the Service, and preserve
   const installed = await cli(setup, ["install", ...setup.archiveArgs]);
   expect(installed).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
   expect(readFileSync(setup.layout.servePath, "utf8")).toBe(setup.serve);
+  expect(readFileSync(path.join(setup.layout.currentDir, ".archive-sha256"), "utf8").trim()).toBe(createHash("sha256").update(readFileSync(setup.archiveArgs[1]!)).digest("hex"));
   expect(readFileSync(setup.layout.unitPath, "utf8")).toContain(`ExecStart=${setup.layout.servePath}`);
   expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual([
     "--user daemon-reload", "--user enable --now omarchy-bot.service",
@@ -138,6 +151,47 @@ test("installs on a non-Omarchy fixture, pairs, reuses the Service, and preserve
   expect(existsSync(setup.layout.unitPath)).toBe(false);
   expect(existsSync(setup.layout.runtimeDir)).toBe(false);
   for (const [file, contents] of kept) expect(readFileSync(file!, "utf8")).toBe(contents);
+});
+
+test("default listener settings survive install reuse, update, and reconfigure", async () => {
+  const setup = await fixture();
+  delete setup.env.OMARCHY_BOT_HOST;
+  delete setup.env.OMARCHY_BOT_PORT;
+  const pairing = "pairing: http://127.0.0.1:7321/pair?code=ABCD2345\n";
+  expect(await cli(setup, ["install", ...setup.archiveArgs])).toEqual({ code: 0, stdout: pairing, stderr: "" });
+  const saved = JSON.parse(readFileSync(path.join(setup.layout.dataDir, "service.json"), "utf8"));
+  expect(saved).toMatchObject({ OMARCHY_BOT_HOST: "127.0.0.1", OMARCHY_BOT_PORT: "7321" });
+  expect(await cli(setup, ["install", "--archive", "missing", "--checksum", "missing"])).toEqual({ code: 0, stdout: `reusing installed Service\n${pairing}`, stderr: "" });
+  expect(await cli(setup, ["update", ...setup.archiveArgs])).toEqual({ code: 0, stdout: pairing, stderr: "" });
+  expect(await cli(setup, ["reconfigure"])).toEqual({ code: 0, stdout: "Service reconfigured.\n", stderr: "" });
+});
+
+test.each(["install", "update", "reconfigure"])("legacy empty listener defaults allow %s", async command => {
+  const setup = await fixture();
+  delete setup.env.OMARCHY_BOT_HOST;
+  delete setup.env.OMARCHY_BOT_PORT;
+  const pairing = "pairing: http://127.0.0.1:7321/pair?code=ABCD2345\n";
+  expect(await cli(setup, ["install", ...setup.archiveArgs])).toEqual({ code: 0, stdout: pairing, stderr: "" });
+  writeFileSync(path.join(setup.layout.dataDir, "service.json"), JSON.stringify({ OMARCHY_BOT_HOST: "", OMARCHY_BOT_PORT: "" }));
+  const args = command === "reconfigure" ? [command] : [command, ...setup.archiveArgs];
+  const stdout = command === "reconfigure" ? "Service reconfigured.\n" : `${command === "install" ? "reusing installed Service\n" : ""}${pairing}`;
+  expect(await cli(setup, args)).toEqual({ code: 0, stdout, stderr: "" });
+});
+
+test("saved listener settings retain valid values and environment precedence", async () => {
+  const setup = await fixture();
+  const port = setup.env.OMARCHY_BOT_PORT!;
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  delete setup.env.OMARCHY_BOT_HOST;
+  delete setup.env.OMARCHY_BOT_PORT;
+  expect(layoutFromEnv(setup.env).env).toMatchObject({ OMARCHY_BOT_HOST: "127.0.0.1", OMARCHY_BOT_PORT: port });
+  expect(await cli(setup, ["reconfigure"])).toEqual({ code: 0, stdout: "Service reconfigured.\n", stderr: "" });
+  const overridden = layoutFromEnv({ ...setup.env, OMARCHY_BOT_HOST: "::1", OMARCHY_BOT_PORT: "17499" });
+  expect(overridden.env).toMatchObject({ OMARCHY_BOT_HOST: "::1", OMARCHY_BOT_PORT: "17499" });
+  expect(overridden.host).toBe("::1");
+  expect(overridden.port).toBe("17499");
+  const reset = layoutFromEnv({ ...setup.env, OMARCHY_BOT_HOST: "", OMARCHY_BOT_PORT: "" });
+  expect(reset.env).toMatchObject({ OMARCHY_BOT_HOST: "127.0.0.1", OMARCHY_BOT_PORT: "7321" });
 });
 
 test("a bad install checksum creates no runtime or unit and never opens a browser", async () => {
@@ -200,3 +254,176 @@ test("a failing custom opener is reported after successful install without faili
   expect(result.stderr).not.toContain(setup.secret);
   expect(recorded(setup.env.OPEN_CALLS!)).toEqual([setup.pairingUrl]);
 });
+
+test("install and update health waits connect to an existing TLS-bound Service", async () => {
+  const setup = await fixture({ tls: true });
+  mkdirSync(setup.layout.unitDir, { recursive: true });
+  writeFileSync(setup.layout.unitPath, `ExecStart=${setup.layout.servePath}\nEnvironment=OMARCHY_BOT_TLS_CERT=${setup.env.OMARCHY_BOT_TLS_CERT}\nEnvironment=OMARCHY_BOT_TLS_KEY=${setup.env.OMARCHY_BOT_TLS_KEY}\n`);
+  for (const command of ["install", "update"]) {
+    const result = await cli(setup, [command, ...setup.archiveArgs]);
+    expect(result).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+  }
+});
+
+test("TLS flags configure the unit and reconfigure restarts without replacing the runtime", async () => {
+  const setup = await fixture({ tls: true });
+  const cert = setup.env.OMARCHY_BOT_TLS_CERT!, key = setup.env.OMARCHY_BOT_TLS_KEY!;
+  delete setup.env.OMARCHY_BOT_TLS_CERT;
+  delete setup.env.OMARCHY_BOT_TLS_KEY;
+  const installed = await cli(setup, ["install", ...setup.archiveArgs, "--tls-cert", cert, "--tls-key", key, "--trusted-proxy", "127.0.0.1"]);
+  expect(installed).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+  const unit = readFileSync(setup.layout.unitPath, "utf8");
+  expect(unit).toContain(`Environment=OMARCHY_BOT_TLS_CERT=${cert}`);
+  expect(unit).toContain(`Environment=OMARCHY_BOT_TLS_KEY=${key}`);
+  expect(unit).toContain("Environment=OMARCHY_BOT_TRUSTED_PROXY=127.0.0.1");
+  expect((await cli(setup, ["pair"])).stdout).toBe(`pairing: ${setup.pairingUrl}\n`);
+  const marker = path.join(setup.layout.currentDir, "retain-runtime");
+  writeFileSync(marker, "unchanged");
+  expect(await cli(setup, ["reconfigure", "--tls-cert", cert, "--tls-key", key, "--trusted-proxy", "::1"])).toEqual({ code: 0, stdout: "Service reconfigured.\n", stderr: "" });
+  expect(readFileSync(marker, "utf8")).toBe("unchanged");
+  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain("Environment=OMARCHY_BOT_TRUSTED_PROXY=::1");
+  expect(recorded(setup.env.SYSTEMCTL_CALLS!).slice(-2)).toEqual(["--user daemon-reload", "--user restart omarchy-bot.service"]);
+  const changed = readFileSync(setup.layout.unitPath, "utf8");
+  expect((await cli(setup, ["reconfigure", "--tls-cert", cert, "--tls-key", ""])).code).toBe(2);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).toBe(changed);
+});
+
+test("install and update carry TLS and trusted proxy environment and reconfigure can disable TLS", async () => {
+  const setup = await fixture({ tls: true });
+  setup.env.OMARCHY_BOT_TRUSTED_PROXY = "127.0.0.1";
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  setup.env.OMARCHY_BOT_TRUSTED_PROXY = "::1";
+  expect((await cli(setup, ["update", ...setup.archiveArgs])).code).toBe(0);
+  const unit = readFileSync(setup.layout.unitPath, "utf8");
+  expect(unit).toContain(`OMARCHY_BOT_TLS_CERT=${setup.env.OMARCHY_BOT_TLS_CERT}`);
+  expect(unit).toContain(`OMARCHY_BOT_TLS_KEY=${setup.env.OMARCHY_BOT_TLS_KEY}`);
+  expect(unit).toContain("OMARCHY_BOT_TRUSTED_PROXY=::1");
+  expect((await cli(setup, ["reconfigure", "--tls-cert", "", "--tls-key", "", "--trusted-proxy", ""])).code).toBe(0);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).not.toContain("OMARCHY_BOT_TLS");
+  expect(readFileSync(setup.layout.unitPath, "utf8")).not.toContain("OMARCHY_BOT_TRUSTED_PROXY");
+  delete setup.env.OMARCHY_BOT_TLS_CERT;
+  delete setup.env.OMARCHY_BOT_TLS_KEY;
+  expect((await cli(setup, ["pair"])).stdout).toContain("pairing: http://");
+});
+
+test("install creates an executable local launcher that invokes installed help and pairing, uninstall removes it", async () => {
+  const setup = await fixture({ tls: true });
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  const launcher = path.join(setup.env.HOME!, ".local/bin/omarchy-bot");
+  expect(statSync(launcher).mode & 0o777).toBe(0o755);
+  const env = { ...setup.env }; delete env.OMARCHY_BOT_TLS_CERT; delete env.OMARCHY_BOT_TLS_KEY;
+  for (const args of [["--help"], ["pair", "--help"], ["pair"]]) {
+    const child = Bun.spawn([launcher, ...args], { env, stdout: "pipe", stderr: "pipe" });
+    expect(await child.exited).toBe(0);
+    expect(await new Response(child.stdout).text()).toContain(args.length === 1 && args[0] === "pair" ? `pairing: ${setup.pairingUrl}` : "Usage: omarchy-bot");
+    expect(await new Response(child.stderr).text()).toBe("");
+  }
+  expect((await cli(setup, ["uninstall"])).code).toBe(0);
+  expect(existsSync(launcher)).toBe(false);
+});
+
+test("install refuses a foreign launcher or symlink before changing runtime or units", async () => {
+  for (const symlink of [false, true]) {
+    const setup = await fixture();
+    const launcher = path.join(setup.env.HOME!, ".local/bin/omarchy-bot");
+    mkdirSync(path.dirname(launcher), { recursive: true });
+    const target = path.join(setup.root, "foreign"); writeFileSync(target, "user-owned");
+    if (symlink) symlinkSync(target, launcher); else writeFileSync(launcher, "user-owned");
+    const result = await cli(setup, ["install", ...setup.archiveArgs]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("launcher");
+    expect(readFileSync(target, "utf8")).toBe("user-owned");
+    expect(readFileSync(launcher, "utf8")).toBe("user-owned");
+    expect(existsSync(setup.layout.runtimeDir)).toBe(false);
+    expect(existsSync(setup.layout.unitPath)).toBe(false);
+    expect((await cli(setup, ["uninstall"])).code).toBe(0);
+    expect(existsSync(launcher)).toBe(true);
+  }
+});
+
+test("invalid TLS files and trusted proxy are rejected before replacing an installed unit", async () => {
+  const setup = await fixture();
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  const unit = readFileSync(setup.layout.unitPath, "utf8");
+  for (const args of [["--tls-cert", "/missing/cert.pem", "--tls-key", "/missing/key.pem"], ["--trusted-proxy", "untrusted.example"]]) {
+    const result = await cli(setup, ["reconfigure", ...args]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toMatch(/TLS file|trusted proxy/);
+    expect(readFileSync(setup.layout.unitPath, "utf8")).toBe(unit);
+  }
+});
+
+test("reconfigure rejects insecure and unusable TLS listeners before mutating a working install", async () => {
+  const setup = await fixture({ tls: true });
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  const unit = readFileSync(setup.layout.unitPath, "utf8");
+  const config = readFileSync(path.join(setup.layout.dataDir, "service.json"), "utf8");
+  const calls = recorded(setup.env.SYSTEMCTL_CALLS!);
+  const bad = path.join(setup.root, "bad.pem"); writeFileSync(bad, "not PEM");
+  const other = await fixture({ tls: true });
+  for (const [env, args] of [
+    [{ ...setup.env, OMARCHY_BOT_HOST: "0.0.0.0" }, ["--tls-cert", "", "--tls-key", ""]],
+    [setup.env, ["--tls-cert", bad]],
+    [setup.env, ["--tls-key", other.env.OMARCHY_BOT_TLS_KEY!]],
+  ] as const) {
+    const result = await cli({ env }, ["reconfigure", ...args]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toMatch(/requires a certificate|TLS/);
+    expect(readFileSync(setup.layout.unitPath, "utf8")).toBe(unit);
+    expect(readFileSync(path.join(setup.layout.dataDir, "service.json"), "utf8")).toBe(config);
+    expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual(calls);
+    expect((await cli(setup, ["pair"])).code).toBe(0);
+  }
+});
+
+test("failed reconfigure activation restores the prior unit, saved settings and running Service", async () => {
+  const setup = await fixture({ tls: true });
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  const unit = readFileSync(setup.layout.unitPath, "utf8");
+  const configPath = path.join(setup.layout.dataDir, "service.json");
+  const config = readFileSync(configPath, "utf8");
+  setup.env.FAIL_RESTART_ONCE = path.join(setup.root, "fail-restart");
+  writeFileSync(setup.env.FAIL_RESTART_ONCE, "once");
+  const result = await cli(setup, ["reconfigure", "--trusted-proxy", "127.0.0.2"]);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("fixture activation failure");
+  expect(readFileSync(setup.layout.unitPath, "utf8")).toBe(unit);
+  expect(readFileSync(configPath, "utf8")).toBe(config);
+  expect((await cli(setup, ["pair"])).code).toBe(0);
+});
+
+test("reconfigure identifies legacy TLS drop-ins before mutation and preserves unrelated user settings", async () => {
+  const setup = await fixture({ tls: true });
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  const unit = readFileSync(setup.layout.unitPath, "utf8");
+  const config = readFileSync(path.join(setup.layout.dataDir, "service.json"), "utf8");
+  const directory = `${setup.layout.unitPath}.d`; mkdirSync(directory);
+  const override = path.join(directory, "override.conf");
+  const previous = `[Service]\nEnvironment=OMARCHY_BOT_HOST=0.0.0.0\nEnvironment=OMARCHY_BOT_TLS_CERT=${setup.env.OMARCHY_BOT_TLS_CERT}\nEnvironment=OMARCHY_BOT_TLS_KEY=${setup.env.OMARCHY_BOT_TLS_KEY}\nNice=5\nEnvironment=USER_SETTING=keep\n`;
+  writeFileSync(override, previous);
+  const calls = recorded(setup.env.SYSTEMCTL_CALLS!);
+  const refused = await cli(setup, ["reconfigure", "--tls-cert", "", "--tls-key", ""]);
+  expect(refused.code).toBe(1);
+  expect(refused.stderr).toContain(override);
+  expect(refused.stderr).toContain("OMARCHY_BOT_");
+  expect(readFileSync(override, "utf8")).toBe(previous);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).toBe(unit);
+  expect(readFileSync(path.join(setup.layout.dataDir, "service.json"), "utf8")).toBe(config);
+  expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual(calls);
+  expect((await cli(setup, ["pair"])).code).toBe(0);
+  const unrelated = "[Service]\nNice=5\nEnvironment=USER_SETTING=keep\n";
+  writeFileSync(override, unrelated);
+  expect((await cli(setup, ["reconfigure", "--tls-cert", "", "--tls-key", ""])).code).toBe(0);
+  expect(readFileSync(override, "utf8")).toBe(unrelated);
+});
+
+test("installed launcher reconfigure retains available Bun when the caller PATH omits it", async () => {
+  const setup = await fixture({ requireBun: true });
+  const installedEnv = { ...setup.env, PATH: `${path.dirname(process.execPath)}:${setup.env.PATH}` };
+  expect((await cli({ env: installedEnv }, ["install", ...setup.archiveArgs])).code).toBe(0);
+  expect(Bun.which("bun", { PATH: setup.env.PATH || "" })).toBeNull();
+  const child = Bun.spawn([setup.layout.launcherPath, "reconfigure"], { env: setup.env, stdout: "pipe", stderr: "pipe" });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  expect({ code, stdout, stderr }).toEqual({ code: 0, stdout: "Service reconfigured.\n", stderr: "" });
+  expect((await cli(setup, ["pair"])).code).toBe(0);
+}, 40_000);

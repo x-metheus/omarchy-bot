@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { layoutFromEnv } from "../../apps/cli/src/layout.ts";
 import { run } from "../../apps/cli/src/main.ts";
@@ -44,21 +44,85 @@ test("status reports the Service address and startup failure through run", async
   expect(readFileSync(setup.env.CALLS!, "utf8")).toBe("--user is-active omarchy-bot.service\n");
 });
 
-test("doctor reports complete fixture prerequisites through run", async () => {
+test("doctor reports every missing installed component and fails without changing the host", async () => {
   const setup = fixture();
   shim(setup.bin, "bun", 'printf "1.4.2\\n"');
   shim(setup.bin, "flock", "exit 0");
   shim(setup.bin, "bash", "exit 0");
-  shim(setup.bin, "systemctl", "exit 0");
+  shim(setup.bin, "systemctl", 'printf "%s\\n" "$*" >> "$CALLS"\nprintf "inactive\\n"\nexit 3');
   shim(setup.bin, "uname", 'if [ "$1" = -s ]; then echo Linux; else echo x86_64; fi');
   shim(setup.bin, "loginctl", 'test "$*" = "show-user fixture-user -p Linger" || exit 99\necho Linger=yes');
   const directory = join(setup.env.XDG_RUNTIME_DIR!, "systemd");
   mkdirSync(directory, { recursive: true });
   const socket = Bun.listen({ unix: join(directory, "private"), socket: { data() {} } });
   cleanups.push(() => socket.stop(true));
-  expect(await run(["doctor"], setup.env, setup.io)).toBe(0);
-  expect(setup.log).toEqual(["All prerequisites available."]);
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
+  const output = setup.log.join("\n");
+  for (const check of ["runtime:", "checksum marker:", "Sway bundle:", "fonts:", "unit:", "launcher:", "health:", "pairing:"]) {
+    expect(output.split("\n").filter(line => line.startsWith(check))).toHaveLength(1);
+  }
+  expect(output).toContain("omarchy-bot update --archive");
+  expect(output).toContain("omarchy-bot pair");
+  expect(readFileSync(setup.env.CALLS!, "utf8")).toBe("--user is-active omarchy-bot.service\n");
+  expect(existsSync(setup.layout.runtimeDir)).toBe(false);
   expect(setup.error).toEqual([]);
+});
+
+test("doctor accepts a healthy install and diagnoses damaged markers, fonts and revoked pairing", async () => {
+  const setup = fixture();
+  for (const [name, script] of Object.entries({ bun: 'echo 1.4.2', bash: 'exit 0', flock: 'exit 0', systemctl: 'echo active', uname: 'if [ "$1" = -s ]; then echo Linux; else echo x86_64; fi', loginctl: 'echo Linger=yes' })) shim(setup.bin, name, script);
+  mkdirSync(join(setup.env.XDG_RUNTIME_DIR!, "systemd"), { recursive: true });
+  const socket = Bun.listen({ unix: join(setup.env.XDG_RUNTIME_DIR!, "systemd/private"), socket: { data() {} } });
+  cleanups.push(() => socket.stop(true));
+  const files: Record<string, string> = {
+    [setup.layout.servePath]: "#!/bin/sh\n",
+    [join(setup.layout.currentDir, "apps/daemon/src/bootstrap/main.ts")]: "// fixture\n",
+    [join(setup.layout.currentDir, ".archive-sha256")]: `${"a".repeat(64)}\n`,
+    [join(setup.layout.currentDir, "sway/.omarchy-bot-runtime")]: "sway-1.10.1-wayvnc-0.8.0-wlroots-0.18.1-v1\nc821bcb7d8e349c22bf3c9a96084a550d7d5a357b2d9d340c608adbdc5fb9344\n",
+    [setup.layout.unitPath]: "[Service]\n",
+    [join(setup.home, ".local/bin/omarchy-bot")]: "#!/bin/sh\n",
+    [setup.layout.hostSecretPath]: "doctor-secret",
+  };
+  for (const file of ["NotoSans[wdth,wght].ttf", "NotoSansSC[wght].ttf", "NotoSansJP[wght].ttf", "NotoSansKR[wght].ttf"]) files[join(setup.layout.currentDir, "fonts", file)] = "font";
+  for (const [file, contents] of Object.entries(files)) { mkdirSync(join(file, ".."), { recursive: true }); writeFileSync(file, contents, { mode: 0o755 }); }
+  let revokedAt: string | null = null;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    if (new URL(request.url).pathname === "/api/health") return Response.json({ ok: true });
+    expect(request.headers.get("authorization")).toBe("Bearer doctor-secret");
+    return Response.json({ devices: [{ revokedAt }] });
+  } });
+  cleanups.push(() => server.stop(true));
+  setup.env.OMARCHY_BOT_PORT = String(server.port);
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(0);
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, "../../apps/cli/src/main.ts"), "doctor"], { env: setup.env, stdout: "pipe", stderr: "pipe" });
+  expect(await child.exited).toBe(0);
+  expect(await new Response(child.stdout).text()).toBe("All required checks passed.\n");
+  expect(await new Response(child.stderr).text()).toBe("");
+  expect(setup.log).toEqual(["All required checks passed."]);
+  shim(setup.bin, "loginctl", "echo Linger=no");
+  shim(setup.bin, "systemctl", "echo inactive; exit 3");
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
+  expect(setup.log.at(-1)).toContain("enable lingering:");
+  expect(setup.log.at(-1)).toContain("unit: missing or inactive;");
+  expect(setup.log.at(-1)).not.toContain("All required checks passed.");
+  shim(setup.bin, "systemctl", "echo active");
+  server.stop(true);
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
+  expect(setup.log.at(-1)).toContain("health: Service is unreachable");
+  expect(setup.log.at(-1)).not.toContain("All required checks passed.");
+  shim(setup.bin, "loginctl", "echo Linger=yes");
+  const replacement = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    return Response.json(new URL(request.url).pathname === "/api/health" ? { ok: true } : { devices: [{ revokedAt }] });
+  } });
+  cleanups.push(() => replacement.stop(true));
+  setup.env.OMARCHY_BOT_PORT = String(replacement.port);
+  writeFileSync(join(setup.layout.currentDir, ".archive-sha256"), "corrupt");
+  writeFileSync(join(setup.layout.currentDir, "sway/.omarchy-bot-runtime"), "wrong bundle");
+  writeFileSync(join(setup.layout.currentDir, "fonts/NotoSansSC[wght].ttf"), "");
+  revokedAt = "2026-01-01";
+  setup.log.length = 0;
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
+  expect(setup.log[0]!.split("\n").map(line => line.split(":")[0])).toEqual(["checksum marker", "Sway bundle", "fonts", "pairing"]);
 });
 
 test("pair, devices, and revoke authenticate with the host secret without exposing tokens", async () => {
@@ -103,6 +167,42 @@ test("pair, devices, and revoke authenticate with the host secret without exposi
   expect(setup.log.join("\n")).not.toContain(secret);
 });
 
+test("TLS commands accept self-signed certificates only on the local loopback Service connection", async () => {
+  const setup = fixture();
+  const cert = join(setup.home, "cert.pem"), key = join(setup.home, "key.pem");
+  expect(Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key, "-out", cert, "-days", "1", "-nodes", "-subj", "/CN=localhost"]).exitCode).toBe(0);
+  setup.env.OMARCHY_BOT_TLS_CERT = cert;
+  setup.env.OMARCHY_BOT_TLS_KEY = key;
+  mkdirSync(setup.layout.stateDir, { recursive: true });
+  writeFileSync(setup.layout.hostSecretPath, "tls-private-secret");
+  shim(setup.bin, "systemctl", 'echo active');
+  const server = Bun.serve({ hostname: "0.0.0.0", port: 0, tls: { cert: Bun.file(cert), key: Bun.file(key) }, fetch(request) {
+    expect(request.headers.get("authorization")).toBe("Bearer tls-private-secret");
+    const route = new URL(request.url).pathname;
+    if (route === "/api/pairing/codes") return Response.json({ url: "/pair?code=TLS23456" });
+    if (route === "/api/devices/paired") return Response.json({ devices: [{ id: "tls-device", name: "TLS browser" }] });
+    return Response.json({ ok: true });
+  } });
+  cleanups.push(() => server.stop(true));
+  setup.env.OMARCHY_BOT_PORT = String(server.port);
+  for (const args of [["pair"], ["devices"], ["revoke", "tls-device"], ["status"]]) expect(await run(args, setup.env, setup.io)).toBe(0);
+  expect(setup.log).toContain(`pairing: https://127.0.0.1:${server.port}/pair?code=TLS23456`);
+  expect(setup.log).toContain(`state: active\naddress: https://127.0.0.1:${server.port}`);
+  for (const host of ["127.0.1.0", "::ffff:127.0.0.1", "::ffff:7f00:1"]) {
+    expect(await run(["pair"], { ...setup.env, OMARCHY_BOT_HOST: host }, setup.io)).toBe(0);
+  }
+  expect(await run(["pair"], { ...setup.env, OMARCHY_BOT_HOST: "127.0.0.256" }, setup.io)).toBe(1);
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, "../../apps/cli/src/main.ts"), "pair"], { env: setup.env, stdout: "pipe", stderr: "pipe" });
+  expect(await child.exited).toBe(0);
+  expect(await new Response(child.stdout).text()).toContain("pairing: https://");
+  expect(await new Response(child.stderr).text()).toBe("");
+  const address = Object.values(networkInterfaces()).flat().find(address => address?.family === "IPv4" && !address.internal)?.address;
+  if (!address) throw new Error("A local non-loopback IPv4 interface is required for the TLS trust regression");
+  setup.env.OMARCHY_BOT_HOST = address;
+  expect(await run(["pair"], setup.env, setup.io)).toBe(1);
+  expect([...setup.log, ...setup.error].join("\n")).not.toContain("tls-private-secret");
+});
+
 test("start and stop use the fixture user manager", async () => {
   const setup = fixture();
   shim(setup.bin, "systemctl", 'printf "%s\\n" "$*" >> "$CALLS"');
@@ -134,4 +234,16 @@ test("HTTP authentication errors return failure without printing the host secret
   expect(await run(["pair"], setup.env, setup.io)).toBe(1);
   expect(setup.error.join("\n")).toContain("401");
   expect([...setup.log, ...setup.error].join("\n")).not.toContain(secret);
+});
+
+test("global and every command help exit successfully before touching the Service", async () => {
+  const setup = fixture();
+  for (const args of [["--help"], ["-h"], ["help"], ...["install", "start", "stop", "status", "pair", "devices", "revoke", "update", "reconfigure", "uninstall", "doctor"].map(command => [command, "--help"])]) {
+    setup.log.length = 0;
+    expect(await run(args, setup.env, setup.io)).toBe(0);
+    expect(setup.log.join("\n")).toContain("Usage: omarchy-bot");
+    if (args.length === 2) expect(setup.log.join("\n")).toContain(`omarchy-bot ${args[0]}`);
+  }
+  expect(setup.error).toEqual([]);
+  expect(existsSync(setup.env.CALLS!)).toBe(false);
 });

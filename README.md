@@ -54,7 +54,7 @@ The repository root manifest points Omarchy's plugin manager at `packages/omarch
 - **Release artifacts:** `omarchy-bot-runtime-<sha>-x86_64.tar.zst` and its SHA-256 sidecar, published under `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<sha>/`.
 - **Runtime location:** `~/.local/share/omarchy-bot/runtime/current/`, or `$OMARCHY_BOT_HOME/runtime/current/` when overridden. Extraction is atomic and keeps the checkout clean and fast-forwardable.
 - **No source fallback:** a network, server, or integrity failure stops startup rather than silently compiling.
-- **Failure handling:** there is no supervisor lifeline, no `notify-send` path, and Quickshell does not parent the Service. Install, startup, and unit failures go to the Service log, `omarchy-bot status` (unit state, address, last startup failure), and `omarchy-bot doctor` (missing prerequisites). See [Service CLI](#service-cli).
+- **Failure handling:** there is no supervisor lifeline, no `notify-send` path, and Quickshell does not parent the Service. Install, startup, and unit failures go to the Service log, `omarchy-bot status` (unit state, address, last startup failure), and `omarchy-bot doctor` (prerequisites, installed runtime and markers, fonts, unit and launcher, health, pairing). See [Service CLI](#service-cli).
 
 Service log:
 
@@ -76,11 +76,11 @@ bun apps/cli/src/main.ts install \
   --checksum omarchy-bot-runtime-<sha>-x86_64.tar.zst.sha256
 ```
 
-It requires Bun 1.4+, Bash, `flock`, a systemd user manager socket (`$XDG_RUNTIME_DIR/systemd/private`), and a non-root user. `install` verifies the checksum, extracts atomically into `~/.local/share/omarchy-bot/runtime/current/`, writes `$XDG_CONFIG_HOME/systemd/user/omarchy-bot.service` with `ExecStart=<dataDir>/runtime/current/scripts/serve.sh`, enables and starts that unit, waits for `GET /api/health`, then prints a one-time `pairing: http://…/pair?code=…` URL and opens it with `xdg-open` (set `OMARCHY_BOT_OPEN` for a different opener). An already-installed runtime is reused instead of replaced. The installer registers no desktop hook and installs no global `omarchy-bot` binary: run the CLI by path, as shown in [Service CLI](#service-cli).
+It requires Bun 1.4+, Bash, `flock`, a systemd user manager socket (`$XDG_RUNTIME_DIR/systemd/private`), and a non-root user. `install` verifies the checksum, extracts atomically into `~/.local/share/omarchy-bot/runtime/current/`, writes `$XDG_CONFIG_HOME/systemd/user/omarchy-bot.service` with `ExecStart=<dataDir>/runtime/current/scripts/serve.sh`, enables and starts that unit, waits for `GET /api/health`, then prints a one-time `pairing: <origin>/pair?code=…` URL and opens it with `xdg-open` (set `OMARCHY_BOT_OPEN` for a different opener). The origin is `https://` when TLS is configured and `http://` otherwise. An already-installed runtime is reused instead of replaced. The installer registers no desktop hook and writes the `omarchy-bot` launcher described under [Service CLI](#service-cli); `install` and `update` also accept the TLS and proxy flags described under [Remote access](#remote-access).
 
 A host without a systemd user manager cannot use `install`; start the Service with the container path below or with `scripts/serve.sh` directly.
 
-The generated unit carries a fixed environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `OMARCHY_BOT_HOST`, `OMARCHY_BOT_PORT`, `PATH`, and `XDG_RUNTIME_DIR`, captured when the unit is first written. `OMARCHY_BOT_TLS_CERT`, `OMARCHY_BOT_TLS_KEY`, and `OMARCHY_BOT_TRUSTED_PROXY` are not in it, and `install`/`update` reuse an existing unit instead of rewriting it, so setting those variables before installing has no effect. A TLS or proxied listener therefore needs a systemd drop-in, or direct `scripts/serve.sh`/container startup — see [Remote access](#remote-access).
+The generated unit records `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `OMARCHY_BOT_HOST`, `OMARCHY_BOT_PORT`, `PATH`, `XDG_RUNTIME_DIR`, and, when configured, `OMARCHY_BOT_TLS_CERT`, `OMARCHY_BOT_TLS_KEY`, and `OMARCHY_BOT_TRUSTED_PROXY`. TLS and proxy settings come from `--tls-cert`/`--tls-key`/`--trusted-proxy` flags or those variables in the installing environment. `install`/`update` leave an existing unit alone unless a TLS flag or one of those three variables is supplied, in which case they rewrite the unit and restart it instead of only starting it; [Remote access](#remote-access) documents the exact rules. Writing the unit also saves the connection settings to `<dataDir>/service.json` (mode 0600, no host secret) so later CLI commands reach the installed address and scheme.
 
 ### Start an installed runtime
 
@@ -128,7 +128,7 @@ For an existing Service, a paired `POST /api/agents/pi/recheck` also reruns the 
 
 `--shm-size=512m` gives Chromium sufficient shared memory. Chromium's namespace sandbox needs a host that permits unprivileged user namespaces and Docker's `--security-opt seccomp=unconfined`; this relaxes Docker's syscall filtering, so run the Service only with trusted Agent workloads. The browser's own sandbox remains enabled. The image never uses `--privileged`, mounts a desktop socket, or requires a host graphical session.
 
-For remote HTTPS, set `OMARCHY_BOT_HOST` to the interface address you mean (use `0.0.0.0` only when every interface is intended) and mount a readable certificate/key with `OMARCHY_BOT_TLS_CERT` and `OMARCHY_BOT_TLS_KEY`, passing all three as `-e` variables to `docker run`. Alternatively, use `OMARCHY_BOT_TRUSTED_PROXY=<proxy-IP>` behind your TLS-terminating proxy and restrict network access to that proxy. Startup fails on a non-loopback address otherwise. Pairing remains required in both cases. `OMARCHY_BOT_PORT` changes the listener and health probe port. Docker's health check calls `/api/health`; `docker logs` receives Service stdout/stderr. The CLI inside a TLS-bound container keeps using plain HTTP, so `docker exec … pair` fails there. Pair the client while the container still uses loopback HTTP, before enabling TLS and restarting with the same volume; a fresh TLS-only container cannot issue a pairing code through this CLI, so reuse an existing paired token or provision a code through the paired API.
+For remote HTTPS, set `OMARCHY_BOT_HOST` to the interface address you mean (use `0.0.0.0` only when every interface is intended) and mount a readable certificate/key with `OMARCHY_BOT_TLS_CERT` and `OMARCHY_BOT_TLS_KEY`, passing all three as `-e` variables to `docker run`. Alternatively, use `OMARCHY_BOT_TRUSTED_PROXY=<proxy-IP>` behind your TLS-terminating proxy and restrict network access to that proxy. Startup fails on a non-loopback address otherwise. Pairing remains required in both cases. `OMARCHY_BOT_PORT` changes the listener and health probe port. Docker's health check calls `/api/health`; `docker logs` receives Service stdout/stderr and, with TLS enabled and no active Paired Device, one `pairing: https://…/pair?code=…` line the entrypoint issues after the Service reports healthy. An active Paired Device suppresses automatic issuance. `docker exec … pair`, `devices`, and `revoke` use HTTPS with the configured host and port. Wildcard binds connect through loopback and accept local self-signed certificates. For a specific local interface, the CLI binds its source to loopback for host authorization while still validating the destination certificate; install its CA in the image's trust store or use a certificate that verifies. If automatic issuance fails, the entrypoint logs a line saying so; the manual fallback is `docker exec omarchy-bot bun /opt/omarchy-bot/runtime/apps/cli/src/main.ts pair`. Use `docker inspect` for container state/health and `docker logs` for startup failures.
 
 The local health probe sends no credentials and checks liveness only. With HTTPS it skips certificate identity validation so operator-managed self-signed certificates and certificates for the external DNS name still work; validate public TLS separately from container health.
 
@@ -136,33 +136,36 @@ Maintainers can run the real, offline acceptance test with `OMARCHY_BOT_CONTAINE
 
 ## Service CLI
 
-The installer writes no global `omarchy-bot` binary. Invoke the CLI from an installed runtime (or a checkout) by path:
+`install` and `update` write an executable `omarchy-bot` launcher to `~/.local/bin`, which runs the installed CLI with the recorded data, state, and config paths. It does not change shell startup files or `PATH`: add `~/.local/bin` yourself if your shell does not already include it. Without an install — or from a checkout — invoke the CLI by path:
 
 ```bash
 bun ~/.local/share/omarchy-bot/runtime/current/apps/cli/src/main.ts <command>
 ```
 
-Prose elsewhere names the command as `omarchy-bot <command>`; that always means this path invocation. There is no `--help`; an unknown or missing command prints `Commands: …` to stderr and exits 2.
+Prose elsewhere names the command as `omarchy-bot <command>`; that means the launcher when installed, and this path invocation otherwise. `omarchy-bot --help`, `omarchy-bot help`, `omarchy-bot <command> --help`, and `-h` print usage and exit 0. An unknown or missing command prints `Commands: …` to stderr and exits 2. `uninstall` removes the launcher only if the installer wrote it; a foreign file or symlink at that path makes `install` refuse before touching the runtime or unit.
 
 | Command | Effect |
 | :--- | :--- |
-| `install --archive <path> --checksum <path>` | Verify the archive, extract into `runtime/current/`, install and enable the user unit, start it, wait for health, print and open the pairing URL. Reuses an installed runtime. |
-| `update --archive <path> --checksum <path>` | Stop the unit, replace `runtime/current/`, keep the unit, start it, wait for health, print the pairing URL. |
+| `install --archive <path> --checksum <path>` | Verify the archive, extract into `runtime/current/`, write the launcher, install and enable the user unit, start it, wait for health, print and open the pairing URL. Reuses an installed runtime. Accepts the TLS and proxy flags below. |
+| `update --archive <path> --checksum <path>` | Stop the unit, replace `runtime/current/`, write the launcher, keep the unit, start it, wait for health, print the pairing URL. Accepts the TLS and proxy flags below. |
+| `reconfigure` | Validate the resulting listener and TLS material, rewrite the unit, reload and restart it, wait for health, and print `Service reconfigured.` Activation failure restores the prior unit and saved settings and restarts the prior Service. The runtime is not replaced; a missing unit or runtime requests `install` first. Accepts only the TLS and proxy flags. |
 | `start` / `stop` | Start or stop `omarchy-bot.service` in the user manager. |
 | `status` | Print `state:` (`active`, `failed`, or `inactive`), `address:`, and, when not active, `startup failure:` from the last relevant Service log line. |
-| `doctor` | Print one `missing:` line per unmet prerequisite, or `All prerequisites available.` A linger hint (`enable lingering: loginctl enable-linger <user>`) is advisory and is not a `missing:` line. |
+| `doctor` | Print one actionable line per failed check, then `All required checks passed.` when nothing but the advisory linger hint is outstanding. Exits 1 if any required check fails. |
 | `pair` | Print a one-time `pairing:` URL. |
 | `devices` | List Paired Devices as `id<TAB>name`. |
 | `revoke <id>` | Revoke one Paired Device. |
-| `uninstall` | Disable and stop the unit, remove it and `runtime/`, and keep user data. |
+| `uninstall` | Disable and stop the unit, remove it, `runtime/`, the owned launcher, and `service.json`, and keep user data. |
 
-`install` and `update` refuse to run without a systemd user manager; `start`, `stop`, and `uninstall` act on `omarchy-bot.service` in that manager. `status` shells out to `systemctl --user is-active omarchy-bot.service`: with `systemctl` on `PATH` but no reachable user manager it reports `state: inactive` and the last Service log line, while a `PATH` without `systemctl` makes the command fail with exit 1 instead. `doctor` reports the container's missing pieces by design: inside the container use `scripts/serve.sh` and `GET /api/health` instead.
+`install`, `update`, and `reconfigure` share `[--tls-cert <path> --tls-key <path>] [--trusted-proxy <address>]`, with `OMARCHY_BOT_TLS_CERT`, `OMARCHY_BOT_TLS_KEY`, and `OMARCHY_BOT_TRUSTED_PROXY` as fallbacks. Omitted flags keep the saved configuration. Both certificate flags must be set together; pass `--tls-cert "" --tls-key ""` to disable TLS and `--trusted-proxy ""` to clear proxy trust. Paths become absolute and must contain readable, usable, matching TLS material. The proxy must be one IPv4 or IPv6 address. The resulting listener must retain TLS or a trusted proxy when bound outside loopback; these checks precede unit changes. Existing user or runtime drop-ins that override listener settings (including the former `systemctl --user edit` TLS recipe), reset the environment, or use `EnvironmentFile=` cause an explicit conflict naming the file. Move listener settings to the CLI flags/environment and remove those assignments while preserving unrelated drop-in settings, then retry. The generated unit includes the executing Bun's directory in `PATH`. See [Remote access](#remote-access).
 
-`doctor` checks only prerequisites: Bun ≥ 1.4, `bash`, `flock`, `systemctl`, x86_64 Linux, the user manager socket, `loginctl`, and a lingering hint (`enable lingering: loginctl enable-linger <user>`). It does not check the installed runtime, checksum or bundle markers, fonts, unit state, health, or pairing. Use `status` for unit state, address, and the last startup failure, and `GET /api/health` for liveness.
+`install` and `update` refuse to run without a systemd user manager; `start`, `stop`, and `uninstall` act on `omarchy-bot.service` in that manager. `status` shells out to `systemctl --user is-active omarchy-bot.service`: with `systemctl` on `PATH` but no reachable user manager it reports `state: inactive` and the last Service log line, while a `PATH` without `systemctl` makes the command fail with exit 1 instead.
 
-`pair`, `devices`, and `revoke` read the host secret from `<state>/pairing-host-secret` and call `http://<host>:<port>` directly, with no TLS support. Run them on the Service Host, or against a loopback listener. A TLS-bound remote Service cannot be managed with these commands from another machine.
+`doctor` checks Bun ≥ 1.4, `bash`, `flock`, `systemctl`, `loginctl`, x86_64 Linux, the user manager socket, a lingering hint (`enable lingering: loginctl enable-linger <user>`, advisory), the installed runtime's `serve.sh` and daemon entry, the `.archive-sha256` marker's format, the pinned Sway bundle ready marker, the required font files, unit presence and active state, an executable launcher, `GET /api/health`, and an unrevoked Paired Device. Failures print one line naming the check, with a repair command where one exists (for example `run omarchy-bot update --archive <path> --checksum <path>`). It rehashes nothing and never changes the host: the archive digest is checked for format only, because packaging verifies the fonts and bundle checksums. Inside a container it reports the missing unit, launcher, and installer-written archive marker by design; use `docker exec … pair` or the pairing URL in `docker logs`.
 
-CLI environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR`, `OMARCHY_BOT_HOST`, `OMARCHY_BOT_PORT`, `OMARCHY_BOT_OPEN`, `PATH`, and `USER`.
+`pair`, `devices`, `revoke`, and `doctor`'s pairing check read the host secret from `<state>/pairing-host-secret`. They and the `install`/`update`/`reconfigure` health wait use the configured origin, `http://` or `https://` per the installed TLS setting; `status` prints that same address. Wildcard binds connect through loopback. A specific local interface uses a loopback source address so the Service retains its loopback-only host authorization. A self-signed certificate is tolerated only for a loopback destination; interface and remote destination certificates must verify normally, and redirects are refused. Run these commands on the Service Host. For a non-loopback interface with a private CA, configure normal CA trust (for example `NODE_EXTRA_CA_CERTS=/path/to/ca.pem` when invoking Bun), or manage the Service over a loopback listener or tunnel.
+
+CLI environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR`, `OMARCHY_BOT_HOST`, `OMARCHY_BOT_PORT`, `OMARCHY_BOT_TLS_CERT`, `OMARCHY_BOT_TLS_KEY`, `OMARCHY_BOT_TRUSTED_PROXY`, `OMARCHY_BOT_OPEN`, `PATH`, and `USER`. Values saved in `<dataDir>/service.json` supply the connection settings that are not set in the environment; the saved listener is the effective one (`127.0.0.1:7321` when nothing was supplied).
 
 ## Product model
 
@@ -499,27 +502,22 @@ Three supported paths reach a Service from another machine. All three require a 
 
 - **SSH tunnel.** Keep the default loopback bind and forward the port: `ssh -L 7321:127.0.0.1:7321 user@host`. Open `http://127.0.0.1:7321` locally; the Service sees a loopback peer.
 - **Private network.** Reach the Service Host over your VPN or overlay. Keep the loopback bind and forward the port there, or bind the private interface with TLS as below.
-- **TLS binding.** Set `OMARCHY_BOT_HOST` to the interface address and provide `OMARCHY_BOT_TLS_CERT` and `OMARCHY_BOT_TLS_KEY`, or declare `OMARCHY_BOT_TRUSTED_PROXY=<proxy-IP>` for a TLS-terminating proxy you control. Only a Launcher that inherits your shell environment (the container entrypoint, `scripts/serve.sh`, a checkout `bun run dev`) sees these variables; the generated `omarchy-bot.service` records a fixed environment instead, so a systemd host needs a drop-in:
+- **TLS binding.** Set `OMARCHY_BOT_HOST` to the interface address and provide `OMARCHY_BOT_TLS_CERT` and `OMARCHY_BOT_TLS_KEY`, or declare `OMARCHY_BOT_TRUSTED_PROXY=<proxy-IP>` for a TLS-terminating proxy you control. On a systemd host, give the flags to `install`, `update`, or `reconfigure` so the unit carries them:
 
   ```bash
-  systemctl --user edit omarchy-bot.service
+  OMARCHY_BOT_HOST=192.0.2.10 omarchy-bot reconfigure \
+    --tls-cert /home/me/tls/cert.pem --tls-key /home/me/tls/key.pem
   ```
 
-  ```ini
-  [Service]
-  Environment=OMARCHY_BOT_HOST=192.0.2.10
-  Environment=OMARCHY_BOT_TLS_CERT=/home/me/tls/cert.pem
-  Environment=OMARCHY_BOT_TLS_KEY=/home/me/tls/key.pem
-  ```
+  `OMARCHY_BOT_HOST` and `OMARCHY_BOT_PORT` are read from the environment, so prefixing the command (or exporting them first) sets the recorded listener; `install`, `update`, and `reconfigure` take `OMARCHY_BOT_TLS_CERT`, `OMARCHY_BOT_TLS_KEY`, and `OMARCHY_BOT_TRUSTED_PROXY` as fallbacks for the flags, and omitted settings keep the saved configuration. Reconfigure rewrites the unit, reloads the manager, restarts the Service, and waits for health without replacing the runtime. The same three variables still work for a Launcher that inherits your shell environment: the container entrypoint, `scripts/serve.sh`, or a checkout `bun run dev`. Because the wait then connects to the new non-loopback address, use a certificate the host trusts; a self-signed one is accepted only while the address is loopback.
 
-  Then activate it explicitly — a drop-in edit does not change a running unit:
+  Disable TLS again with explicit empty values, which also clears any saved certificate paths:
 
   ```bash
-  systemctl --user daemon-reload
-  systemctl --user restart omarchy-bot.service
+  omarchy-bot reconfigure --tls-cert "" --tls-key ""
   ```
 
-  The `pair`, `devices`, and `revoke` CLI commands, and the health wait inside `install`/`update`, speak plain HTTP to `<host>:<port>`, so none of them works against a TLS-bound listener; pair with the one-time URL in a browser and manage devices before the TLS drop-in is in place.
+  Because the installed setting persists in `<dataDir>/service.json`, `pair`, `devices`, `revoke`, the `install`/`update`/`reconfigure` health wait, and `doctor` then call the `https://` origin, and `status` prints it. A self-signed certificate is accepted only when the connection targets a loopback address; connecting to a remote host address requires a certificate that verifies normally. Redirects are refused. Manage the Service from the Service Host, or reach it over the SSH tunnel or VPN path above.
 
 Pairing is required in every case. [ADR 0014](docs/adr/0014-require-paired-device-tokens.md) supersedes the [earlier transport decision](docs/adr/0004-defer-web-control-transport-security.md); [ADR 0013](docs/adr/0013-run-a-standalone-linux-service.md) records the standalone Service these paths reach.
 
