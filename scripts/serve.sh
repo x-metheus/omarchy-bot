@@ -4,19 +4,10 @@
 # installs or downloads anything and never inspects the distribution.
 set -euo pipefail
 
-preload=
-while (($# > 0)); do
-  case $1 in
-    --preload)
-      preload=${2:?--preload requires a file}
-      shift 2
-      ;;
-    *)
-      printf 'Omarchy Bot serve: unknown argument %s\n' "$1" >&2
-      exit 2
-      ;;
-  esac
-done
+if (($# > 0)); then
+  printf 'Omarchy Bot serve: unknown argument %s\n' "$1" >&2
+  exit 2
+fi
 
 runtime_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 main=$runtime_root/apps/daemon/src/bootstrap/main.ts
@@ -98,31 +89,23 @@ if [[ -L $lock_file ]]; then
   printf 'Omarchy Bot refuses to follow a symlinked lock: %s\n' "$lock_file" >&2
   exit 1
 fi
-# Descriptor 9 is the launcher convention: launch.sh holds the same lock file
-# there so runtime preparation and the Service never overlap. Adopting it keeps
-# preparation, the Service and its cleanup one critical section; a plain re-open
-# would deadlock because the inherited open file description still holds it.
-if { true >&9; } 2>/dev/null && [[ /proc/$$/fd/9 -ef $lock_file ]] && flock -n 9; then
-  lock_fd=9
-else
-  exec {lock_fd}>>"$lock_file"
-  if ! flock -n "$lock_fd"; then
-    running_pid=
-    # The winner records its pid just after locking; give it a moment to land and
-    # ignore a leftover pid from a run that is gone.
-    for _ in {1..50}; do
-      candidate=
-      read -r candidate <"$lock_file" 2>/dev/null || true
-      if [[ -n $candidate ]] && kill -0 "$candidate" 2>/dev/null; then
-        running_pid=$candidate
-        break
-      fi
-      sleep 0.01
-    done
-    printf 'Omarchy Bot Service already running for this user%s (lock %s)\n' \
-      "${running_pid:+ (pid $running_pid)}" "$lock_file" >&2
-    exit 1
-  fi
+exec {lock_fd}>>"$lock_file"
+if ! flock -n "$lock_fd"; then
+  running_pid=
+  # The winner records its pid just after locking; give it a moment to land and
+  # ignore a leftover pid from a run that is gone.
+  for _ in {1..50}; do
+    candidate=
+    read -r candidate <"$lock_file" 2>/dev/null || true
+    if [[ -n $candidate ]] && kill -0 "$candidate" 2>/dev/null; then
+      running_pid=$candidate
+      break
+    fi
+    sleep 0.01
+  done
+  printf 'Omarchy Bot Service already running for this user%s (lock %s)\n' \
+    "${running_pid:+ (pid $running_pid)}" "$lock_file" >&2
+  exit 1
 fi
 # exec below keeps this pid and this descriptor, so the Service itself holds the
 # lock until its cleanup finishes. Truncate first: a previous run left its pid
@@ -131,8 +114,4 @@ fi
 printf '%s\n' "$$" >"$lock_file"
 
 cd -- "$runtime_root"
-args=()
-if [[ -n $preload ]]; then
-  args+=(--preload "$preload")
-fi
-exec "$bun_bin" "${args[@]}" "$main"
+exec "$bun_bin" "$main"

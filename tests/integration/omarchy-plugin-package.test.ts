@@ -1,0 +1,233 @@
+import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { layoutFromEnv, type Layout } from "../../apps/cli/src/layout.ts";
+
+const root = path.resolve(import.meta.dir, "../..");
+const entry = path.join(root, "packages/omarchy-plugin/entry.sh");
+const pluginId = "io.github.xmethues.omarchy-bot";
+const cleanups: Array<() => void> = [];
+afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
+function shim(bin: string, name: string, script: string) {
+  writeFileSync(path.join(bin, name), `#!/bin/bash\n${script}\n`, { mode: 0o755 });
+}
+async function fixture() {
+  const home = mkdtempSync(path.join(tmpdir(), "ob-plugin-package-"));
+  cleanups.push(() => rmSync(home, { recursive: true, force: true }));
+  const bin = path.join(home, "bin"); mkdirSync(bin);
+  const source = path.join(home, "plugin"); mkdirSync(source);
+  copyFileSync(entry, path.join(source, "entry.sh"));
+  const bunDir = path.join(home, "resolved-bun"); mkdirSync(bunDir);
+  shim(bunDir, "bun", `if [[ \${1:-} == */apps/cli/src/main.ts ]]; then printf '%s\\n' "$*" >> "$CLI_CALLS"; fi\nexec '${process.execPath}' "$@"`);
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, PATH: `${bin}:/usr/bin:/bin`,
+    XDG_CONFIG_HOME: path.join(home, "config"), XDG_DATA_HOME: path.join(home, "data"),
+    XDG_STATE_HOME: path.join(home, "state"), XDG_RUNTIME_DIR: path.join(home, "run"),
+    OMARCHY_BOT_HOME: path.join(home, "data/omarchy-bot"), OMARCHY_BOT_STATE: path.join(home, "state/omarchy-bot"),
+    OMARCHY_BOT_PLUGIN_OS_RELEASE: path.join(home, "os-release"), OMARCHY_BOT_PLUGIN_BUN: path.join(bunDir, "bun"),
+    OMARCHY_BOT_PLUGIN_REVISION: "fixture-revision", OMARCHY_BOT_PLUGIN_CURL: path.join(bin, "curl"),
+    CALLS: path.join(home, "calls"), CLI_CALLS: path.join(home, "cli-calls"), DOWNLOADS: path.join(home, "downloads"), OMARCHY_BOT_OPEN: "true" };
+  writeFileSync(env.OMARCHY_BOT_PLUGIN_OS_RELEASE!, 'ID="omarchy"\n');
+  const layout = layoutFromEnv(env);
+  const manager = path.join(env.XDG_RUNTIME_DIR!, "systemd"); mkdirSync(manager, { recursive: true });
+  const socket = Bun.listen({ unix: path.join(manager, "private"), socket: { data() {} } });
+  cleanups.push(() => socket.stop(true));
+  const control = path.join(home, "systemctl.ts");
+  writeFileSync(control, `import {appendFileSync,readFileSync,writeFileSync,existsSync} from "node:fs";
+const args=process.argv.slice(2);appendFileSync(process.env.CALLS!,args.join(" ")+"\\n");
+const pidFile=process.env.CALLS+".pid";
+if(args.includes("stop")||args.includes("disable")){if(existsSync(pidFile)){try{process.kill(Number(readFileSync(pidFile,"utf8")),"SIGTERM")}catch{}}}
+const env={...process.env};
+if(args.includes("enable")||args.includes("start")){for(const line of readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/omarchy-bot.service","utf8").split("\\n")){if(line.startsWith("Environment=")){const value=line.slice(12),index=value.indexOf("=");env[value.slice(0,index)]=value.slice(index+1);}}}
+if(args.includes("enable")||args.includes("start")){let live=false;if(existsSync(pidFile)){try{process.kill(Number(readFileSync(pidFile,"utf8")),0);live=true}catch{}}
+if(!live){const unit=readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/omarchy-bot.service","utf8");const executable=unit.split("\\n").find(s=>s.startsWith("ExecStart="))!.slice(10);const child=Bun.spawn(["setsid",executable],{env,stdin:"ignore",stdout:"ignore",stderr:"ignore"});writeFileSync(pidFile,String(child.pid));child.unref();}}
+`);
+  shim(bin, "systemctl", `exec '${process.execPath}' '${control}' "$@"`);
+  cleanups.push(() => { const pid = `${env.CALLS}.pid`; if (existsSync(pid)) { try { process.kill(Number(readFileSync(pid, "utf8")), "SIGKILL"); } catch {} } });
+  const reservation = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
+  env.OMARCHY_BOT_PORT = String(reservation.port); reservation.stop(true);
+  const serve = `#!/bin/bash\nexec bun run - <<'SERVICE'\nimport {mkdirSync,writeFileSync} from 'node:fs';\nmkdirSync(process.env.OMARCHY_BOT_STATE,{recursive:true});writeFileSync(process.env.OMARCHY_BOT_STATE+'/pairing-host-secret','fixture-secret');\nBun.serve({hostname:'127.0.0.1',port:Number(process.env.OMARCHY_BOT_PORT),fetch(r){return new URL(r.url).pathname==='/api/health'?Response.json({ok:true}):Response.json({code:'ABCD2345',url:'/pair?code=ABCD2345'})}});\nSERVICE\n`;
+  const archive = path.join(home, "runtime.tar.zst");
+  const files: Record<string, string> = { "scripts/serve.sh": serve };
+  for (const name of ["main", "layout", "archive", "lifecycle"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(root, `apps/cli/src/${name}.ts`), "utf8");
+  writeFileSync(archive, Bun.zstdCompressSync(await new Bun.Archive(files).bytes()));
+  writeFileSync(`${archive}.sha256`, `${createHash("sha256").update(readFileSync(archive)).digest("hex")}  runtime.tar.zst\n`);
+  env.ARCHIVE = archive;
+  shim(bin, "curl", 'printf "%s\\n" "$*" >> "$DOWNLOADS"\nwhile [[ $1 != -o ]]; do shift; done\ndest=$2; url=$3\nif [[ $url == *.sha256 ]]; then cp "$ARCHIVE.sha256" "$dest"; else cp "$ARCHIVE" "$dest"; fi');
+  return { home, bin, bunDir, source, env, layout, serve };
+}
+async function invoke(setup: { env: NodeJS.ProcessEnv; source: string }, ...args: string[]) {
+  const child = Bun.spawn(["bash", path.join(setup.source, "entry.sh"), ...args], { env: setup.env, stdout: "pipe", stderr: "pipe" });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  return { code, stdout, stderr };
+}
+const calls = (file: string) => existsSync(file) ? readFileSync(file, "utf8").trim().split("\n") : [];
+function spawnSettle(setup: { env: NodeJS.ProcessEnv; layout: Layout; source: string; home: string }) {
+  const child = Bun.spawn(["setsid", "bash", path.join(setup.layout.runtimeDir, "plugin-entry.sh"), "settle", setup.source, path.join(setup.home, ".config/omarchy/shell.json"), pluginId], { env: setup.env, stdout: "pipe", stderr: "pipe" });
+  cleanups.push(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} });
+  return child;
+}
+function setEnabled(setup: { home: string }, enabled: boolean) {
+  const config = path.join(setup.home, ".config/omarchy/shell.json");
+  mkdirSync(path.dirname(config), { recursive: true });
+  writeFileSync(config, JSON.stringify({ version: 1, plugins: enabled ? [{ id: pluginId }] : [] }));
+}
+
+// Readiness comes from real child processes; fake JS timers cannot advance them.
+async function waitForFile(file: string) {
+  for (let attempt = 0; attempt < 250; attempt++) {
+    if (existsSync(file)) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`timed out waiting for ${file}`);
+}
+
+test("manifest keeps the service loaded and QML declares the injected manifest and lifecycle hooks", () => {
+  const manifest = JSON.parse(readFileSync(path.join(root, "manifest.json"), "utf8"));
+  expect(manifest.schemaVersion).toBe(1); expect(manifest.id).toBe("io.github.xmethues.omarchy-bot"); expect(manifest.kinds).toEqual(["service"]);
+  expect(manifest.keepLoaded).toBe(true);
+  expect(manifest.entryPoints.service).toBe("packages/omarchy-plugin/Service.qml");
+  expect(path.isAbsolute(manifest.entryPoints.service)).toBe(false); expect(manifest.entryPoints.service.split("/")).not.toContain("..");
+  const qml = readFileSync(path.join(root, manifest.entryPoints.service), "utf8");
+  expect(qml).toContain('Qt.resolvedUrl("entry.sh")');
+  expect(qml).toMatch(/property var manifest: null/);
+  expect(qml).toMatch(/Component.onCompleted:.*enable/); expect(qml).toMatch(/Component.onDestruction:.*settle/);
+  expect(qml).toMatch(/Component.onDestruction:.*\["bash", installedEntryPath,/);
+  expect(qml).toContain('"/runtime/plugin-entry.sh"');
+  expect(qml).toContain('"/.config/omarchy/shell.json"');
+  expect(qml).toContain("manifest.__sourceDir"); expect(qml).not.toContain("notify-send");
+  const pkg = JSON.parse(readFileSync(path.join(root, "packages/omarchy-plugin/package.json"), "utf8"));
+  expect(pkg.name).toBe("@omarchy-bot/omarchy-plugin"); expect(pkg.private).toBe(true); expect(Object.keys(pkg.dependencies || {})).toHaveLength(0);
+});
+
+test("refuses non-Omarchy and unsupported architecture before invoking Bun", async () => {
+  const setup = await fixture();
+  shim(setup.bin, "bun-trap", 'touch "$HOME/bun-invoked"\nexit 99');
+  setup.env.OMARCHY_BOT_PLUGIN_BUN = path.join(setup.bin, "bun-trap");
+  writeFileSync(setup.env.OMARCHY_BOT_PLUGIN_OS_RELEASE!, "ID=arch\n");
+  expect(await invoke(setup, "enable")).toEqual({ code: 1, stdout: "", stderr: "Omarchy Bot supports Omarchy on x86_64 only\n" });
+  writeFileSync(setup.env.OMARCHY_BOT_PLUGIN_OS_RELEASE!, "ID=omarchy\n"); shim(setup.bin, "uname", 'echo aarch64');
+  expect((await invoke(setup, "enable")).stderr).toBe("Omarchy Bot supports Omarchy on x86_64 only\n");
+  expect(existsSync(path.join(setup.home, "bun-invoked"))).toBe(false); expect(calls(setup.env.DOWNLOADS!)).toEqual([]);
+});
+
+test("enable installs using the archive CLI and records the resolved Bun directory in the unit PATH; reuse does not download or double-enable", async () => {
+  const setup = await fixture();
+  expect(setup.env.PATH!.split(":")).not.toContain(setup.bunDir);
+  const installed = await invoke(setup, "enable"); expect(installed).toMatchObject({ code: 0, stderr: "" });
+  expect(readFileSync(setup.layout.servePath, "utf8")).toBe(setup.serve);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain(`Environment=PATH=${setup.bunDir}:`);
+  expect(calls(setup.env.CALLS!)).toEqual(["--user daemon-reload", "--user enable --now omarchy-bot.service"]);
+  expect(calls(setup.env.DOWNLOADS!)).toHaveLength(2);
+  expect(readFileSync(setup.env.DOWNLOADS!, "utf8")).toContain("https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture-revision/omarchy-bot-runtime-fixture-revision-x86_64.tar.zst");
+  expect(calls(setup.env.CLI_CALLS!)[0]).toMatch(/\/apps\/cli\/src\/main.ts install --archive .* --checksum /);
+  expect(calls(setup.env.CLI_CALLS!)[0]).not.toContain(setup.source);
+  const reused = await invoke(setup, "enable"); expect(reused).toMatchObject({ code: 0, stderr: "" }); expect(reused.stdout).toContain("reusing installed Service");
+  expect(calls(setup.env.DOWNLOADS!)).toHaveLength(2); expect(calls(setup.env.CALLS!).filter(s => s.includes("enable"))).toHaveLength(1);
+  expect(calls(setup.env.CLI_CALLS!).at(-1)).toBe(`${setup.layout.currentDir}/apps/cli/src/main.ts install --archive missing --checksum missing`);
+  expect(calls(setup.env.CALLS!).at(-1)).toBe("--user start omarchy-bot.service");
+});
+
+test("disable stops through the installed CLI, watches beyond one second, and re-enable ends the watcher without uninstalling", async () => {
+  const setup = await fixture();
+  expect((await invoke(setup, "enable")).code).toBe(0);
+  const kept = preserveData(setup.layout);
+  setEnabled(setup, false);
+  const child = spawnSettle(setup);
+  // The old deadline is in a separate bash process; fake JS timers cannot advance it.
+  await Bun.sleep(1_200);
+  expect(child.exitCode).toBeNull();
+  expect(calls(setup.env.CLI_CALLS!).at(-1)).toBe(`${setup.layout.currentDir}/apps/cli/src/main.ts stop`);
+  expect(calls(setup.env.CALLS!).at(-1)).toBe("--user stop omarchy-bot.service");
+  expect(calls(setup.env.CLI_CALLS!).some(line => line.endsWith(" uninstall"))).toBe(false);
+  setEnabled(setup, true);
+  expect(await child.exited).toBe(0); expect(await new Response(child.stderr).text()).toBe("");
+  expect(existsSync(setup.layout.unitPath)).toBe(true); expect(existsSync(setup.layout.servePath)).toBe(true);
+  for (const [file, data] of kept) expect(readFileSync(file)).toEqual(data);
+});
+
+test("a slow removal still uninstalls after disable has stopped the unit for more than one second", async () => {
+  const setup = await fixture();
+  expect((await invoke(setup, "enable")).code).toBe(0);
+  const kept = preserveData(setup.layout);
+  setEnabled(setup, false);
+  const child = spawnSettle(setup);
+  // Host deletion has no deadline, and fake JS timers cannot drive the bash watcher.
+  await Bun.sleep(1_200);
+  expect(child.exitCode).toBeNull();
+  expect(calls(setup.env.CLI_CALLS!).at(-1)).toBe(`${setup.layout.currentDir}/apps/cli/src/main.ts stop`);
+  expect(existsSync(setup.layout.unitPath)).toBe(true);
+  rmSync(setup.source, { recursive: true });
+  expect(await child.exited).toBe(0); expect(await new Response(child.stderr).text()).toBe("");
+  expect(calls(setup.env.CLI_CALLS!).at(-1)).toBe(`${setup.layout.currentDir}/apps/cli/src/main.ts uninstall`);
+  expect(existsSync(setup.layout.unitPath)).toBe(false); expect(existsSync(setup.layout.runtimeDir)).toBe(false);
+  for (const [file, data] of kept) expect(readFileSync(file)).toEqual(data);
+});
+
+function preserveData(layout: Layout): Array<[string, Buffer<ArrayBuffer>]> {
+  const files = [layout.dbPath, path.join(layout.screensDir, "profile"), path.join(layout.workspaceDir, "note"), layout.serviceLog, layout.hostSecretPath];
+  return files.map((file, index) => {
+    const data = Buffer.from([0, index, 255, 10, 65]);
+    mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, data);
+    return [file, data];
+  });
+}
+
+test("remove deletes the checkout immediately after settle is spawned and uninstalls through the installed CLI preserving every data file", async () => {
+  const setup = await fixture();
+  expect((await invoke(setup, "enable")).code).toBe(0);
+  const kept = preserveData(setup.layout);
+  setEnabled(setup, false);
+  const child = spawnSettle(setup);
+  rmSync(setup.source, { recursive: true });
+  expect(await child.exited).toBe(0); expect(await new Response(child.stderr).text()).toBe("");
+  expect(calls(setup.env.CLI_CALLS!).at(-1)).toBe(`${setup.layout.currentDir}/apps/cli/src/main.ts uninstall`);
+  expect(calls(setup.env.CALLS!).slice(-2)).toEqual(["--user disable --now omarchy-bot.service", "--user daemon-reload"]);
+  expect(existsSync(setup.layout.unitPath)).toBe(false); expect(existsSync(setup.layout.runtimeDir)).toBe(false);
+  for (const [file, data] of kept) expect(readFileSync(file)).toEqual(data);
+});
+
+test("removing the checkout during download waits for enable and leaves no running unit", async () => {
+  const setup = await fixture();
+  shim(setup.bin, "curl", 'touch "$HOME/download-waiting"\nwhile [[ ! -f $HOME/download-release ]]; do sleep 0.02; done\nwhile [[ $1 != -o ]]; do shift; done\ndest=$2; url=$3\nif [[ $url == *.sha256 ]]; then cp "$ARCHIVE.sha256" "$dest"; else cp "$ARCHIVE" "$dest"; fi');
+  const enabling = invoke(setup, "enable");
+  await waitForFile(path.join(setup.home, "download-waiting"));
+  setEnabled(setup, false);
+  const settling = spawnSettle(setup);
+  rmSync(setup.source, { recursive: true });
+  writeFileSync(path.join(setup.home, "download-release"), "");
+  expect(await enabling).toMatchObject({ code: 0, stderr: "" });
+  expect(await settling.exited).toBe(0);
+  expect(await new Response(settling.stderr).text()).toBe("");
+  expect(calls(setup.env.CALLS!).at(-2)).toBe("--user disable --now omarchy-bot.service");
+  expect(existsSync(setup.layout.unitPath)).toBe(false);
+  expect(existsSync(setup.layout.runtimeDir)).toBe(false);
+  const pid = Number(readFileSync(`${setup.env.CALLS}.pid`, "utf8"));
+  expect(() => process.kill(pid, 0)).toThrow();
+});
+
+test.each([false, true])("a removal watcher rechecks generation and enabled state before uninstall (persisted enabled=%s)", async persistedEnabled => {
+  const setup = await fixture();
+  expect((await invoke(setup, "enable")).code).toBe(0);
+  setEnabled(setup, false);
+  const gate = path.join(setup.home, "watcher-lock");
+  // Pause only this watcher's second lock acquisition, after it sees the missing checkout.
+  shim(setup.bin, "flock", 'if [[ -n ${WATCHER_GATE:-} && $1 != -u ]]; then\n  count=$(cat "$WATCHER_GATE.count" 2>/dev/null || echo 0)\n  count=$((count + 1)); printf "%s" "$count" > "$WATCHER_GATE.count"\n  if [[ $count == 2 ]]; then\n    touch "$WATCHER_GATE.ready"\n    while [[ ! -f $WATCHER_GATE.release ]]; do /usr/bin/sleep 0.02; done\n  fi\nfi\nexec /usr/bin/flock "$@"');
+  const settling = spawnSettle({ ...setup, env: { ...setup.env, WATCHER_GATE: gate } });
+  rmSync(setup.source, { recursive: true });
+  await waitForFile(`${gate}.ready`);
+  if (!persistedEnabled) {
+    mkdirSync(setup.source);
+    copyFileSync(entry, path.join(setup.source, "entry.sh"));
+    expect(await invoke(setup, "enable")).toMatchObject({ code: 0, stderr: "" });
+  }
+  setEnabled(setup, persistedEnabled);
+  writeFileSync(`${gate}.release`, "");
+  expect(await settling.exited).toBe(0);
+  expect(await new Response(settling.stderr).text()).toBe("");
+  expect(calls(setup.env.CALLS!).at(-1)).toBe(persistedEnabled ? "--user stop omarchy-bot.service" : "--user start omarchy-bot.service");
+  expect(calls(setup.env.CLI_CALLS!).some(line => line.endsWith(" uninstall"))).toBe(false);
+  expect(existsSync(setup.layout.unitPath)).toBe(true);
+  if (!persistedEnabled) expect(() => process.kill(Number(readFileSync(`${setup.env.CALLS}.pid`, "utf8")), 0)).not.toThrow();
+});

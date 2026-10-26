@@ -26,7 +26,7 @@ The daemon owns product state, SQLite, the REST/WebSocket API, process supervisi
 
 Workers start on demand by Agent, not by visible Bot. Several user-created Bots may share one Agent worker/runtime while retaining independent native sessions.
 
-Deployment follows the [Omarchy plugin contract](../README.md#installation), including Omarchy Shell's ownership of daemon lifecycle. The Bot Computer is a separately supervised application runtime, not an additional host graphical login session.
+Deployment follows the [Omarchy plugin contract](../README.md#installation): the Service's lifecycle belongs to its systemd user unit, and the Omarchy plugin only installs, starts, and stops it. The Bot Computer is a separately supervised application runtime, not an additional host graphical login session.
 
 Bot Screens do not inherit the user's Wayland display. The daemon provisions one private Sway runtime with headless outputs, one private D-Bus bus and persistent application profile, and workspace-scoped Screen routing. No runtime selector or fallback compositor is supported. The HTTP PNG snapshot remains a read-only recovery path and never substitutes an interactive live transport.
 

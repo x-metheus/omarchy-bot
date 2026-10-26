@@ -9,8 +9,9 @@
     "serve": "bash scripts/serve.sh",
     "site:dev": "bun run --filter='@omarchy-bot/site' dev",
     "site:build": "bun run --filter='@omarchy-bot/site' build",
-    "build": "bun run --filter='*' build",
+    "build": "bun run lint:boundaries && bun run --filter='*' build",
     "typecheck": "tsc --noEmit",
+    "lint:boundaries": "bun test tests/integration/package-boundaries.test.ts",
     "test": "bun test",
     "test:e2e": "bunx playwright test -c tests/e2e"
   },

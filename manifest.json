@@ -7,7 +7,8 @@
   "license": "MIT",
   "description": "Local AI teammates with independent Bot Screens, built specifically for Omarchy.",
   "kinds": ["service"],
+  "keepLoaded": true,
   "entryPoints": {
-    "service": "plugin/Service.qml"
+    "service": "packages/omarchy-plugin/Service.qml"
   }
 }
