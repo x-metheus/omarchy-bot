@@ -4,7 +4,7 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 Spec: [standalone Linux Service](../spec.md)
 
