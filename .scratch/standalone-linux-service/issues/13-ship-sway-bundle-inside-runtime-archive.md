@@ -28,3 +28,5 @@ Local Docker build evidence: `.lane/dist/omarchy-bot-sway-runtime-sway-1.10.1-wa
 Full `bun test`: 665 pass, 13 skip, 5 fail. The failures are outside this change: `tests/conformance/pi.test.ts` has a capability-key assertion that omits `plugins` although the preceding assertion requires `plugins: true` (also present on baseline `45548a7`); two application-launch tests and two service-supervision tests failed the existing Noto Sans font download with `ECONNRESET` (`ensureFonts` predates this branch). No failure attempted the old Sway GitHub release download.
 
 The real `package-plugin-runtime.sh` run with the Docker bundle was not performed because `apps/web/dist` and the three native helpers are not built in this worktree. The packager test covers checksum mismatch refusal and extraction under `sway/` using a fixture archive.
+
+Ticket 14 later replaced the bundle hash and removed the GPU-only Mesa closure; the in-archive resolution described here is unchanged.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: bash scripts/package-plugin-runtime.sh <repo-root> <out-dir> <sway-bundle.tar.gz>
+# Usage: bash scripts/package-plugin-runtime.sh <repo-root> <out-dir> <sway-bundle.tar.gz> <font-dir>
 set -euo pipefail
 
 root=$(CDPATH= cd -- "${1:-$(dirname -- "$0")/..}" && pwd)
@@ -66,6 +66,40 @@ if [[ $received_sha256 != "$sway_sha256" ]]; then
   exit 1
 fi
 
+font_dir=${4:-${OMARCHY_BOT_FONT_ASSETS_DIR:-}}
+if [[ -z $font_dir || ! -d $font_dir ]]; then
+  printf 'Omarchy Bot runtime package requires a font directory: %s\n' "${font_dir:-<missing fourth argument>}" >&2
+  exit 1
+fi
+font_pin=$root/apps/daemon/src/modules/computer/botComputerAssets.ts
+font_source=$(<"$font_pin")
+# The block terminator is distinct from brackets in variable-font filenames.
+font_source=${font_source#*export const FONT_ASSETS}
+font_source=${font_source%%']);'*}
+font_pattern='file: "([^"]+)"[^}]*sha256: "([0-9a-f]{64})"'
+font_files=()
+while [[ $font_source =~ $font_pattern ]]; do
+  font_file=${BASH_REMATCH[1]}
+  expected=${BASH_REMATCH[2]}
+  font_path=$font_dir/$font_file
+  if [[ ! -f $font_path || ! -r $font_path ]]; then
+    printf 'Omarchy Bot runtime package font file is unavailable: %s\n' "$font_path" >&2
+    exit 1
+  fi
+  received=$(sha256sum -- "$font_path")
+  received=${received%% *}
+  if [[ $received != "$expected" ]]; then
+    printf 'Omarchy Bot font checksum mismatch at %s: expected %s, received %s\n' "$font_path" "$expected" "$received" >&2
+    exit 1
+  fi
+  font_files+=("$font_file")
+  font_source=${font_source#*"${BASH_REMATCH[0]}"}
+done
+if [[ ${#font_files[@]} -eq 0 ]]; then
+  printf 'Omarchy Bot runtime package is missing valid font pins in %s\n' "$font_pin" >&2
+  exit 1
+fi
+
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 
@@ -98,6 +132,10 @@ tar -C "$root" --exclude=node_modules \
 mkdir -p "$staging/sway"
 tar -xzf "$sway_bundle" -C "$staging/sway"
 printf '%s\n%s\n' "$sway_release" "$sway_sha256" > "$staging/sway/.omarchy-bot-runtime"
+mkdir -p "$staging/fonts"
+for font_file in "${font_files[@]}"; do
+  cp -- "$font_dir/$font_file" "$staging/fonts/$font_file"
+done
 printf 'Installing frozen production dependencies in runtime staging\n' >&2
 (
   cd "$staging"

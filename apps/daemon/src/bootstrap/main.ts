@@ -13,6 +13,7 @@ import { ScreenProjectionService } from "../modules/computer/screenProjection.ts
 import { ScreenInputLease } from "../modules/computer/screenInputLease.ts";
 import { SwayBotScreenRuntimeAdapter } from "../modules/computer/swayBotScreenRuntime.ts";
 import { PortableSwayRuntimeSupply } from "../modules/computer/swayRuntimeSupply.ts";
+import type { BotComputerAssetSupply } from "../modules/computer/botComputerAssets.ts";
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { DictationService } from "../modules/dictation/dictationService.ts";
@@ -36,6 +37,7 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
 
 export interface MainOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
+  botComputerAssetSupply?: BotComputerAssetSupply;
   botScreenCapacity?: number;
   /** Integration harnesses disable host user-systemd; production defaults to enabled. */
   useHostApplicationUnits?: boolean;
@@ -81,6 +83,8 @@ export async function main(options: MainOptions = {}): Promise<{
     profileRoot: cfg.botScreenProfileDir,
     capacity: cfg.botScreenCapacity,
     applicationCwd: prepareSharedWorkspace(cfg.sharedWorkspaceDir),
+    fontDir: process.env.OMARCHY_BOT_FONT_DIR ?? cfg.botComputerFontSupplyDir,
+    ...(options.botComputerAssetSupply === undefined ? {} : { assetSupply: options.botComputerAssetSupply }),
     // Development: point OMARCHY_BOT_SWAY_BUNDLE_DIR at an extracted, pinned bundle.
     runtimeSupply: new PortableSwayRuntimeSupply({
       rootDir: process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR ?? cfg.botScreenSwayRuntimeSupplyDir,

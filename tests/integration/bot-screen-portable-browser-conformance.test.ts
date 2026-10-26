@@ -235,9 +235,12 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
   });
   const probeUrl = (label: string): string => `http://127.0.0.1:${probe!.port}/glyphs?label=${label}`;
 
+  const fontDir = process.env.OMARCHY_BOT_FONT_DIR
+    ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts");
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot,
+    fontDir,
     capacity: 2,
     applicationCwd,
     swayBin,
@@ -328,18 +331,18 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
     expect(browserProcess(probeUrl("GLYPH-A")).userDataDir
       .startsWith(path.join(profileRoot, "computer"))).toBeTrue();
 
-    // Fonts are profile-local with no host directories or includes. Chromium rewrites
-    // its own environment after startup, so the proof they are effective is that
-    // fontconfig wrote its cache inside the profile, plus the glyph pixels below.
+    // Runtime fonts have no host directories or includes; fontconfig keeps its
+    // cache inside the profile. Glyph pixels below prove the faces are used.
     const { fontConfigFile } = await new PortableBotComputerAssets({
       profileDir: path.join(profileRoot, "computer"),
+      fontDir,
     }).ensureFonts();
     expect(fontConfigFile.startsWith(path.join(profileRoot, "computer"))).toBeTrue();
     expect(readFileSync(fontConfigFile, "utf8")).not.toContain("<include");
     const fonts = readFontConfig(fontConfigFile);
-    expect(fonts.dirs.length).toBeGreaterThan(0);
-    expect([...fonts.dirs, ...fonts.cacheDirs]
-      .every((dir) => dir.startsWith(path.join(profileRoot, "computer")))).toBeTrue();
+    expect(fonts.dirs).toEqual([path.resolve(fontDir)]);
+    expect(fonts.cacheDirs.length).toBeGreaterThan(0);
+    expect(fonts.cacheDirs.every((dir) => dir.startsWith(path.join(profileRoot, "computer")))).toBeTrue();
     expect(fonts.cacheDirs.some((dir) => readdirSync(dir).length > 0)).toBeTrue();
 
     const probeA = await captureProbe(owners[0]!);
@@ -385,5 +388,5 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
     await harness?.stop().catch(() => {});
     harness = undefined;
   }
-// First run also downloads and verifies the pinned browser, libraries, and fonts.
+// First run also downloads and verifies the pinned browser and libraries.
 }, 600_000);

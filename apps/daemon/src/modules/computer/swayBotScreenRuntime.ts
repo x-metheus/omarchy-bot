@@ -71,7 +71,7 @@ export interface SwayAdapterOptions extends BotComputerOptions {
   /** Test hook. The scripted fixture blocks here so an in-flight launch stays pending. */
   onLaunch?: () => Promise<void>;
   applicationCwd?: string;
-  /** Portable browser and font supply; defaults to the Bot Computer profile. */
+  /** Portable browser and font supply; fontDir supplies installed runtime fonts. */
   assetSupply?: BotComputerAssetSupply;
 }
 
@@ -398,6 +398,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#assets = options.assetSupply
       ?? new PortableBotComputerAssets({
         profileDir: path.join(options.profileRoot, "computer"),
+        ...(options.fontDir === undefined ? {} : { fontDir: options.fontDir }),
       });
     this.#computer = new BotComputerRuntime({ ...options, assetSupply: this.#assets });
   }

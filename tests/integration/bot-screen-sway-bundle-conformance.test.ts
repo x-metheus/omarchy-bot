@@ -249,6 +249,8 @@ bundleOnly("two bundle-only Bot Screens isolate X11 clients, input, and projecti
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "profiles"),
+    fontDir: process.env.OMARCHY_BOT_FONT_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts"),
     applicationCwd,
     runtimeSupply: supply,
   });

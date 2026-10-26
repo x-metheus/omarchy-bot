@@ -11,7 +11,7 @@ export const SWAY_RUNTIME_RELEASE = "sway-1.10.1-wayvnc-0.8.0-wlroots-0.18.1-v1"
 
 export const SWAY_RUNTIME_BUNDLE: SwayRuntimeBundle = Object.freeze({
   release: SWAY_RUNTIME_RELEASE,
-  sha256: "fc4b7ec887c6b5ccad7f62706b4e5a186e63eaeb3e8f70636e641af241a52f94",
+  sha256: "c821bcb7d8e349c22bf3c9a96084a550d7d5a357b2d9d340c608adbdc5fb9344",
 });
 
 const READY_FILE = ".omarchy-bot-runtime";

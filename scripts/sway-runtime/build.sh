@@ -72,12 +72,22 @@ build_meson() {
 }
 
 build_meson aml
-build_meson neatvnc
+build_meson neatvnc -Dgbm=disabled
 
+log "patch xwayland xkbcomp resolution"
+patch -d "$work/src/xwayland" -p1 <"$here/xwayland-xkbcomp-path.patch" >&2
+
+build_meson xwayland \
+  -Dxvfb=false -Dxdmcp=false -Dxcsecurity=true -Ddri3=false -Dglamor=false -Dglx=false \
+  -Dsha1=libmd -Dxkb_dir=/usr/share/X11/xkb -Dxkb_output_dir=/var/lib/xkb \
+  -Dxkb_bin_dir=/usr/bin
+
+# Headless/Wayland backends, pixman and the SHM allocator are always built;
+# empty lists disable the optional GPU and physical-device implementations.
 build_meson wlroots \
-  -Dexamples=false -Dxwayland=enabled -Dbackends=drm,libinput \
-  -Drenderers=gles2 -Dallocators=gbm -Dsession=enabled \
-  -Dcolor-management=enabled -Dlibliftoff=enabled -Dxcb-errors=disabled
+  -Dexamples=false -Dxwayland=enabled -Dbackends=[] \
+  -Drenderers=[] -Dallocators=[] -Dsession=disabled \
+  -Dcolor-management=disabled -Dlibliftoff=disabled -Dxcb-errors=disabled
 
 build_meson sway -Dsd-bus-provider=basu -Ddefault-wallpaper=false \
   -Dzsh-completions=false -Dbash-completions=false -Dfish-completions=false \
@@ -86,14 +96,6 @@ build_meson sway -Dsd-bus-provider=basu -Ddefault-wallpaper=false \
 build_meson wayvnc -Dman-pages=disabled -Dscreencopy-dmabuf=disabled
 build_meson grim -Dman-pages=disabled
 build_meson wlr-randr
-
-log "patch xwayland xkbcomp resolution"
-patch -d "$work/src/xwayland" -p1 <"$here/xwayland-xkbcomp-path.patch" >&2
-
-build_meson xwayland \
-  -Dxvfb=false -Dxdmcp=false -Dxcsecurity=true -Ddri3=true -Dglamor=true \
-  -Dsha1=libmd -Dxkb_dir=/usr/share/X11/xkb -Dxkb_output_dir=/var/lib/xkb \
-  -Dxkb_bin_dir=/usr/bin
 
 log "build dbus"
 mkdir -p "$work/build/dbus"
@@ -273,15 +275,22 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 # Drop --session (mutually exclusive with --config-file) while keeping the rest.
 n=$#
 i=0
+has_config=0
 while [ "$i" -lt "$n" ]; do
   arg=$1
   shift
   i=$((i + 1))
+  case $arg in
+    --config-file|--config-file=*) has_config=1 ;;
+  esac
   [ "$arg" = "--session" ] && continue
   set -- "$@" "$arg"
 done
+if [ "$has_config" -eq 0 ]; then
+  set -- --config-file="$root/share/dbus-1/session.conf" "$@"
+fi
 exec "$root/lib/ld-musl-x86_64.so.1" --library-path "$root/lib" \
-  "$root/libexec/dbus-daemon" --config-file="$root/share/dbus-1/session.conf" "$@"
+  "$root/libexec/dbus-daemon" "$@"
 EOF
 chmod 0755 "$root/bin/dbus-daemon"
 

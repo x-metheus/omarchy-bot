@@ -63,7 +63,7 @@ function assertSucceeded(result: CommandResult, operation: string): void {
   );
 }
 
-function createFixture(): { root: string; cache: string; output: string; bundle: string; bundleSha256: string } {
+function createFixture(): { root: string; cache: string; output: string; bundle: string; bundleSha256: string; fonts: string } {
   const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-runtime-package-"));
   roots.push(root);
   const cache = path.join(root, ".bun-cache");
@@ -81,6 +81,16 @@ function createFixture(): { root: string; cache: string; output: string; bundle:
     "apps/daemon/src/modules/computer/swayRuntimeSupply.ts",
     `export const SWAY_RUNTIME_RELEASE = "sway-fixture-v1";\nexport const SWAY_RUNTIME_BUNDLE = { sha256: "${bundleSha256}" };\n`,
   );
+  const fonts = path.join(root, "prepared-fonts");
+  const font = "Fixture[wght].ttf";
+  const fontBytes = "fixture font bytes";
+  const fontSha256 = createHash("sha256").update(fontBytes).digest("hex");
+  write(fonts, font, fontBytes);
+  write(fonts, "FixtureCJK[wght].ttf", fontBytes);
+  write(root, "apps/daemon/src/modules/computer/botComputerAssets.ts", `export const FONT_ASSETS = Object.freeze([
+  { file: "${font}", url: "https://assets.invalid/font.ttf", sha256: "${fontSha256}" },
+  { file: "FixtureCJK[wght].ttf", url: "https://assets.invalid/cjk.ttf", sha256: "${fontSha256}" },
+]);\n`);
 
   write(
     root,
@@ -183,7 +193,7 @@ if (process.env.OMARCHY_BOT_SERVE_FIXTURE_MARKER !== undefined) {
     writeExecutable(root, helper, `#!/bin/sh\nprintf '%s\\n' ${path.basename(helper)}\n`);
   }
 
-  return { root, cache, output, bundle, bundleSha256 };
+  return { root, cache, output, bundle, bundleSha256, fonts };
 }
 
 test("packages a runnable production dependency tree without mutating the source install", () => {
@@ -200,7 +210,7 @@ test("packages a runnable production dependency tree without mutating the source
   const lockBefore = readFileSync(path.join(fixture.root, "bun.lock"));
 
   const revision = "0123456789abcdef0123456789abcdef01234567";
-  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle], {
+  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle, fixture.fonts], {
     cwd: projectRoot,
     env: { ...installEnv, OMARCHY_BOT_PLUGIN_REVISION: revision },
   });
@@ -223,6 +233,8 @@ test("packages a runnable production dependency tree without mutating the source
 
   expect(readFileSync(path.join(extracted, "sway/.omarchy-bot-runtime"), "utf8"))
     .toBe(`sway-fixture-v1\n${fixture.bundleSha256}\n`);
+  expect(readFileSync(path.join(extracted, "fonts/Fixture[wght].ttf"), "utf8")).toBe("fixture font bytes");
+  expect(readFileSync(path.join(extracted, "fonts/FixtureCJK[wght].ttf"), "utf8")).toBe("fixture font bytes");
   for (const launcher of ["sway", "swaymsg"]) {
     const launched = run([path.join(extracted, "sway/bin", launcher)], { cwd: extracted });
     assertSucceeded(launched, `packaged ${launcher} launcher`);
@@ -280,7 +292,7 @@ test("refuses a Sway bundle that does not match the pinned checksum without writ
     `export const SWAY_RUNTIME_RELEASE = "sway-fixture-v1";\nexport const SWAY_RUNTIME_BUNDLE = { sha256: "${expected}" };\n`,
   );
   const revision = "wrong-checksum";
-  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle], {
+  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle, fixture.fonts], {
     cwd: projectRoot,
     env: { ...installEnv, OMARCHY_BOT_PLUGIN_REVISION: revision },
   });
@@ -290,4 +302,24 @@ test("refuses a Sway bundle that does not match the pinned checksum without writ
   expect(packaged.stderr.toString()).toContain(`received ${fixture.bundleSha256}`);
   expect(existsSync(path.join(fixture.output, `omarchy-bot-runtime-${revision}-x86_64.tar.zst`)))
     .toBe(false);
+});
+
+test("refuses a font that does not match its pin without writing an archive", () => {
+  const fixture = createFixture();
+  const installEnv = { ...process.env, BUN_INSTALL_CACHE_DIR: fixture.cache };
+  assertSucceeded(run(["bun", "install"], { cwd: fixture.root, env: installEnv }), "fixture dependency install");
+  const fontPath = path.join(fixture.fonts, "FixtureCJK[wght].ttf");
+  writeFileSync(fontPath, "tampered");
+  const expected = createHash("sha256").update("fixture font bytes").digest("hex");
+  const received = createHash("sha256").update("tampered").digest("hex");
+  const revision = "wrong-font-checksum";
+  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle, fixture.fonts], {
+    cwd: projectRoot,
+    env: { ...installEnv, OMARCHY_BOT_PLUGIN_REVISION: revision },
+  });
+  expect(packaged.exitCode).not.toBe(0);
+  expect(packaged.stderr.toString()).toContain(fontPath);
+  expect(packaged.stderr.toString()).toContain(`expected ${expected}`);
+  expect(packaged.stderr.toString()).toContain(`received ${received}`);
+  expect(existsSync(path.join(fixture.output, `omarchy-bot-runtime-${revision}-x86_64.tar.zst`))).toBe(false);
 });

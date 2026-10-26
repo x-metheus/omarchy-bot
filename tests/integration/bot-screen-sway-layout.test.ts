@@ -191,6 +191,8 @@ realTest("two Screen workspaces render full-width tabbed windows with readable t
   adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "screens"),
+    fontDir: process.env.OMARCHY_BOT_FONT_DIR
+      ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts"),
     applicationCwd: workspace,
     swayBin: binaries.swayBin,
     swaymsgBin: binaries.swaymsgBin,
