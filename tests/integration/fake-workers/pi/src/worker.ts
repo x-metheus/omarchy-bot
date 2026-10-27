@@ -1303,4 +1303,4 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     default:
       if (msg.requestId) respondError(msg.requestId, `unknown command ${msg.type}`);
   }
-});
+}, () => process.exit(0));

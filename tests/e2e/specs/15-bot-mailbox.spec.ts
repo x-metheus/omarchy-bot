@@ -13,7 +13,9 @@ async function createBot(page: Page, name: string): Promise<string> {
 }
 
 function composer(page: Page): Locator {
-  return page.getByRole("textbox", { name: "Message input" });
+  return page
+    .getByRole("textbox", { name: "Message input", exact: true })
+    .or(page.getByRole("combobox", { name: "Message input", exact: true }));
 }
 
 test.describe("durable Bot mailbox", () => {
@@ -74,7 +76,7 @@ test.describe("durable Bot mailbox", () => {
     await composer(page).fill("send_bot_message:../../private:key");
     await composer(page).press("Enter");
     const errorCard = page.getByTestId("composer-error-card");
-    await expect(errorCard).toContainText("invalid Bot message tool request", { timeout: 15_000 });
+    await expect(errorCard).toContainText("target Bot ID is invalid", { timeout: 15_000 });
     await expect(errorCard).not.toContainText("../../private");
     await errorCard.getByRole("button", { name: "Close" }).click();
     await expect(errorCard).toHaveCount(0);

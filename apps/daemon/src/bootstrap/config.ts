@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync } from "node:fs";
-import { isIP } from "node:net";
+import { mkdirSync } from "node:fs";
+import { listenerConfig } from "./listenerConfig.ts";
 import os from "node:os";
 import path from "node:path";
 import { sharedWorkspaceDir } from "../modules/workspace/sharedWorkspace.ts";
@@ -89,28 +89,8 @@ function botScreenCapacity(profile: "1080p" | "720p"): number {
   return capacity;
 }
 
-function isCanonicalIPv4(address: string): boolean {
-  return isIP(address) === 4 && /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(address);
-}
-
 export function loadConfig(): Config {
-  const host = process.env.OMARCHY_BOT_HOST ?? "127.0.0.1";
-  const tlsCert = process.env.OMARCHY_BOT_TLS_CERT || undefined;
-  const tlsKey = process.env.OMARCHY_BOT_TLS_KEY || undefined;
-  const trustedProxy = process.env.OMARCHY_BOT_TRUSTED_PROXY || undefined;
-  if (trustedProxy && !isCanonicalIPv4(trustedProxy) && isIP(trustedProxy) !== 6) {
-    throw new Error("OMARCHY_BOT_TRUSTED_PROXY must be one IP address (canonical IPv4 or IPv6)");
-  }
-  if (Boolean(tlsCert) !== Boolean(tlsKey)) throw new Error("OMARCHY_BOT_TLS_CERT and OMARCHY_BOT_TLS_KEY must be set together");
-  for (const file of [tlsCert, tlsKey]) {
-    if (file && !existsSync(file)) throw new Error(`TLS file does not exist: ${file}`);
-  }
-  const loopback = host === "localhost" || host === "[::1]" || host === "::1"
-    || (isCanonicalIPv4(host) && host.startsWith("127."))
-    || (isIP(host) === 6 && host.startsWith("::ffff:127.") && isCanonicalIPv4(host.slice(7)));
-  if (!loopback && !(tlsCert && tlsKey) && !trustedProxy) {
-    throw new Error(`Bind address ${host} requires a certificate (OMARCHY_BOT_TLS_CERT and OMARCHY_BOT_TLS_KEY) or a declared trusted proxy (OMARCHY_BOT_TRUSTED_PROXY)`);
-  }
+  const { host, tlsCert, tlsKey, trustedProxy } = listenerConfig(process.env);
   const dataDir = process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot");
   const stateDir = process.env.OMARCHY_BOT_STATE ?? path.join(os.homedir(), ".local/state/omarchy-bot");
   const runtimeDir = process.env.XDG_RUNTIME_DIR;

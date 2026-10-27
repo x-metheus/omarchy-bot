@@ -51,6 +51,8 @@ if(!live){const unit=readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/oma
   const archive = path.join(home, "runtime.tar.zst");
   const files: Record<string, string> = { "scripts/serve.sh": serve };
   for (const name of ["main", "layout", "archive", "lifecycle"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(root, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(root, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(root, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   writeFileSync(archive, Bun.zstdCompressSync(await new Bun.Archive(files).bytes()));
   writeFileSync(`${archive}.sha256`, `${createHash("sha256").update(readFileSync(archive)).digest("hex")}  runtime.tar.zst\n`);
   env.ARCHIVE = archive;
@@ -125,7 +127,7 @@ test("enable installs using the archive CLI and records the resolved Bun directo
   expect(setup.env.PATH!.split(":")).not.toContain(setup.bunDir);
   const installed = await invoke(setup, "enable"); expect(installed).toMatchObject({ code: 0, stderr: "" });
   expect(readFileSync(setup.layout.servePath, "utf8")).toBe(setup.serve);
-  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain(`Environment=PATH=${setup.bunDir}:`);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain(`Environment=PATH=${path.dirname(process.execPath)}:${setup.bunDir}:`);
   expect(calls(setup.env.CALLS!)).toEqual(["--user daemon-reload", "--user enable --now omarchy-bot.service"]);
   expect(calls(setup.env.DOWNLOADS!)).toHaveLength(2);
   expect(readFileSync(setup.env.DOWNLOADS!, "utf8")).toContain("https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture-revision/omarchy-bot-runtime-fixture-revision-x86_64.tar.zst");

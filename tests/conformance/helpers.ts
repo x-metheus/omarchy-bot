@@ -2,7 +2,7 @@
  * Conformance harness: boots the real daemon with the REAL workers (pi +
  * computer) against the user's actual Pi credentials, in an isolated data dir.
  */
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { sanitizedEnv } from "../../apps/daemon/src/supervision/workerClient.ts";
@@ -28,6 +28,16 @@ export async function startConformanceDaemon(): Promise<ConformanceDaemon> {
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
   delete process.env.OMARCHY_BOT_WORKERS_DIR; // real workers
+  // The isolated home has no installed runtime, so the Bot Screen needs the
+  // prepared development bundle and fonts (build-sway-runtime.sh, prepare-fonts.sh).
+  const repo = path.resolve(import.meta.dir, "../..");
+  process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR ??= path.join(repo, ".lane/dist/sway");
+  process.env.OMARCHY_BOT_FONT_DIR ??= path.join(repo, ".lane/fonts");
+  for (const dir of [process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR, process.env.OMARCHY_BOT_FONT_DIR]) {
+    if (!existsSync(dir)) {
+      throw new Error(`conformance needs ${dir}; run scripts/build-sway-runtime.sh .lane/dist and scripts/prepare-fonts.sh .lane/fonts, or set OMARCHY_BOT_SWAY_BUNDLE_DIR / OMARCHY_BOT_FONT_DIR`);
+    }
+  }
   const agentEnv = sanitizedEnv();
 
   // Dynamic import: the harness mutates process.env above; importing main.ts fresh keeps that contract explicit.
