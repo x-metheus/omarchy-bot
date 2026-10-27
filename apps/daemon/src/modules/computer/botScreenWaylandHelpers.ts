@@ -546,6 +546,7 @@ export function spawnDetachedChild(input: {
   cwd?: string;
   output: "pipe" | "ignore";
   owned: boolean;
+  browserPipe?: boolean;
 }): OwnedChild {
   const token = randomUUID();
   const process = Bun.spawn(
@@ -553,9 +554,9 @@ export function spawnDetachedChild(input: {
     {
       env: input.env,
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-      stdin: "ignore",
-      stdout: input.output,
-      stderr: input.output,
+      ...(input.browserPipe
+        ? { stdio: ["ignore", input.output, input.output, "socket-fd", "socket-fd"] as const }
+        : { stdin: "ignore" as const, stdout: input.output, stderr: input.output }),
       detached: true,
     },
   );

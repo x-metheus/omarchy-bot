@@ -46,6 +46,7 @@ import {
   type BotComputerAssetSupply,
 } from "./botComputerAssets.ts";
 import { listApplicationToplevels, SwayIpcClient } from "./swayIpc.ts";
+import type { BrowserRuntime } from "./browserRuntime.ts";
 
 type SwayProcess = DetachedProcess;
 export type ApplicationProcess = OwnedChild;
@@ -111,6 +112,7 @@ export interface BotComputer {
   surfaceIds: Set<SurfaceId>;
   applicationProcesses: Set<ApplicationProcess>;
   applicationSequence: number;
+  browser?: BrowserRuntime;
   /** Lazily verifies the runtime fonts and exports fontconfig to graphical children. */
   ensureFonts(): Promise<void>;
   running(): boolean;
@@ -613,6 +615,7 @@ export class BotComputerRuntime {
   async #stopComputer(computer: LiveComputer): Promise<void> {
     if (this.#computer !== computer) return;
     this.#computer = undefined;
+    computer.browser?.close();
     // Closing windows lets applications save profile data before their child processes are stopped.
     const ipc = new SwayIpcClient(computer.sockets.swaySock);
     const windows = await ipc.getTree().then(listApplicationToplevels).catch(() => []);

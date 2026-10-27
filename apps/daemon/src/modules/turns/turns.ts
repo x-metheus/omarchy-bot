@@ -8,6 +8,9 @@ import {
   LOCAL_SCHEMA,
   COMPUTER_TOOL_SCHEMA,
   AGENT_COMPUTER_TOOL,
+  AGENT_BROWSER_TOOL,
+  BROWSER_TOOL_SCHEMA,
+  type AgentBrowserToolOutput,
   AGENT_LOCAL_TOOL,
   type AgentBotMessageToolOutput,
   createToolChannelDaemon,
@@ -22,7 +25,7 @@ import {
   type AgentLocalToolOutput,
 } from "@omarchy-bot/agent-contract";
 import type { SendResultDto, TurnDto } from "@omarchy-bot/protocol";
-import type { AgentId, ComputerActionName, SurfaceId, TurnStatus } from "@omarchy-bot/domain";
+import type { AgentId, BrowserActionName, ComputerActionName, SurfaceId, TurnStatus } from "@omarchy-bot/domain";
 import { canTransitionTurn, isTerminalTurn } from "@omarchy-bot/domain";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
@@ -66,6 +69,7 @@ const STATIC_TOOLS: readonly ToolChannelTool[] = [
   { name: "send_bot_message", schema: SEND_BOT_MESSAGE_SCHEMA },
   { name: AGENT_LOCAL_TOOL.name, schema: LOCAL_SCHEMA },
   { name: AGENT_COMPUTER_TOOL.name, schema: COMPUTER_TOOL_SCHEMA },
+  { name: AGENT_BROWSER_TOOL.name, schema: BROWSER_TOOL_SCHEMA },
 ];
 
 /** Local title from the first user message — no extra Agent call. */
@@ -371,6 +375,7 @@ export class TurnService {
           if (name === "send_bot_message") return this.#sendBotMessage(agentId, context, params);
           if (name === AGENT_LOCAL_TOOL.name) return this.#runLocal(agentId, context, params, signal);
           if (name === AGENT_COMPUTER_TOOL.name) return this.#runComputer(agentId, context, params, signal);
+          if (name === AGENT_BROWSER_TOOL.name) return this.#runBrowser(agentId, context, params, signal);
           return this.#callPlugin(agentId, context, params, signal, name);
         },
       }),
@@ -543,6 +548,29 @@ export class TurnService {
     }
     const action = params as { action: ComputerActionName; args?: Record<string, unknown> };
     return computer.agentToolAct(owner, context.turnId, context.toolCallId, { name: action.action, args: action.args ?? {} }, signal);
+  }
+
+  /** Dispatch one Turn-bound browser action to this Bot's own Computer Surface. */
+  async #runBrowser(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal): Promise<AgentBrowserToolOutput> {
+    const computer = this.#computer;
+    const active = this.#turns.get(context.workerSessionId);
+    if (
+      computer === undefined
+      || active === undefined
+      || active.agentId !== agentId
+      || active.botId !== context.botId
+      || active.turnId !== context.turnId
+      || active.workerSessionId !== context.workerSessionId
+      || (context.surfaceId !== undefined && context.surfaceId !== active.surfaceId)
+    ) {
+      throw new Error("browser tool context is stale or mismatched");
+    }
+    const owner = computer.resolveOwner(context.botId, active.surfaceId);
+    if (owner === undefined) {
+      throw new Error("browser tool context has a mismatched Computer Surface");
+    }
+    const action = params as { action: BrowserActionName; args?: Record<string, unknown> };
+    return computer.agentBrowserAct(owner, context.turnId, context.toolCallId, { name: action.action, args: action.args ?? {} }, signal);
   }
 
   /** Dispatch one Turn-bound local job; ownership and This Device come from the active Turn. */

@@ -1,5 +1,5 @@
 import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
-import type { SurfaceId } from "@omarchy-bot/domain";
+import type { BrowserAction, SurfaceId } from "@omarchy-bot/domain";
 import { BotScreenInputRejectedError } from "./botScreenManager.ts";
 import type {
   BotScreenCapture,
@@ -38,6 +38,8 @@ interface FakeRuntimeRecord {
 export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   readonly pointerEvents: Array<{ surfaceId: string; runtimeGeneration: number; event: FakePointerEvent }> = [];
   readonly inputEvents: Array<{ surfaceId: string; runtimeGeneration: number; event: BotScreenInputEvent }> = [];
+  readonly browserActions: Array<{ surfaceId: string; action: BrowserAction }> = [];
+  browserDelayMs = 0;
   releaseCount = 0;
   readonly starts: BotScreenProvision[] = [];
   readonly stops: Array<{ surfaceId: string; runtimeGeneration: number }> = [];
@@ -344,6 +346,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     let highestControllerEpoch = 0;
     let lastInputSequence = 0;
     let actionCount = 0;
+    let browserSnapshot = 0;
     const videoWidth = Math.round(provision.logicalWidth * provision.scale);
     const videoHeight = Math.round(provision.logicalHeight * provision.scale);
     const rawFrame = Buffer.alloc(videoWidth * videoHeight * 4);
@@ -495,6 +498,29 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           throw new Error("fake application launch failed");
         }
         return { text: `fake-open#${this.#actionsStarted}:${request.app ?? request.url ?? ""}` };
+      },
+      browser: async (action, input, signal) => {
+        signal.throwIfAborted();
+        if (stopped) throw new Error("fake Bot Screen is stopped");
+        if (action.name === "request_takeover") return { text: "Browser is available for Takeover" };
+        this.#countAction();
+        this.browserActions.push({ surfaceId: provision.surfaceId, action });
+        await this.#gateAction();
+        if (this.browserDelayMs > 0) await Bun.sleep(this.browserDelayMs);
+        signal.throwIfAborted();
+        if (action.name === "snapshot") {
+          browserSnapshot += 1;
+          return { text: `[e1-${browserSnapshot}] textbox Name\n[e2-${browserSnapshot}] button Submit` };
+        }
+        if (["click", "type", "select"].includes(action.name)) {
+          const ref = action.args.ref;
+          if (ref !== `e1-${browserSnapshot}` && ref !== `e2-${browserSnapshot}`) {
+            throw new Error(`Stale Element Ref ${String(ref)}; take a new snapshot before acting.`);
+          }
+          await input({ name: "click", args: { x: 100, y: 100 } });
+          if (action.name === "type") await input({ name: "type", args: { text: action.args.text } });
+        }
+        return { text: `fake-browser:${action.name}` };
       },
       setInputAuthority: async (epoch): Promise<number> => {
         if (!Number.isSafeInteger(epoch) || epoch <= highestControllerEpoch) {

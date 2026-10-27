@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
+import type { BrowserAction, ComputerAction, SurfaceId } from "@omarchy-bot/domain";
 import type {
   AgentComputerToolOutput,
   ComputerWindowListItem,
@@ -153,6 +153,7 @@ export interface BotScreenRuntime {
   /** Opens an application or URL on this Screen. */
   launch(request: BotScreenLaunchRequest): Promise<{ text?: string }>;
   setInputAuthority(controllerEpoch: number): Promise<number>;
+  browser?(action: BrowserAction, input: (action: ComputerAction) => Promise<void>, signal: AbortSignal): Promise<{ text: string; truncated?: boolean }>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
   /** Resolves only for an unexpected component exit; deliberate stops are ignored by the manager. */
@@ -662,6 +663,30 @@ export class BotScreenManager {
       };
     });
   }
+  async browserAct(
+    owner: ComputerSurfaceOwner,
+    action: BrowserAction,
+    send?: (event: BotScreenInputAction) => Promise<void>,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<BotScreenBoundActionResult & { truncated?: boolean }> {
+    signal.throwIfAborted();
+    const runtime = await this.#readyRuntime(owner);
+    const entry = this.#entries.get(owner.surfaceId);
+    if (runtime === undefined || entry?.runtime !== runtime) throw new Error("Bot Screen is unavailable");
+    if (runtime.browser === undefined) throw new Error("Browser tool unavailable: this runtime has no owned CDP pipe; computer tools remain available.");
+    const result = await runtime.browser(action, async (input) => {
+      signal.throwIfAborted();
+      if (this.#entries.get(owner.surfaceId) !== entry) throw new Error("Bot Screen is unavailable");
+      await runBotScreenAction(runtime, input, send);
+    }, signal);
+    signal.throwIfAborted();
+    if (this.#entries.get(owner.surfaceId) !== entry) throw new Error("Bot Screen is unavailable");
+    return {
+      ...result,
+      desktopSession: { botId: owner.botId, surfaceId: owner.surfaceId, runtimeGeneration: runtime.generation },
+    };
+  }
+
 
   async ensureReady(owner: ComputerSurfaceOwner): Promise<boolean> {
     return (await this.#readyRuntime(owner)) !== undefined;

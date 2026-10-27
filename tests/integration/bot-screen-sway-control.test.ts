@@ -767,6 +767,25 @@ test("open_url asks a native Chromium browser for a routable new window", async 
   }
 });
 
+test("browser tool fails clearly for host browsers while computer launch remains available", async () => {
+  const fixture = await startControlRuntime({ nativeBrowserName: "brave", hostBrowser: true });
+  try {
+    await expect(fixture.runtime.browser!(
+      { name: "snapshot", args: {} },
+      async () => { throw new Error("unexpected input"); },
+      new AbortController().signal,
+    )).rejects.toThrow("host browser has no owned CDP pipe");
+    await expect(fixture.runtime.browser!(
+      { name: "request_takeover", args: { reason: "Please log in" } },
+      async () => { throw new Error("unexpected input"); },
+      new AbortController().signal,
+    )).rejects.toThrow("host browser has no owned CDP pipe");
+    expect(fixture.assets.browserCalls()).toBe(0);
+  } finally {
+    await fixture.runtime.stop();
+  }
+});
+
 test("open_url rejects an env-wrapped snap browser and uses the portable one", async () => {
   const fixture = await startControlRuntime({ nativeBrowser: false, snapOnly: true, hostBrowser: true });
   const url = "https://example.com/env-snap";
@@ -885,6 +904,7 @@ test("open_url opens the portable browser on a host with no native browser", asy
       `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "chromium")}`,
       "--ozone-platform=wayland", "--disable-gpu", "--no-first-run",
       "--no-default-browser-check", "--disable-sync", "--password-store=basic",
+      "--remote-debugging-pipe",
       "--new-window", url,
     ]);
     expect(launch!.fontConfigFile).toBe(fixture.assets.fontConfigFile);

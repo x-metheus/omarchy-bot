@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createConformanceHome } from "./helpers.ts";
+import { createConformanceHome, startBrowserConformanceFixture } from "./helpers.ts";
 
 test("Pi conformance keeps native sessions and readiness records in a private child home", async () => {
   const parentHome = process.env.HOME;
@@ -45,12 +45,31 @@ test("Pi conformance keeps native sessions and readiness records in a private ch
   expect(existsSync(fixture.root)).toBeFalse();
 });
 
-test("pi conformance (10 steps, real model) > all ten steps pass", async () => {
+test("browser conformance fixture reveals its receipt only after the expected form submission", async () => {
+  const fixture = startBrowserConformanceFixture();
+  try {
+    expect(new URL(fixture.url).hostname).toBe("127.0.0.1");
+    const page = await fetch(fixture.url).then(response => response.text());
+    expect(page).toContain('name="message"');
+    expect(page).not.toContain(fixture.receipt);
+    const rejected = await fetch(fixture.url, { method: "POST", body: new URLSearchParams({ message: "wrong" }) });
+    expect(rejected.status).toBe(400);
+    expect(fixture.submissions).toEqual([]);
+    const accepted = await fetch(fixture.url, { method: "POST", body: new URLSearchParams({ message: fixture.value }) });
+    expect(accepted.status).toBe(200);
+    expect(await accepted.text()).toContain(fixture.receipt);
+    expect(fixture.submissions).toEqual([fixture.value]);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("pi conformance (11 steps, real model) > all eleven steps pass", async () => {
   const fixture = createConformanceHome();
   try {
     console.log(`conformance: private HOME ${fixture.root}`);
     const child = Bun.spawn([process.execPath, "test", "--no-orphans", path.join(import.meta.dir, "pi.steps.ts")], {
-      env: fixture.env, stdout: "inherit", stderr: "inherit", timeout: 650_000,
+      env: fixture.env, stdout: "inherit", stderr: "inherit", timeout: 860_000,
     });
     expect(await child.exited).toBe(0);
   } finally {
@@ -58,4 +77,4 @@ test("pi conformance (10 steps, real model) > all ten steps pass", async () => {
     expect(existsSync(fixture.root)).toBeFalse();
     console.log(`conformance: private HOME removed ${fixture.root}`);
   }
-}, 680_000);
+}, 890_000);

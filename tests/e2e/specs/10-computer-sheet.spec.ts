@@ -565,6 +565,7 @@ test.describe("contextual computer sheet", () => {
     await installProjectionPeer(page);
     let state: ComputerState = "ready";
     let takeover: "unavailable" | "available" | "active" = "available";
+    const takeoverReason = 'Complete login <img src=x onerror="alert(1)">';
     let returnCalls = 0;
     let takeoverCalls = 0;
     let activeBotId: string | undefined;
@@ -589,12 +590,13 @@ test.describe("contextual computer sheet", () => {
       const selectedBotId = url.searchParams.get("botId") ?? undefined;
       const surfaceId = url.searchParams.get("surfaceId") ?? undefined;
       const selectedState: ComputerState =
-        state === "bot-using" && selectedBotId !== activeBotId ? "ready" : state;
+        (state === "bot-using" || state === "needs-you") && selectedBotId !== activeBotId ? "ready" : state;
       await fulfillJson(route, {
         state: selectedState,
         botId: selectedBotId,
         takeover,
         surfaceId,
+        takeoverReason: takeover === "unavailable" ? undefined : takeoverReason,
         activity:
           selectedState === "bot-using"
             ? "Bot using screen."
@@ -607,11 +609,11 @@ test.describe("contextual computer sheet", () => {
 
     await page.goto("/");
     activeBotId = await createBot(page, "Computer Bot");
-    state = "bot-using";
+    state = "needs-you";
     await page.reload();
 
     const trigger = page.getByRole("button", { name: "Open Computer Surface", exact: true });
-    await expect(trigger).toHaveAttribute("data-state", "bot-using");
+    await expect(trigger).toHaveAttribute("data-state", "needs-you");
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
     await expect(trigger.locator("svg.lucide-monitor")).toBeVisible();
     await trigger.click();
@@ -632,7 +634,9 @@ test.describe("contextual computer sheet", () => {
 
     const sheet = drawer;
     await expect(sheet.getByAltText("Computer Bot screen")).toBeVisible();
-    await expect(sheet).toContainText("Bot using screen");
+    await expect(sheet).toContainText("Needs you");
+    await expect(sheet.getByText(takeoverReason, { exact: true })).toBeVisible();
+    await expect(sheet.locator("img[onerror]")).toHaveCount(0);
     await expect(sheet).not.toContainText("Screen Projection");
     await expect(sheet).not.toContainText("WebRTC");
     await expect(sheet).not.toContainText(/lease|TTL|token|queue depth/i);
@@ -641,6 +645,9 @@ test.describe("contextual computer sheet", () => {
     await sheet.getByRole("button", { name: "Open Web Control" }).click();
     const expandedControl = page.getByTestId("expanded-web-control");
     await expect(expandedControl).toBeVisible();
+    await expect(expandedControl.getByText(takeoverReason, { exact: true })).toBeVisible();
+    await expect(expandedControl.locator("img[onerror]")).toHaveCount(0);
+    await expect(closeTrigger).toHaveAttribute("data-state", "user-control");
     const expandedView = page.getByTestId("computer-expanded-view");
     await expect(expandedView).toBeVisible();
     const rfbCanvas = expandedView.locator("canvas");
@@ -700,6 +707,7 @@ test.describe("contextual computer sheet", () => {
     await expect(sheet).not.toContainText("Screen ready");
     expect(returnCalls).toBe(1);
     await expect(sheet.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
+    await expect(sheet.getByText(takeoverReason, { exact: true })).toHaveCount(0);
     await page.getByTestId("header-computer").click();
     await expect(drawer).toBeHidden();
     await expect(trigger).toBeFocused();

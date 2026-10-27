@@ -221,6 +221,7 @@ function ComputerSurfaceContent({
       {!loading && view.state !== "unavailable" && view.state !== "ready" ? (
         <Text color="secondary">{STATE_LABELS[view.state]}</Text>
       ) : null}
+      {view.takeoverReason !== undefined ? <Text>{view.takeoverReason}</Text> : null}
       {error !== undefined ? <Banner status="error" title={error} /> : null}
       {projectionUnavailable && frameUrl !== undefined ? (
         <Banner
@@ -770,6 +771,7 @@ export function ComputerSurface({
               <Text color="inherit">
                 {controlReady ? "Click, scroll, or type to control" : "Connecting controls…"}
               </Text>
+              {view.takeoverReason !== undefined ? <Text color="inherit">{view.takeoverReason}</Text> : null}
             </HStack>
           </StackItem>
           {view.takeover === "active" ? (

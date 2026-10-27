@@ -11,6 +11,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { createConnection } from "node:net";
+import { CdpPipe } from "./cdpPipe.ts";
+import { BrowserRuntime } from "./browserRuntime.ts";
 import sharp from "sharp";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
@@ -121,6 +124,7 @@ const PORTABLE_BROWSER_FLAGS = [
   "--no-default-browser-check",
   "--disable-sync",
   "--password-store=basic",
+  "--remote-debugging-pipe",
 ];
 
 
@@ -656,11 +660,11 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (confirmed?.focused !== true) throw new Error("Sway window focus was not confirmed");
       });
     };
-    const launch = async (request: BotScreenLaunchRequest): Promise<{ text?: string }> => {
+    const launch = async (request: BotScreenLaunchRequest, signal?: AbortSignal): Promise<{ text?: string }> => {
       if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
       if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
       return this.#withInputLease(session, async () => {
-        const result = await this.#launchApplication(session, request);
+        const result = await this.#launchApplication(session, request, signal);
         await hideBotDesktop(swayIpc, session.workspaceName);
         return result;
       });
@@ -671,6 +675,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (cleanupInFlight !== undefined) return cleanupInFlight;
       const cleanup = (async (): Promise<void> => {
         await virtualInput.release().catch(() => {});
+        computer.browser?.dropScreen(provision.surfaceId);
         this.#releaseInputLease(provision.surfaceId);
         await virtualInput.stop().catch(() => {});
         await Promise.allSettled(captureStreamStarts);
@@ -860,6 +865,27 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       listWindows,
       focusWindow,
       launch,
+      browser: async (action, input, signal) => {
+        signal.throwIfAborted();
+        if (computer.childEnv.OMARCHY_BOT_BROWSER === "host" && nativeBrowserCommand(computer.childEnv) !== undefined) {
+          throw new Error("Browser tool unavailable: the host browser has no owned CDP pipe. Use the pack browser or computer tools.");
+        }
+        if (action.name === "request_takeover") return { text: "Browser is available for Takeover" };
+        const routed = await listWindows();
+        if (computer.browser?.alive !== true || !routed.some((window) => /chrome|chromium/i.test(window.appId ?? ""))) {
+          const beforeTargets = new Set(computer.browser?.alive === true ? (await computer.browser.pageTargets(signal)).map((target) => target.targetId) : []);
+          await launch({ url: "about:blank" }, signal);
+          signal.throwIfAborted();
+          if (computer.browser?.alive === true) {
+            const targets = (await computer.browser.pageTargets(signal)).filter((target) => !beforeTargets.has(target.targetId));
+            const browserPid = await computer.browser.processId(signal);
+            const windows = (await listWindows()).filter((window) => window.pid === browserPid && !routed.some((before) => before.id === window.id));
+            if (targets.length === 1 && windows.length === 1) await computer.browser.registerTarget(provision.surfaceId, targets[0]!.targetId, windows[0]!.id, signal);
+          }
+        }
+        if (computer.browser?.alive !== true) throw new Error("Browser tool unavailable: browser CDP pipe closed; close browser windows and relaunch. Computer tools remain available.");
+        return computer.browser.perform(provision.surfaceId, action, { windows: listWindows, focusWindow, input }, signal);
+      },
       setInputAuthority: async (controllerEpoch) => {
         if (!Number.isSafeInteger(controllerEpoch) || controllerEpoch <= lastInputEpoch) {
           throw new BotScreenInputRejectedError("stale controller epoch");
@@ -900,8 +926,10 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   async #launchApplication(
     session: SwaySession,
     request: BotScreenLaunchRequest,
+    signal?: AbortSignal,
   ): Promise<{ text?: string }> {
     await this.options.onLaunch?.();
+    signal?.throwIfAborted();
     const cwd = this.options.applicationCwd;
     if (cwd === undefined || cwd === "" || !existsSync(cwd)) {
       throw new Error("Shared Workspace is unavailable for application launch");
@@ -921,22 +949,37 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         session.computer.profileDir,
       );
     const text = request.app !== undefined ? `launched ${request.app}` : `opened ${request.url}`;
+    const browserPipe = argv.includes("--remote-debugging-pipe");
     const role = `application-${++session.computer.applicationSequence}` as const;
     const application = spawnDetachedChild({
       argv: [
-        ...this.#units.computerCommand(
+        ...(browserPipe ? [] : this.#units.computerCommand(
           session.computer.generation,
           role,
           session.computer.childEnv,
           cwd,
-        ),
+        )),
         ...argv,
       ],
-      env: this.#units.launcherEnvironment(session.computer.childEnv),
+      env: browserPipe ? session.computer.childEnv : this.#units.launcherEnvironment(session.computer.childEnv),
       cwd,
       output: "ignore",
-      owned: !this.#units.enabled,
+      // Extra CDP descriptors cannot pass through systemd-run's stdio forwarding.
+      owned: browserPipe || !this.#units.enabled,
+      browserPipe,
     });
+    if (browserPipe) {
+      const writer = createConnection({ fd: application.process.stdio[3]! });
+      const reader = createConnection({ fd: application.process.stdio[4]! });
+      if (session.computer.browser?.alive !== true) {
+        const browser = new BrowserRuntime(new CdpPipe(writer, reader));
+        session.computer.browser = browser;
+        void application.process.exited.then(() => browser.close());
+      } else {
+        writer.destroy();
+        reader.destroy();
+      }
+    }
     // An application is shared by every Screen, so it is stopped with the Bot
     // Computer. Its entry survives its leader while descendants still live in the
     // owned session; that is what makes the teardown find them.
@@ -950,6 +993,10 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     // window is routed only once it exists.
     const deadline = Date.now() + (request.app !== undefined ? 5_000 : 30_000);
     while (Date.now() < deadline && session.computer.running()) {
+      if (signal?.aborted) {
+        await terminateOwnedChild(application);
+        signal.throwIfAborted();
+      }
       const windows = listApplicationToplevels(await swayIpc.getTree());
       const created = windows.filter((window) => !before.has(window.id));
       if (created.length > 0) {

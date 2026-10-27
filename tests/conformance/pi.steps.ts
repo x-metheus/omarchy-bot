@@ -1,5 +1,5 @@
 /**
- * Pi Agent conformance suite (agents-integration.md §6, ten steps) — the Gate 1
+ * Pi Agent conformance suite (agents-integration.md §6, eleven steps) — the Gate 1
  * gatekeeper. Runs against the REAL Pi worker (real model calls via the user's
  * Pi credentials) and the REAL computer worker. On success it writes a private
  * versioned conformance record that verifies the fixture Pi Agent is `ready`.
@@ -9,14 +9,15 @@
  *   3. read-only tool lifecycle      8. worker exit leaves no orphans
  *   4. native write tool lifecycle    9. capability inventory / event mapping
  *   5. mid-turn cancel + steer      10. Real Pi computer tool via owning Broker
+ *  11. Real Pi browser form via refs and page result
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { WorkerClient } from "../../apps/daemon/src/supervision/workerClient.ts";
 import { isAgentCapabilityInventory } from "../../packages/agent-contract/src/agent-protocol.ts";
-import { RED_PIXEL_PNG, startConformanceDaemon, type ConformanceDaemon } from "./helpers.ts";
+import { RED_PIXEL_PNG, startBrowserConformanceFixture, startConformanceDaemon, type ConformanceDaemon } from "./helpers.ts";
 import { normalizeSessionEvent } from "../../workers/pi/src/normalize.ts";
 import type { SurfaceId } from "../../packages/domain/src/index.ts";
 
@@ -109,9 +110,61 @@ function assistantText(recent: { type: string; event: Record<string, unknown> }[
   return text;
 }
 
-describe("pi conformance (10 steps, real model)", () => {
-  test(
-    "all ten steps pass",
+async function browserConformance(botId: string) {
+  const fixture = startBrowserConformanceFixture();
+  const browserCalls = spyOn(daemon.svc.computer, "agentBrowserAct");
+  try {
+    const sent = await daemon.svc.turns.send(botId, null, [
+      "This is a browser conformance check. Use only the browser tool.",
+      `Navigate to ${fixture.url}, then take a snapshot.`,
+      `Use the snapshot's ref for the Conformance message textbox to type ${fixture.value}.`,
+      "Use the snapshot's ref for the Submit form button to click it (take another snapshot if refs are stale).",
+      "Wait for Form submitted, then call read_text to read the page result.",
+      "Reply with the exact BROWSER-RECEIPT value from the returned page text. Do not use shell, fetch, scripts or any other tools.",
+    ].join(" "));
+    const terminal = await daemon.svc.turns.waitForTerminal(sent.turnId, 180_000);
+    expect(terminal.status).toBe("completed");
+    const response = await fetch(`${daemon.baseUrl}/api/threads/${sent.threadId}/messages`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    expect(response.ok).toBeTrue();
+    const transcript = await response.json() as Array<{
+      kind: string;
+      text?: string;
+      toolCall?: { name: string; status: string };
+    }>;
+    const calls = transcript.filter(message => message.kind === "tool");
+    expect(calls.length).toBeGreaterThanOrEqual(5);
+    expect(calls.every(message => message.toolCall?.name === "browser" && message.toolCall.status === "completed")).toBeTrue();
+    expect(fixture.submissions).toEqual([fixture.value]);
+    expect(transcript.some(message => message.kind !== "tool" && message.text?.includes(fixture.receipt))).toBeTrue();
+    const actions = browserCalls.mock.calls.map(call => call[3]);
+    expect(actions.map(action => action.name)).toEqual(expect.arrayContaining(["navigate", "snapshot", "type", "click", "read_text"]));
+    const typed = actions.find(action => action.name === "type");
+    expect(typed?.args.text).toBe(fixture.value);
+    expect(typeof typed?.args.ref).toBe("string");
+    expect(actions.filter(action => action.name === "click").every(action => typeof action.args.ref === "string")).toBeTrue();
+    console.log("conformance: step 11 ok — real Pi browser snapshot, form refs and page receipt");
+  } finally {
+    browserCalls.mockRestore();
+    await fixture.stop();
+  }
+}
+
+test.skipIf(process.env.OMARCHY_BOT_PI_CONFORMANCE_STEP !== "browser")("pi conformance step 11: browser form (real model)", async () => {
+  const probe = await pi.request({ type: "probe", requestId: crypto.randomUUID() }, 30_000);
+  if (typeof probe?.agentVersion !== "string" || !probe.agentVersion) throw new Error("Pi probe returned no agent version");
+  const directory = path.join(daemon.home, "conformance");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(path.join(directory, `pi-${probe.agentVersion}.json`), JSON.stringify({ ok: true, image: "provider-unsupported" }));
+  expect((await daemon.svc.agents.recheck("pi")).status).toBe("ready");
+  const bot = daemon.svc.bots.create({ name: "Pi Browser Conformance", agentId: "pi", instructions: "Follow the requested browser conformance tool calls exactly." });
+  await browserConformance(bot.id);
+}, 210_000);
+
+describe("pi conformance (11 steps, real model)", () => {
+  test.skipIf(process.env.OMARCHY_BOT_PI_CONFORMANCE_STEP === "browser")(
+    "all eleven steps pass",
     async () => {
       // ---- Step 1: temp cwd + session ----
       const version = await pi.request({ type: "probe", requestId: crypto.randomUUID() }, 30_000);
@@ -402,10 +455,10 @@ describe("pi conformance (10 steps, real model)", () => {
 
       // ---- Step 10: REAL Pi SDK custom tool -> daemon -> owning Broker/worker ----
       // Seed only the isolated daemon's gate so its supervised Pi worker can run
-      // this final live conformance turn.
+      // these final live conformance turns.
       const image = imageResult === "ok" ? "verified" : "provider-unsupported";
-      const record = JSON.stringify({ ok: true, at: new Date().toISOString(), steps: 10, image });
-      writeFileSync(path.join(testConfDir, `pi-${agentVersion}.json`), record);
+      const record = JSON.stringify({ ok: true, at: new Date().toISOString(), steps: 11, image });
+      writeFileSync(path.join(testConfDir, `pi-${agentVersion}.json`), JSON.stringify({ ok: true, image }));
       expect((await daemon.svc.agents.recheck("pi")).status).toBe("ready");
       const sent = await daemon.svc.turns.send(
         conformanceBot.id,
@@ -450,6 +503,9 @@ describe("pi conformance (10 steps, real model)", () => {
       }).lastImageAt).toBeDefined();
       console.log("conformance: step 10 ok — real Pi custom tool typed and observed its owning Bot Screen");
 
+      // ---- Step 11: REAL Pi browser snapshot -> refs -> submitted page text ----
+      await browserConformance(conformanceBot.id);
+
       // ---- Record: write the versioned conformance record and verify the gate ----
       const recordPath = path.join(testConfDir, `pi-${agentVersion}.json`);
       writeFileSync(recordPath, record);
@@ -466,6 +522,6 @@ describe("pi conformance (10 steps, real model)", () => {
       expect(agent.status).toBe("ready");
       console.log("conformance: Pi Agent is READY");
     },
-    600_000,
+    810_000,
   );
 });

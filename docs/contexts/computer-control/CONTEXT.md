@@ -4,7 +4,7 @@ The context for coordinating Bots and the user across the Bot Computer and, when
 
 ## Language
 
-Definitions only. Rules and acceptance live in [Computer ADR 0009](adr/0009-adopt-sway-bot-desktops.md), [Computer ADR 0011](adr/0011-bundle-one-sway-bot-computer.md), historical [Computer ADR 0008](adr/0008-run-cage-bot-desktops.md), [system ADR 0009](../../adr/0009-share-work-files-isolate-bot-screens.md), and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Bot](../workspace/CONTEXT.md), [Bot Client](../workspace/CONTEXT.md), [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Shared Workspace](../workspace/CONTEXT.md).
+Definitions only. Rules and acceptance live in [Computer ADR 0009](adr/0009-adopt-sway-bot-desktops.md), [Computer ADR 0011](adr/0011-bundle-one-sway-bot-computer.md), [Computer ADR 0012](adr/0012-agent-browser-control-over-cdp.md), historical [Computer ADR 0008](adr/0008-run-cage-bot-desktops.md), [system ADR 0009](../../adr/0009-share-work-files-isolate-bot-screens.md), and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Bot](../workspace/CONTEXT.md), [Bot Client](../workspace/CONTEXT.md), [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Shared Workspace](../workspace/CONTEXT.md).
 
 **Host Session**:
 The user's own graphical environment on the Service Host (Omarchy or any other desktop), including its desktop, top bar, shortcuts, and physical input. It is distinct from the graphical work surfaces provided to Bots. A headless Service Host has no Host Session.
@@ -33,6 +33,14 @@ _Avoid_: Bot control, Shared Screen control
 **Computer Broker**:
 The public coordinator that prevents a Bot and the user from interleaving input on one Bot Screen. The shared Bot Computer runtime additionally serializes mutations across Screen workspaces because Sway has one effective seat. It is neither an Agent permission authority nor a coordinator for Shared Workspace files.
 _Avoid_: File lock manager, task scheduler, permission manager, visible lease panel
+
+**Browser Tool**:
+The structure-first Agent interface to the pack Chromium on a Bot Screen, driven over the Service's private CDP pipe. It exposes the accessibility tree and acts through refs and real input; it is distinct from `computer` pixels and raw input, and unavailable while a launched host browser is in use.
+_Avoid_: automation bridge, headless browser, DevTools port, page scripting
+
+**Element Ref**:
+A snapshot-scoped identifier for one accessibility-tree element on the active tab, accepted by click, type, and select until the next snapshot, navigation, tab change, or document replacement. A stale ref requires a new snapshot.
+_Avoid_: CSS selector, XPath, DOM id, persistent element handle
 
 **Takeover**:
 A contextual handoff of one Bot Screen from its Bot to the user, either because the Bot needs human input or the user chooses to intervene. It returns control after that Screen is observed again.
