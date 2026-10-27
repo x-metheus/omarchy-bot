@@ -124,14 +124,14 @@ const PORTABLE_BROWSER_FLAGS = [
 ];
 
 
-/** Native browser first, otherwise the portable browser on the shared Bot Computer profile. */
+/** Use the pinned pack unless the operator explicitly selects a native browser. */
 async function browserCommand(
   url: string,
   environment: Record<string, string>,
   assets: BotComputerAssetSupply,
   profileDir: string,
 ): Promise<string[]> {
-  const native = nativeBrowserCommand(environment);
+  const native = environment.OMARCHY_BOT_BROWSER === "host" ? nativeBrowserCommand(environment) : undefined;
   if (native !== undefined) {
     // Without this a running native browser reuses a tab, so no new window can
     // be routed to the requesting Screen.

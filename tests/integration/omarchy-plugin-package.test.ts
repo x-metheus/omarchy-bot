@@ -4,6 +4,8 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { layoutFromEnv, type Layout } from "../../apps/cli/src/layout.ts";
+import { BROWSER_ASSETS_RELEASE } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
+import { runnableBrowserFiles } from "./helpers/browserPackFixture.ts";
 
 const root = path.resolve(import.meta.dir, "../..");
 const entry = path.join(root, "packages/omarchy-plugin/entry.sh");
@@ -20,7 +22,6 @@ async function fixture() {
   const source = path.join(home, "plugin"); mkdirSync(source);
   copyFileSync(entry, path.join(source, "entry.sh"));
   const bunDir = path.join(home, "resolved-bun"); mkdirSync(bunDir);
-  shim(bunDir, "bun", `if [[ \${1:-} == */apps/cli/src/main.ts ]]; then printf '%s\\n' "$*" >> "$CLI_CALLS"; fi\nexec '${process.execPath}' "$@"`);
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, PATH: `${bin}:/usr/bin:/bin`,
     XDG_CONFIG_HOME: path.join(home, "config"), XDG_DATA_HOME: path.join(home, "data"),
     XDG_STATE_HOME: path.join(home, "state"), XDG_RUNTIME_DIR: path.join(home, "run"),
@@ -50,12 +51,17 @@ if(!live){const unit=readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/oma
   const serve = `#!/bin/bash\nexec bun run - <<'SERVICE'\nimport {existsSync,mkdirSync,writeFileSync} from 'node:fs';\nmkdirSync(process.env.OMARCHY_BOT_STATE,{recursive:true});const secret=process.env.OMARCHY_BOT_STATE+'/pairing-host-secret';if(!existsSync(secret))writeFileSync(secret,'fixture-secret');\nBun.serve({hostname:'127.0.0.1',port:Number(process.env.OMARCHY_BOT_PORT),fetch(r){return new URL(r.url).pathname==='/api/health'?Response.json({ok:true}):Response.json({code:'ABCD2345',url:'/pair?code=ABCD2345'})}});\nSERVICE\n`;
   const archive = path.join(home, "runtime.tar.zst");
   const files: Record<string, string> = { "scripts/serve.sh": serve };
-  for (const name of ["main", "layout", "archive", "lifecycle"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(root, `apps/cli/src/${name}.ts`), "utf8");
-  for (const name of ["swayRuntimeSupply", "botComputerAssets"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(root, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(root, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(root, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
   files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(root, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   writeFileSync(archive, Bun.zstdCompressSync(await new Bun.Archive(files).bytes()));
   writeFileSync(`${archive}.sha256`, `${createHash("sha256").update(readFileSync(archive)).digest("hex")}  runtime.tar.zst\n`);
   env.ARCHIVE = archive;
+  const pack = path.join(home, "browser.tar.zst");
+  writeFileSync(pack, Bun.zstdCompressSync(await new Bun.Archive({ ".omarchy-bot-browser-pack": `${BROWSER_ASSETS_RELEASE}\n`, ...runnableBrowserFiles() }).bytes()));
+  const hook = path.join(home, "pack-fetch.ts");
+  writeFileSync(hook, `const original=globalThis.fetch; globalThis.fetch=async(input,init)=>{const url=String(input); if(!url.startsWith("https://github.com/")) return original(input,init); if(!url.startsWith("https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture-revision/omarchy-bot-browser-")) throw new Error("unexpected fixture URL: "+url); require("node:fs").appendFileSync(${JSON.stringify(path.join(home, "browser-downloads"))},url+"\\n"); const response=new Response(url.endsWith(".sha256")?${JSON.stringify(createHash("sha256").update(readFileSync(pack)).digest("hex"))}:Bun.file(${JSON.stringify(pack)}));Object.defineProperty(response,"url",{value:url});return response;};`);
+  shim(bunDir, "bun", `if [[ \${1:-} == */apps/cli/src/main.ts ]]; then printf '%s\\n' "$*" >> "$CLI_CALLS"; fi\nexec '${process.execPath}' --preload '${hook}' "$@"`);
   shim(bin, "curl", 'printf "%s\\n" "$*" >> "$DOWNLOADS"\nwhile [[ $1 != -o ]]; do shift; done\ndest=$2; url=$3\nif [[ $url == *.sha256 ]]; then cp "$ARCHIVE.sha256" "$dest"; else cp "$ARCHIVE" "$dest"; fi');
   return { home, bin, bunDir, source, env, layout, serve };
 }
@@ -136,6 +142,23 @@ test("enable installs using the archive CLI and records the resolved Bun directo
   const reused = await invoke(setup, "enable"); expect(reused).toMatchObject({ code: 0, stderr: "" }); expect(reused.stdout).toContain("reusing installed Service");
   expect(calls(setup.env.DOWNLOADS!)).toHaveLength(2); expect(calls(setup.env.CALLS!).filter(s => s.includes("enable"))).toHaveLength(1);
   expect(calls(setup.env.CLI_CALLS!).at(-1)).toBe(`${setup.layout.currentDir}/apps/cli/src/main.ts install --archive missing --checksum missing`);
+  expect(calls(setup.env.CALLS!).at(-1)).toBe("--user start omarchy-bot.service");
+});
+
+test("plugin enable repairs the missing pack from the retained runtime release after the plugin revision changes", async () => {
+  const setup = await fixture();
+  expect(await invoke(setup, "enable")).toMatchObject({ code: 0, stderr: "" });
+  rmSync(setup.layout.browserPackDir, { recursive: true });
+  setup.env.OMARCHY_BOT_PLUGIN_REVISION = "different-plugin-revision";
+  expect(await invoke(setup, "enable")).toMatchObject({ code: 0, stderr: "" });
+  expect(readFileSync(path.join(setup.layout.browserPackDir, ".omarchy-bot-assets"), "utf8")).toBe(`${BROWSER_ASSETS_RELEASE}\n`);
+  expect(calls(path.join(setup.home, "browser-downloads"))).toEqual([
+    `https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture-revision/omarchy-bot-browser-${BROWSER_ASSETS_RELEASE}-x86_64.tar.zst`,
+    `https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture-revision/omarchy-bot-browser-${BROWSER_ASSETS_RELEASE}-x86_64.tar.zst.sha256`,
+    `https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture-revision/omarchy-bot-browser-${BROWSER_ASSETS_RELEASE}-x86_64.tar.zst`,
+    `https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture-revision/omarchy-bot-browser-${BROWSER_ASSETS_RELEASE}-x86_64.tar.zst.sha256`,
+  ]);
+  expect(calls(setup.env.DOWNLOADS!)).toHaveLength(2);
   expect(calls(setup.env.CALLS!).at(-1)).toBe("--user start omarchy-bot.service");
 });
 

@@ -108,7 +108,7 @@ jobs:
           $(cat "$ARCHIVE.sha256")
           \`\`\`
 
-          The runtime archive carries no browser. Installers take the separate browser pack for Service Hosts with no usable non-snap browser:
+          The runtime archive carries no browser. Installers install the separate browser pack by default; this is the pinned browser every Service Host runs:
 
           \`https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/$(basename "$BROWSER_PACK")\`
 

@@ -201,8 +201,8 @@ function isFile(candidate: string): boolean {
 
 function isExecutableFile(candidate: string): boolean {
   try {
-    const mode = statSync(candidate).mode;
-    return statSync(candidate).isFile() && (mode & 0o111) !== 0;
+    const stat = statSync(candidate);
+    return stat.isFile() && stat.size > 0 && (stat.mode & 0o111) !== 0;
   } catch {
     return false;
   }
@@ -322,6 +322,6 @@ export class PortableBotComputerAssets implements BotComputerAssetSupply {
           && isExecutableFile(path.join(bundle, "libs", LOADER))) return { browserBin };
       } catch {}
     }
-    throw new Error("No usable host browser or installed browser pack. Run omarchy-bot install --with-browser (with your runtime --archive and --checksum).");
+    throw new Error("No installed browser pack. Run omarchy-bot update --archive <path> --checksum <path> --browser-pack <file-or-https-url>, or set OMARCHY_BOT_BROWSER=host to use a host browser.");
   }
 }

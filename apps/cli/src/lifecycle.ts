@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readF
 import { dirname, join } from "node:path";
 import { layoutFromEnv, serviceFetch, serviceOrigin, type Layout } from "./layout.ts";
 import { SWAY_RUNTIME_BUNDLE } from "../../daemon/src/modules/computer/swayRuntimeSupply.ts";
-import { FONT_ASSETS } from "../../daemon/src/modules/computer/botComputerAssets.ts";
+import { FONT_ASSETS, PortableBotComputerAssets } from "../../daemon/src/modules/computer/botComputerAssets.ts";
 
 function unitValue(value: string): string {
   const escaped = value.replace(/%/g, "%%").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r");
@@ -40,7 +40,7 @@ export function renderUnit(layout: Layout): string {
     OMARCHY_BOT_PORT: layout.port,
     PATH: [dirname(process.execPath), layout.env.PATH].filter(Boolean).join(":"),
     ...(layout.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: layout.env.XDG_RUNTIME_DIR } : {}),
-    ...Object.fromEntries(["OMARCHY_BOT_TLS_CERT", "OMARCHY_BOT_TLS_KEY", "OMARCHY_BOT_TRUSTED_PROXY"].filter(key => layout.env[key]).map(key => [key, layout.env[key]])),
+    ...Object.fromEntries(["OMARCHY_BOT_TLS_CERT", "OMARCHY_BOT_TLS_KEY", "OMARCHY_BOT_TRUSTED_PROXY", "OMARCHY_BOT_BROWSER"].filter(key => layout.env[key]).map(key => [key, layout.env[key]])),
   };
   return [
     "[Unit]",
@@ -97,8 +97,8 @@ export function checkConfigurationOverrides(layout: Layout): void {
     for (const file of readdirSync(directory).filter(file => file.endsWith(".conf"))) {
       const source = join(directory, file);
       const settings = readFileSync(source, "utf8").split(/\r?\n/).filter(line => !/^\s*[#;]/.test(line)).join("\n");
-      if (/OMARCHY_BOT_(?:HOST|PORT|TLS_CERT|TLS_KEY|TRUSTED_PROXY)\b|^\s*(?:Environment\s*=\s*$|EnvironmentFile\s*=)/m.test(settings)) {
-        throw new Error(`Service configuration override conflicts with managed OMARCHY_BOT_ settings: ${source}. Move listener settings to omarchy-bot reconfigure flags/environment and remove those assignments from the drop-in, preserving unrelated settings, then retry.`);
+      if (/OMARCHY_BOT_(?:HOST|PORT|TLS_CERT|TLS_KEY|TRUSTED_PROXY|BROWSER)\b|^\s*(?:Environment\s*=\s*$|EnvironmentFile\s*=)/m.test(settings)) {
+        throw new Error(`Service configuration override conflicts with managed OMARCHY_BOT_ settings: ${source}. Move managed settings to omarchy-bot reconfigure flags/environment and remove those assignments from the drop-in, preserving unrelated settings, then retry.`);
       }
     }
   }
@@ -121,7 +121,7 @@ export async function installUnit(layout: Layout, env: NodeJS.ProcessEnv): Promi
 
 function saveConfiguration(layout: Layout): void {
   mkdirSync(layout.dataDir, { recursive: true, mode: 0o700 });
-  writeFileSync(join(layout.dataDir, "service.json"), JSON.stringify({ OMARCHY_BOT_HOST: layout.host, OMARCHY_BOT_PORT: layout.port, ...Object.fromEntries(["OMARCHY_BOT_TLS_CERT", "OMARCHY_BOT_TLS_KEY", "OMARCHY_BOT_TRUSTED_PROXY"].map(key => [key, layout.env[key] || ""])) }), { mode: 0o600 });
+  writeFileSync(join(layout.dataDir, "service.json"), JSON.stringify({ OMARCHY_BOT_HOST: layout.host, OMARCHY_BOT_PORT: layout.port, ...Object.fromEntries(["OMARCHY_BOT_TLS_CERT", "OMARCHY_BOT_TLS_KEY", "OMARCHY_BOT_TRUSTED_PROXY", "OMARCHY_BOT_BROWSER"].map(key => [key, layout.env[key] || ""])) }), { mode: 0o600 });
 }
 
 export async function reconfigureUnit(layout: Layout, env: NodeJS.ProcessEnv, healthy: () => Promise<void>): Promise<void> {
@@ -216,6 +216,12 @@ export async function doctorText(env: NodeJS.ProcessEnv): Promise<string> {
   // shortcut: packaging verifies font checksums; doctor checks availability, rehash if corruption diagnostics are needed.
   const missingFonts = FONT_ASSETS.filter(font => !nonempty(join(layout.currentDir, "fonts", font.file)));
   if (missingFonts.length) lines.push(`fonts: missing or empty ${missingFonts.map(font => font.file).join(", ")}; ${repair}`);
+  if (layout.env.OMARCHY_BOT_BROWSER !== "host") {
+    try {
+      const { browserBin } = await new PortableBotComputerAssets({ profileDir: layout.screensDir, browserPackDir: layout.env.OMARCHY_BOT_BROWSER_PACK_DIR || layout.browserPackDir }).ensureBrowser();
+      if (!await probe(browserBin, ["--version"])) throw new Error();
+    } catch { lines.push(`browser pack: verified marker or runnable binary is missing or invalid; ${repair} --browser-pack <file-or-https-url>`); }
+  }
   const state = await probe("systemctl", ["--user", "is-active", "omarchy-bot.service"]);
   if (!existsSync(layout.unitPath) || state !== "active") lines.push("unit: missing or inactive; run omarchy-bot install --archive <path> --checksum <path>, then omarchy-bot start");
   if (!nonempty(join(layout.home, ".local/bin/omarchy-bot"), true)) lines.push("launcher: missing or not executable; run the installer to restore ~/.local/bin/omarchy-bot");

@@ -90,9 +90,9 @@ test("fresh TLS container prints one pairing URL, retains paired state and forwa
   const image = path.join(root, "image"), runtime = path.join(image, "runtime");
   mkdirSync(path.join(runtime, "scripts"), { recursive: true });
   mkdirSync(path.join(runtime, "apps/cli/src"), { recursive: true });
-  for (const file of ["main", "layout", "lifecycle", "archive"]) writeFileSync(path.join(runtime, `apps/cli/src/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/cli/src/${file}.ts`)));
+  for (const file of ["main", "layout", "lifecycle", "archive", "browserPack"]) writeFileSync(path.join(runtime, `apps/cli/src/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/cli/src/${file}.ts`)));
   mkdirSync(path.join(runtime, "apps/daemon/src/modules/computer"), { recursive: true });
-  for (const file of ["swayRuntimeSupply", "botComputerAssets"]) writeFileSync(path.join(runtime, `apps/daemon/src/modules/computer/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/daemon/src/modules/computer/${file}.ts`)));
+  for (const file of ["swayRuntimeSupply", "botComputerAssets", "browserPack"]) writeFileSync(path.join(runtime, `apps/daemon/src/modules/computer/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/daemon/src/modules/computer/${file}.ts`)));
   mkdirSync(path.join(runtime, "apps/daemon/src/bootstrap"), { recursive: true });
   writeFileSync(path.join(runtime, "apps/daemon/src/bootstrap/listenerConfig.ts"), readFileSync(path.resolve(import.meta.dir, "../../apps/daemon/src/bootstrap/listenerConfig.ts")));
   const cert = path.join(root, "cert.pem"), key = path.join(root, "key.pem");

@@ -1,6 +1,6 @@
 # 05: Portable browser and fonts
 
-**What to build:** `open_url` works on a host with no browser, and pages render Latin and CJK text correctly on hosts without fonts. A natively installed host browser is still preferred; snap-confined browsers are never launched. The shared Bot Computer browser profile is unchanged.
+**What to build:** `open_url` works on a host with no browser, and pages render Latin and CJK text correctly on hosts without fonts. A natively installed host browser was preferred when this ticket was written; ticket 17 made the checksum-pinned browser pack the default and a host browser opt-in. Snap-confined browsers are never launched. The shared Bot Computer browser profile is unchanged.
 
 **Blocked by:** None (can start immediately)
 
@@ -16,9 +16,9 @@ Spec: [standalone Linux Service](../spec.md)
 
 ## Answer
 
-`open_url` prefers a native host browser, skips snap-confined ones (including `env NAME=value` wrappers), and otherwise launches a checksum-verified Chrome for Testing build from the Bot Computer profile with `--user-data-dir` under `<profileRoot>/computer/config/chromium` and `--new-window`. Latin and CJK fonts are the same kind of verified download, and fontconfig is pointed only at that profile. The browser ELF names the bundled glibc loader via a `PT_INTERP` path placed after the segment's BSS, so the zygote sandbox stays on and host libraries are not required. Assets are fetched into the profile on first graphical use, not carried in the runtime archive and not installed on the host.
+At the time of this ticket, `open_url` preferred a native host browser, skipped snap-confined ones (including `env NAME=value` wrappers), and otherwise launched a checksum-verified Chrome for Testing build from the Bot Computer profile with `--user-data-dir` under `<profileRoot>/computer/config/chromium` and `--new-window`. Latin and CJK fonts are the same kind of verified download, and fontconfig is pointed only at that profile. The browser ELF names the bundled glibc loader via a `PT_INTERP` path placed after the segment's BSS, so the zygote sandbox stays on and host libraries are not required. Assets are fetched into the profile on first graphical use, not carried in the runtime archive and not installed on the host.
 
-Ticket 14 moved the font set out of the profile and into the runtime archive; ticket 17 replaced the on-demand browser download with a checksum-pinned browser pack installed by `install`/`update`, so the Service never downloads a browser at run time.
+Ticket 14 moved the font set out of the profile and into the runtime archive; ticket 17 replaced the on-demand browser download with a checksum-pinned browser pack installed by `install`/`update`, so the Service never downloads a browser at run time. Ticket 17 also reversed the host-browser preference recorded above: the pack is now the default on every Service Host — one pinned version for Agent control, with no dependency on what the host installed — and a host browser is used only through the explicit `OMARCHY_BOT_BROWSER=host` opt-in, still skipping snap-confined browsers. Chrome for Testing ships no Widevine module, so DRM-protected video does not play in Bot Screens.
 
 ## Comments
 

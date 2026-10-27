@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import path from "node:path";
 /** A stored-entry ZIP, which is all the fixture browser archive needs. */
 export function zip(entries: Record<string, string | Uint8Array>): Uint8Array {
   const encoder = new TextEncoder();
@@ -79,6 +80,16 @@ export function deb(member: string, content: string, mode = "0000644"): Uint8Arr
     new TextEncoder().encode("!<arch>\n"),
     ...records,
   ]));
+}
+
+/** Real small ELF and its loader/libc: --version must execute successfully in installer fixtures. */
+export function runnableBrowserFiles(): Record<string, Uint8Array> {
+  const loader = realpathSync(interpreterPath("/usr/bin/printf").path!);
+  return {
+    "chrome-linux64/chrome": readFileSync("/usr/bin/printf"),
+    "libs/ld-linux-x86-64.so.2": readFileSync(loader),
+    "libs/libc.so.6": readFileSync(path.join(path.dirname(loader), "libc.so.6")),
+  };
 }
 
 /**

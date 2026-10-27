@@ -1,10 +1,12 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { zip, deb, elfFixture, interpreterPath } from "./helpers/browserPackFixture.ts";
 import { extractRuntimeArchive, verifyChecksum } from "../../apps/cli/src/archive.ts";
 import { prepareBrowserPack } from "../../apps/daemon/src/modules/computer/browserPack.ts";
+import { installBrowserPack } from "../../apps/cli/src/browserPack.ts";
+import { BROWSER_ASSETS_RELEASE } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const hash = (bytes: Uint8Array) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
@@ -32,5 +34,38 @@ test("builds an unpatched pack, verifies every input, and patches only for the i
     const badOut = path.join(root, `bad-${pin.name}`); const refused = build(badOut);
     expect(refused.exitCode).not.toBe(0); expect(refused.stderr.toString()).toContain(`${pin.name}: checksum mismatch`);
     expect(existsSync(path.join(badOut, path.basename(archive)))).toBe(false); writeFileSync(file, original);
+  }
+});
+
+test("refuses insecure browser URLs and redirects without replacing the installed pack", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "browser-pack-url-")); roots.push(root);
+  const destination = path.join(root, "installed"); mkdirSync(destination);
+  const marker = path.join(destination, "keep"); writeFileSync(marker, "verified old pack");
+  const network = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => {
+    const response = new Response("untrusted"); Object.defineProperty(response, "url", { value: "http://fixture.invalid/browser.tar.zst" }); return response;
+  }, { preconnect: globalThis.fetch.preconnect }));
+  try {
+    await expect(installBrowserPack("http://fixture.invalid/browser.tar.zst", destination)).rejects.toThrow("URL must use HTTPS");
+    expect(network).not.toHaveBeenCalled();
+    await expect(installBrowserPack("https://fixture.invalid/browser.tar.zst", destination)).rejects.toThrow("redirect must use HTTPS");
+    expect(readFileSync(marker, "utf8")).toBe("verified old pack");
+  } finally { network.mockRestore(); }
+});
+
+test("refuses a corrupt checksum, foreign pin or invalid executable before replacing the installed pack", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "browser-pack-refused-")); roots.push(root);
+  const destination = path.join(root, "installed"); mkdirSync(destination);
+  const marker = path.join(destination, "keep"); writeFileSync(marker, "verified old pack");
+  for (const [pin, binary, corrupt, message] of [
+    [BROWSER_ASSETS_RELEASE, elfFixture(), true, "checksum mismatch"],
+    ["foreign-pin", elfFixture(), false, "version mismatch"],
+    [BROWSER_ASSETS_RELEASE, new Uint8Array([1, 2, 3]), false, "dynamic loader"],
+  ] as const) {
+    const archive = path.join(root, "browser.tar.zst");
+    const bytes = Bun.zstdCompressSync(await new Bun.Archive({ ".omarchy-bot-browser-pack": `${pin}\n`, "chrome-linux64/chrome": binary, "libs/ld-linux-x86-64.so.2": "loader" }).bytes());
+    writeFileSync(archive, bytes); writeFileSync(`${archive}.sha256`, corrupt ? "0".repeat(64) : hash(bytes));
+    await expect(installBrowserPack(archive, destination)).rejects.toThrow(message);
+    expect(readFileSync(marker, "utf8")).toBe("verified old pack");
+    expect(existsSync(`${destination}.staging-${process.pid}`)).toBe(false);
   }
 });

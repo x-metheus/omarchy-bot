@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { layoutFromEnv } from "../../apps/cli/src/layout.ts";
 import { BROWSER_ASSETS_RELEASE } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
-import { elfFixture, interpreterPath } from "./helpers/browserPackFixture.ts";
+import { interpreterPath, runnableBrowserFiles } from "./helpers/browserPackFixture.ts";
 
 const projectRoot = path.resolve(import.meta.dir, "../..");
 const cleanups: Array<() => void> = [];
@@ -19,7 +19,7 @@ function shim(bin: string, name: string, script: string) {
   chmodSync(file, 0o755);
 }
 
-async function fixture(options: { manager?: boolean; opener?: string; browser?: "native" | "snap" | "absent"; tls?: boolean; requireBun?: boolean } = {}) {
+async function fixture(options: { manager?: boolean; opener?: string; browser?: "native" | "snap" | "absent"; tls?: boolean; requireBun?: boolean; pin?: string; revision?: string; priorInstaller?: boolean } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "ob-install-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, "bin");
@@ -53,7 +53,7 @@ if(args.includes("restart") && process.env.FAIL_RESTART_ONCE && existsSync(proce
 if(args.includes("enable") || args.includes("start") || args.includes("restart")){
 let running=false;if(existsSync(pidFile)){try{process.kill(Number(readFileSync(pidFile,"utf8")),0);running=true}catch{}}
 if(!running){const unit=readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/omarchy-bot.service","utf8");
-const env={...process.env};for(const key of ["OMARCHY_BOT_TLS_CERT","OMARCHY_BOT_TLS_KEY","OMARCHY_BOT_TRUSTED_PROXY"])delete env[key];for(const line of unit.split("\\n")){if(line.startsWith("Environment=")){const value=line.slice(12);const index=value.indexOf("=");env[value.slice(0,index)]=value.slice(index+1)}}
+const env={...process.env};for(const key of ["OMARCHY_BOT_TLS_CERT","OMARCHY_BOT_TLS_KEY","OMARCHY_BOT_TRUSTED_PROXY","OMARCHY_BOT_BROWSER"])delete env[key];for(const line of unit.split("\\n")){if(line.startsWith("Environment=")){const value=line.slice(12);const index=value.indexOf("=");env[value.slice(0,index)]=value.slice(index+1)}}
 const executable=unit.split("\\n").find(line=>line.startsWith("ExecStart="))!.slice(10);
 const child=Bun.spawn([executable],{env,stdin:"ignore",stdout:"ignore",stderr:"ignore"});writeFileSync(pidFile,String(child.pid));child.unref();}}
 `);
@@ -79,7 +79,7 @@ const child=Bun.spawn([executable],{env,stdin:"ignore",stdout:"ignore",stderr:"i
     expect(Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", env.OMARCHY_BOT_TLS_KEY, "-out", env.OMARCHY_BOT_TLS_CERT, "-days", "1", "-nodes", "-subj", "/CN=localhost"]).exitCode).toBe(0);
   }
   const layout = layoutFromEnv(env);
-  const archive = path.join(root, "omarchy-bot-runtime-fixture-x86_64.tar.zst");
+  const archive = path.join(root, `omarchy-bot-runtime-${options.revision ?? "fixture"}-x86_64.tar.zst`);
   const checksum = `${archive}.sha256`;
   const serve = `#!/bin/bash
 ${options.requireBun ? 'command -v bun >/dev/null || { echo "requires Bun in PATH" >&2; exit 1; }' : ""}
@@ -100,16 +100,28 @@ SERVICE
   for (const name of ["main", "layout", "archive", "lifecycle", "browserPack"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
   for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "hostBrowser"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
   files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(projectRoot, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
+  if (options.pin) files["apps/daemon/src/modules/computer/botComputerAssets.ts"] = files["apps/daemon/src/modules/computer/botComputerAssets.ts"]!.replace(`BROWSER_ASSETS_RELEASE = "${BROWSER_ASSETS_RELEASE}"`, `BROWSER_ASSETS_RELEASE = "${options.pin}"`);
+  // Frozen from 23c944b74457df7755acab944db54c80db689858, before the installer gained a third argument.
+  if (options.priorInstaller) files["apps/cli/src/browserPack.ts"] = readFileSync(path.join(import.meta.dir, "helpers/priorBrowserPack.ts.fixture"), "utf8");
   const packed = await new Bun.Archive(files).bytes();
   writeFileSync(archive, Bun.zstdCompressSync(packed));
   writeFileSync(checksum, `${createHash("sha256").update(readFileSync(archive)).digest("hex")}  runtime.tar.zst\n`);
+  const pack = path.join(root, "browser.tar.zst");
+  writeFileSync(pack, Bun.zstdCompressSync(await new Bun.Archive({
+    ".omarchy-bot-browser-pack": `${options.pin ?? BROWSER_ASSETS_RELEASE}\n`,
+    ...runnableBrowserFiles(),
+  }).bytes()));
+  const packHash = createHash("sha256").update(readFileSync(pack)).digest("hex");
+  writeFileSync(`${pack}.sha256`, `${packHash}  browser.tar.zst\n`);
+  const hook = path.join(root, "release-hook.ts");
+  writeFileSync(hook, `const original=globalThis.fetch; globalThis.fetch=async(input,init)=>{const url=String(input); if(!url.startsWith("https://github.com/")) return original(input,init); if(!url.startsWith(${JSON.stringify(`https://github.com/XMethues/omarchy-bot/releases/download/runtime-${options.revision ?? "fixture"}/`)})) throw new Error("unexpected fixture URL: "+url); require("node:fs").appendFileSync(${JSON.stringify(path.join(root, "downloads"))},url+"\\n"); const response=new Response(url.endsWith(".sha256") ? ${JSON.stringify(packHash)} : Bun.file(${JSON.stringify(pack)})); Object.defineProperty(response,"url",{value:url}); return response;};`);
   const archiveArgs = ["--archive", archive, "--checksum", checksum];
-  return { root, env, layout, archiveArgs, checksum, secret, serve, bin,
+  return { root, env, layout, archiveArgs, checksum, secret, serve, bin, pack, hook,
     pairingUrl: `${options.tls ? "https" : "http"}://127.0.0.1:${env.OMARCHY_BOT_PORT}/pair?code=ABCD2345` };
 }
 
-async function cli(setup: { env: NodeJS.ProcessEnv }, args: string[]) {
-  const child = Bun.spawn([process.execPath, "apps/cli/src/main.ts", ...args], {
+async function cli(setup: { env: NodeJS.ProcessEnv; hook?: string; cliPath?: string }, args: string[]) {
+  const child = Bun.spawn([process.execPath, ...(setup.hook ? ["--preload", setup.hook] : []), setup.cliPath ?? "apps/cli/src/main.ts", ...args], {
     cwd: projectRoot, env: setup.env, stdin: "ignore", stdout: "pipe", stderr: "pipe",
   });
   const [code, stdout, stderr] = await Promise.all([
@@ -141,7 +153,7 @@ test("installs on a non-Omarchy fixture, pairs, reuses the Service, and preserve
   expect(recorded(setup.env.SYSTEMCTL_CALLS!).at(-1)).toBe("--user start omarchy-bot.service");
   expect(recorded(setup.env.OPEN_CALLS!)).toEqual([setup.pairingUrl, setup.pairingUrl]);
   expect(readdirSync(setup.layout.unitDir)).toEqual(["omarchy-bot.service"]);
-  expect(readdirSync(setup.layout.runtimeDir)).toEqual(["current"]);
+  expect(readdirSync(setup.layout.runtimeDir).sort()).toEqual(["browser", "current"]);
 
   const kept: [string, string][] = [
     [setup.layout.dbPath, "database"],
@@ -234,9 +246,74 @@ test("update replaces the installed runtime after checksum verification", async 
   expect(result).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
   expect(readFileSync(setup.layout.servePath, "utf8")).toBe(setup.serve);
   expect(existsSync(path.join(setup.layout.currentDir, "old-file"))).toBe(false);
-  expect(readdirSync(setup.layout.runtimeDir)).toEqual(["current"]);
+  expect(readdirSync(setup.layout.runtimeDir).sort()).toEqual(["browser", "current"]);
   const calls = recorded(setup.env.SYSTEMCTL_CALLS!);
   expect(calls.indexOf("--user stop omarchy-bot.service")).toBeLessThan(calls.indexOf("--user start omarchy-bot.service"));
+});
+
+test("update and install reuse select the target runtime pin rather than the executing CLI pin", async () => {
+  const setup = await fixture();
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  const target = await fixture({ pin: "chrome-for-testing-target-fixture-linux64", revision: "target-release" });
+  expect(readFileSync(target.archiveArgs[1]!)).not.toEqual(readFileSync(setup.archiveArgs[1]!));
+  const updated = await cli({ ...setup, hook: target.hook, cliPath: path.join(setup.layout.currentDir, "apps/cli/src/main.ts") }, ["update", ...target.archiveArgs]);
+  expect(updated).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+  const marker = path.join(setup.layout.browserPackDir, ".omarchy-bot-assets");
+  expect(readFileSync(marker, "utf8")).toBe("chrome-for-testing-target-fixture-linux64\n");
+  expect(recorded(path.join(target.root, "downloads"))).toEqual([
+    "https://github.com/XMethues/omarchy-bot/releases/download/runtime-target-release/omarchy-bot-browser-chrome-for-testing-target-fixture-linux64-x86_64.tar.zst",
+    "https://github.com/XMethues/omarchy-bot/releases/download/runtime-target-release/omarchy-bot-browser-chrome-for-testing-target-fixture-linux64-x86_64.tar.zst.sha256",
+  ]);
+  writeFileSync(path.join(setup.layout.browserPackDir, "keep"), "retained runtime pin");
+  expect(await cli(setup, ["install", ...setup.archiveArgs, "--browser-pack", setup.pack])).toEqual({ code: 0, stdout: `reusing installed Service\npairing: ${setup.pairingUrl}\n`, stderr: "" });
+  expect(readFileSync(marker, "utf8")).toBe("chrome-for-testing-target-fixture-linux64\n");
+  expect(readFileSync(path.join(setup.layout.browserPackDir, "keep"), "utf8")).toBe("retained runtime pin");
+  rmSync(setup.layout.browserPackDir, { recursive: true });
+  expect((await cli(setup, ["install", ...setup.archiveArgs, "--browser-pack", target.pack])).code).toBe(0);
+  expect(readFileSync(marker, "utf8")).toBe("chrome-for-testing-target-fixture-linux64\n");
+});
+
+test.each(["missing", "broken", "target archive"])("a prior two-argument runtime installer leaves a runnable browser after %s pack preparation", async mode => {
+  const setup = await fixture({ priorInstaller: true, pin: "chrome-for-testing-prior-fixture-linux64", revision: "prior-release" });
+  if (mode !== "target archive") {
+    expect((await cli(setup, ["install", ...setup.archiveArgs, "--no-browser-pack"])).code).toBe(0);
+    if (mode === "broken") {
+      // The fixture's retained runtime selects the module and browser pin.
+      const installer = path.join(setup.layout.currentDir, "apps/cli/src/browserPack.ts");
+      expect(Bun.spawnSync([process.execPath, "--eval", `const { installBrowserPack } = await import(${JSON.stringify(installer)}); await installBrowserPack(${JSON.stringify(setup.pack)}, ${JSON.stringify(setup.layout.browserPackDir)});`], { cwd: projectRoot, env: setup.env }).exitCode).toBe(0);
+      writeFileSync(path.join(setup.layout.browserPackDir, "browser"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+    }
+  }
+  const args = mode === "target archive" ? ["update", ...setup.archiveArgs] : ["install", "--archive", "missing", "--checksum", "missing"];
+  expect(await cli(setup, args)).toEqual({ code: 0, stdout: `${mode === "target archive" ? "" : "reusing installed Service\n"}pairing: ${setup.pairingUrl}\n`, stderr: "" });
+  const version = Bun.spawnSync([path.join(setup.layout.browserPackDir, "browser"), "--version"], { env: setup.env });
+  expect(version.stderr.toString()).toBe("");
+  expect(version.exitCode).toBe(0);
+  expect(interpreterPath(path.join(setup.layout.browserPackDir, "chrome-linux64/chrome"))).toMatchObject({ path: path.join(setup.layout.browserPackDir, "libs/ld-linux-x86-64.so.2"), mapped: true });
+  expect(readFileSync(path.join(setup.layout.browserPackDir, ".omarchy-bot-assets"), "utf8")).toBe("chrome-for-testing-prior-fixture-linux64\n");
+  expect(readFileSync(path.join(setup.layout.currentDir, ".runtime-archive"), "utf8")).toBe("omarchy-bot-runtime-prior-release-x86_64.tar.zst\n");
+  expect(readdirSync(setup.layout.runtimeDir).sort()).toEqual(["browser", "current"]);
+  expect(recorded(path.join(setup.root, "downloads"))).toEqual([
+    "https://github.com/XMethues/omarchy-bot/releases/download/runtime-prior-release/omarchy-bot-browser-chrome-for-testing-prior-fixture-linux64-x86_64.tar.zst",
+    "https://github.com/XMethues/omarchy-bot/releases/download/runtime-prior-release/omarchy-bot-browser-chrome-for-testing-prior-fixture-linux64-x86_64.tar.zst.sha256",
+  ]);
+});
+
+test("target browser validation failure preserves the running runtime and pack without stopping the Service", async () => {
+  const setup = await fixture();
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  const target = await fixture({ pin: "chrome-for-testing-target-fixture-linux64" });
+  const marker = path.join(setup.layout.browserPackDir, ".omarchy-bot-assets");
+  const runtime = readFileSync(path.join(setup.layout.currentDir, ".archive-sha256"), "utf8");
+  const calls = recorded(setup.env.SYSTEMCTL_CALLS!);
+  const rejected = await cli(setup, ["update", ...target.archiveArgs, "--browser-pack", setup.pack]);
+  expect(rejected.code).toBe(1);
+  expect(rejected.stderr).toContain("browser pack version mismatch");
+  expect(readFileSync(marker, "utf8")).toBe(`${BROWSER_ASSETS_RELEASE}\n`);
+  expect(readFileSync(path.join(setup.layout.currentDir, ".archive-sha256"), "utf8")).toBe(runtime);
+  expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual(calls);
+  expect(readdirSync(setup.layout.runtimeDir).sort()).toEqual(["browser", "current"]);
+  expect((await cli(setup, ["pair"])).code).toBe(0);
 });
 
 test("install reports a missing user manager without invoking host systemctl", async () => {
@@ -260,45 +337,116 @@ test("a failing custom opener is reported after successful install without faili
   expect(recorded(setup.env.OPEN_CALLS!)).toEqual([setup.pairingUrl]);
 });
 
-test("installs a local pack on a browserless host, refreshes on update, and removes it on uninstall", async () => {
+test("installs a local pack, preserves an unchanged pin, replaces a stale pin and removes it on uninstall", async () => {
   const setup = await fixture({ browser: "absent" });
-  const pack = path.join(setup.root, "browser.tar.zst");
-  writeFileSync(pack, Bun.zstdCompressSync(await new Bun.Archive({
-    ".omarchy-bot-browser-pack": `${BROWSER_ASSETS_RELEASE}\n`,
-    "chrome-linux64/chrome": elfFixture(),
-    "libs/ld-linux-x86-64.so.2": "fixture-loader",
-  }).bytes()));
-  writeFileSync(`${pack}.sha256`, `${createHash("sha256").update(readFileSync(pack)).digest("hex")}  browser.tar.zst\n`);
+  const pack = setup.pack;
   const installed = await cli(setup, ["install", ...setup.archiveArgs, "--browser-pack", pack]);
   expect(installed.stderr).toBe(""); expect(installed.code).toBe(0);
   expect(interpreterPath(path.join(setup.layout.browserPackDir, "chrome-linux64/chrome"))).toMatchObject({ path: path.join(setup.layout.browserPackDir, "libs/ld-linux-x86-64.so.2"), mapped: true });
   writeFileSync(path.join(setup.layout.browserPackDir, "obsolete"), "old");
   expect((await cli(setup, ["update", ...setup.archiveArgs, "--browser-pack", pack])).code).toBe(0);
+  expect(readFileSync(path.join(setup.layout.browserPackDir, "obsolete"), "utf8")).toBe("old");
+  writeFileSync(path.join(setup.layout.browserPackDir, ".omarchy-bot-assets"), "older-pin\n");
+  expect((await cli(setup, ["update", ...setup.archiveArgs, "--browser-pack", pack])).code).toBe(0);
   expect(existsSync(path.join(setup.layout.browserPackDir, "obsolete"))).toBe(false);
+  rmSync(path.join(setup.layout.browserPackDir, "chrome-linux64/chrome"));
+  expect((await cli(setup, ["update", ...setup.archiveArgs, "--browser-pack", pack])).code).toBe(0);
+  expect(existsSync(path.join(setup.layout.browserPackDir, "chrome-linux64/chrome"))).toBe(true);
   expect((await cli(setup, ["uninstall"])).code).toBe(0);
   expect(existsSync(setup.layout.browserPackDir)).toBe(false);
 });
 
-test("skips the pack for a native host browser, automatically installs for snap-only hosts, and honors --with-browser", async () => {
-  for (const browser of ["native", "snap"] as const) {
-    const setup = await fixture({ browser });
-    const pack = Bun.zstdCompressSync(await new Bun.Archive({
-      ".omarchy-bot-browser-pack": `${BROWSER_ASSETS_RELEASE}\n`, "chrome-linux64/chrome": elfFixture(), "libs/ld-linux-x86-64.so.2": "loader",
-    }).bytes());
-    const packFile = path.join(setup.root, "release-pack"); writeFileSync(packFile, pack);
-    const hook = path.join(setup.root, "release-hook.ts");
-    writeFileSync(hook, `const original=globalThis.fetch; globalThis.fetch=async(input,init)=>{const url=String(input); if(!url.startsWith("https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture/")) return original(input,init); require("node:fs").appendFileSync(${JSON.stringify(path.join(setup.root, "downloads"))},url+"\\n"); const response=new Response(url.endsWith(".sha256") ? ${JSON.stringify(new Bun.CryptoHasher("sha256").update(pack).digest("hex"))} : Bun.file(${JSON.stringify(packFile)})); Object.defineProperty(response,"url",{value:url}); return response;};`);
-    const execute = async (flags: string[]) => {
-      const child = Bun.spawn([process.execPath, "--preload", hook, "apps/cli/src/main.ts", "install", ...setup.archiveArgs, ...flags], { env: setup.env, stdout: "pipe", stderr: "pipe" });
-      const stderr = new Response(child.stderr).text(); expect(await child.exited, await stderr).toBe(0);
-    };
-    await execute([]);
-    expect(existsSync(setup.layout.browserPackDir)).toBe(browser === "snap");
-    expect(recorded(path.join(setup.root, "downloads"))).toHaveLength(browser === "snap" ? 2 : 0);
-    await execute(["--with-browser"]);
-    expect(existsSync(path.join(setup.layout.browserPackDir, "browser"))).toBe(true);
-    expect(recorded(path.join(setup.root, "downloads"))).toHaveLength(browser === "snap" ? 4 : 2);
+test("doctor's advertised update repairs a same-pin browser that exits 7 or has a missing dependency", async () => {
+  const setup = await fixture();
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  const browser = path.join(setup.layout.browserPackDir, "browser");
+  for (const broken of ["#!/bin/sh\nexit 7\n", "#!/nonexistent/browser-loader\n"]) {
+    writeFileSync(browser, broken, { mode: 0o755 });
+    expect((await cli(setup, ["doctor"])).stdout).toContain("browser pack:");
+    expect(await cli(setup, ["update", ...setup.archiveArgs, "--browser-pack", setup.pack])).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+    expect(readFileSync(browser, "utf8")).not.toBe(broken);
+    const version = Bun.spawnSync([browser, "--version"], { env: setup.env });
+    expect(version.exitCode).toBe(0);
+    expect((await cli(setup, ["doctor"])).stdout).not.toContain("browser pack:");
   }
+});
+
+test("installs the release pack by default on native, snap and browserless hosts and keeps the same pin on update", async () => {
+  for (const browser of ["native", "snap", "absent"] as const) {
+    const setup = await fixture({ browser });
+    expect(await cli(setup, ["install", ...setup.archiveArgs])).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+    expect(existsSync(path.join(setup.layout.browserPackDir, "browser"))).toBe(true);
+    const downloads = path.join(setup.root, "downloads");
+    expect(recorded(downloads)).toEqual([
+      `https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture/omarchy-bot-browser-${BROWSER_ASSETS_RELEASE}-x86_64.tar.zst`,
+      `https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture/omarchy-bot-browser-${BROWSER_ASSETS_RELEASE}-x86_64.tar.zst.sha256`,
+    ]);
+    writeFileSync(path.join(setup.layout.browserPackDir, "keep"), "same pin");
+    expect((await cli(setup, ["update", ...setup.archiveArgs])).code).toBe(0);
+    expect(readFileSync(path.join(setup.layout.browserPackDir, "keep"), "utf8")).toBe("same pin");
+    expect(recorded(downloads)).toHaveLength(2);
+  }
+});
+
+test("--browser-pack installs an explicit HTTPS archive and its checksum sidecar", async () => {
+  const setup = await fixture();
+  const source = "https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture/custom-browser.tar.zst";
+  expect((await cli(setup, ["install", ...setup.archiveArgs, "--browser-pack", source])).code).toBe(0);
+  expect(recorded(path.join(setup.root, "downloads"))).toEqual([source, `${source}.sha256`]);
+  expect(existsSync(path.join(setup.layout.browserPackDir, "browser"))).toBe(true);
+});
+
+test("--no-browser-pack skips install and update without downloads or changing an existing pack", async () => {
+  const setup = await fixture();
+  expect((await cli(setup, ["install", ...setup.archiveArgs, "--no-browser-pack"])).code).toBe(0);
+  expect(existsSync(setup.layout.browserPackDir)).toBe(false);
+  mkdirSync(setup.layout.browserPackDir);
+  writeFileSync(path.join(setup.layout.browserPackDir, ".omarchy-bot-assets"), "older-pin\n");
+  expect((await cli(setup, ["update", ...setup.archiveArgs, "--no-browser-pack"])).code).toBe(0);
+  expect(readFileSync(path.join(setup.layout.browserPackDir, ".omarchy-bot-assets"), "utf8")).toBe("older-pin\n");
+  expect(recorded(path.join(setup.root, "downloads"))).toEqual([]);
+});
+
+test.each(["install", "update"])("%s rejects conflicting browser flags and obsolete flags before mutation", async command => {
+  const setup = await fixture();
+  for (const flags of [["--no-browser-pack", "--browser-pack", setup.pack], ["--with-browser"], ["--browser-pack"]]) {
+    expect((await cli(setup, [command, ...setup.archiveArgs, ...flags])).code).toBe(2);
+  }
+  expect(existsSync(setup.layout.runtimeDir)).toBe(false);
+  expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual([]);
+});
+
+test("host opt-in persists through install, saved settings, update and explicit clearing", async () => {
+  const setup = await fixture();
+  setup.env.OMARCHY_BOT_BROWSER = "host";
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain("Environment=OMARCHY_BOT_BROWSER=host");
+  const configPath = path.join(setup.layout.dataDir, "service.json");
+  expect(JSON.parse(readFileSync(configPath, "utf8")).OMARCHY_BOT_BROWSER).toBe("host");
+  expect(existsSync(setup.layout.browserPackDir)).toBe(true);
+  delete setup.env.OMARCHY_BOT_BROWSER;
+  expect((await cli(setup, ["reconfigure"])).code).toBe(0);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain("Environment=OMARCHY_BOT_BROWSER=host");
+  setup.env.OMARCHY_BOT_BROWSER = "";
+  expect((await cli(setup, ["update", ...setup.archiveArgs])).code).toBe(0);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).not.toContain("OMARCHY_BOT_BROWSER=");
+  expect(JSON.parse(readFileSync(configPath, "utf8")).OMARCHY_BOT_BROWSER).toBe("");
+  setup.env.OMARCHY_BOT_BROWSER = "host";
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain("Environment=OMARCHY_BOT_BROWSER=host");
+  setup.env.OMARCHY_BOT_BROWSER = "";
+  expect((await cli(setup, ["reconfigure"])).code).toBe(0);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).not.toContain("OMARCHY_BOT_BROWSER=");
+});
+
+test.each(["install", "update", "reconfigure"])("%s rejects invalid host browser selection before mutation", async command => {
+  const setup = await fixture();
+  setup.env.OMARCHY_BOT_BROWSER = "chromium";
+  const result = await cli(setup, [command, ...(command === "reconfigure" ? [] : setup.archiveArgs)]);
+  expect(result.code).toBe(2);
+  expect(result.stderr).toContain("OMARCHY_BOT_BROWSER must be host or empty");
+  expect(existsSync(setup.layout.runtimeDir)).toBe(false);
+  expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual([]);
 });
 
 test("refuses a mismatched browser pack before publishing the runtime or starting systemctl", async () => {
@@ -435,12 +583,14 @@ test("reconfigure rejects insecure and unusable TLS listeners before mutating a 
 
 test("failed reconfigure activation restores the prior unit, saved settings and running Service", async () => {
   const setup = await fixture({ tls: true });
+  setup.env.OMARCHY_BOT_BROWSER = "host";
   expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
   const unit = readFileSync(setup.layout.unitPath, "utf8");
   const configPath = path.join(setup.layout.dataDir, "service.json");
   const config = readFileSync(configPath, "utf8");
   setup.env.FAIL_RESTART_ONCE = path.join(setup.root, "fail-restart");
   writeFileSync(setup.env.FAIL_RESTART_ONCE, "once");
+  setup.env.OMARCHY_BOT_BROWSER = "";
   const result = await cli(setup, ["reconfigure", "--trusted-proxy", "127.0.0.2"]);
   expect(result.code).toBe(1);
   expect(result.stderr).toContain("fixture activation failure");
@@ -456,7 +606,7 @@ test("reconfigure identifies legacy TLS drop-ins before mutation and preserves u
   const config = readFileSync(path.join(setup.layout.dataDir, "service.json"), "utf8");
   const directory = `${setup.layout.unitPath}.d`; mkdirSync(directory);
   const override = path.join(directory, "override.conf");
-  const previous = `[Service]\nEnvironment=OMARCHY_BOT_HOST=0.0.0.0\nEnvironment=OMARCHY_BOT_TLS_CERT=${setup.env.OMARCHY_BOT_TLS_CERT}\nEnvironment=OMARCHY_BOT_TLS_KEY=${setup.env.OMARCHY_BOT_TLS_KEY}\nNice=5\nEnvironment=USER_SETTING=keep\n`;
+  const previous = `[Service]\nEnvironment=OMARCHY_BOT_BROWSER=host\nEnvironment=OMARCHY_BOT_HOST=0.0.0.0\nEnvironment=OMARCHY_BOT_TLS_CERT=${setup.env.OMARCHY_BOT_TLS_CERT}\nEnvironment=OMARCHY_BOT_TLS_KEY=${setup.env.OMARCHY_BOT_TLS_KEY}\nNice=5\nEnvironment=USER_SETTING=keep\n`;
   writeFileSync(override, previous);
   const calls = recorded(setup.env.SYSTEMCTL_CALLS!);
   const refused = await cli(setup, ["reconfigure", "--tls-cert", "", "--tls-key", ""]);
@@ -477,7 +627,7 @@ test("reconfigure identifies legacy TLS drop-ins before mutation and preserves u
 test("installed launcher reconfigure retains available Bun when the caller PATH omits it", async () => {
   const setup = await fixture({ requireBun: true });
   const installedEnv = { ...setup.env, PATH: `${path.dirname(process.execPath)}:${setup.env.PATH}` };
-  expect((await cli({ env: installedEnv }, ["install", ...setup.archiveArgs])).code).toBe(0);
+  expect((await cli({ env: installedEnv, hook: setup.hook }, ["install", ...setup.archiveArgs])).code).toBe(0);
   expect(Bun.which("bun", { PATH: setup.env.PATH || "" })).toBeNull();
   const child = Bun.spawn([setup.layout.launcherPath, "reconfigure"], { env: setup.env, stdout: "pipe", stderr: "pipe" });
   const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);

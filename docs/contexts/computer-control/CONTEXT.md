@@ -43,7 +43,7 @@ A Bot-owned visual surface implemented as one output and workspace within the Bo
 _Avoid_: Agent Screen, Host workspace, Shared Screen, separate computer, security sandbox
 
 **Bot Computer**:
-The one private headless Sway environment, shipped with the Service and identical on every Service Host, shared by all active Bot Screens. It owns the Wayland/Sway/D-Bus runtime, application processes, persistent home/XDG profile, browser session, and serialized input seat. It also owns the portable browser and font supply used when the Service Host has neither: the browser comes from the separate checksum-pinned browser pack that the installer places in the runtime directory (never a run-time download), while the fonts ship inside the runtime archive. It is distinct from the Host Session, Agent Native Sessions, and viewer projections.
+The one private headless Sway environment, shipped with the Service and identical on every Service Host, shared by all active Bot Screens. It owns the Wayland/Sway/D-Bus runtime, application processes, persistent home/XDG profile, browser session, and serialized input seat. It also owns the portable browser and font supply: the browser comes from the separate checksum-pinned browser pack that the installer places in the runtime directory (never a run-time download) and is the default on every Service Host, while the fonts ship inside the runtime archive. A host browser is used only on the explicit `OMARCHY_BOT_BROWSER=host` opt-in. It is distinct from the Host Session, Agent Native Sessions, and viewer projections.
 _Avoid_: Full Omarchy session, Host Session, per-Bot computer
 
 **Bot Desktop**:

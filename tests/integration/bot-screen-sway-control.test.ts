@@ -166,6 +166,7 @@ test("native window data excludes the Bot Desktop infrastructure surface", () =>
 let root: string | undefined;
 const originalPath = process.env.PATH;
 const originalDataDirs = process.env.XDG_DATA_DIRS;
+const originalBrowser = process.env.OMARCHY_BOT_BROWSER;
 
 afterEach(() => {
   if (root !== undefined) rmSync(root, { recursive: true, force: true });
@@ -174,6 +175,8 @@ afterEach(() => {
   else process.env.PATH = originalPath;
   if (originalDataDirs === undefined) delete process.env.XDG_DATA_DIRS;
   else process.env.XDG_DATA_DIRS = originalDataDirs;
+  if (originalBrowser === undefined) delete process.env.OMARCHY_BOT_BROWSER;
+  else process.env.OMARCHY_BOT_BROWSER = originalBrowser;
 });
 
 function executable(directory: string, name: string, body: string): string {
@@ -186,6 +189,7 @@ function executable(directory: string, name: string, body: string): string {
 async function startControlRuntime(options?: {
   tree?: unknown;
   failPastePath?: string;
+  hostBrowser?: boolean;
   /** Omit the native browser desktop entry to simulate a browser-less host. */
   nativeBrowser?: boolean;
   /** Install a snap-only browser desktop entry and a `snap` shim on PATH. */
@@ -228,6 +232,8 @@ async function startControlRuntime(options?: {
   writeFakeSwayIpcMode(controlDir, "ok");
   writeFileSync(inputLog, "");
   // Hide host desktop entries and host browsers so only this fixture is detectable.
+  if (options?.hostBrowser) process.env.OMARCHY_BOT_BROWSER = "host";
+  else delete process.env.OMARCHY_BOT_BROWSER;
   process.env.XDG_DATA_DIRS = path.join(root, "host-data");
   for (const [name, target] of Object.entries({
     bun: process.execPath,
@@ -397,7 +403,7 @@ workspace.nodes.push({
 });
 writeFileSync(treePath, JSON.stringify(tree));
 writeFileSync(${JSON.stringify(logPath)}, JSON.stringify({
-  argv: process.argv.slice(2),
+  argv: process.argv.slice(1),
   fontConfigFile: process.env.FONTCONFIG_FILE ?? null,
   home: process.env.HOME ?? null,
   configHome: process.env.XDG_CONFIG_HOME ?? null,
@@ -736,31 +742,19 @@ test("shared runtime launches applications into the requesting Screen workspace"
   }
 });
 
-test("open_url prefers a native browser and skips the portable one", async () => {
+test("open_url uses the installed browser pack even when a native browser is available", async () => {
   const fixture = await startControlRuntime();
-  const url = "https://example.com/native";
+  const url = "https://example.com/pack-default";
   try {
-    await expect(
-      fixture.runtime.launch({ url }),
-    ).resolves.toEqual({ text: `opened ${url}` });
-    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
-      `workspace bot-${SURFACE_ID}`,
-      "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",
-      `workspace bot-${SURFACE_ID}`,
-      `[app_id="^dev[.]omarchy[.]BotDesktop$" workspace="^bot-${SURFACE_ID}$"] move scratchpad`,
-    ]);
-    expect(await Bun.file(fixture.applicationMarker).text()).toContain(
-      path.join(root!, "profiles", "computer"),
-    );
-    expect(fixture.assets.browserCalls()).toBe(0);
+    await expect(fixture.runtime.launch({ url })).resolves.toEqual({ text: `opened ${url}` });
+    expect(existsSync(fixture.applicationMarker)).toBeFalse();
+    expect(fixture.assets.browserLaunches()).toHaveLength(1);
     expect(fixture.assets.fontCalls()).toBe(1);
-  } finally {
-    await fixture.runtime.stop();
-  }
+  } finally { await fixture.runtime.stop(); }
 });
 
 test("open_url asks a native Chromium browser for a routable new window", async () => {
-  const fixture = await startControlRuntime({ nativeBrowserName: "brave" });
+  const fixture = await startControlRuntime({ nativeBrowserName: "brave", hostBrowser: true });
   const url = "https://example.com/native-new-window";
   try {
     await expect(
@@ -774,7 +768,7 @@ test("open_url asks a native Chromium browser for a routable new window", async 
 });
 
 test("open_url rejects an env-wrapped snap browser and uses the portable one", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false, snapOnly: true });
+  const fixture = await startControlRuntime({ nativeBrowser: false, snapOnly: true, hostBrowser: true });
   const url = "https://example.com/env-snap";
   try {
     // Ubuntu/GNOME launch entries commonly route through env with an assignment,
@@ -802,8 +796,8 @@ test("open_url rejects an env-wrapped snap browser and uses the portable one", a
   }
 });
 
-test("open_url still prefers a real browser launched through env", async () => {
-  const fixture = await startControlRuntime({ nativeBrowserName: "brave" });
+test("open_url honors host opt-in for a real browser launched through env", async () => {
+  const fixture = await startControlRuntime({ nativeBrowserName: "brave", hostBrowser: true });
   const url = "https://example.com/env-native";
   try {
     const applications = path.join(root!, "profiles", "computer", "data", "applications");
@@ -825,7 +819,7 @@ test("open_url still prefers a real browser launched through env", async () => {
 });
 
 test("open_url does not interpret env options or PATH assignments", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const fixture = await startControlRuntime({ nativeBrowser: false, hostBrowser: true });
   const applications = path.join(root!, "profiles", "computer", "data", "applications");
   const bin = path.join(root!, "bin");
   const snapMarker = path.join(root!, "env-snap");
@@ -886,13 +880,13 @@ test("open_url opens the portable browser on a host with no native browser", asy
       `[app_id="^dev[.]omarchy[.]BotDesktop$" workspace="^bot-${SURFACE_ID}$"] move scratchpad`,
     ]);
     const [launch] = fixture.assets.browserLaunches();
-    expect(launch!.argv).toContain("--new-window");
-    expect(launch!.argv.at(-1)).toBe(url);
-    expect(launch!.argv).toContain("--ozone-platform=wayland");
-    expect(launch!.argv).not.toContain("--no-sandbox");
-    expect(launch!.argv).toContain(
+    expect(launch!.argv).toEqual([
+      path.join(root!, "assets", "portable-browser"),
       `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "chromium")}`,
-    );
+      "--ozone-platform=wayland", "--disable-gpu", "--no-first-run",
+      "--no-default-browser-check", "--disable-sync", "--password-store=basic",
+      "--new-window", url,
+    ]);
     expect(launch!.fontConfigFile).toBe(fixture.assets.fontConfigFile);
     expect(fixture.runtime.sessionEnv.FONTCONFIG_FILE).toBe(fixture.assets.fontConfigFile);
     expect(launch!.home).toBe(path.join(root!, "profiles", "computer", "home"));
@@ -902,17 +896,17 @@ test("open_url opens the portable browser on a host with no native browser", asy
   }
 });
 
-test("open_url reports how to install the missing browser pack on a browserless host", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false });
+test.each([false, true])("open_url gives one actionable missing-pack error with host opt-in %s", async hostBrowser => {
+  const fixture = await startControlRuntime({ hostBrowser, ...(hostBrowser ? { nativeBrowser: false, snapOnly: true } : {}) });
   const missing = new PortableBotComputerAssets({ profileDir: path.join(root!, "unused-profile") });
   fixture.assets.ensureBrowser = () => missing.ensureBrowser();
   try {
-    await expect(fixture.runtime.launch({ url: "https://example.com/missing-pack" })).rejects.toThrow("--with-browser");
+    await expect(fixture.runtime.launch({ url: "https://example.com/missing-pack" })).rejects.toThrow("No installed browser pack. Run omarchy-bot update --archive <path> --checksum <path> --browser-pack <file-or-https-url>, or set OMARCHY_BOT_BROWSER=host to use a host browser.");
   } finally { await fixture.runtime.stop(); }
 });
 
 test("open_url skips snap-confined browsers without executing them", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false, snapOnly: true });
+  const fixture = await startControlRuntime({ nativeBrowser: false, snapOnly: true, hostBrowser: true });
   const url = "https://example.com/snap";
   try {
     // Three shapes: a `snap run` desktop entry (installed by the fixture), an

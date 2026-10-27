@@ -1,8 +1,8 @@
 /**
  * Conformance harness: boots the real daemon with the REAL workers (pi +
- * computer) against the user's actual Pi credentials, in an isolated data dir.
+ * computer) against private copies of Pi credentials and model configuration.
  */
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { sanitizedEnv } from "../../apps/daemon/src/supervision/workerClient.ts";
@@ -17,11 +17,53 @@ export interface ConformanceDaemon {
   stop: () => Promise<void>;
 }
 
+/** Keep daemon-supervised workers in the same private HOME as the direct worker. */
+export function createConformanceHome() {
+  const source = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi/agent");
+  const root = mkdtempSync(path.join(os.tmpdir(), "pi-conformance-"));
+  const cleanup = () => rmSync(root, { recursive: true, force: true });
+  try {
+    const agentDir = path.join(root, ".pi/agent");
+    mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+    // Never copy packages, extensions or sessionDir from the user's settings.
+    for (const name of ["auth.json", "models.json", "settings.json"]) {
+      const file = path.join(source, name);
+      if (!existsSync(file)) continue;
+      let config = JSON.parse(readFileSync(file, "utf8"));
+      if (name === "settings.json") {
+        const { defaultProvider, defaultModel, defaultThinkingLevel, modelThinkingLevels } = config;
+        config = { defaultProvider, defaultModel, defaultThinkingLevel, modelThinkingLevels };
+      }
+      writeFileSync(path.join(agentDir, name), JSON.stringify(config), { mode: 0o600 });
+    }
+    const env = {
+      ...process.env,
+      HOME: root,
+      XDG_CONFIG_HOME: path.join(root, ".config"),
+      XDG_DATA_HOME: path.join(root, ".local/share"),
+      XDG_STATE_HOME: path.join(root, ".local/state"),
+      XDG_CACHE_HOME: path.join(root, ".cache"),
+      XDG_RUNTIME_DIR: path.join(root, "r"),
+      TMPDIR: path.join(root, "tmp"),
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_CODING_AGENT_SESSION_DIR: path.join(agentDir, "sessions"),
+      OMARCHY_BOT_CONFORMANCE_HOME: root,
+      OMARCHY_BOT_HOME: path.join(root, ".local/share/omarchy-bot"),
+      OMARCHY_BOT_STATE: path.join(root, ".local/state/omarchy-bot"),
+    };
+    for (const dir of [env.TMPDIR, env.XDG_RUNTIME_DIR]) mkdirSync(dir, { mode: 0o700 });
+    return { root, env, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
 export async function startConformanceDaemon(): Promise<ConformanceDaemon> {
-  const home = path.join(os.tmpdir(), `omarchy-bot-conformance-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  const state = path.join(os.tmpdir(), `omarchy-bot-conformance-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(home, { recursive: true });
-  mkdirSync(state, { recursive: true });
+  const root = process.env.OMARCHY_BOT_CONFORMANCE_HOME;
+  if (!root || process.env.HOME !== root) throw new Error("run Pi conformance through pi.test.ts for private HOME isolation");
+  const home = path.join(root, ".local/share/omarchy-bot");
+  const state = path.join(root, ".local/state/omarchy-bot");
   // NOTE: no conformance record is pre-baked — the suite writes it on success.
 
   process.env.OMARCHY_BOT_HOME = home;
@@ -42,7 +84,7 @@ export async function startConformanceDaemon(): Promise<ConformanceDaemon> {
 
   // Dynamic import: the harness mutates process.env above; importing main.ts fresh keeps that contract explicit.
   const { main } = await import("../../apps/daemon/src/bootstrap/main.ts");
-  const { stop, port, svc } = await main();
+  const { stop, port, svc } = await main({ useHostApplicationUnits: false, botScreenRuntimeDir: path.join(root, "r/screens") });
   const secret = readFileSync(path.join(state, "pairing-host-secret"), "utf8").trim();
   const baseUrl = `http://127.0.0.1:${port}`;
   const issued = await fetch(`${baseUrl}/api/pairing/codes`, {
