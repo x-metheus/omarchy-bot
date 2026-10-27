@@ -36,10 +36,15 @@ jobs:
           bun apps/daemon/native/bot-desktop/build.ts
           source scripts/sway-runtime/sources.lock
           bash scripts/package-plugin-runtime.sh . dist-runtime ".lane/dist/omarchy-bot-sway-runtime-$SWAY_RUNTIME_RELEASE-x86_64.tar.gz" .lane/fonts
+      - name: Build the browser pack
+        run: bash scripts/package-browser-pack.sh "$PWD" dist-browser
       - uses: actions/upload-artifact@v4
         with:
           name: distro-runtime
-          path: dist-runtime/*
+          path: |
+            dist-runtime/*
+            dist-browser/*.tar.zst
+            dist-browser/*.sha256
           if-no-files-found: error
 
   conformance:
@@ -58,7 +63,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: distro-runtime
-          path: dist-runtime
       - name: Prepare distribution container
         env:
           DISTRO_IMAGE: ${{ matrix.image }}
@@ -74,4 +78,6 @@ jobs:
         run: |
           archives=(dist-runtime/*.tar.zst)
           test "${#archives[@]}" -eq 1
-          bun scripts/distro-conformance/run.ts "$DISTRO" "${archives[0]}"
+          packs=(dist-browser/*.tar.zst)
+          test "${#packs[@]}" -eq 1
+          bun scripts/distro-conformance/run.ts "$DISTRO" "${archives[0]}" "${packs[0]}"

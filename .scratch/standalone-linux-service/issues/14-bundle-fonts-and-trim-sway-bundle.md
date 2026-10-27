@@ -15,7 +15,7 @@ Spec: [standalone Linux Service](../spec.md)
 - [x] `service-supervision`, the application-launch tests, and the Sway runtime tests pass on a host that cannot reach `raw.githubusercontent.com`.
 - [x] The runtime archive size before and after is recorded in the comments.
 
-Out of scope: the portable browser fallback (Chrome for Testing and its Ubuntu libraries) stays an on-demand download for now; a later ticket decides how headless hosts and stock Ubuntu get a browser.
+Out of scope: the portable browser fallback (Chrome for Testing and its Ubuntu libraries) stayed an on-demand download here; ticket 17 replaced it with a separate checksum-pinned browser pack installed by `install`/`update`, so headless hosts and stock Ubuntu get a browser without a run-time download.
 
 ## Comments
 
@@ -32,3 +32,5 @@ Sizes: the new Sway archive is 13,235,612 bytes; extracted regular files are 32,
 Proof: `scripts/sway-runtime/conformance/run.sh` passed 3 / failed 0, including "two bundle-only Bot Screens isolate X11 clients, input, and projection". `musl-smoke` passed. `OMARCHY_BOT_REAL_SWAY=1 bot-screen-sway-runtime.test.ts` passed 17 / failed 0. Portable browser conformance passed 2 / failed 0 with bundled Sway binaries and `.lane/fonts`. `bun run typecheck` (`tsc --noEmit`) passed. Earlier full `bun test`: 676 pass, 13 skip, 1 fail (Pi capability keys extra plugins; the assertion exists on HEAD; this branch does not touch `workers/pi`). Host `bot-screen-sway-conformance` still ends cutover blocked on "Bot Screen input requires the input lease" after Ghostty titles were fixed (`--title=BOT-A-TERM`); both screens were ready; distinct-apps passed. That lease is outside this ticket. Review: no must-fix findings.
 
 Build note: a clean registry rebuild was blocked (Docker Hub/Alpine TLS EOF). The archive was built from the cached trimmed image with `--pull=never --network=none`. `Dockerfile` and `build.sh` match that build.
+
+Ticket 17 completed the deferred browser half. The browser is no longer downloaded at run time: the packager emits `omarchy-bot-browser-<version>-x86_64.tar.zst` with a `.sha256` sidecar from the pinned `BROWSER_ASSET` and `BROWSER_LIBRARY_ASSETS`, `install`/`update` install it by default under `<dataDir>/runtime/browser` (skipped with `--no-browser-pack`; refreshed only when the pin changes, the installation is incomplete, or its `browser --version` fails), and the runtime archive stays browserless exactly as this ticket left it. The pack is the default because it gives Agent control one pinned browser and the Service no dependency on the host; a host browser requires the explicit `OMARCHY_BOT_BROWSER=host` opt-in, and Chrome for Testing ships no Widevine module, so DRM-protected video does not play. Fonts under `runtime/current/fonts` and `OMARCHY_BOT_FONT_DIR` are unchanged.

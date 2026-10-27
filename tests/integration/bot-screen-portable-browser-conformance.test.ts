@@ -189,7 +189,7 @@ test("glyph analysis finds the page inside a desktop capture and separates shape
   expect(maskDistance(byId.get("latin")!, byId.get("zh")!)).toBeGreaterThan(MIN_DISTINCT_DISTANCE);
 });
 
-realTest("portable browser renders CJK glyphs on a browser-less host and shares one profile", async () => {
+realTest.each(["default", "host"])("installed browser pack renders CJK and shares one profile with browser selection %s", async selection => {
   const swayBin = process.env.OMARCHY_BOT_SWAY_BIN;
   const wlrRandrBin = process.env.OMARCHY_BOT_WLR_RANDR_BIN;
   const grimBin = process.env.OMARCHY_BOT_GRIM_BIN ?? Bun.which("grim") ?? undefined;
@@ -220,6 +220,7 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
   // be found even with no browser on PATH.
   setEnvironment("PATH", browserlessPath(bin, snapMarker));
   setEnvironment("XDG_DATA_DIRS", emptyDataDirs);
+  setEnvironment("OMARCHY_BOT_BROWSER", selection === "host" ? "host" : undefined);
   // Bun caches PATH at startup, so resolution must be asked with the fixture PATH.
   const fixturePath = process.env.PATH ?? "";
   expect(Bun.which("brave", { PATH: fixturePath })).toBeNull();
@@ -237,10 +238,13 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
 
   const fontDir = process.env.OMARCHY_BOT_FONT_DIR
     ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts");
+  const browserPackDir = process.env.OMARCHY_BOT_BROWSER_PACK_DIR
+    ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "browser");
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot,
     fontDir,
+    browserPackDir,
     capacity: 2,
     applicationCwd,
     swayBin,
@@ -253,6 +257,11 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
     grimBin,
     dbusDaemonBin,
   });
+  const nativeMarker = path.join(root, "host-browser-ran");
+  if (selection === "default") {
+    const native = executableFixture(bin, "brave", `#!/bin/sh\nprintf called > ${JSON.stringify(nativeMarker)}\nexit 1\n`);
+    desktopEntry(path.join(profileRoot, "computer", "data", "applications"), "brave-browser.desktop", `"${native}" %U`);
+  }
 
   harness = await startDaemon(path.join(root, "home"), { botScreenAdapter: adapter, botScreenCapacity: 2 });
   const botIds = await Promise.all([
@@ -282,7 +291,7 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
           .flatMap((entry) => {
             try {
               const commandLine = readFileSync(`/proc/${entry}/cmdline`).toString().split("\0").join(" ");
-              return commandLine.includes("browser-bundle") && commandLine.includes("--user-data-dir")
+              return commandLine.includes(browserPackDir) && commandLine.includes("--user-data-dir")
                 ? [`${entry}:${commandLine.slice(0, 400)}`]
                 : [];
             } catch {
@@ -320,14 +329,19 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
     // missing library otherwise surfaces only much later as a window that never maps.
     const { browserBin } = await new PortableBotComputerAssets({
       profileDir: path.join(profileRoot, "computer"),
+      browserPackDir,
     }).ensureBrowser();
     expect(statSync(browserBin).mode & 0o111).toBeGreaterThan(0);
+    const version = Bun.spawnSync([browserBin, "--version"], { stdout: "pipe", stderr: "pipe" });
+    expect(version.exitCode).toBe(0);
+    expect(version.stdout.toString()).toContain("Google Chrome for Testing 156.0.8078.47");
 
     // No browser on the fixture host, so the portable browser must open the URL.
     await act(owners[0]!, { name: "open_url", args: { url: probeUrl("GLYPH-A") } }, "open-a");
     const windowA = await waitForTitle(owners[0]!, "GLYPH-A");
     expect({ title: windowA.title, count: titleCount(windowA.title) })
       .toMatchObject({ count: 1 });
+    expect(browserProcess(probeUrl("GLYPH-A")).binary).toBe(path.join(path.resolve(browserPackDir), "chrome-linux64/chrome"));
     expect(browserProcess(probeUrl("GLYPH-A")).userDataDir
       .startsWith(path.join(profileRoot, "computer"))).toBeTrue();
 
@@ -384,9 +398,9 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
     const windowC = await waitForTitle(owners[0]!, "GLYPH-C");
     expect(titleCount(windowC.title)).toBe(3);
     expect(existsSync(snapMarker)).toBeFalse();
+    expect(existsSync(nativeMarker)).toBeFalse();
   } finally {
     await harness?.stop().catch(() => {});
     harness = undefined;
   }
-// First run also downloads and verifies the pinned browser and libraries.
 }, 600_000);

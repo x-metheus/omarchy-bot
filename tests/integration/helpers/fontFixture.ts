@@ -17,6 +17,5 @@ export function createFixtureFontSupply(directory: string): PortableBotComputerA
       url: "https://assets.invalid/font.ttf",
       sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
     }],
-    fetch: async () => { throw new Error("font fixture must not download"); },
   });
 }

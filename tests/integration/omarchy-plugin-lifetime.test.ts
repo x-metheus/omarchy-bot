@@ -4,6 +4,8 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pairForToken } from "./helpers/harness.ts";
+import { BROWSER_ASSETS_RELEASE } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
+import { runnableBrowserFiles } from "./helpers/browserPackFixture.ts";
 
 const projectRoot = path.resolve(import.meta.dir, "../..");
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -124,11 +126,17 @@ process.once("SIGINT",async()=>{await daemon.stop();process.exit(0)});
     "scripts/serve.sh": readFileSync(path.join(projectRoot, "scripts/serve.sh"), "utf8"),
     "apps/daemon/src/bootstrap/main.ts": daemon,
   };
-  for (const name of ["main", "layout", "archive", "lifecycle"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
-  for (const name of ["swayRuntimeSupply", "botComputerAssets"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
   files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(projectRoot, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   writeFileSync(env.ARCHIVE!, Bun.zstdCompressSync(await new Bun.Archive(files).bytes()));
   writeFileSync(`${env.ARCHIVE}.sha256`, `${createHash("sha256").update(readFileSync(env.ARCHIVE!)).digest("hex")}  runtime.tar.zst\n`);
+  const pack = path.join(root, "browser.tar.zst");
+  writeFileSync(pack, Bun.zstdCompressSync(await new Bun.Archive({ ".omarchy-bot-browser-pack": `${BROWSER_ASSETS_RELEASE}\n`, ...runnableBrowserFiles() }).bytes()));
+  const hook = path.join(root, "pack-fetch.ts");
+  writeFileSync(hook, `const original=globalThis.fetch; globalThis.fetch=async(input,init)=>{const url=String(input); if(!url.startsWith("https://github.com/XMethues/omarchy-bot/releases/download/runtime-fixture-revision/omarchy-bot-browser-")) return original(input,init); const response=new Response(url.endsWith(".sha256")?${JSON.stringify(createHash("sha256").update(readFileSync(pack)).digest("hex"))}:Bun.file(${JSON.stringify(pack)}));Object.defineProperty(response,"url",{value:url});return response;};`);
+  shim(bin, "plugin-bun", `exec '${process.execPath}' --preload '${hook}' "$@"`);
+  env.OMARCHY_BOT_PLUGIN_BUN = path.join(bin, "plugin-bun");
   shim(bin, "curl", 'while [[ $1 != -o ]]; do shift; done\ndest=$2; url=$3\nif [[ $url == *.sha256 ]]; then cp "$ARCHIVE.sha256" "$dest"; else cp "$ARCHIVE" "$dest"; fi');
 
   const baseUrl = `http://127.0.0.1:${env.OMARCHY_BOT_PORT}`;

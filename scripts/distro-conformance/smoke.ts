@@ -12,6 +12,29 @@ async function until<T>(read: () => Promise<T | undefined>, label: string, timeo
   throw new Error(`Timed out: ${label}`);
 }
 
+export function createBrowserProbe() {
+  let latestSequence = 0;
+  const probe = {
+    typed: "",
+    focused: false,
+    fetch(request: Request): Response {
+      const url = new URL(request.url);
+      if (url.pathname === "/focused") { probe.focused = true; return new Response("ok"); }
+      if (url.pathname === "/typed") {
+        // Independent input-event fetches can arrive after a newer editor value.
+        const sequence = Number(url.searchParams.get("sequence"));
+        if (sequence > latestSequence) {
+          latestSequence = sequence;
+          probe.typed = url.searchParams.get("text") ?? "";
+        }
+        return new Response("ok");
+      }
+      return new Response(`${glyphProbeHtml()}<textarea autofocus style="position:absolute;left:0;top:150px;width:500px;height:300px" onfocus="fetch('/focused')" oninput="fetch('/typed?text='+encodeURIComponent(this.value)+'&sequence='+ ++sequence)"></textarea><script>let sequence = 0; document.querySelector('textarea').focus()</script>`, { headers: { "content-type": "text/html; charset=utf-8" } });
+    },
+  };
+  return probe;
+}
+
 /** The same public Service protocol runs against fixtures and every installed distribution. */
 export async function exerciseService(base: string, state: string, realBrowser = true): Promise<void> {
   const token = await pairForToken(base, state, "distribution smoke");
@@ -52,14 +75,8 @@ export async function exerciseService(base: string, state: string, realBrowser =
     return bytes;
   };
   await capture();
-  let typed = "";
-  let focused = false;
-  const page = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
-    const url = new URL(request.url);
-    if (url.pathname === "/focused") { focused = true; return new Response("ok"); }
-    if (url.pathname === "/typed") { typed = url.searchParams.get("text") ?? ""; return new Response("ok"); }
-    return new Response(`${glyphProbeHtml()}<textarea autofocus style="position:absolute;left:0;top:150px;width:500px;height:300px" onfocus="fetch('/focused')" oninput="fetch('/typed?text='+encodeURIComponent(this.value))"></textarea><script>document.querySelector('textarea').focus()</script>`, { headers: { "content-type": "text/html; charset=utf-8" } });
-  } });
+  const probe = createBrowserProbe();
+  const page = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: probe.fetch });
   try {
     await tool(`open_url:http://127.0.0.1:${page.port}/?label=DISTRO-SMOKE`);
     if (realBrowser) {
@@ -74,10 +91,16 @@ export async function exerciseService(base: string, state: string, realBrowser =
       }
     }
     // The local page owns focus; waiting for its acknowledgement avoids typing into browser chrome.
-    if (realBrowser) await until(async () => focused ? true : undefined, "browser editor focus");
+    if (realBrowser) await until(async () => probe.focused ? true : undefined, "browser editor focus");
     await tool("type:distribution smoke: 你好");
-    if (realBrowser) await until(async () => typed === "distribution smoke: 你好" ? true : undefined, "typed text in browser");
-  } finally { page.stop(true); }
+    if (realBrowser) await until(async () => probe.typed === "distribution smoke: 你好" ? true : undefined, "typed text in browser");
+  } catch (error) {
+    const windows = await tool("list_windows").catch(error => `Unavailable: ${error}`);
+    console.error("Distribution browser probe failed:", JSON.stringify({ typed: probe.typed, focused: probe.focused, windows }));
+    throw error;
+  } finally {
+    page.stop(true);
+  }
   console.log("PASS install/serve/pair/screen/capture/open_url/type");
 }
 

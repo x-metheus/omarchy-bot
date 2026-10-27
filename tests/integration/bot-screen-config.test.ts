@@ -49,6 +49,7 @@ test("selects the measured 720p Bot Screen fallback from configuration", () => {
     botScreenLogicalHeight: 720,
     botScreenSwayRuntimeSupplyDir: path.join(temporaryRoot, "data", "runtime", "current", "sway"),
     botComputerFontSupplyDir: path.join(temporaryRoot, "data", "runtime", "current", "fonts"),
+    botComputerBrowserPackDir: path.join(temporaryRoot, "data", "runtime", "browser"),
   });
   expect(loadConfig()).not.toHaveProperty("botScreenRuntimeSupplyDir");
 });

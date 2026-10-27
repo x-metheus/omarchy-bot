@@ -467,7 +467,7 @@ export function explicitEnvironment(input: {
     MOZ_ENABLE_WAYLAND: "1",
     QT_QPA_PLATFORM: "wayland",
   };
-  for (const key of ["OMARCHY_COMPUTER_BIN", "OMARCHY_BOT_COMPUTER_BIN"]) {
+  for (const key of ["OMARCHY_COMPUTER_BIN", "OMARCHY_BOT_COMPUTER_BIN", "OMARCHY_BOT_BROWSER"]) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }

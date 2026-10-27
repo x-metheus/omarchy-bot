@@ -25,13 +25,14 @@ export OMARCHY_BOT_SCREEN_PROFILE=720p OMARCHY_BOT_SCREEN_CAPACITY=2
 unset DISPLAY WAYLAND_DISPLAY SWAYSOCK DBUS_SESSION_BUS_ADDRESS HYPRLAND_INSTANCE_SIGNATURE
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$OMARCHY_BOT_HOME" "$OMARCHY_BOT_STATE"
 current=$OMARCHY_BOT_HOME/runtime/current
-bun /src/scripts/distro-conformance/install.ts /bundle/runtime.tar.zst "$current"
+bun /src/scripts/distro-conformance/install.ts /bundle/runtime.tar.zst "$current" /bundle/browser.tar.zst
 # Tests resolve application imports against the installed archive, never the checkout.
 cp -R /src/tests "$current/tests"
 mkdir -p "$current/scripts/distro-conformance"
 cp /src/scripts/distro-conformance/smoke.ts "$current/scripts/distro-conformance/"
 export OMARCHY_BOT_WORKERS_DIR=$current/tests/integration/fake-workers
 export OMARCHY_BOT_SWAY_BUNDLE_DIR=$current/sway OMARCHY_BOT_DISTRO_SWAY_DIR=$current/sway OMARCHY_BOT_FONT_DIR=$current/fonts
+export OMARCHY_BOT_BROWSER_PACK_DIR=$OMARCHY_BOT_HOME/runtime/browser
 export OMARCHY_BOT_SWAY_BIN=$current/sway/bin/sway OMARCHY_BOT_SWAYMSG_BIN=$current/sway/bin/swaymsg
 export OMARCHY_BOT_WLR_RANDR_BIN=$current/sway/bin/wlr-randr OMARCHY_BOT_WAYVNC_BIN=$current/sway/bin/wayvnc
 export OMARCHY_BOT_GRIM_BIN=$current/sway/bin/grim OMARCHY_BOT_DBUS_DAEMON_BIN=$current/sway/bin/dbus-daemon

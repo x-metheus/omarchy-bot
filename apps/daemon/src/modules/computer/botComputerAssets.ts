@@ -1,17 +1,11 @@
 import {
-  chmodSync,
-  existsSync,
   mkdirSync,
   readFileSync,
-  renameSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { createReadStream } from "node:fs";
-import { inflateRawSync } from "node:zlib";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 
 export interface PinnedAsset {
   name: string;
@@ -184,24 +178,17 @@ export const BROWSER_ASSETS_RELEASE = "chrome-for-testing-156.0.8078.47-linux64"
 
 const READY_FILE = ".omarchy-bot-assets";
 const LOADER = "ld-linux-x86-64.so.2";
-const DOWNLOAD_TIMEOUT_MS = 600_000;
 
 export interface BotComputerAssetSupply {
   ensureFonts(): Promise<{ fontConfigFile: string }>;
   ensureBrowser(): Promise<{ browserBin: string }>;
 }
 
-type AssetFetch = (url: string, init?: RequestInit) => Promise<Response>;
-
 export interface PortableBotComputerAssetsOptions {
   profileDir: string;
   fontDir?: string;
-  browser?: PinnedAsset;
-  libraries?: readonly PinnedAsset[];
+  browserPackDir?: string;
   fonts?: readonly FontAsset[];
-  fetch?: AssetFetch;
-  platform?: string;
-  arch?: string;
 }
 
 function isFile(candidate: string): boolean {
@@ -214,8 +201,8 @@ function isFile(candidate: string): boolean {
 
 function isExecutableFile(candidate: string): boolean {
   try {
-    const mode = statSync(candidate).mode;
-    return statSync(candidate).isFile() && (mode & 0o111) !== 0;
+    const stat = statSync(candidate);
+    return stat.isFile() && stat.size > 0 && (stat.mode & 0o111) !== 0;
   } catch {
     return false;
   }
@@ -227,251 +214,6 @@ async function sha256(filePath: string): Promise<string> {
   return hasher.digest("hex");
 }
 
-/** Writes one archive member below `destination`, refusing traversal. */
-function writeMember(
-  destination: string,
-  member: string,
-  bytes: Uint8Array,
-  mode?: number,
-): void {
-  const target = path.resolve(destination, member);
-  if (target !== destination && !target.startsWith(`${destination}${path.sep}`)) {
-    throw new Error(`archive member escapes its destination: ${member}`);
-  }
-  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  writeFileSync(target, bytes, mode === undefined ? undefined : { mode });
-  if (mode !== undefined) chmodSync(target, mode);
-}
-
-/**
- * Reads a ZIP central directory and inflates each entry. Bun's archive reader
- * handles tar but not ZIP, and a browser download is the only ZIP this module
- * needs, so the two ZIP methods it can contain (stored and deflate) are
- * decoded here instead of adding a dependency.
- */
-function extractZip(archivePath: string, destination: string): void {
-  const archive = new Uint8Array(readFileSync(archivePath));
-  const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
-  let end = archive.byteLength - 22;
-  while (end >= 0 && view.getUint32(end, true) !== 0x06054b50) end -= 1;
-  if (end < 0) throw new Error(`${path.basename(archivePath)} is not a ZIP archive`);
-  const count = view.getUint16(end + 10, true);
-  let offset = view.getUint32(end + 16, true);
-  for (let index = 0; index < count; index += 1) {
-    if (view.getUint32(offset, true) !== 0x02014b50) {
-      throw new Error(`${path.basename(archivePath)} has a corrupt central directory`);
-    }
-    const method = view.getUint16(offset + 10, true);
-    const compressedSize = view.getUint32(offset + 20, true);
-    const nameLength = view.getUint16(offset + 28, true);
-    const extraLength = view.getUint16(offset + 30, true);
-    const commentLength = view.getUint16(offset + 32, true);
-    const localOffset = view.getUint32(offset + 42, true);
-    const name = new TextDecoder().decode(
-      archive.subarray(offset + 46, offset + 46 + nameLength),
-    );
-    offset += 46 + nameLength + extraLength + commentLength;
-    if (name.endsWith("/")) continue;
-    if (view.getUint32(localOffset, true) !== 0x04034b50) {
-      throw new Error(`${path.basename(archivePath)} has a corrupt local header for ${name}`);
-    }
-    const dataStart = localOffset
-      + 30
-      + view.getUint16(localOffset + 26, true)
-      + view.getUint16(localOffset + 28, true);
-    const data = archive.subarray(dataStart, dataStart + compressedSize);
-    if (method === 0) writeMember(destination, name, data);
-    else if (method === 8) writeMember(destination, name, inflateRawSync(data));
-    else throw new Error(`${name} uses unsupported ZIP compression method ${method}`);
-  }
-}
-
-/**
- * Unpacks the ELF libraries from a Debian package's `data.tar.zst` member into
- * a flat directory. Debian's `ar` container is a flat record list of
- * length-prefixed records, so every read is bounds-checked before it happens.
- *
- * Packaging splits a library into a real file (`ld-2.39.so`) plus symlinks
- * (`ld-linux-x86-64.so.2`), but the browser's loader needs the symlink names,
- * so each link is materialized as a copy of the file it points to.
- */
-function extractDeb(archivePath: string, destination: string): void {
-  const archive = new Uint8Array(readFileSync(archivePath));
-  const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
-  if (archive.byteLength < 8 || view.getBigUint64(0, false) !== 0x213c617263683e0an) {
-    throw new Error(`${path.basename(archivePath)} is not a Debian package`);
-  }
-  let offset = 8;
-  while (offset + 60 <= archive.byteLength) {
-    const name = new TextDecoder().decode(archive.subarray(offset, offset + 16)).trimEnd();
-    const size = Number(
-      new TextDecoder().decode(archive.subarray(offset + 48, offset + 58)).trim(),
-    );
-    const start = offset + 60;
-    const end = start + size;
-    if (!Number.isSafeInteger(size) || end > archive.byteLength) {
-      throw new Error(`${path.basename(archivePath)} has a truncated ${name} member`);
-    }
-    if (name.startsWith("data.tar")) {
-      if (!name.endsWith(".zst")) {
-        throw new Error(`${path.basename(archivePath)} must use a zstd data member`);
-      }
-      extractLibraries(Bun.zstdDecompressSync(archive.subarray(start, end)), destination);
-      return;
-    }
-    offset = end + (size % 2);
-  }
-  throw new Error(`${path.basename(archivePath)} has no data.tar.zst member`);
-}
-
-/** `<any>/lib/x86_64-linux-gnu/<name>` or `.../nss/<name>`, `.../pulseaudio/<name>`. */
-const LIBRARY_MEMBER =
-  /(?:^|\/)lib\/x86_64-linux-gnu\/(?:nss\/|pulseaudio\/)?([^/]+)$/;
-
-function extractLibraries(tar: Uint8Array, destination: string): void {
-  const links = new Map<string, string>();
-  let offset = 0;
-  while (offset + 512 <= tar.byteLength) {
-    const header = tar.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) break;
-    const name = tarString(header.subarray(0, 100));
-    const prefix = tarString(header.subarray(345, 500));
-    const size = Number.parseInt(tarString(header.subarray(124, 136)) || "0", 8);
-    const type = String.fromCharCode(header[156] ?? 0);
-    const linkName = tarString(header.subarray(157, 257));
-    const mode = Number.parseInt(tarString(header.subarray(100, 108)) || "0", 8);
-    offset += 512;
-    if (!Number.isSafeInteger(size) || size < 0 || offset + size > tar.byteLength) {
-      throw new Error(`library archive has a truncated ${prefix}/${name} member`);
-    }
-    const data = tar.subarray(offset, offset + size);
-    offset += Math.ceil(size / 512) * 512;
-    const member = LIBRARY_MEMBER.exec(prefix === "" ? name : `${prefix}/${name}`);
-    if (member === null) continue;
-    const library = member[1] as string;
-    if (type === "2") links.set(library, path.basename(linkName));
-    else if (type === "0" || type === "\0") {
-      writeMember(destination, library, data, mode === 0 ? undefined : mode);
-    }
-  }
-  for (const [library, target] of links) {
-    const resolved = path.join(destination, target);
-    if (!isFile(resolved)) continue;
-    writeMember(destination, library, readFileSync(resolved), 0o755);
-  }
-}
-
-function tarString(bytes: Uint8Array): string {
-  const zero = bytes.indexOf(0);
-  return new TextDecoder().decode(zero < 0 ? bytes : bytes.subarray(0, zero));
-}
-/**
- * Points a browser ELF at the bundle's own loader. The kernel reads
- * `PT_INTERP` by file offset; glibc also reads that string by virtual
- * address (`load_bias + p_vaddr`) and compares it while loading. The path
- * is therefore stored inside a mapped segment, not merely appended.
- *
- * Because the executable itself names the loader, Chromium's normal zygote,
- * renderer, and crash-handler re-exec of `/proc/self/exe` all start under the
- * bundled loader, and the ordinary Chromium sandbox stays enabled.
- *
- * shortcut: the recorded interpreter is an absolute path inside the profile,
- * so a bundle cannot be relocated after publication; regenerate it instead.
- */
-function patchInterpreter(filePath: string, interpreter: string): boolean {
-  const file = readFileSync(filePath);
-  const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
-  if (file.byteLength < 64 || view.getUint32(0, false) !== 0x7f454c46 || file[4] !== 2) {
-    return false;
-  }
-  const littleEndian = file[5] === 1;
-  const programOffset = Number(view.getBigUint64(32, littleEndian));
-  const entrySize = view.getUint16(54, littleEndian);
-  const entryCount = view.getUint16(56, littleEndian);
-  if (entrySize < 56 || programOffset < 0) return false;
-  const pathBytes = new TextEncoder().encode(`${interpreter}\0`);
-  let interp = -1;
-  let loadOffset = 0;
-  let loadAddress = 0;
-  let loadFileEnd = 0;
-  let loadMemoryEnd = 0;
-  let loadAlign = 0x1000;
-  let maxFileEnd = 0;
-  for (let index = 0; index < entryCount; index += 1) {
-    const entry = programOffset + index * entrySize;
-    if (entry + 56 > file.byteLength) return false;
-    const type = view.getUint32(entry, littleEndian);
-    if (type === 3) interp = entry;
-    if (type !== 1) continue;
-    const offset = Number(view.getBigUint64(entry + 8, littleEndian));
-    const address = Number(view.getBigUint64(entry + 16, littleEndian));
-    const fileSize = Number(view.getBigUint64(entry + 32, littleEndian));
-    const memorySize = Number(view.getBigUint64(entry + 40, littleEndian));
-    const align = Number(view.getBigUint64(entry + 48, littleEndian));
-    const fileEnd = offset + fileSize;
-    const memoryEnd = address + Math.max(fileSize, memorySize);
-    if (fileEnd > maxFileEnd) maxFileEnd = fileEnd;
-    if (memoryEnd >= loadMemoryEnd) {
-      loadOffset = offset;
-      loadAddress = address;
-      loadFileEnd = fileEnd;
-      loadMemoryEnd = memoryEnd;
-      if (align >= 0x1000) loadAlign = align;
-    }
-  }
-  // A later load would be dropped, and bytes past the file size are section
-  // headers that must not initialize the BSS.
-  if (interp < 0 || loadFileEnd === 0 || maxFileEnd !== loadFileEnd) return false;
-  const memoryExtent = loadOffset + (loadMemoryEnd - loadAddress);
-  const placement = Math.ceil(memoryExtent / loadAlign) * loadAlign;
-  if (placement < loadFileEnd) return false;
-  // The kernel maps whole pages. A short final page reads past the file and
-  // fails the exec, so the span is rounded up and fully backed.
-  const span = Math.ceil(pathBytes.byteLength / loadAlign) * loadAlign;
-  const patched = new Uint8Array(placement + span);
-  patched.set(file.subarray(0, Math.min(file.byteLength, loadFileEnd)));
-  patched.set(pathBytes, placement);
-  const patchedView = new DataView(patched.buffer);
-  const address = BigInt(loadAddress + (placement - loadOffset));
-  patchedView.setBigUint64(interp + 8, BigInt(placement), littleEndian);
-  patchedView.setBigUint64(interp + 16, address, littleEndian);
-  patchedView.setBigUint64(interp + 32, BigInt(pathBytes.byteLength), littleEndian);
-  patchedView.setBigUint64(interp + 40, BigInt(pathBytes.byteLength), littleEndian);
-  // Grow the segment that contains the string so the address glibc reads is mapped.
-  let extended = false;
-  for (let index = 0; index < entryCount; index += 1) {
-    const entry = programOffset + index * entrySize;
-    if (patchedView.getUint32(entry, littleEndian) !== 1) continue;
-    const offset = Number(patchedView.getBigUint64(entry + 8, littleEndian));
-    if (offset !== loadOffset) continue;
-    const fileSize = BigInt(placement - loadOffset + span);
-    const memorySize = patchedView.getBigUint64(entry + 40, littleEndian);
-    patchedView.setBigUint64(entry + 32, fileSize, littleEndian);
-    if (memorySize < fileSize) patchedView.setBigUint64(entry + 40, fileSize, littleEndian);
-    const flags = patchedView.getUint32(entry + 4, littleEndian);
-    patchedView.setUint32(entry + 4, flags | 4, littleEndian);
-    extended = true;
-  }
-  if (!extended) return false;
-  writeFileSync(filePath, patched, { mode: 0o755 });
-  return true;
-}
-
-/**
- * The launcher only supplies the library search path: the browser ELF already
- * names the bundled loader, so Chromium's own child processes start correctly
- * without any command-prefix rewriting and without `--no-zygote`.
- */
-function browserShim(): string {
-  return [
-    "#!/bin/sh",
-    "here=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)",
-    "LD_LIBRARY_PATH=\"$here/libs\"",
-    "export LD_LIBRARY_PATH",
-    "exec \"$here/chrome-linux64/chrome\" \"$@\"",
-    "",
-  ].join("\n");
-}
 
 /**
  * A font configuration that reads only the supplied runtime fonts and keeps
@@ -502,32 +244,20 @@ function fontConfig(fontDir: string, cacheDir: string): string {
   ].join("\n");
 }
 
-/**
- * Lazily provisions the portable browser and verifies the installed Latin/CJK
- * fonts. Only browser assets, fontconfig, and its cache are written in the
- * profile; the constructor performs no I/O.
- */
+/** Resolves installed browser assets and verifies runtime fonts without network access. */
 export class PortableBotComputerAssets implements BotComputerAssetSupply {
   readonly #profileDir: string;
   readonly #fontDir: string | undefined;
-  readonly #browser: PinnedAsset;
-  readonly #libraries: readonly PinnedAsset[];
+  readonly #browserPackDir: string | undefined;
   readonly #fonts: readonly FontAsset[];
-  readonly #fetch: AssetFetch;
-  readonly #platform: string;
-  readonly #arch: string;
   #fontsInFlight: Promise<{ fontConfigFile: string }> | undefined;
   #browserInFlight: Promise<{ browserBin: string }> | undefined;
 
   constructor(options: PortableBotComputerAssetsOptions) {
     this.#profileDir = options.profileDir;
     this.#fontDir = options.fontDir;
-    this.#browser = options.browser ?? BROWSER_ASSET;
-    this.#libraries = options.libraries ?? BROWSER_LIBRARY_ASSETS;
+    this.#browserPackDir = options.browserPackDir;
     this.#fonts = options.fonts ?? FONT_ASSETS;
-    this.#fetch = options.fetch ?? fetch;
-    this.#platform = options.platform ?? process.platform;
-    this.#arch = options.arch ?? process.arch;
   }
 
   ensureFonts(): Promise<{ fontConfigFile: string }> {
@@ -582,135 +312,16 @@ export class PortableBotComputerAssets implements BotComputerAssetSupply {
   }
 
   async #provisionBrowser(): Promise<{ browserBin: string }> {
-    if (this.#platform !== "linux" || this.#arch !== "x64") {
-      throw new Error(
-        `portable browser provisioning requires Linux on x64 (found ${this.#platform} ${this.#arch})`,
-      );
-    }
-    const bundle = path.join(this.#assetsDir, "browser-bundle");
-    const browserBin = path.join(bundle, "browser");
-    const ready = this.#readyBrowser(browserBin);
-    if (ready !== undefined) return ready;
-
-    mkdirSync(this.#assetsDir, { recursive: true, mode: 0o700 });
-    // An older build could leave a bundle whose loader lost its exec bit. Move
-    // it aside atomically rather than deleting the published path, so a
-    // concurrent publisher never races a deletion.
-    let stale: string | undefined;
-    if (existsSync(bundle) && !isExecutableFile(path.join(bundle, "libs", LOADER))) {
-      stale = `${bundle}.stale-${randomUUID()}`;
-      renameSync(bundle, stale);
-    }
-    const staging = path.join(this.#assetsDir, `.stage-${process.pid}-${randomUUID()}`);
-    mkdirSync(staging, { recursive: true, mode: 0o700 });
-    try {
-      const archivePath = path.join(staging, "browser.zip");
-      await this.#downloadVerified(this.#browser, archivePath);
-      extractZip(archivePath, staging);
-      rmSync(archivePath, { force: true });
-
-      const libraryDir = path.join(staging, "libs");
-      mkdirSync(libraryDir, { recursive: true, mode: 0o700 });
-      for (const [index, library] of this.#libraries.entries()) {
-        const packagePath = path.join(staging, `${index}.deb`);
-        await this.#downloadVerified(library, packagePath);
-        extractDeb(packagePath, libraryDir);
-        rmSync(packagePath, { force: true });
-      }
-
-      if (!isFile(path.join(staging, "chrome-linux64", "chrome"))) {
-        throw new Error("portable browser archive did not contain chrome-linux64/chrome");
-      }
-      const loader = path.join(libraryDir, LOADER);
-      if (!isFile(loader)) {
-        throw new Error(`portable browser libraries did not provide ${LOADER}`);
-      }
-      // The loader is what the kernel starts, so its exec bit is mandatory
-      // regardless of what mode the package's tar header recorded.
-      chmodSync(loader, 0o755);
-      // Patch every browser ELF that names a loader. The path recorded is the
-      // bundle's published location, which is why publication is a plain
-      // rename of the same directory.
-      const publishedLoader = path.join(bundle, "libs", LOADER);
-      for (const binary of ["chrome", "chrome_crashpad_handler"]) {
-        const candidate = path.join(staging, "chrome-linux64", binary);
-        if (!isFile(candidate)) continue;
-        chmodSync(candidate, 0o755);
-        if (!patchInterpreter(candidate, publishedLoader)) {
-          throw new Error(`${binary} does not name a dynamic loader to redirect`);
-        }
-      }
-      const shim = path.join(staging, "browser");
-      writeFileSync(shim, browserShim(), { mode: 0o700 });
-      chmodSync(shim, 0o700);
-
-      writeFileSync(path.join(staging, READY_FILE), `${BROWSER_ASSETS_RELEASE}\n`, { mode: 0o600 });
+    const bundle = this.#browserPackDir;
+    if (bundle !== undefined) {
+      const browserBin = path.join(bundle, "browser");
       try {
-        renameSync(staging, bundle);
-      } catch (error) {
-        const concurrentlyPublished = this.#readyBrowser(browserBin);
-        if (concurrentlyPublished !== undefined) return concurrentlyPublished;
-        throw error;
-      }
-      const published = this.#readyBrowser(browserBin);
-      if (published === undefined) {
-        throw new Error(`portable browser at ${browserBin} was not complete after publication`);
-      }
-      return published;
-    } catch (error) {
-      throw new Error(
-        `unable to provision the portable browser under ${this.#assetsDir}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
-    } finally {
-      rmSync(staging, { recursive: true, force: true });
-      if (stale !== undefined) rmSync(stale, { recursive: true, force: true });
+        if (readFileSync(path.join(bundle, READY_FILE), "utf8") === `${BROWSER_ASSETS_RELEASE}\n`
+          && isExecutableFile(browserBin)
+          && isExecutableFile(path.join(bundle, "chrome-linux64", "chrome"))
+          && isExecutableFile(path.join(bundle, "libs", LOADER))) return { browserBin };
+      } catch {}
     }
-  }
-
-  #readyBrowser(browserBin: string): { browserBin: string } | undefined {
-    const bundle = path.join(this.#assetsDir, "browser-bundle");
-    try {
-      if (readFileSync(path.join(bundle, READY_FILE), "utf8") !== `${BROWSER_ASSETS_RELEASE}\n`) {
-        return undefined;
-      }
-      if (!isExecutableFile(browserBin)) return undefined;
-      if (!isFile(path.join(bundle, "chrome-linux64", "chrome"))) return undefined;
-      // A cached bundle with a non-executable loader cannot run, so it must be replaced.
-      if (!isExecutableFile(path.join(bundle, "libs", LOADER))) return undefined;
-      return { browserBin };
-    } catch {
-      return undefined;
-    }
-  }
-
-  async #downloadVerified(asset: PinnedAsset, destination: string): Promise<void> {
-    if (!asset.url.startsWith("https://")) {
-      throw new Error(`${asset.name} must be downloaded over HTTPS`);
-    }
-    let response: Response;
-    try {
-      response = await this.#fetch(asset.url, {
-        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-      });
-    } catch (error) {
-      throw new Error(
-        `could not download ${asset.name} from ${asset.url}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
-    }
-    if (!response.ok) {
-      throw new Error(`could not download ${asset.name} from ${asset.url}: HTTP ${response.status}`);
-    }
-    const partial = `${destination}.partial`;
-    await Bun.write(partial, response);
-    const actual = await sha256(partial);
-    if (actual !== asset.sha256) {
-      rmSync(partial, { force: true });
-      throw new Error(
-        `${asset.name} failed SHA-256 verification (expected ${asset.sha256}, received ${actual})`,
-      );
-    }
-    renameSync(partial, destination);
+    throw new Error("No installed browser pack. Run omarchy-bot update --archive <path> --checksum <path> --browser-pack <file-or-https-url>, or set OMARCHY_BOT_BROWSER=host to use a host browser.");
   }
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { listenerConfig } from "../../daemon/src/bootstrap/listenerConfig.ts";
 import { assertNotRoot, extractRuntimeArchive, verifyChecksum } from "./archive.ts";
 import { layoutFromEnv, serviceFetch, serviceOrigin, type Layout } from "./layout.ts";
@@ -9,8 +10,8 @@ import { checkConfigurationOverrides, checkLauncher, doctorText, installLauncher
 const commands = ["install", "start", "stop", "status", "pair", "devices", "revoke", "update", "reconfigure", "uninstall", "doctor"];
 const tlsUsage = "[--tls-cert <path> --tls-key <path>] [--trusted-proxy <address>]";
 const usage: Record<string, string> = {
-  install: `--archive <path> --checksum <path> ${tlsUsage}`,
-  update: `--archive <path> --checksum <path> ${tlsUsage}`,
+  install: `--archive <path> --checksum <path> [--no-browser-pack] [--browser-pack <file-or-https-url>] ${tlsUsage}`,
+  update: `--archive <path> --checksum <path> [--no-browser-pack] [--browser-pack <file-or-https-url>] ${tlsUsage}`,
   reconfigure: tlsUsage,
   revoke: "<id>",
 };
@@ -72,18 +73,31 @@ export async function run(
         assertNotRoot();
         let archive: string | undefined;
         let checksum: string | undefined;
+        let browserPack: string | undefined;
+        let noBrowserPack = false;
         const configured = { ...layout.env };
         const tlsFlags: Record<string, string> = { "--tls-cert": "OMARCHY_BOT_TLS_CERT", "--tls-key": "OMARCHY_BOT_TLS_KEY", "--trusted-proxy": "OMARCHY_BOT_TRUSTED_PROXY" };
-        for (let index = 0; index < args.length; index += 2) {
+        for (let index = 0; index < args.length; index += 1) {
           const flag = args[index];
+          if (flag === "--no-browser-pack" && command !== "reconfigure") { noBrowserPack = true; continue; }
           const value = args[index + 1];
-          if ((flag !== "--archive" && flag !== "--checksum" && !tlsFlags[flag!]) || value === undefined || value.startsWith("--") || (command === "reconfigure" && !tlsFlags[flag!])) {
-            io.error(`Usage: omarchy-bot ${command} ${command === "reconfigure" ? "" : "--archive <path> --checksum <path> "}[--tls-cert <path> --tls-key <path>] [--trusted-proxy <address>]`);
+          if ((flag !== "--archive" && flag !== "--checksum" && flag !== "--browser-pack" && !tlsFlags[flag!]) || value === undefined || value.startsWith("--") || (command === "reconfigure" && !tlsFlags[flag!])) {
+            io.error(`Usage: omarchy-bot ${command} ${usage[command]}`);
             return 2;
           }
           if (flag === "--archive") archive = value;
           else if (flag === "--checksum") checksum = value;
+          else if (flag === "--browser-pack") browserPack = value;
           else configured[tlsFlags[flag!]!] = value;
+          index += 1;
+        }
+        if (noBrowserPack && browserPack !== undefined) {
+          io.error("--no-browser-pack cannot be combined with --browser-pack");
+          return 2;
+        }
+        if (configured.OMARCHY_BOT_BROWSER && configured.OMARCHY_BOT_BROWSER !== "host") {
+          io.error("OMARCHY_BOT_BROWSER must be host or empty to use the browser pack");
+          return 2;
         }
         if (Boolean(configured.OMARCHY_BOT_TLS_CERT) !== Boolean(configured.OMARCHY_BOT_TLS_KEY)) {
           io.error("--tls-cert and --tls-key must both be set (or both empty to disable TLS)");
@@ -116,28 +130,78 @@ export async function run(
         const archiveChecksum = reuse ? undefined : verifyChecksum(archive, checksum);
         if (!userManagerAvailable(env)) throw new Error("A user systemd manager is required ($XDG_RUNTIME_DIR/systemd/private)");
         checkLauncher(layout);
-        if (!reuse) {
-          const staging = join(layout.runtimeDir, `staging-${process.pid}`);
-          rmSync(staging, { recursive: true, force: true });
-          try {
+        const staging = join(layout.runtimeDir, `staging-${process.pid}`);
+        const stagedBrowser = join(layout.runtimeDir, `browser-staging-${process.pid}`);
+        const previousRuntime = join(layout.runtimeDir, `previous-${process.pid}`);
+        const previousBrowser = join(layout.runtimeDir, `browser-previous-${process.pid}`);
+        let runtimeChanged = false;
+        let browserChanged = false;
+        let stopped = false;
+        try {
+          if (!reuse) {
             extractRuntimeArchive(archive, staging);
+            if (!statSync(join(staging, "scripts/serve.sh")).isFile()) throw new Error("runtime archive has no Service entrypoint");
             writeFileSync(join(staging, ".archive-sha256"), `${archiveChecksum}\n`, { mode: 0o644 });
-            if (command === "update") {
-              await stopUnit(layout, env).catch(error => {
-                if (!/not loaded|not found|does not exist/i.test(error.message)) throw error;
-              });
-              rmSync(layout.currentDir, { recursive: true, force: true });
+            writeFileSync(join(staging, ".runtime-archive"), `${basename(archive)}\n`, { mode: 0o644 });
+          }
+          if (!noBrowserPack) {
+            const target = reuse ? layout.currentDir : staging;
+            // Only the verified target archive (or retained runtime) knows its browser modules and pins.
+            const { PortableBotComputerAssets } = await import(pathToFileURL(join(target, "apps/daemon/src/modules/computer/botComputerAssets.ts")).href);
+            const { browserPackReleaseUrl, installBrowserPack } = await import(pathToFileURL(join(target, "apps/cli/src/browserPack.ts")).href);
+            const { prepareBrowserPack } = await import(pathToFileURL(join(target, "apps/daemon/src/modules/computer/browserPack.ts")).href);
+            const usable = await new PortableBotComputerAssets({ profileDir: layout.screensDir, browserPackDir: layout.browserPackDir }).ensureBrowser().then(async ({ browserBin }: { browserBin: string }) => {
+              try {
+                const child = Bun.spawn([browserBin, "--version"], { env: layout.env, stdout: "ignore", stderr: "ignore" });
+                return await child.exited === 0;
+              } catch { return false; }
+            }, () => false);
+            if (!usable) {
+              const runtimeArchive = reuse && !browserPack ? readFileSync(join(target, ".runtime-archive"), "utf8").trim() : archive;
+              await installBrowserPack(browserPack ?? browserPackReleaseUrl(runtimeArchive), stagedBrowser);
+              // Retained installers only know the staging path; relocate before publication.
+              prepareBrowserPack(stagedBrowser, layout.browserPackDir);
             }
+          }
+          if (!reuse && command === "update") {
+            await stopUnit(layout, env).catch(error => {
+              if (!/not loaded|not found|does not exist/i.test(error.message)) throw error;
+            });
+            stopped = true;
+          }
+          if (existsSync(stagedBrowser)) {
+            if (existsSync(layout.browserPackDir)) renameSync(layout.browserPackDir, previousBrowser);
+            browserChanged = true;
+            renameSync(stagedBrowser, layout.browserPackDir);
+          }
+          if (!reuse) {
+            if (existsSync(layout.currentDir)) renameSync(layout.currentDir, previousRuntime);
+            runtimeChanged = true;
             renameSync(staging, layout.currentDir);
-          } finally {
-            rmSync(staging, { recursive: true, force: true });
+          }
+        } catch (error) {
+          if (runtimeChanged) {
+            rmSync(layout.currentDir, { recursive: true, force: true });
+            if (existsSync(previousRuntime)) renameSync(previousRuntime, layout.currentDir);
+          }
+          if (browserChanged) {
+            rmSync(layout.browserPackDir, { recursive: true, force: true });
+            if (existsSync(previousBrowser)) renameSync(previousBrowser, layout.browserPackDir);
+          }
+          if (stopped) await startUnit(layout, env);
+          throw error;
+        } finally {
+          for (const directory of [staging, stagedBrowser]) rmSync(directory, { recursive: true, force: true });
+          if (existsSync(layout.runtimeDir) && !existsSync(layout.currentDir) && !existsSync(layout.browserPackDir)) {
+            try { rmdirSync(layout.runtimeDir); } catch {}
           }
         }
+        for (const directory of [previousRuntime, previousBrowser]) rmSync(directory, { recursive: true, force: true });
         installLauncher(layout);
         if (!existsSync(layout.unitPath)) {
           await installUnit(layout, env);
           if (command === "update") await startUnit(layout, env);
-        } else if (Object.values(tlsFlags).some(key => env[key] !== undefined) || args.some(arg => Boolean(tlsFlags[arg]))) await reconfigureUnit(layout, env, () => waitForHealth(layout));
+        } else if (env.OMARCHY_BOT_BROWSER !== undefined || Object.values(tlsFlags).some(key => env[key] !== undefined) || args.some(arg => Boolean(tlsFlags[arg]))) await reconfigureUnit(layout, env, () => waitForHealth(layout));
         else await startUnit(layout, env);
         await waitForHealth(layout);
         const url = await pairingUrl(layout);

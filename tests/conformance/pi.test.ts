@@ -1,466 +1,61 @@
-/**
- * Pi Agent conformance suite (agents-integration.md §6, ten steps) — the Gate 1
- * gatekeeper. Runs against the REAL Pi worker (real model calls via the user's
- * Pi credentials) and the REAL computer worker. On success it writes the
- * versioned conformance record that flips the Pi Agent to `ready`.
- *
- *   1. temp cwd + session            6. attachments (text file + 1×1 PNG)
- *   2. streamed fixed text           7. close → resume → history
- *   3. read-only tool lifecycle      8. worker exit leaves no orphans
- *   4. native write tool lifecycle    9. capability inventory / event mapping
- *   5. mid-turn cancel + steer      10. Real Pi computer tool via owning Broker
- */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { expect, test } from "bun:test";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WorkerClient } from "../../apps/daemon/src/supervision/workerClient.ts";
-import { isAgentCapabilityInventory } from "../../packages/agent-contract/src/agent-protocol.ts";
-import { RED_PIXEL_PNG, startConformanceDaemon, type ConformanceDaemon } from "./helpers.ts";
-import { normalizeSessionEvent } from "../../workers/pi/src/normalize.ts";
-import type { SurfaceId } from "../../packages/domain/src/index.ts";
+import { createConformanceHome } from "./helpers.ts";
 
-let daemon: ConformanceDaemon;
-let pi: WorkerClient;
-let conformanceBot!: { id: string; surfaceId: SurfaceId };
-const events: { type: string; event: Record<string, unknown> }[] = [];
-const seenEventTypes = new Set<string>();
-const tempDirs: string[] = [];
-
-beforeAll(async () => {
-  daemon = await startConformanceDaemon();
-  pi = new WorkerClient({
-    name: "agent:pi",
-    script: path.resolve(import.meta.dir, "../../workers/pi/src/worker.ts"),
-    env: daemon.agentEnv,
-    onEvent: (event: { type: string }) => {
-      events.push({ type: event.type, event: event as unknown as Record<string, unknown> });
-      seenEventTypes.add(event.type);
-    },
-  });
-  await pi.start();
-}, 30_000);
-
-afterAll(async () => {
-  await pi?.stop().catch(() => {});
-  await daemon?.stop();
-  for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
-  // Gate 1 step 8: no orphan worker processes remain.
-  const proc = Bun.spawn(["pgrep", "-P", String(process.pid), "-fa", "worker.ts"]);
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  const stragglers = out.split("\n").filter((l) => l.includes("omarchy-bot/workers"));
-  expect(stragglers).toEqual([]);
-}, 20_000);
-
-/** Drive one turn and collect streamed output. */
-async function send(sessionId: string, text: string, attachments?: { id: string; name: string; path: string; mediaType: string }[]): Promise<number> {
-  const before = events.length;
-  const turnId = crypto.randomUUID();
-  const acceptance = await pi.request({
-    type: "message.send",
-    requestId: crypto.randomUUID(),
-    sessionId,
-    turnId,
-    message: { text, ...(attachments ? { attachments } : {}) },
-    computer: {
-      botId: conformanceBot.id,
-      turnId,
-      workerSessionId: sessionId,
-      surfaceId: conformanceBot.surfaceId,
-    },
-  }, 15_000);
-  expect(acceptance).toEqual({ accepted: true });
-  return before;
-}
-
-async function waitForEvent(before: number, pred: (e: { type: string; event: Record<string, unknown> }) => boolean, timeoutMs: number): Promise<{ type: string; event: Record<string, unknown> }> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const found = events.slice(before).find(pred);
-    if (found) return found;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for event (have: ${events.slice(before).map((e) => e.type).join(",")})`);
-    await Bun.sleep(150);
-  }
-}
-
-async function awaitTerminal(before: number, timeoutMs: number): Promise<{ type: string; event: Record<string, unknown> }[]> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const recent = events.slice(before);
-    if (recent.some((e) => e.type === "turn.completed" || e.type === "turn.cancelled" || e.type === "error")) {
-      return recent;
+test("Pi conformance keeps native sessions and readiness records in a private child home", async () => {
+  const parentHome = process.env.HOME;
+  const fixture = createConformanceHome();
+  try {
+    const child = Bun.spawn([process.execPath, "-e", `
+      import { SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
+      import { mkdirSync, writeFileSync } from "node:fs";
+      import os from "node:os";
+      import path from "node:path";
+      const session = SessionManager.create(process.cwd());
+      session.appendMessage({ role: "assistant", content: [{ type: "text", text: "fixture" }] });
+      const record = path.join(process.env.OMARCHY_BOT_HOME, "conformance", "pi-fixture.json");
+      mkdirSync(path.dirname(record), { recursive: true });
+      writeFileSync(record, JSON.stringify({ ok: true }));
+      console.log(JSON.stringify({ home: os.homedir(), agentDir: getAgentDir(), session: session.getSessionFile(), record }));
+    `], { cwd: path.resolve(import.meta.dir, "../../workers/pi"), env: fixture.env, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const locations = JSON.parse(stdout);
+    expect(locations.home).toBe(fixture.root);
+    expect(locations.agentDir).toBe(path.join(fixture.root, ".pi/agent"));
+    expect(locations.session.startsWith(path.join(fixture.root, ".pi/agent/sessions/"))).toBeTrue();
+    expect(existsSync(locations.session)).toBeTrue();
+    expect(locations.record).toBe(path.join(fixture.env.OMARCHY_BOT_HOME, "conformance/pi-fixture.json"));
+    expect(JSON.parse(readFileSync(locations.record, "utf8"))).toEqual({ ok: true });
+    expect(statSync(fixture.root).mode & 0o777).toBe(0o700);
+    for (const name of ["auth.json", "models.json", "settings.json"]) {
+      const file = path.join(locations.agentDir, name);
+      if (existsSync(file)) expect(statSync(file).mode & 0o777).toBe(0o600);
     }
-    if (Date.now() > deadline) throw new Error(`turn did not finish (events: ${recent.map((e) => e.type).join(",")})`);
-    await Bun.sleep(150);
+    expect(process.env.HOME).toBe(parentHome);
+    expect(os.homedir()).not.toBe(fixture.root);
+  } finally {
+    fixture.cleanup();
   }
-}
-
-async function turn(sessionId: string, text: string, opts: { attachments?: { id: string; name: string; path: string; mediaType: string }[]; timeoutMs?: number } = {}) {
-  const before = await send(sessionId, text, opts.attachments);
-  return awaitTerminal(before, opts.timeoutMs ?? 120_000);
-}
-
-function assistantText(recent: { type: string; event: Record<string, unknown> }[]): string {
-  let text = "";
-  for (const e of recent) {
-    if (e.type === "response.delta" && typeof e.event.text === "string") text += e.event.text;
-  }
-  return text;
-}
-
-describe("pi conformance (10 steps, real model)", () => {
-  test(
-    "all ten steps pass",
-    async () => {
-      // ---- Step 1: temp cwd + session ----
-      const version = await pi.request({ type: "probe", requestId: crypto.randomUUID() }, 30_000);
-      const agentVersion = version?.agentVersion;
-      if (typeof agentVersion !== "string" || agentVersion.length === 0) {
-        throw new Error("Pi probe returned no agent version");
-      }
-      const testConfDir = path.join(daemon.home, "conformance");
-      mkdirSync(testConfDir, { recursive: true });
-      writeFileSync(
-        path.join(testConfDir, `pi-${agentVersion}.json`),
-        JSON.stringify({ ok: true, image: "provider-unsupported" }),
-      );
-      expect((await daemon.svc.agents.recheck("pi")).status).toBe("ready");
-      conformanceBot = daemon.svc.bots.create({
-        name: "Pi Conformance",
-        agentId: "pi",
-        instructions: "When explicitly asked for computer conformance, follow the requested computer tool calls exactly.",
-      });
-
-      const cwd = mkdtempSync(path.join(os.tmpdir(), "pi-conform-"));
-      tempDirs.push(cwd);
-      const opened = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: conformanceBot.id, threadId: "thread_conformance", options: { cwd, instructions: "" } }, 30_000)) as {
-        sessionId: string;
-        nativeSessionId: string;
-      };
-      expect(opened.sessionId).toBeTruthy();
-      expect(opened.nativeSessionId).toBeTruthy();
-
-      // Ordinary sends require only their existing Computer binding. If a
-      // Bot-message binding is supplied, however, it must remain immutable.
-      const forgedBindingTurnId = crypto.randomUUID();
-      await expect(pi.request({
-        type: "message.send",
-        requestId: crypto.randomUUID(),
-        sessionId: opened.sessionId,
-        turnId: forgedBindingTurnId,
-        message: { text: "This forged Bot-message binding must not start a Turn." },
-        computer: {
-          botId: conformanceBot.id,
-          turnId: forgedBindingTurnId,
-          workerSessionId: opened.sessionId,
-          surfaceId: conformanceBot.surfaceId,
-        },
-        botMessage: {
-          botId: conformanceBot.id,
-          turnId: crypto.randomUUID(),
-          workerSessionId: opened.sessionId,
-        },
-      }, 15_000)).rejects.toThrow(
-        "Bot message binding is required and must match the Agent command",
-      );
-      console.log("conformance: step 1 ok — session", opened.nativeSessionId);
-
-      // ---- Step 2: streamed fixed text ----
-      const sayRecent = await turn(opened.sessionId, "Reply with exactly: CONFORM-STREAM-OK and nothing else.");
-      const streamed = assistantText(sayRecent);
-      expect(streamed).toContain("CONFORM-STREAM-OK");
-      const deltaCount = sayRecent.filter((e) => e.type === "response.delta").length;
-      expect(deltaCount).toBeGreaterThanOrEqual(1);
-      expect(sayRecent.some((e) => e.type === "turn.completed")).toBeTrue();
-      console.log(`conformance: step 2 ok — streamed in ${deltaCount} deltas`);
-
-      // ---- Step 3: read-only native tool lifecycle ----
-      const roFile = path.join(cwd, "conform-readonly.txt");
-      writeFileSync(roFile, "READ-ONLY-CONFORM");
-      const lsRecent = await turn(opened.sessionId, `Use the read tool (NOT bash) to read the file ${roFile}, then reply DONE.`);
-      expect(lsRecent.some((e) => e.type === "tool.started" && (e.event as { name?: string }).name === "read")).toBeTrue();
-      const lsDone = lsRecent.find((e) => e.type === "tool.completed");
-      expect(lsDone).toBeDefined();
-      expect(lsDone!.event.status).toBe("completed");
-      console.log("conformance: step 3 ok — read-only native tool lifecycle");
-
-      // ---- Step 4: native write tool lifecycle under Pi's own behavior ----
-      const target = path.join(cwd, "conform-write-test.txt");
-      const writeRecent = await turn(
-        opened.sessionId,
-        `Use the write tool to create a file at exactly ${target} containing the single word OK.`,
-        { timeoutMs: 180_000 },
-      );
-      expect(writeRecent.some((e) => e.type === "tool.started" && (e.event as { name?: string }).name === "write")).toBeTrue();
-      expect(writeRecent.some((e) => e.type === "tool.completed" && e.event.status === "completed")).toBeTrue();
-      expect(writeRecent.some((e) => e.type === "turn.completed")).toBeTrue();
-      const deadline4 = Date.now() + 30_000;
-      while (!existsSync(target) && Date.now() < deadline4) await Bun.sleep(200);
-      expect((await Bun.file(target).text()).trim()).toBe("OK");
-      console.log("conformance: step 4 ok — native write tool completed");
-
-      // ---- Step 5: cancel mid-turn; no late writes after cancel ----
-      // Dedicated session: an aborted run must never pollute later turns.
-      const countSession = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: conformanceBot.id, threadId: "thread_conformance_count", options: { cwd, instructions: "" } }, 30_000)) as { sessionId: string };
-      const before = await send(countSession.sessionId, "Count from 1 to 400, one number per line, no commentary.");
-      const deadline5 = Date.now() + 60_000;
-      let sawDeltas = 0;
-      while (Date.now() < deadline5) {
-        sawDeltas = events.slice(before).filter((e) => e.type === "response.delta").length;
-        if (sawDeltas >= 5) break;
-        await Bun.sleep(150);
-      }
-      expect(sawDeltas).toBeGreaterThanOrEqual(5);
-      await pi.request({ type: "turn.abort", requestId: crypto.randomUUID(), sessionId: countSession.sessionId }, 30_000);
-      const cancelled = events.slice(before).find((e) => e.type === "turn.cancelled");
-      expect(cancelled).toBeDefined();
-      await Bun.sleep(2500); // settle window: nothing may land after cancel
-      const cancelledIndex = events.findIndex((event) => event === cancelled);
-      const lateWrites = events
-        .slice(cancelledIndex + 1)
-        .filter((event) => event.type === "tool.started" || event.type === "response.delta");
-      expect(lateWrites).toEqual([]);
-      console.log("conformance: step 5 ok — cancelled mid-turn, no late writes");
-
-      // ---- Step 5b: native steer keeps the active session and completes ----
-      const steerSession = (await pi.request({
-        type: "session.open",
-        requestId: crypto.randomUUID(),
-        botId: conformanceBot.id,
-        threadId: "thread_conformance_steer",
-        options: { cwd, instructions: "" },
-      }, 30_000)) as { sessionId: string; nativeSessionId: string };
-      const steerBefore = await send(
-        steerSession.sessionId,
-        "Count from 1 to 1000, one number per line, no commentary.",
-      );
-      await waitForEvent(
-        steerBefore,
-        (event) => event.type === "response.delta" && event.event.sessionId === steerSession.sessionId,
-        60_000,
-      );
-      const steerResult = await pi.request({
-        type: "message.steer",
-        requestId: crypto.randomUUID(),
-        sessionId: steerSession.sessionId,
-        text: "Change course now. Stop counting and reply exactly STEER-NATIVE-OK.",
-      }, 30_000) as { steered: boolean };
-      expect(steerResult.steered).toBeTrue();
-      const steeredRecent = (await awaitTerminal(steerBefore, 120_000))
-        .filter((event) => event.event.sessionId === steerSession.sessionId);
-      expect(steeredRecent.some((event) => event.type === "turn.completed")).toBeTrue();
-      expect(steeredRecent.some((event) => event.type === "turn.cancelled")).toBeFalse();
-      expect(steeredRecent.every((event) => event.event.sessionId === steerSession.sessionId)).toBeTrue();
-      expect(assistantText(steeredRecent)).toContain("STEER-NATIVE-OK");
-      console.log(`conformance: step 5b ok — native steer completed in session ${steerSession.nativeSessionId}`);
-
-      // ---- Step 6: attachments (text file + 1×1 PNG) ----
-      const textPath = path.join(cwd, "secret.txt");
-      writeFileSync(textPath, "The secret phrase is CONFORM-TEXT-42.");
-      const pngPath = path.join(cwd, "red.png");
-      writeFileSync(pngPath, RED_PIXEL_PNG);
-      // Capabilities are global to normal Bot turns, so image support must be
-      // exercised through the same default-model session path used in production.
-      let imageResult: "ok" | "provider-unsupported" = "provider-unsupported";
-      let imageNote = "default model did not identify the image";
-      let attachReply = "";
-      try {
-        const imageSession = (await pi.request({
-          type: "session.open",
-          requestId: crypto.randomUUID(),
-          botId: conformanceBot.id,
-          threadId: "thread_conformance_vision",
-          options: { cwd, instructions: "" },
-        }, 30_000)) as { sessionId: string };
-        const recent = await turn(
-          imageSession.sessionId,
-          "A text attachment contains a secret phrase and an image attachment is solid red. Reply in one line: the secret phrase, then the color word.",
-          {
-            attachments: [
-              { id: "a1", name: "secret.txt", path: textPath, mediaType: "text/plain" },
-              { id: "a2", name: "red.png", path: pngPath, mediaType: "image/png" },
-            ],
-          },
-        );
-        attachReply = assistantText(recent);
-        if (attachReply.includes("CONFORM-TEXT-42") && /\bred\b/i.test(attachReply)) {
-          imageResult = "ok";
-          imageNote = "default model identified the solid red image";
-        }
-      } catch (error) {
-        imageNote = `default model rejected image input: ${error instanceof Error ? error.message : String(error)}`;
-      }
-      const textAttachRecent = attachReply.includes("CONFORM-TEXT-42")
-        ? null
-        : await (async () => {
-            const ts = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: conformanceBot.id, threadId: "thread_conformance_text", options: { cwd, instructions: "" } }, 30_000)) as { sessionId: string };
-            return turn(ts.sessionId, "The attachment names a secret phrase. Reply with just the secret phrase.", { attachments: [{ id: "a1", name: "secret.txt", path: textPath, mediaType: "text/plain" }] });
-          })();
-      if (textAttachRecent) attachReply = assistantText(textAttachRecent);
-      expect(attachReply).toContain("CONFORM-TEXT-42");
-      console.log(`conformance: step 6 ok — text attachment ok; image: ${imageResult} (${imageNote})`);
-
-      // ---- Step 7: close → resume → history ----
-      await pi.request({ type: "session.close", requestId: crypto.randomUUID(), sessionId: opened.sessionId }, 15_000);
-      const resumed = (await pi.request(
-        { type: "session.resume", requestId: crypto.randomUUID(), botId: conformanceBot.id, threadId: "thread_conformance", nativeSessionId: opened.nativeSessionId, options: { cwd, instructions: "" } },
-        30_000,
-      )) as { sessionId: string };
-      const history = (await pi.request({ type: "session.history", requestId: crypto.randomUUID(), sessionId: resumed.sessionId }, 30_000)) as {
-        messages: { role: string; text?: string }[];
-      };
-      const roles = history.messages.map((m) => m.role);
-      expect(roles).toContain("user");
-      expect(roles).toContain("assistant");
-      const allText = history.messages.map((m) => m.text ?? "").join("\n");
-      expect(allText).toContain("CONFORM-STREAM-OK");
-      console.log(`conformance: step 7 ok — resumed native session, ${history.messages.length} history messages`);
-
-      // ---- Step 8: worker exit leaves no orphans (asserted in afterAll pgrep) ----
-      // Kill this worker abruptly; supervisor semantics are exercised by the
-      // integration suite. Here we verify a fresh client takes over cleanly.
-      await pi.stop().catch(() => {});
-      pi = new WorkerClient({
-        name: "agent:pi",
-        script: path.resolve(import.meta.dir, "../../workers/pi/src/worker.ts"),
-        env: daemon.agentEnv,
-        onEvent: (event: { type: string }) => {
-          events.push({ type: event.type, event: event as unknown as Record<string, unknown> });
-          seenEventTypes.add(event.type);
-        },
-      });
-      await pi.start();
-      const reprobe = await pi.request({ type: "probe", requestId: crypto.randomUUID() }, 30_000);
-      const probePayload: unknown = reprobe;
-      if (probePayload === null || typeof probePayload !== "object" || !("sdkOk" in probePayload) || !("capabilities" in probePayload)) {
-        throw new Error("Pi probe returned an invalid payload");
-      }
-      expect(probePayload.sdkOk).toBeTrue();
-      if (!isAgentCapabilityInventory(probePayload.capabilities)) {
-        throw new Error("Pi probe returned an invalid capability inventory");
-      }
-      const capabilities = probePayload.capabilities;
-      expect(capabilities).toMatchObject({
-        version: 4,
-        steering: true,
-        abort: true,
-        botMail: true,
-        plugins: true,
-        nativeThreadActions: ["resume", "history", "close"],
-        attachments: { text: true, maxTextBytes: 64 * 1024 },
-        nativeEventFamilies: [],
-      });
-      expect(capabilities.thinking.streaming).toBe(capabilities.thinking.supported);
-      expect(Object.keys(capabilities ?? {}).sort()).toEqual([
-        "abort",
-        "attachments",
-        "botMail",
-        "nativeEventFamilies",
-        "nativeThreadActions",
-        "plugins",
-        "steering",
-        "thinking",
-        "version",
-      ]);
-      await expect(
-        pi.request({ type: "session.delete", nativeSessionId: "obsolete" }, 5_000),
-      ).rejects.toThrow("unsupported command");
-      console.log("conformance: step 8 ok — worker restart clean (orphans checked in afterAll)");
-
-      // ---- Step 9: capability inventory / event mapping ----
-      // Pi does not emit progress updates for every tool (fast read/write tools
-      // commonly jump from start to end), so require only live lifecycle
-      // boundaries here and exercise the optional update mapping directly.
-      const REQUIRED_LIVE_EVENT_TYPES = ["response.start", "response.delta", "response.end", "tool.started", "tool.completed", "turn.completed", "turn.cancelled"] as const;
-      for (const t of REQUIRED_LIVE_EVENT_TYPES) {
-        expect(seenEventTypes.has(t), `missing live event type ${t}; saw ${[...seenEventTypes].sort().join(", ")}`).toBeTrue();
-      }
-      const toolTracker = {
-        responseBlockIds: new Map<number, string>(),
-        thinkingBlocks: new Map<number, { blockId: string; text: string }>(),
-        toolCalls: new Map<string, { name: string; startedAt: number }>(),
-      };
-      normalizeSessionEvent({
-        type: "tool_execution_start",
-        toolCallId: "tool_conformance",
-        toolName: "read",
-        args: { secret: "must-not-cross" },
-      }, "session_conformance", toolTracker);
-      expect(normalizeSessionEvent({
-        type: "tool_execution_update",
-        toolCallId: "tool_conformance",
-        partialResult: { content: [{ type: "text", text: "partial output" }] },
-      }, "session_conformance", toolTracker)).toEqual([{
-        type: "tool.updated",
-        sessionId: "session_conformance",
-        id: "tool_conformance",
-        name: "read",
-        status: "running",
-      }]);
-      console.log(`conformance: step 9 ok — normalized event inventory mapped: ${[...seenEventTypes].sort().join(", ")}`);
-
-      // ---- Step 10: REAL Pi SDK custom tool -> daemon -> owning Broker/worker ----
-      // Seed only the isolated daemon's gate so its supervised Pi worker can run
-      // this final live conformance turn. The durable user record is written only
-      // after the turn succeeds below.
-      const image = imageResult === "ok" ? "verified" : "provider-unsupported";
-      const record = JSON.stringify({ ok: true, at: new Date().toISOString(), steps: 10, image });
-      writeFileSync(path.join(testConfDir, `pi-${agentVersion}.json`), record);
-      expect((await daemon.svc.agents.recheck("pi")).status).toBe("ready");
-      const sent = await daemon.svc.turns.send(
-        conformanceBot.id,
-        null,
-        [
-          "This is a computer conformance check.",
-          "Use only the computer tool and invoke it exactly twice.",
-          "First call action \"type\" with args {\"text\":\"PI-BOT-SCREEN-VISIBLE\"}.",
-          "Then call action \"screenshot\" with empty args.",
-          "After both calls succeed, reply PI-COMPUTER-TOOL-OK.",
-        ].join(" "),
-      );
-      const terminal = await daemon.svc.turns.waitForTerminal(sent.turnId, 180_000);
-      expect(terminal.status).toBe("completed");
-      const transcript = await fetch(
-        `${daemon.baseUrl}/api/threads/${sent.threadId}/messages`,
-        { headers: { authorization: `Bearer ${daemon.token}` } },
-      ).then((response) => response.json()) as Array<{
-        kind: string;
-        text?: string;
-        payload?: unknown;
-        toolCall?: {
-          id: string;
-          name: string;
-          status: string;
-          durationMs?: number;
-        };
-      }>;
-      const computerCalls = transcript.filter((message) =>
-        message.kind === "tool"
-        && message.toolCall?.name === "computer"
-        && message.toolCall.status === "completed"
-      );
-      expect(computerCalls).toHaveLength(2);
-      expect(computerCalls.every((message) => message.payload === undefined)).toBeTrue();
-      expect(
-        transcript.some((message) => message.text?.includes("PI-COMPUTER-TOOL-OK")),
-      ).toBeTrue();
-      expect(daemon.svc.computer.state({
-        botId: conformanceBot.id,
-        surfaceId: conformanceBot.surfaceId,
-      }).lastImageAt).toBeDefined();
-      console.log("conformance: step 10 ok — real Pi custom tool typed and observed its owning Bot Screen");
-
-      // ---- Record: write the versioned conformance record and verify the gate ----
-      const realConfDir = path.join(os.homedir(), ".local/share/omarchy-bot/conformance");
-      mkdirSync(realConfDir, { recursive: true });
-      const recordPath = path.join(realConfDir, `pi-${agentVersion}.json`);
-      writeFileSync(recordPath, record);
-      console.log(`conformance: record written ${recordPath}`);
-      const agent = await daemon.svc.agents.recheck("pi");
-      expect(agent.status).toBe("ready");
-      console.log("conformance: Pi Agent is READY");
-    },
-    600_000,
-  );
+  expect(existsSync(fixture.root)).toBeFalse();
 });
+
+test("pi conformance (10 steps, real model) > all ten steps pass", async () => {
+  const fixture = createConformanceHome();
+  try {
+    console.log(`conformance: private HOME ${fixture.root}`);
+    const child = Bun.spawn([process.execPath, "test", "--no-orphans", path.join(import.meta.dir, "pi.steps.ts")], {
+      env: fixture.env, stdout: "inherit", stderr: "inherit", timeout: 650_000,
+    });
+    expect(await child.exited).toBe(0);
+  } finally {
+    fixture.cleanup();
+    expect(existsSync(fixture.root)).toBeFalse();
+    console.log(`conformance: private HOME removed ${fixture.root}`);
+  }
+}, 680_000);

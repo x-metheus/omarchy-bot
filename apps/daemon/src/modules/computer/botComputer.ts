@@ -56,6 +56,7 @@ export interface BotComputerOptions {
   runtimeRoot: string;
   profileRoot: string;
   fontDir?: string;
+  browserPackDir?: string;
   hostRuntimeDir?: string;
   swayBin?: string;
   swaymsgBin?: string;
@@ -328,6 +329,7 @@ export class BotComputerRuntime {
       ?? new PortableBotComputerAssets({
         profileDir: path.join(options.profileRoot, "computer"),
         ...(options.fontDir === undefined ? {} : { fontDir: options.fontDir }),
+        ...(options.browserPackDir === undefined ? {} : { browserPackDir: options.browserPackDir }),
       });
     this.#capacity = options.capacity ?? 8;
     if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {

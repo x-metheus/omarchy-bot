@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { layoutFromEnv } from "../../apps/cli/src/layout.ts";
 import { run } from "../../apps/cli/src/main.ts";
+import { BROWSER_ASSETS_RELEASE } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -58,7 +59,7 @@ test("doctor reports every missing installed component and fails without changin
   cleanups.push(() => socket.stop(true));
   expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
   const output = setup.log.join("\n");
-  for (const check of ["runtime:", "checksum marker:", "Sway bundle:", "fonts:", "unit:", "launcher:", "health:", "pairing:"]) {
+  for (const check of ["runtime:", "checksum marker:", "Sway bundle:", "fonts:", "browser pack:", "unit:", "launcher:", "health:", "pairing:"]) {
     expect(output.split("\n").filter(line => line.startsWith(check))).toHaveLength(1);
   }
   expect(output).toContain("omarchy-bot update --archive");
@@ -79,6 +80,10 @@ test("doctor accepts a healthy install and diagnoses damaged markers, fonts and 
     [join(setup.layout.currentDir, "apps/daemon/src/bootstrap/main.ts")]: "// fixture\n",
     [join(setup.layout.currentDir, ".archive-sha256")]: `${"a".repeat(64)}\n`,
     [join(setup.layout.currentDir, "sway/.omarchy-bot-runtime")]: "sway-1.10.1-wayvnc-0.8.0-wlroots-0.18.1-v1\nc821bcb7d8e349c22bf3c9a96084a550d7d5a357b2d9d340c608adbdc5fb9344\n",
+    [join(setup.layout.browserPackDir, ".omarchy-bot-assets")]: `${BROWSER_ASSETS_RELEASE}\n`,
+    [join(setup.layout.browserPackDir, "browser")]: "#!/bin/sh\nprintf 'Google Chrome for Testing 156.0.8078.47\\n'\n",
+    [join(setup.layout.browserPackDir, "chrome-linux64/chrome")]: "binary",
+    [join(setup.layout.browserPackDir, "libs/ld-linux-x86-64.so.2")]: "loader",
     [setup.layout.unitPath]: "[Service]\n",
     [join(setup.home, ".local/bin/omarchy-bot")]: "#!/bin/sh\n",
     [setup.layout.hostSecretPath]: "doctor-secret",
@@ -99,6 +104,45 @@ test("doctor accepts a healthy install and diagnoses damaged markers, fonts and 
   expect(await new Response(child.stdout).text()).toBe("All required checks passed.\n");
   expect(await new Response(child.stderr).text()).toBe("");
   expect(setup.log).toEqual(["All required checks passed."]);
+  const externalPack = join(setup.home, "external-browser");
+  renameSync(setup.layout.browserPackDir, externalPack);
+  setup.env.OMARCHY_BOT_BROWSER_PACK_DIR = externalPack;
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(0);
+  expect(setup.log.at(-1)).toBe("All required checks passed.");
+  writeFileSync(join(externalPack, "browser"), "#!/bin/sh\nexit 7\n");
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
+  expect(setup.log.at(-1)).toContain("browser pack:");
+  writeFileSync(join(externalPack, "browser"), files[join(setup.layout.browserPackDir, "browser")]!);
+  expect(await run(["uninstall"], setup.env, setup.io)).toBe(0);
+  expect(readFileSync(join(externalPack, ".omarchy-bot-assets"), "utf8")).toBe(`${BROWSER_ASSETS_RELEASE}\n`);
+  delete setup.env.OMARCHY_BOT_BROWSER_PACK_DIR;
+  mkdirSync(setup.layout.runtimeDir, { recursive: true });
+  renameSync(externalPack, setup.layout.browserPackDir);
+  for (const [file, contents] of Object.entries(files).filter(([file]) => !file.startsWith(setup.layout.browserPackDir))) {
+    mkdirSync(join(file, ".."), { recursive: true }); writeFileSync(file, contents, { mode: 0o755 });
+  }
+  const marker = join(setup.layout.browserPackDir, ".omarchy-bot-assets");
+  writeFileSync(marker, "wrong pin\n");
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
+  expect(setup.log.at(-1)).toContain("browser pack:");
+  expect(setup.log.at(-1)).toContain("--browser-pack");
+  writeFileSync(marker, `${BROWSER_ASSETS_RELEASE}\n`);
+  const browser = join(setup.layout.browserPackDir, "browser");
+  writeFileSync(browser, "#!/bin/sh\nexit 7\n");
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
+  expect(setup.log.at(-1)).toContain("browser pack:");
+  writeFileSync(browser, "#!/bin/sh\nprintf 'Google Chrome for Testing 156.0.8078.47\\n'\n");
+  chmodSync(browser, 0o644);
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
+  expect(setup.log.at(-1)).toContain("browser pack:");
+  chmodSync(browser, 0o755);
+  rmSync(setup.layout.browserPackDir, { recursive: true });
+  setup.env.OMARCHY_BOT_BROWSER = "host";
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(0);
+  delete setup.env.OMARCHY_BOT_BROWSER;
+  for (const [file, contents] of Object.entries(files).filter(([file]) => file.startsWith(setup.layout.browserPackDir))) {
+    mkdirSync(join(file, ".."), { recursive: true }); writeFileSync(file, contents, { mode: 0o755 });
+  }
   shim(setup.bin, "loginctl", "echo Linger=no");
   shim(setup.bin, "systemctl", "echo inactive; exit 3");
   expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
