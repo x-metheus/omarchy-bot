@@ -237,10 +237,13 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
 
   const fontDir = process.env.OMARCHY_BOT_FONT_DIR
     ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "current", "fonts");
+  const browserPackDir = process.env.OMARCHY_BOT_BROWSER_PACK_DIR
+    ?? path.join(process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot"), "runtime", "browser");
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot,
     fontDir,
+    browserPackDir,
     capacity: 2,
     applicationCwd,
     swayBin,
@@ -282,7 +285,7 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
           .flatMap((entry) => {
             try {
               const commandLine = readFileSync(`/proc/${entry}/cmdline`).toString().split("\0").join(" ");
-              return commandLine.includes("browser-bundle") && commandLine.includes("--user-data-dir")
+              return commandLine.includes(browserPackDir) && commandLine.includes("--user-data-dir")
                 ? [`${entry}:${commandLine.slice(0, 400)}`]
                 : [];
             } catch {
@@ -320,6 +323,7 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
     // missing library otherwise surfaces only much later as a window that never maps.
     const { browserBin } = await new PortableBotComputerAssets({
       profileDir: path.join(profileRoot, "computer"),
+      browserPackDir,
     }).ensureBrowser();
     expect(statSync(browserBin).mode & 0o111).toBeGreaterThan(0);
 
@@ -388,5 +392,4 @@ realTest("portable browser renders CJK glyphs on a browser-less host and shares 
     await harness?.stop().catch(() => {});
     harness = undefined;
   }
-// First run also downloads and verifies the pinned browser and libraries.
 }, 600_000);

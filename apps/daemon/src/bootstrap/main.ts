@@ -84,6 +84,7 @@ export async function main(options: MainOptions = {}): Promise<{
     capacity: cfg.botScreenCapacity,
     applicationCwd: prepareSharedWorkspace(cfg.sharedWorkspaceDir),
     fontDir: process.env.OMARCHY_BOT_FONT_DIR ?? cfg.botComputerFontSupplyDir,
+    browserPackDir: process.env.OMARCHY_BOT_BROWSER_PACK_DIR ?? cfg.botComputerBrowserPackDir,
     ...(options.botComputerAssetSupply === undefined ? {} : { assetSupply: options.botComputerAssetSupply }),
     // Development: point OMARCHY_BOT_SWAY_BUNDLE_DIR at an extracted, pinned bundle.
     runtimeSupply: new PortableSwayRuntimeSupply({

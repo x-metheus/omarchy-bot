@@ -15,6 +15,7 @@ import {
   createFixtureAssetSupply,
   type FixtureAssetSupply,
 } from "./helpers/botComputerAssetsFixture.ts";
+import { PortableBotComputerAssets } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 
 const SURFACE_ID = "surf_33333333333333333333333333333333" as SurfaceId;
 const SURFACE_B = "surf_44444444444444444444444444444444" as SurfaceId;
@@ -899,6 +900,15 @@ test("open_url opens the portable browser on a host with no native browser", asy
   } finally {
     await fixture.runtime.stop();
   }
+});
+
+test("open_url reports how to install the missing browser pack on a browserless host", async () => {
+  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const missing = new PortableBotComputerAssets({ profileDir: path.join(root!, "unused-profile") });
+  fixture.assets.ensureBrowser = () => missing.ensureBrowser();
+  try {
+    await expect(fixture.runtime.launch({ url: "https://example.com/missing-pack" })).rejects.toThrow("--with-browser");
+  } finally { await fixture.runtime.stop(); }
 });
 
 test("open_url skips snap-confined browsers without executing them", async () => {

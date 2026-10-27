@@ -13,6 +13,6 @@ trap 'rm -rf "$staging"' EXIT
 mkdir -p "$cache"
 "$bun_bin" "$root/scripts/container-image/prepare.ts" "$archive" "$cache" "$staging"
 cp "$root/scripts/container-image/"{Dockerfile,entrypoint.sh,provision-browser.ts} "$staging/"
-# No image-build network: runtime, Bun and checksum-pinned browser inputs are local.
+# Runtime, Bun and the verified browser pack are local; installation has no network.
 docker build --pull=false --network=none -t "$image" "$staging"
 printf 'Image: %s\n' "$image"

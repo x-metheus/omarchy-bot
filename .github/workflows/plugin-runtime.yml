@@ -68,6 +68,13 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "sha256=$archive.sha256" >> "$GITHUB_OUTPUT"
 
+      - name: Package the browser pack
+        id: browser
+        run: |
+          pack=$(bash scripts/package-browser-pack.sh "$PWD" dist-browser)
+          echo "pack=$pack" >> "$GITHUB_OUTPUT"
+          echo "sha256=$pack.sha256" >> "$GITHUB_OUTPUT"
+
       - name: Upload Actions artifact
         uses: actions/upload-artifact@v4
         with:
@@ -75,6 +82,8 @@ jobs:
           path: |
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.sha256 }}
+            ${{ steps.browser.outputs.pack }}
+            ${{ steps.browser.outputs.sha256 }}
           if-no-files-found: error
 
       - name: Publish release asset
@@ -82,6 +91,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
+          BROWSER_PACK: ${{ steps.browser.outputs.pack }}
         run: |
           tag="runtime-${GITHUB_SHA}"
           notes="Omarchy plugin runtime for \`${GITHUB_SHA}\` (x86_64).
@@ -97,11 +107,21 @@ jobs:
           \`\`\`
           $(cat "$ARCHIVE.sha256")
           \`\`\`
+
+          The runtime archive carries no browser. Installers take the separate browser pack for Service Hosts with no usable non-snap browser:
+
+          \`https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/$(basename "$BROWSER_PACK")\`
+
+          SHA-256:
+
+          \`\`\`
+          $(cat "$BROWSER_PACK.sha256")
+          \`\`\`
           "
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+            gh release upload "$tag" "$ARCHIVE" "$ARCHIVE.sha256" "$BROWSER_PACK" "$BROWSER_PACK.sha256" --clobber
           else
-            gh release create "$tag" "$ARCHIVE" "$ARCHIVE.sha256" \
+            gh release create "$tag" "$ARCHIVE" "$ARCHIVE.sha256" "$BROWSER_PACK" "$BROWSER_PACK.sha256" \
               --title "Plugin runtime ${GITHUB_SHA:0:12}" \
               --notes "$notes" \
               --target "$GITHUB_SHA"

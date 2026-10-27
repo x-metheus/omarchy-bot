@@ -118,7 +118,7 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
     await turn("computer:open_url:http://127.0.0.1:7999/");
     await waitBrowser(1);
     const executables = await docker("exec", name, "bun", "-e", 'const fs = require("node:fs"); for (const pid of fs.readdirSync("/proc").filter(p => /^\\d+$/.test(p))) { try { console.log(fs.readlinkSync(`/proc/${pid}/exe`)); } catch {} }');
-    expect(executables).toContain("/opt/omarchy-bot/browser-profile/assets/browser-bundle/chrome-linux64/chrome");
+    expect(executables).toContain("/opt/omarchy-bot/browser/chrome-linux64/chrome");
     expect(executables).toContain("/opt/omarchy-bot/runtime/sway/");
     expect(await api(`/api/computer/state?botId=${bot.id}&surfaceId=${bot.surfaceId}`)).toMatchObject({ state: "ready" });
     const snapshot = await request(`/api/computer/snapshot?botId=${bot.id}&surfaceId=${bot.surfaceId}`);

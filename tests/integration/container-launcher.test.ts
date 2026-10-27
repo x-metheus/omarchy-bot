@@ -13,7 +13,7 @@ test("container Launcher attaches image assets and preserves one state volume ac
   roots.push(root);
   const runtime = path.join(root, "image", "runtime");
   mkdirSync(path.join(runtime, "scripts"), { recursive: true });
-  writeFileSync(path.join(runtime, "scripts", "serve.sh"), '#!/bin/sh\nprintf \'serve stdout\\n\'\nprintf %s "$HOME" > "$OMARCHY_BOT_STATE/started"\n');
+  writeFileSync(path.join(runtime, "scripts", "serve.sh"), '#!/bin/sh\nprintf \'serve stdout\\n\'\nprintf %s "$HOME" > "$OMARCHY_BOT_STATE/started"\nprintf %s "$OMARCHY_BOT_BROWSER_PACK_DIR" > "$OMARCHY_BOT_STATE/browser"\n');
   const volume = path.join(root, "volume");
   const env = {
     ...process.env,
@@ -22,7 +22,7 @@ test("container Launcher attaches image assets and preserves one state volume ac
     OMARCHY_BOT_STATE: path.join(volume, "state"),
   };
   const entrypoint = path.resolve(import.meta.dir, "../../scripts/container-image/entrypoint.sh");
-  // The image installs the entrypoint next to runtime/ and browser-profile/.
+  // The image installs the entrypoint next to runtime/ and browser/.
   const installed = path.join(root, "image", "entrypoint.sh");
   writeFileSync(installed, readFileSync(entrypoint));
   for (let launch = 0; launch < 2; launch += 1) {
@@ -36,8 +36,8 @@ test("container Launcher attaches image assets and preserves one state volume ac
     expect(await new Response(child.stdout).text()).toBe("serve stdout\n");
     expect(readFileSync(path.join(env.OMARCHY_BOT_STATE, "started"), "utf8")).toBe(env.HOME);
     expect(readlinkSync(path.join(env.OMARCHY_BOT_HOME, "runtime/current"))).toBe(runtime);
-    expect(readlinkSync(path.join(env.OMARCHY_BOT_HOME, "screens/computer/assets/browser-bundle")))
-      .toBe(path.join(root, "image/browser-profile/assets/browser-bundle"));
+    expect(readFileSync(path.join(env.OMARCHY_BOT_STATE, "browser"), "utf8"))
+      .toBe(path.join(root, "image/browser"));
     if (launch === 0) writeFileSync(path.join(env.HOME, "work"), "retained");
     expect(readFileSync(path.join(env.HOME, "work"), "utf8")).toBe("retained");
     expect(statSync(env.OMARCHY_BOT_STATE).mode & 0o777).toBe(0o700);

@@ -27,7 +27,7 @@ Omarchy Bot's headless Service owns the Bots, Threads, Agents, Shared Workspace,
 | **Hand work to another Bot** | Durable, asynchronous 1:1 mail creates a target-owned Thread without forwarding the source conversation. |
 
 > [!IMPORTANT]
-> **Current support:** the Service runs on **x86_64 Linux** with or without a desktop. Install paths are the Omarchy plugin, the generic `install` command, and the container image ([ADR 0013](docs/adr/0013-run-a-standalone-linux-service.md)). The runtime archive ships the Bot Computer bundle and fonts; the configured distribution matrix runs in CI. **Not supported:** arm64, macOS, and Windows Service Hosts, including a VM-hosted Bot Computer. **Pi** is the current Agent backend. Other Agents require an adapter and a passing versioned conformance inventory before becoming selectable. Omarchy Bot (Tauri) is planned, not shipped.
+> **Current support:** the Service runs on **x86_64 Linux** with or without a desktop. Install paths are the Omarchy plugin, the generic `install` command, and the container image ([ADR 0013](docs/adr/0013-run-a-standalone-linux-service.md)). The runtime archive ships the Bot Computer bundle and fonts, and installers add the separate browser pack when the host has no usable browser; the configured distribution matrix runs in CI. **Not supported:** arm64, macOS, and Windows Service Hosts, including a VM-hosted Bot Computer. **Pi** is the current Agent backend. Other Agents require an adapter and a passing versioned conformance inventory before becoming selectable. Omarchy Bot (Tauri) is planned, not shipped.
 
 ## Installation
 
@@ -51,8 +51,9 @@ The plugin package only installs the Service. Enable runs the shared installer f
 The repository root manifest points Omarchy's plugin manager at `packages/omarchy-plugin`, and Omarchy Shell loads its `Service.qml`.
 
 - **Bun resolution:** PATH, then mise, then a checksum-verified official Bun 1.4.2 download under `OMARCHY_BOT_HOME`.
-- **Release artifacts:** `omarchy-bot-runtime-<sha>-x86_64.tar.zst` and its SHA-256 sidecar, published under `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<sha>/`.
+- **Release artifacts:** `omarchy-bot-runtime-<sha>-x86_64.tar.zst` and `omarchy-bot-browser-<version>-x86_64.tar.zst`, each with its SHA-256 sidecar, published under `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<sha>/`. The runtime archive carries no browser; the browser pack is separate.
 - **Runtime location:** `~/.local/share/omarchy-bot/runtime/current/`, or `$OMARCHY_BOT_HOME/runtime/current/` when overridden. Extraction is atomic and keeps the checkout clean and fast-forwardable.
+- **Browser pack location:** `~/.local/share/omarchy-bot/runtime/browser/`, or `$OMARCHY_BOT_HOME/runtime/browser/`, beside `current/` so replacing the runtime on `update` keeps the installed pack. `OMARCHY_BOT_BROWSER_PACK_DIR` overrides it.
 - **No source fallback:** a network, server, or integrity failure stops startup rather than silently compiling.
 - **Failure handling:** there is no supervisor lifeline, no `notify-send` path, and Quickshell does not parent the Service. Install, startup, and unit failures go to the Service log, `omarchy-bot status` (unit state, address, last startup failure), and `omarchy-bot doctor` (missing prerequisites). See [Service CLI](#service-cli).
 
@@ -79,6 +80,8 @@ bun apps/cli/src/main.ts install \
 It requires Bun 1.4+, Bash, `flock`, a systemd user manager socket (`$XDG_RUNTIME_DIR/systemd/private`), and a non-root user. `install` verifies the checksum, extracts atomically into `~/.local/share/omarchy-bot/runtime/current/`, writes `$XDG_CONFIG_HOME/systemd/user/omarchy-bot.service` with `ExecStart=<dataDir>/runtime/current/scripts/serve.sh`, enables and starts that unit, waits for `GET /api/health`, then prints a one-time `pairing: http://…/pair?code=…` URL and opens it with `xdg-open` (set `OMARCHY_BOT_OPEN` for a different opener). An already-installed runtime is reused instead of replaced. The installer registers no desktop hook and installs no global `omarchy-bot` binary: run the CLI by path, as shown in [Service CLI](#service-cli).
 
 A host without a systemd user manager cannot use `install`; start the Service with the container path below or with `scripts/serve.sh` directly.
+
+The runtime archive contains no browser. `install` and `update` also install the browser pack when the host has no usable non-snap browser on `PATH`, or when you pass `--with-browser`; a host with a native browser skips it. By default the pack comes from `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<version>/`, inferred from the runtime archive's file name; a local runtime archive without that name needs an explicit `--browser-pack <path-or-https-url>`, which also forces the install when a host browser exists. The adjacent `<source>.sha256` sidecar is verified before anything is written, and a mismatch aborts before the unit is installed. The pack is extracted to `~/.local/share/omarchy-bot/runtime/browser/`, never onto the host, and `uninstall` removes it with `runtime/`.
 
 The generated unit carries a fixed environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `OMARCHY_BOT_HOST`, `OMARCHY_BOT_PORT`, `PATH`, and `XDG_RUNTIME_DIR`, captured when the unit is first written. `OMARCHY_BOT_TLS_CERT`, `OMARCHY_BOT_TLS_KEY`, and `OMARCHY_BOT_TRUSTED_PROXY` are not in it, and `install`/`update` reuse an existing unit instead of rewriting it, so setting those variables before installing has no effect. A TLS or proxied listener therefore needs a systemd drop-in, or direct `scripts/serve.sh`/container startup — see [Remote access](#remote-access).
 
@@ -110,9 +113,9 @@ docker logs omarchy-bot
 docker exec omarchy-bot bun /opt/omarchy-bot/runtime/apps/cli/src/main.ts pair
 ```
 
-Open the pairing URL on the Service Host, or forward `7321` with `ssh -L 7321:127.0.0.1:7321 user@host` and open the URL locally. The default listener is loopback; host networking makes it reachable through that tunnel on Linux. No public registry image is published by this build command. Docker and Bun 1.4+, `curl`, and `unzip` are build prerequisites. The optional third build argument selects the asset cache (default `.lane/container-assets`); cache misses fetch checksum-pinned Bun and Chrome for Testing inputs. Docker build itself runs without network access, using the pinned Ubuntu 22.04 base; pull that base once if absent.
+Open the pairing URL on the Service Host, or forward `7321` with `ssh -L 7321:127.0.0.1:7321 user@host` and open the URL locally. The default listener is loopback; host networking makes it reachable through that tunnel on Linux. No public registry image is published by this build command. Docker and Bun 1.4+, `curl`, and `unzip` are build prerequisites. The optional third build argument selects the asset cache (default `.lane/container-assets`); cache misses fetch checksum-pinned Bun and Chrome for Testing inputs and build the browser pack from them into the image. Docker build itself runs without network access, using the pinned Ubuntu 22.04 base; pull that base once if absent.
 
-The Service runs as UID/GID 1000. The single named volume contains its database, pairing identity, Threads, artifacts, Shared Workspace, Agent credentials, and Bot Computer application/browser profile. Back up the volume while the container is stopped; recreate containers with the same volume to retain state. A bind mount must already be writable by UID 1000. Keep `HOME`, `OMARCHY_BOT_HOME`, and `OMARCHY_BOT_STATE` at their image defaults so state stays on that volume. Runtime locks and sockets are temporary. The image's browser binaries and fonts are installed at build time, so opening a local page in a Bot Screen needs no downloads. Docker stops use SIGINT so the Service closes the Bot Computer and flushes its application profile before exiting.
+The Service runs as UID/GID 1000. The single named volume contains its database, pairing identity, Threads, artifacts, Shared Workspace, Agent credentials, and Bot Computer application/browser profile. Back up the volume while the container is stopped; recreate containers with the same volume to retain state. A bind mount must already be writable by UID 1000. Keep `HOME`, `OMARCHY_BOT_HOME`, and `OMARCHY_BOT_STATE` at their image defaults so state stays on that volume. Runtime locks and sockets are temporary. The image builds the browser pack into `/opt/omarchy-bot/browser` and sets `OMARCHY_BOT_BROWSER_PACK_DIR` to it, and installs the fonts at build time, so opening a local page in a Bot Screen needs no downloads. Docker stops use SIGINT so the Service closes the Bot Computer and flushes its application profile before exiting.
 
 Use one running container per state volume. On startup the entrypoint clears Chromium's three transient singleton links, whose hostname and temporary socket refer to the previous container; browser profile data remains on the volume.
 
@@ -146,8 +149,8 @@ Prose elsewhere names the command as `omarchy-bot <command>`; that always means 
 
 | Command | Effect |
 | :--- | :--- |
-| `install --archive <path> --checksum <path>` | Verify the archive, extract into `runtime/current/`, install and enable the user unit, start it, wait for health, print and open the pairing URL. Reuses an installed runtime. |
-| `update --archive <path> --checksum <path>` | Stop the unit, replace `runtime/current/`, keep the unit, start it, wait for health, print the pairing URL. |
+| `install --archive <path> --checksum <path> [--browser-pack <path-or-url>] [--with-browser]` | Verify the archive, extract into `runtime/current/`, install the browser pack when the host has no usable non-snap browser or `--with-browser` is given, install and enable the user unit, start it, wait for health, print and open the pairing URL. Reuses an installed runtime. |
+| `update --archive <path> --checksum <path> [--browser-pack <path-or-url>] [--with-browser]` | Stop the unit, replace `runtime/current/`, install the browser pack as `install` does, keep the unit, start it, wait for health, print the pairing URL. |
 | `start` / `stop` | Start or stop `omarchy-bot.service` in the user manager. |
 | `status` | Print `state:` (`active`, `failed`, or `inactive`), `address:`, and, when not active, `startup failure:` from the last relevant Service log line. |
 | `doctor` | Print one `missing:` line per unmet prerequisite, or `All prerequisites available.` A linger hint (`enable lingering: loginctl enable-linger <user>`) is advisory and is not a `missing:` line. |
@@ -387,7 +390,7 @@ accounts before presenting these connectors as publicly available.
 | **Configured Pi installation** | Real Agent execution and Pi conformance |
 | **Docker** | Building the container image and running its conformance |
 | **Voxtype** | Composer dictation |
-| **Network on first graphical use** | Checksum-verified portable browser download into the Bot Computer profile, needed only when the host has no usable non-snap browser; fonts ship inside the runtime archive |
+| **Network during `install`/`update`** | Downloads the checksum-verified browser pack (Chrome for Testing plus its libraries) when the host has no usable non-snap browser; the Bot Computer never downloads at run time, and fonts ship inside the runtime archive |
 
 On first graphical use, the Service uses the SHA-256-pinned Bot Computer bundle shipped inside its runtime archive under `<dataDir>/runtime/current/sway`. It contains Sway, wlroots, WayVNC, wlr-randr, Xwayland, grim, a private D-Bus daemon, and prebuilt capture/input/desktop helpers with their loader, libraries, and runtime data. The same archive runs on glibc and musl x86_64 Linux hosts; host grim, D-Bus, and a C toolchain are unnecessary. Point `OMARCHY_BOT_SWAY_BUNDLE_DIR` at the checksum-prepared `.lane/dist/sway` directory output by `bash scripts/build-sway-runtime.sh .lane/dist` to develop against a local bundle, and explicit binary overrides remain available.
 
@@ -404,23 +407,33 @@ bash scripts/package-plugin-runtime.sh . dist-runtime <archive.tar.gz> .lane/fon
 
 The fourth argument (or `OMARCHY_BOT_FONT_ASSETS_DIR`) is required; packaging refuses to run without a font directory whose files match the pinned `FONT_ASSETS` checksums. No separate Sway release is published.
 
-The `distro-conformance` pull-request/manual workflow builds the same runtime archive without publishing it, then runs named jobs for Ubuntu 22.04/24.04, Debian 12, Fedora, Arch, openSUSE, and Alpine. Each installs the checksum-verified archive with the shared CLI extraction code and starts `scripts/serve.sh` under a container entrypoint (including Alpine's non-systemd path). A paired scripted Agent opens a real Screen, captures PNGs, opens a local page in the portable browser, and types text that the page reports back. Seam 3 runs the bundle/Xwayland/isolation suite, the tabbed-layout/dialog suite, and the portable-browser/CJK/shared-profile/snap-avoidance suite against that installed archive. Sway always uses headless pixman; no host compositor, display socket, GPU, systemd manager, or host configuration is mounted.
+The browser pack is a second artifact built from the same pins:
 
-To repeat one job locally, prepare its image explicitly and supply a runtime archive plus its `.sha256` sidecar:
+```bash
+bash scripts/package-browser-pack.sh "$PWD" .lane/browser-pack
+```
+
+It reads `BROWSER_ASSET` and `BROWSER_LIBRARY_ASSETS` from `botComputerAssets.ts`, verifies every input's SHA-256, and writes `omarchy-bot-browser-<version>-x86_64.tar.zst` with a `.sha256` sidecar; `<version>` is the pinned `BROWSER_ASSETS_RELEASE`. It refuses a mismatched input and writes no archive. The optional third argument is a directory of already-downloaded inputs named by their SHA-256, which is how CI and the container build reuse a cache; without it the builder downloads the pinned inputs into `<out-dir>/inputs`. `plugin-runtime.yml` uploads the pack beside the runtime archive and publishes both in the same `runtime-<sha>` release.
+
+The `distro-conformance` pull-request/manual workflow builds the same runtime archive and browser pack without publishing either, then runs named jobs for Ubuntu 22.04/24.04, Debian 12, Fedora, Arch, openSUSE, and Alpine. Each installs the checksum-verified archive with the shared CLI extraction code, installs the browser pack into the container, and starts `scripts/serve.sh` under a container entrypoint (including Alpine's non-systemd path). A paired scripted Agent opens a real Screen, captures PNGs, opens a local page in the portable browser, and types text that the page reports back. Seam 3 runs the bundle/Xwayland/isolation suite, the tabbed-layout/dialog suite, and the portable-browser/CJK/shared-profile/snap-avoidance suite against that installed archive. The containers run with `--network none`, so a browser or library that still needed a download would fail the job. Sway always uses headless pixman; no host compositor, display socket, GPU, systemd manager, or host configuration is mounted.
+
+To repeat one job locally, prepare its image explicitly and supply a runtime archive plus its `.sha256` sidecar, and the browser pack:
 
 ```bash
 # Docker, Bun 1.4+, a cached base image, and network for image prerequisites are required.
 # Replace the id with any entry in scripts/distro-conformance/matrix.json.
-OMARCHY_BOT_DISTRO_BUILD=1 bun scripts/distro-conformance/run.ts ubuntu-22.04 /path/to/runtime.tar.zst
+OMARCHY_BOT_DISTRO_BUILD=1 bun scripts/distro-conformance/run.ts ubuntu-22.04 /path/to/runtime.tar.zst /path/to/omarchy-bot-browser-<version>-x86_64.tar.zst
 # Reuse the prepared image without pulling or rebuilding:
-bun scripts/distro-conformance/run.ts ubuntu-22.04 /path/to/runtime.tar.zst
+bun scripts/distro-conformance/run.ts ubuntu-22.04 /path/to/runtime.tar.zst /path/to/omarchy-bot-browser-<version>-x86_64.tar.zst
 ```
 
-The image provides Bash, Bun (the native musl build on Alpine), `flock`, and development files only for the X11/Wayland test clients. The application and production dependencies come from the archive; tests never reinstall them. First browser use still needs the pinned Chrome and library download URLs. `OMARCHY_BOT_DISTRO_NETWORK=none` disables container networking to diagnose offline prerequisites; an uncached browser then fails explicitly. Runs use read-only inputs, a private temporary home/runtime/profile, no host ports or Docker volumes, and `--rm --init` for targeted process cleanup. The production CLI's systemd lifecycle is covered separately by installer fixtures; this matrix exercises the documented unpacked-runtime/container Launcher path.
+The browser pack argument is required; the runner verifies each input's adjacent `.sha256` sidecar and mounts both read-only. To make the pack once, run `bash scripts/package-browser-pack.sh "$PWD" .lane/browser-pack` and use the archive it prints.
+
+The image provides Bash, Bun (the native musl build on Alpine), `flock`, and development files only for the X11/Wayland test clients. The application and production dependencies come from the archive and the browser from the installed pack; tests never reinstall or download either. Containers run with `--network none`, so an unexpectedly missing prerequisite fails explicitly instead of silently downloading. Runs use read-only inputs, a private temporary home/runtime/profile, no host ports or Docker volumes, and `--rm --init` for targeted process cleanup. The production CLI's systemd lifecycle is covered separately by installer fixtures; this matrix exercises the documented unpacked-runtime/container Launcher path.
 
 The test container relaxes Docker's seccomp profile so Chromium can create its own user-namespace sandbox; it still runs as uid 1000 without privileged mode or host devices. Hosts that disable unprivileged user namespaces must enable them in their container/CI environment before browser conformance can pass; the runner does not change host sysctls or disable Chromium's sandbox.
 
-The Bot Computer also supplies its own browser and fonts, so `open_url` works on a Service Host with no browser and pages render Latin and CJK text without host fonts. A natively installed browser is still preferred; snap-confined browsers are never launched, because a snap cannot see the Bot Computer's private home. The portable browser is a checksum-verified download prepared inside the Bot Computer profile, never installed on the host, and every Screen shares the one browser profile so sign-ins and session state carry over. The fonts are not downloaded: they ship inside the runtime archive at `<dataDir>/runtime/current/fonts`, and `OMARCHY_BOT_FONT_DIR` points at a locally prepared font directory for development. Each `open_url` opens a new window routed to the requesting Screen.
+The Bot Computer also supplies its own browser and fonts, so `open_url` works on a Service Host with no browser and pages render Latin and CJK text without host fonts. A natively installed browser is still preferred; snap-confined browsers are never launched, because a snap cannot see the Bot Computer's private home. Otherwise the Service launches the browser from the installed **browser pack** — Chrome for Testing plus its pinned Ubuntu library closure — under `<dataDir>/runtime/browser`, with `OMARCHY_BOT_BROWSER_PACK_DIR` as the development override. The pack is never installed on the host, and every Screen shares the one browser profile so sign-ins and session state carry over. The runtime archive stays browserless: `install` and `update` add the pack when no usable non-snap browser is on `PATH`, or on `--with-browser`, and `uninstall` removes it. The Service never downloads a browser; with neither a host browser nor a pack, `open_url` fails with one message: `No usable host browser or installed browser pack. Run omarchy-bot install --with-browser (with your runtime --archive and --checksum).` The fonts ship inside the runtime archive at `<dataDir>/runtime/current/fonts`, and `OMARCHY_BOT_FONT_DIR` points at a locally prepared font directory for development. Each `open_url` opens a new window routed to the requesting Screen.
 
 ### Useful checks
 
@@ -436,11 +449,13 @@ Real Pi conformance makes model calls and requires a configured Agent:
 bun test tests/conformance/pi.test.ts
 ```
 
-Real portable-browser conformance runs one private Sway Bot Computer on a fixture host with no browser on `PATH` and no visible host desktop entries, captures a Latin/Chinese/Japanese/Korean page from two Screens, and asserts real glyphs rather than empty boxes, one shared browser profile, and no snap launch. It needs a prepared Sway bundle and a prepared font directory, downloads the pinned browser on first use, and skips without the flag. Prepare both once (the bundle build needs Docker; `prepare-fonts.sh` downloads the pinned fonts over HTTPS):
+Real portable-browser conformance runs one private Sway Bot Computer on a fixture host with no browser on `PATH` and no visible host desktop entries, captures a Latin/Chinese/Japanese/Korean page from two Screens, and asserts real glyphs rather than empty boxes, one shared browser profile, and no snap launch. It needs a prepared Sway bundle, a prepared font directory, and an installed browser pack (pointed at with `OMARCHY_BOT_BROWSER_PACK_DIR`), and skips without the flag. Prepare all three once (the bundle build needs Docker; the pack build downloads the pinned Chrome for Testing and library inputs over HTTPS):
 
 ```bash
 bash scripts/build-sway-runtime.sh .lane/dist    # writes .lane/dist/sway with relocatable launchers
 bash scripts/prepare-fonts.sh .lane/fonts
+bash scripts/package-browser-pack.sh "$PWD" .lane/browser-pack
+bun scripts/install-browser-pack.ts .lane/browser-pack/*.tar.zst .lane/browser
 ```
 
 Each bundle launcher relocates from its own path, so pointing the variables at `.lane/dist/sway/bin` runs no host compiler and needs no host Sway, grim, or D-Bus:
@@ -458,6 +473,7 @@ OMARCHY_BOT_INPUT_HELPER_BIN=$sway/bin/omarchy-bot-wayland-input \
 OMARCHY_BOT_CAPTURE_HELPER_BIN=$sway/bin/omarchy-bot-wayland-capture \
 OMARCHY_BOT_DESKTOP_BIN=$sway/bin/omarchy-bot-desktop \
 OMARCHY_BOT_FONT_DIR=$PWD/.lane/fonts \
+OMARCHY_BOT_BROWSER_PACK_DIR=$PWD/.lane/browser \
 bun test tests/integration/bot-screen-portable-browser-conformance.test.ts
 ```
 

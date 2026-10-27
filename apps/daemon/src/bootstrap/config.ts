@@ -33,6 +33,7 @@ export interface Config {
   /** Bot Computer bundle shipped inside the installed application runtime. */
   botScreenSwayRuntimeSupplyDir: string;
   botComputerFontSupplyDir: string;
+  botComputerBrowserPackDir: string;
   conformanceDir: string;
   statusPath: string;
   /** Voxtype binary override (defaults to `voxtype` on PATH). */
@@ -130,6 +131,7 @@ export function loadConfig(): Config {
     botScreenProfileDir: path.join(dataDir, "screens"),
     botScreenSwayRuntimeSupplyDir: path.join(dataDir, "runtime", "current", "sway"),
     botComputerFontSupplyDir: path.join(dataDir, "runtime", "current", "fonts"),
+    botComputerBrowserPackDir: path.join(dataDir, "runtime", "browser"),
     conformanceDir: path.join(dataDir, "conformance"),
     statusPath: path.join(stateDir, "status.json"),
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),

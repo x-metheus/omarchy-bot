@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { assertNotRoot, extractRuntimeArchive, verifyChecksum } from "./archive.ts";
 import { layoutFromEnv, type Layout } from "./layout.ts";
 import { doctorText, installUnit, startUnit, statusText, stopUnit, uninstall, userManagerAvailable } from "./lifecycle.ts";
+import { browserPackReleaseUrl, installBrowserPack } from "./browserPack.ts";
+import { nativeBrowserCommand } from "../../daemon/src/modules/computer/hostBrowser.ts";
+import { PortableBotComputerAssets } from "../../daemon/src/modules/computer/botComputerAssets.ts";
 
 const commands = ["install", "start", "stop", "status", "pair", "devices", "revoke", "update", "uninstall", "doctor"];
 
@@ -59,15 +62,20 @@ export async function run(
         assertNotRoot();
         let archive: string | undefined;
         let checksum: string | undefined;
-        for (let index = 0; index < args.length; index += 2) {
+        let browserPack: string | undefined;
+        let withBrowser = false;
+        for (let index = 0; index < args.length; index += 1) {
           const flag = args[index];
+          if (flag === "--with-browser") { withBrowser = true; continue; }
           const value = args[index + 1];
-          if ((flag !== "--archive" && flag !== "--checksum") || !value || value.startsWith("--")) {
-            io.error(`Usage: omarchy-bot ${command} --archive <path> --checksum <path>`);
+          if (!["--archive", "--checksum", "--browser-pack"].includes(flag ?? "") || !value || value.startsWith("--")) {
+            io.error(`Usage: omarchy-bot ${command} --archive <path> --checksum <path> [--with-browser] [--browser-pack <file-or-https-url>]`);
             return 2;
           }
           if (flag === "--archive") archive = value;
-          else checksum = value;
+          else if (flag === "--checksum") checksum = value;
+          else browserPack = value;
+          index += 1;
         }
         if (!archive || !checksum) {
           io.error(`Usage: omarchy-bot ${command} --archive <path> --checksum <path>`);
@@ -77,6 +85,13 @@ export async function run(
         if (reuse) io.log("reusing installed Service");
         else verifyChecksum(archive, checksum);
         if (!userManagerAvailable(env)) throw new Error("A user systemd manager is required ($XDG_RUNTIME_DIR/systemd/private)");
+        const environment = Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+        if (withBrowser || browserPack !== undefined || nativeBrowserCommand(environment) === undefined) {
+          const usable = await new PortableBotComputerAssets({ profileDir: layout.screensDir, browserPackDir: layout.browserPackDir }).ensureBrowser().then(() => true, () => false);
+          if (!reuse || withBrowser || browserPack !== undefined || !usable) {
+            await installBrowserPack(browserPack ?? browserPackReleaseUrl(archive), layout.browserPackDir);
+          }
+        }
         if (!reuse) {
           const staging = join(layout.runtimeDir, `staging-${process.pid}`);
           rmSync(staging, { recursive: true, force: true });

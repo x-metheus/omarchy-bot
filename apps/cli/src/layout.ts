@@ -7,6 +7,7 @@ export interface Layout {
   stateDir: string;
   runtimeDir: string;
   currentDir: string;
+  browserPackDir: string;
   servePath: string;
   unitDir: string;
   unitPath: string;
@@ -33,6 +34,7 @@ export function layoutFromEnv(env: NodeJS.ProcessEnv = process.env): Layout {
     stateDir,
     runtimeDir,
     currentDir,
+    browserPackDir: join(runtimeDir, "browser"),
     servePath: join(currentDir, "scripts/serve.sh"),
     unitDir,
     unitPath: join(unitDir, "omarchy-bot.service"),
