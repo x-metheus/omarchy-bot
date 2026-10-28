@@ -4,9 +4,16 @@ import { LOCAL_RESULT_TEXT_MAX, type DeviceLocalJobFrame } from "@omarchy-bot/pr
 import { confinedPath } from "@omarchy-bot/domain";
 import type { LocalDeviceIdentity } from "@omarchy-bot/agent-contract";
 import { posixExecutor, type LocalExecutor } from "./posix.ts";
+import { windowsExecutor, windowsLongPath } from "./windows.ts";
 
 const LINUX_SECRET_PATHS = [".ssh", ".gnupg", ".aws", ".config"];
 const MACOS_SECRET_PATHS = [...LINUX_SECRET_PATHS, "Library/Keychains", "Library/Accounts", "Library/Application Support/com.apple.TCC"];
+const WINDOWS_SECRET_PATHS = [...LINUX_SECRET_PATHS,
+  "AppData/Local/Microsoft/Credentials", "AppData/Roaming/Microsoft/Credentials",
+  "AppData/Local/Microsoft/Protect", "AppData/Roaming/Microsoft/Protect",
+  "AppData/Local/Microsoft/Vault", "AppData/Roaming/Microsoft/Vault",
+  "AppData/Local/Microsoft/Crypto", "AppData/Roaming/Microsoft/Crypto",
+];
 const SEARCH_HIT_LIMIT = 32;
 const SNIPPET_MAX = 160;
 
@@ -22,12 +29,17 @@ export async function executeLocalJob(
 ): Promise<{ ok: true; text: string; exitCode?: number } | { ok: false; error: string }> {
   try {
     signal?.throwIfAborted();
-    const os = options.os ?? (process.platform === "darwin" ? "macos" : "linux");
-    const secretPaths = os === "macos" ? MACOS_SECRET_PATHS : LINUX_SECRET_PATHS;
+    const os = options.os ?? (process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux");
+    const secretPaths = os === "windows" ? WINDOWS_SECRET_PATHS : os === "macos" ? MACOS_SECRET_PATHS : LINUX_SECRET_PATHS;
     const localPaths = job.action === "transfer"
       ? [job.direction === "from-workspace" ? job.destination : job.path]
       : [job.path];
-    if (os === "macos" && localPaths.some((target) => target !== undefined && isSecretPath(confinedPath(target, root), root, secretPaths, true))) {
+    if (localPaths.some((target) => {
+      if (target === undefined) return false;
+      const resolved = confinedPath(target, root);
+      return isSecretPath(resolved, root, secretPaths, os !== "linux")
+        || (os === "windows" && process.platform === "win32" && isSecretPath(windowsLongPath(resolved), windowsLongPath(path.resolve(root)), secretPaths, true));
+    })) {
       return { ok: false, error: "Local Sidecar refuses credential directories" };
     }
     if (/\bscreenshot\b|\bpointer\b|SWAYSOCK|WAYLAND_DISPLAY/i.test(`${job.command ?? ""} ${job.path ?? ""}`)) {
@@ -35,11 +47,11 @@ export async function executeLocalJob(
     }
     if (job.action === "run") {
       if (job.command === undefined) return { ok: false, error: "local.run requires a command" };
-      return await (options.executor ?? posixExecutor).run(job.command, root, signal);
+      return await (options.executor ?? (os === "windows" ? windowsExecutor : posixExecutor)).run(job.command, root, signal);
     }
     if (job.action === "search") {
       if (job.query === undefined) return { ok: false, error: "local.search requires a query" };
-      return { ok: true, text: searchSandbox(job.query, root, secretPaths, os === "macos", job.path) };
+      return { ok: true, text: searchSandbox(job.query, root, secretPaths, os !== "linux", job.path, os === "windows" && process.platform === "win32") };
     }
     if (job.action === "read") {
       if (job.path === undefined) return { ok: false, error: "local.read requires an explicit path" };
@@ -85,11 +97,15 @@ function isSecretPath(target: string, root: string, secretPaths: readonly string
   return secretPaths.some((secret) => candidate.includes(`/${ignoreCase ? secret.toLowerCase() : secret}/`));
 }
 
-function searchSandbox(query: string, root: string, secretPaths: readonly string[], ignoreCase: boolean, explicitRoot?: string): string {
+function searchSandbox(query: string, root: string, secretPaths: readonly string[], ignoreCase: boolean, explicitRoot?: string, windows = false): string {
   if (explicitRoot === "/" || query === "/") {
     throw new Error("Local Sidecar search cannot scan /");
   }
-  const start = confinedPath(explicitRoot ?? ".", root);
+  let start = confinedPath(explicitRoot ?? ".", root);
+  if (windows) {
+    start = windowsLongPath(start);
+    root = windowsLongPath(path.resolve(root));
+  }
   if (isSecretPath(start, root, secretPaths, ignoreCase)) throw new Error("Local Sidecar refuses credential directories");
   const hits: string[] = [];
   const walk = (dir: string): void => {

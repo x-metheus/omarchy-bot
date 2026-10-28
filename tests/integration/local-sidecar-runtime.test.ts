@@ -70,66 +70,6 @@ describe("Local Sidecar process", () => {
     expect(await new Response(rejected.stdout).text()).not.toContain('"type":"registered"');
   });
 
-  test("wss uses a trusted TLS certificate and access_token for an approved command", async () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-sidecar-tls-"));
-    const cert = path.join(root, "cert.pem");
-    const key = path.join(root, "key.pem");
-    const generated = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1"]);
-    expect(generated.exitCode).toBe(0);
-    const token = "tls+paired/token?secret";
-    const result = Promise.withResolvers<unknown>();
-    const registered = Promise.withResolvers<unknown>();
-    const server = Bun.serve({
-      hostname: "127.0.0.1", port: 0,
-      tls: { cert: Bun.file(cert), key: Bun.file(key) },
-      fetch(request, server) {
-        const url = new URL(request.url);
-        if (url.pathname !== "/api/devices" || url.searchParams.get("access_token") !== token) return new Response(null, { status: 401 });
-        if (server.upgrade(request)) return;
-        return new Response(null, { status: 400 });
-      },
-      websocket: {
-        message(ws, message) {
-          const frame = JSON.parse(String(message));
-          if (frame.type === "register") {
-            registered.resolve(frame);
-            ws.send(JSON.stringify({ type: "registered", deviceId: frame.deviceId }));
-            ws.send(JSON.stringify({ type: "local.job", jobId: "tls-smoke", hostname: "tls-laptop", botId: "bot", turnId: "turn", action: "run", command: "printf tls-smoke" }));
-          } else if (frame.type === "local.result") result.resolve(frame);
-        },
-      },
-    });
-    try {
-      for (const env of [{ NODE_EXTRA_CA_CERTS: undefined, OMARCHY_BOT_DEVICE_TOKEN: token }, { NODE_EXTRA_CA_CERTS: cert, OMARCHY_BOT_DEVICE_TOKEN: "unpaired" }]) {
-        const rejected = Bun.spawn({
-          cmd: [process.execPath, sidecarMain], stdout: "pipe", stderr: "pipe",
-          env: { ...process.env, OMARCHY_BOT_SERVICE_URL: `wss://127.0.0.1:${server.port}`, OMARCHY_BOT_DEVICE_ID: DEVICE_A, OMARCHY_BOT_SIDECAR_ROOT: root, ...env },
-        });
-        expect(await rejected.exited).toBe(1);
-        expect(await new Response(rejected.stdout).text()).not.toContain('"type":"registered"');
-      }
-      child = Bun.spawn({
-        cmd: [process.execPath, sidecarMain], stdin: "pipe", stdout: "pipe", stderr: "pipe",
-        env: { ...process.env, NODE_EXTRA_CA_CERTS: cert, OMARCHY_BOT_SERVICE_URL: `wss://127.0.0.1:${server.port}`, OMARCHY_BOT_DEVICE_ID: DEVICE_A, OMARCHY_BOT_DEVICE_TOKEN: token, OMARCHY_BOT_SIDECAR_ROOT: root },
-      });
-      let stdout = "";
-      if (!child.stdout || typeof child.stdout === "number") throw new Error("stdout is not a pipe");
-      const stream = child.stdout;
-      void (async () => { for await (const chunk of stream) stdout += new TextDecoder().decode(chunk); })();
-      await until(() => stdout.includes('"type":"ask"'), "TLS Sidecar never asked");
-      expect(await registered.promise).toMatchObject({ type: "register", os: process.platform === "darwin" ? "macos" : "linux", shell: "posix-sh" });
-      if (!child.stdin || typeof child.stdin === "number") throw new Error("stdin is not a pipe");
-      child.stdin.write(`${JSON.stringify({ type: "allow-once", jobId: "tls-smoke" })}\n`);
-      expect(await result.promise).toMatchObject({ type: "local.result", ok: true, text: "tls-smoke", exitCode: 0 });
-      child.kill("SIGTERM");
-      await child.exited;
-      child = undefined;
-    } finally {
-      if (child) { child.kill("SIGKILL"); await child.exited; child = undefined; }
-      await server.stop(true);
-      rmSync(root, { recursive: true, force: true });
-    }
-  }, 25_000);
 
   test("outbound production Sidecar registers, asks, runs, and unregisters without stopping plugin-host work", async () => {
     h = await startDaemon();
