@@ -6,7 +6,7 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Text } from "@astryxdesign/core/Text";
 import { avatarStatusScope, avatarStatusStyles } from "./avatarStatus.stylex.ts";
 import { renderAvatarRecipe, type AvatarPresentation } from "./avatarRenderer.ts";
-import { withDeviceToken } from "../lib/deviceToken.ts";
+import { withDeviceToken } from "../lib/urls.ts";
 
 export type { AvatarPresentation } from "./avatarRenderer.ts";
 

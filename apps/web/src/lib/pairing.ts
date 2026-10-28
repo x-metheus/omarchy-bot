@@ -1,4 +1,4 @@
-import { DEVICE_TOKEN_STORAGE_KEY } from "./deviceToken.ts";
+import { getShell } from "./shell.ts";
 
 let error: string | undefined;
 
@@ -8,7 +8,7 @@ interface ExchangeResponse {
 }
 
 /**
- * The Service Host hands out one-time `/pair?code=...` URLs. Runs once at
+ * The development harness accepts one-time `/pair?code=...` URLs. Runs once at
  * startup, before the router mounts: exchange the code for a Device token, then
  * drop it from history so a refresh cannot replay it. A failed exchange lands on
  * the workspace with `pairingError()` rather than retrying.
@@ -26,7 +26,9 @@ export function pairingError(): string | undefined {
 }
 
 async function exchange(code: string): Promise<string | undefined> {
-  const res = await fetch("/api/pairing/exchange", {
+  const service = getShell().service;
+  const baseUrl = service.baseUrl();
+  const res = await fetch(`${baseUrl}/api/pairing/exchange`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ code }),
@@ -34,7 +36,7 @@ async function exchange(code: string): Promise<string | undefined> {
   const body: ExchangeResponse | undefined = await res?.json().catch(() => undefined);
   if (res?.ok === true && typeof body?.token === "string") {
     try {
-      localStorage.setItem(DEVICE_TOKEN_STORAGE_KEY, body.token);
+      await service.store(baseUrl, body.token);
     } catch {
       return "This pairing link was used, but the browser could not store the device token. Ask the Service Host for a new link.";
     }

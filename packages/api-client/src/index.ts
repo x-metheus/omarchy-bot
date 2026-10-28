@@ -38,15 +38,16 @@ import {
 } from "@omarchy-bot/protocol";
 
 export interface ApiClientOptions {
-  baseUrl?: string;
+  /** Service base URL; a getter is read for each request, browser URL, and socket. */
+  baseUrl?: string | (() => string);
   fetch?: typeof fetch;
   /**
    * Device identity of the Local Sidecar this client install started
    * (`dev_<32hex>`, the same value passed as `OMARCHY_BOT_DEVICE_ID`).
-   * It tags `message.send` so the daemon can resolve This Device.
-   * Omitted means this client has no Local Sidecar — no tag is ever sent.
+   * A getter is read per `message.send` so only a running Sidecar tags This Device.
+   * Omitted or undefined means this client has no Local Sidecar and sends no tag.
    */
-  localSidecarDeviceId?: string | undefined;
+  localSidecarDeviceId?: string | (() => string | undefined) | undefined;
   /**
    * Paired Device token (`Authorization: Bearer`, `access_token` on sockets and
    * browser-loaded URLs). A getter is read per request, so a client created
@@ -75,27 +76,28 @@ export function randomUuid(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-/** Shared by apps/web today and the Tauri client after the MVP. */
+/** Shared Service client for the Web UI in every shell. */
 export class ApiClient {
-  private readonly base: string;
+  private readonly base: () => string;
   private readonly f: typeof fetch;
-  private readonly localSidecarDeviceId: string | undefined;
+  private readonly localSidecarDeviceId: () => string | undefined;
   private readonly token: () => string | undefined;
 
   constructor(opts: ApiClientOptions = {}) {
-    this.base = (opts.baseUrl ?? "").replace(/\/$/, "");
+    const baseUrl = opts.baseUrl ?? "";
+    this.base = typeof baseUrl === "function" ? baseUrl : () => baseUrl;
     this.f = opts.fetch ?? fetch.bind(globalThis);
     const deviceId = opts.localSidecarDeviceId;
-    if (deviceId !== undefined && !isDeviceId(deviceId)) {
+    if (typeof deviceId !== "function" && deviceId !== undefined && !isDeviceId(deviceId)) {
       throw new Error("localSidecarDeviceId must be a Local Sidecar device identity");
     }
-    this.localSidecarDeviceId = deviceId;
+    this.localSidecarDeviceId = typeof deviceId === "function" ? deviceId : () => deviceId;
     const token = opts.deviceToken;
     this.token = typeof token === "function" ? token : () => token;
   }
 
   get baseUrl(): string {
-    return this.base;
+    return this.base().replace(/\/+$/, "");
   }
 
   private authHeaders(): Record<string, string> {
@@ -115,7 +117,7 @@ export class ApiClient {
   }
 
   private async req<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await this.f(`${this.base}${path}`, {
+    const res = await this.f(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
         ...this.authHeaders(),
@@ -242,7 +244,7 @@ export class ApiClient {
     return this.req(`/api/bots/${id}/avatar/generate`, { method: "POST" });
   }
   async uploadAvatar(id: string, file: Blob): Promise<BotDto> {
-    const res = await this.f(`${this.base}/api/bots/${id}/avatar/upload`, {
+    const res = await this.f(`${this.baseUrl}/api/bots/${id}/avatar/upload`, {
       method: "POST",
       headers: { ...this.authHeaders(), "content-type": file.type || "application/octet-stream", "x-command-id": randomUuid() },
       body: file,
@@ -260,7 +262,7 @@ export class ApiClient {
     return this.req(`/api/bots/${id}/avatar/recipe`, { method: "POST", body: JSON.stringify(body) });
   }
   avatarUrl(id: string): string {
-    return this.withToken(`${this.base}/api/bots/${id}/avatar`);
+    return this.withToken(`${this.baseUrl}/api/bots/${id}/avatar`);
   }
   markBotRead(id: string, threadId: string): Promise<void> {
     return this.req(`/api/bots/${id}/read`, { method: "POST", body: JSON.stringify({ threadId }) });
@@ -293,8 +295,12 @@ export class ApiClient {
    */
   #sendBody(body: SendMessageBodyDto): SendMessageBodyDto {
     const { deviceId: _claimed, ...rest } = body;
-    if (this.localSidecarDeviceId === undefined) return rest;
-    return { ...rest, deviceId: this.localSidecarDeviceId };
+    const deviceId = this.localSidecarDeviceId();
+    if (deviceId === undefined) return rest;
+    if (!isDeviceId(deviceId)) {
+      throw new Error("localSidecarDeviceId must be a Local Sidecar device identity");
+    }
+    return { ...rest, deviceId };
   }
 
 
@@ -302,7 +308,7 @@ export class ApiClient {
   async stageAttachment(botId: string, draftToken: AttachmentDraftTokenDto, file: File): Promise<AttachmentDto> {
     const form = new FormData();
     form.append("file", file);
-    const res = await this.f(`${this.base}/api/attachments/stage`, {
+    const res = await this.f(`${this.baseUrl}/api/attachments/stage`, {
       method: "POST",
       headers: {
         ...this.authHeaders(),
@@ -333,7 +339,7 @@ export class ApiClient {
     });
   }
   attachmentUrl(id: string): string {
-    return this.withToken(`${this.base}/api/attachments/${id}`);
+    return this.withToken(`${this.baseUrl}/api/attachments/${id}`);
   }
 
 
@@ -358,7 +364,7 @@ export class ApiClient {
     return this.req(this.computerPath("/api/computer/return-to-bot", owner), { method: "POST" });
   }
   computerProjectionUrl(owner: ComputerSurfaceOwner): string {
-    return this.withToken(`${this.base}${this.computerPath("/api/computer/projection", owner)}`);
+    return this.withToken(`${this.baseUrl}${this.computerPath("/api/computer/projection", owner)}`);
   }
 
   private computerPath(path: string, owner: ComputerSurfaceOwner): string {
@@ -372,9 +378,7 @@ export class ApiClient {
     onEvent: (e: EventEnvelope) => void,
     opts?: { snapshotRequired?: () => void; onOpen?: () => void; onCaughtUp?: () => void },
   ): WebSocket {
-    // Resolve relative bases (web served by the daemon) against the page origin.
-    const base = this.base !== "" ? this.base : (typeof window !== "undefined" ? window.location.origin : "");
-    const wsUrl = this.withToken(`${base.replace(/^http/, "ws")}/api/events`);
+    const wsUrl = this.withToken(`${this.baseUrl.replace(/^http/, "ws")}/api/events`);
     const ws = new WebSocket(wsUrl);
     ws.onopen = () => {
       const hello: ClientToServer = { type: "hello", ...(lastCursor !== undefined ? { lastCursor } : {}) };

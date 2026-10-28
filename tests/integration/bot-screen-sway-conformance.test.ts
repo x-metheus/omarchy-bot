@@ -654,8 +654,11 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     try {
       const page = await webBrowser.newPage();
       await page.addInitScript(
-        (token) => localStorage.setItem("omarchy-bot.device-token", token),
-        harness.token,
+        ({ token, serviceUrl }) => {
+          localStorage.setItem("omarchy-bot.device-token", token);
+          localStorage.setItem("omarchy-bot.service-url", serviceUrl);
+        },
+        { token: harness.token, serviceUrl: harness.baseUrl },
       );
       await page.goto(`${harness.baseUrl}/?bot=${owners[0]!.botId}`);
       await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();

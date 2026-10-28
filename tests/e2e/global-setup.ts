@@ -1,9 +1,9 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { AUTH_STORAGE_STATE } from "./fixtures.ts";
+import { AUTH_TOKEN_FILE, SERVICE_ORIGIN } from "./fixtures.ts";
 
 async function pairForToken(origin: string, stateDir: string): Promise<string> {
   const secret = readFileSync(path.join(stateDir, "pairing-host-secret"), "utf8").trim();
@@ -30,31 +30,18 @@ async function pairForToken(origin: string, stateDir: string): Promise<string> {
   return exchangedBody.token;
 }
 
-/** The web client reads its device token from localStorage; Playwright seeds it per origin. */
-function writeStorageState(token: string, origin: string): void {
-  writeFileSync(AUTH_STORAGE_STATE, JSON.stringify({
-    cookies: [],
-    origins: [{
-      origin: new URL(origin).origin,
-      localStorage: [{ name: "omarchy-bot.device-token", value: token }],
-    }],
-  }));
+/** Fixtures seed the memory shell and authenticate Service requests with this token. */
+function writeToken(token: string): void {
+  writeFileSync(AUTH_TOKEN_FILE, JSON.stringify(token), { mode: 0o600 });
 }
 
 /**
- * Build the web once for this run, then boot the real daemon with the fake
- * agent worker and isolated storage. Playwright runs under Node, so the daemon
- * itself lives in a Bun child that imports main() rather than shelling out to a
- * packaged executable.
+ * Boot the real Service with the fake agent worker and isolated storage.
+ * Playwright runs under Node, so the Service lives in a Bun child that imports
+ * main() rather than shelling out to a packaged executable.
  */
 export default async function globalSetup(): Promise<void> {
   const repoRoot = path.resolve(import.meta.dirname, "../..");
-  const build = spawnSync("bun", ["run", "--filter=@omarchy-bot/web", "build"], {
-    cwd: repoRoot,
-    stdio: "inherit",
-  });
-  if (build.status !== 0) throw new Error("web build failed");
-
   const runDir = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-e2e-"));
   const dataDir = path.join(runDir, "data");
   const stateDir = path.join(runDir, "state");
@@ -63,7 +50,7 @@ export default async function globalSetup(): Promise<void> {
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(conformanceDir, "pi-fake-pi-1.json"), JSON.stringify({ ok: true }));
 
-  const port = process.env.OMARCHY_BOT_E2E_PORT ?? "7399";
+  const port = new URL(SERVICE_ORIGIN).port || "80";
   const child = spawn("bun", [path.join(import.meta.dirname, "daemon-boot.ts")], {
     cwd: repoRoot,
     env: {
@@ -100,7 +87,7 @@ export default async function globalSetup(): Promise<void> {
     });
     await ready.promise;
 
-    const origin = process.env.OMARCHY_BOT_E2E_BASE_URL ?? `http://127.0.0.1:${port}`;
+    const origin = SERVICE_ORIGIN;
     // Health is the only unauthenticated route, so readiness is polled there.
     let healthDeadline = Date.now() + 20_000;
     for (;;) {
@@ -111,7 +98,7 @@ export default async function globalSetup(): Promise<void> {
     }
 
     const token = await pairForToken(origin, stateDir);
-    writeStorageState(token, origin);
+    writeToken(token);
 
     const deadline = Date.now() + 20_000;
     for (;;) {

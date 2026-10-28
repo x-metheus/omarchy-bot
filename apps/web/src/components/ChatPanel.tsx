@@ -42,7 +42,7 @@ import type {
 import { isTerminalTurn } from "@omarchy-bot/domain";
 import { api, apiErrorMessage, randomUuid, trimSendText } from "../lib/api.ts";
 import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
-import { withDeviceToken } from "../lib/deviceToken.ts";
+import { withDeviceToken } from "../lib/urls.ts";
 import {
   thinkingBoundaryAnnouncements,
   toolCallBoundaryAnnouncements,

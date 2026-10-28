@@ -3,45 +3,36 @@ import os from "node:os";
 import path from "node:path";
 import { test as base, expect } from "@playwright/test";
 
+export const WEB_ORIGIN = process.env.OMARCHY_BOT_E2E_WEB_URL ?? "http://127.0.0.1:7398";
+export const SERVICE_ORIGIN = process.env.OMARCHY_BOT_E2E_SERVICE_URL
+  ?? `http://127.0.0.1:${process.env.OMARCHY_BOT_E2E_PORT ?? "7399"}`;
+
 /** globalSetup writes the paired device token here. */
-export const AUTH_STORAGE_STATE = path.join(os.tmpdir(), "omarchy-bot-e2e-auth.json");
+export const AUTH_TOKEN_FILE = path.join(os.tmpdir(), "omarchy-bot-e2e-auth.json");
 
 function deviceToken(): string {
-  const state: unknown = JSON.parse(readFileSync(AUTH_STORAGE_STATE, "utf8"));
-  if (typeof state !== "object" || state === null || !("origins" in state) || !Array.isArray(state.origins)) {
-    throw new Error("e2e auth storage state is malformed");
-  }
-  for (const origin of state.origins) {
-    if (typeof origin !== "object" || origin === null || !("localStorage" in origin) || !Array.isArray(origin.localStorage)) continue;
-    for (const entry of origin.localStorage) {
-      if (
-        typeof entry === "object" && entry !== null
-        && "name" in entry && entry.name === "omarchy-bot.device-token"
-        && "value" in entry && typeof entry.value === "string"
-      ) return entry.value;
-    }
-  }
-  throw new Error("e2e auth storage state has no omarchy-bot.device-token");
+  const token: unknown = JSON.parse(readFileSync(AUTH_TOKEN_FILE, "utf8"));
+  if (typeof token !== "string" || token.length === 0) throw new Error("e2e auth file has no device token");
+  return token;
 }
 
-/**
- * Every daemon route except `/api/health` needs the paired device token. The web
- * client reads it from localStorage, and Playwright's `request` fixture sends no
- * browser storage, so both need seeding here rather than in each spec.
- */
+/** Seed the memory shell in each document; API requests authenticate directly to the Service. */
 export const test = base.extend({
   context: async ({ context }, use) => {
     const token = deviceToken();
     await context.addInitScript(
-      (stored) => localStorage.setItem("omarchy-bot.device-token", stored),
-      token,
+      ({ token, serviceUrl, webOrigin }) => {
+        if (location.origin !== webOrigin) return;
+        localStorage.setItem("omarchy-bot.device-token", token);
+        localStorage.setItem("omarchy-bot.service-url", serviceUrl);
+      },
+      { token, serviceUrl: SERVICE_ORIGIN, webOrigin: new URL(WEB_ORIGIN).origin },
     );
-    await context.setExtraHTTPHeaders({ authorization: `Bearer ${token}` });
     await use(context);
   },
-  request: async ({ playwright, baseURL }, use) => {
+  request: async ({ playwright }, use) => {
     const api = await playwright.request.newContext({
-      ...(baseURL === undefined ? {} : { baseURL }),
+      baseURL: SERVICE_ORIGIN,
       extraHTTPHeaders: { authorization: `Bearer ${deviceToken()}` },
     });
     await use(api);
@@ -50,4 +41,4 @@ export const test = base.extend({
 });
 
 export { expect };
-export type { Locator, Page, Route } from "@playwright/test";
+export type { APIRequestContext, Locator, Page, Route } from "@playwright/test";

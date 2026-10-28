@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "../fixtures.ts";
+import { expect, test, type APIRequestContext, type Locator, type Page } from "../fixtures.ts";
 
 async function createBot(page: Page, name: string): Promise<string> {
   await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
@@ -18,7 +18,7 @@ function composerInput(page: Page): Locator {
     .or(page.getByRole("combobox", { name: "Message input", exact: true }));
 }
 
-async function sendAndWait(page: Page, text: string): Promise<string> {
+async function sendAndWait(page: Page, request: APIRequestContext, text: string): Promise<string> {
   const priorReplies = await page.getByTestId("assistant-message").count();
   const sendResponsePromise = page.waitForResponse((response) =>
     response.request().method() === "POST"
@@ -37,7 +37,7 @@ async function sendAndWait(page: Page, text: string): Promise<string> {
   expect(result.action).toBe("sent");
   await expect(page.getByTestId("assistant-message")).toHaveCount(priorReplies + 1, { timeout: 15_000 });
   await expect.poll(async () => {
-    const response = await page.request.get(`/api/threads/${result.threadId}`);
+    const response = await request.get(`/api/threads/${result.threadId}`);
     if (!response.ok()) return undefined;
     const thread = await response.json() as { latestTurn?: { id: string; status: string } };
     return thread.latestTurn === undefined
@@ -58,8 +58,8 @@ async function currentThreadId(page: Page): Promise<string> {
   return threadId;
 }
 
-async function postMessage(page: Page, threadId: string, text: string): Promise<void> {
-  const response = await page.request.post(`/api/threads/${threadId}/messages`, { data: { text } });
+async function postMessage(request: APIRequestContext, threadId: string, text: string): Promise<void> {
+  const response = await request.post(`/api/threads/${threadId}/messages`, { data: { text } });
   expect(response.status()).toBe(202);
 }
 
@@ -80,11 +80,11 @@ async function scrollTranscriptToTop(page: Page): Promise<void> {
 }
 
 test.describe("Sidebar attention", () => {
-  test("orders by recency and startup opens the most recently active Bot", async ({ page }) => {
+  test("orders by recency and startup opens the most recently active Bot", async ({ page, request }) => {
     await page.goto("/");
     const olderBotName = `Older ${Date.now()}`;
     const olderBotId = await createBot(page, olderBotName);
-    await sendAndWait(page, "say: older useful preview");
+    await sendAndWait(page, request, "say: older useful preview");
     const olderThreadId = await currentThreadId(page);
 
     const navigation = page.getByRole("navigation", { name: "Bot navigation" });
@@ -94,25 +94,26 @@ test.describe("Sidebar attention", () => {
 
     const recentBotName = `Recent ${Date.now()}`;
     const recentBotId = await createBot(page, recentBotName);
-    await sendAndWait(page, "say: newest useful preview");
+    await sendAndWait(page, request, "say: newest useful preview");
     const orderedBots = navigation
       .getByRole("button", { name: new RegExp(`^(?:${olderBotName}|${recentBotName})$`) });
     await expect(orderedBots.first()).toHaveAccessibleName(recentBotName);
 
     await page.goto("/");
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)bot=${recentBotId}(?:&|$)`));
-    const olderThreads = await page.request.get(`/api/bots/${olderBotId}/threads`);
+    const olderThreads = await request.get(`/api/bots/${olderBotId}/threads`);
     const threads = await olderThreads.json() as Array<{ id: string }>;
     expect(threads[0]?.id).toBe(olderThreadId);
   });
 
-  test("keeps unread above the latest output and clears it through the native latest control", async ({ page }) => {
+  test("keeps unread above the latest output and clears it through the native latest control", async ({ page, request }) => {
     await page.goto("/");
     const botId = await createBot(page, `Unread boundary ${Date.now()}`);
     let selectedThreadId: string | undefined;
     for (let index = 0; index < 5; index += 1) {
       const completedThreadId = await sendAndWait(
         page,
+        request,
         `say: ${index} ${"long transcript output ".repeat(20)}`,
       );
       selectedThreadId ??= completedThreadId;
@@ -122,7 +123,7 @@ test.describe("Sidebar attention", () => {
     const threadId = await currentThreadId(page);
     await scrollTranscriptToTop(page);
 
-    await postMessage(page, threadId, "say: background output at the precise read boundary");
+    await postMessage(request, threadId, "say: background output at the precise read boundary");
     await expect(page.getByRole("navigation", { name: "Bot navigation" }).getByLabel("1 unread message")).toBeVisible({ timeout: 15_000 });
     const scrollToLatest = page.getByRole("button", { name: "New messages" });
     await expect(scrollToLatest).toBeVisible();
@@ -132,7 +133,7 @@ test.describe("Sidebar attention", () => {
     await expect(scrollToLatest).toBeHidden();
   });
 
-  test("keeps completion notifications state-driven while process-only output leaves Sidebar attention unchanged", async ({ page }) => {
+  test("keeps completion notifications state-driven while process-only output leaves Sidebar attention unchanged", async ({ page, request }) => {
     await page.addInitScript(() => {
       const state = globalThis as typeof globalThis & {
         __notificationCalls: Array<{ title: string; body?: string }>;
@@ -155,9 +156,9 @@ test.describe("Sidebar attention", () => {
     await page.goto("/");
 
     const affectedBotId = await createBot(page, `Notification target ${Date.now()}`);
-    await sendAndWait(page, "say: focused completion is quiet");
+    await sendAndWait(page, request, "say: focused completion is quiet");
     const affectedThreadId = await currentThreadId(page);
-    const markedRead = await page.request.post(`/api/bots/${affectedBotId}/read`, {
+    const markedRead = await request.post(`/api/bots/${affectedBotId}/read`, {
       data: { threadId: affectedThreadId },
     });
     expect(markedRead.ok()).toBe(true);
@@ -168,12 +169,12 @@ test.describe("Sidebar attention", () => {
     await createBot(page, `Other selected ${Date.now()}`);
     await expect(affectedRow).toContainText("focused completion is quiet");
 
-    await postMessage(page, affectedThreadId, "process-only");
+    await postMessage(request, affectedThreadId, "process-only");
     await expect.poll(() => page.evaluate(() => (globalThis as typeof globalThis & { __notificationCalls: unknown[] }).__notificationCalls.length), { timeout: 15_000 }).toBe(1);
     await expect(affectedRow).toContainText("focused completion is quiet");
     await expect(affectedRow.getByLabel("1 unread message")).toHaveCount(0);
 
-    await postMessage(page, affectedThreadId, "say: background completion notifies");
+    await postMessage(request, affectedThreadId, "say: background completion notifies");
     await expect.poll(() => page.evaluate(() => (globalThis as typeof globalThis & { __notificationCalls: unknown[] }).__notificationCalls.length), { timeout: 15_000 }).toBe(2);
     const notifications = await page.evaluate(() => (globalThis as typeof globalThis & { __notificationCalls: Array<{ title: string }> }).__notificationCalls);
     expect(notifications.every((notification) => notification.title.includes("finished working"))).toBe(true);

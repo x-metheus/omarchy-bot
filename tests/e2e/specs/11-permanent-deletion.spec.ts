@@ -23,7 +23,7 @@ function deletionConfirmation(page: Page, botName: string): Locator {
 }
 
 test.describe("direct local Bot deletion", () => {
-  test("opens the pointer-only Sidebar menu, keeps Bot Settings reachable, cancels unchanged, then deletes and falls back", async ({ page, context }) => {
+  test("opens the pointer-only Sidebar menu, keeps Bot Settings reachable, cancels unchanged, then deletes and falls back", async ({ page, context, request }) => {
     await page.goto("/");
     const otherSelectedBotId = await createBot(page, "Other window selection");
     const otherPage = await context.newPage();
@@ -87,10 +87,10 @@ test.describe("direct local Bot deletion", () => {
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), draftKey)).toBeNull();
     await expect.poll(() => otherPage.evaluate((key) => sessionStorage.getItem(key), otherTargetDraftKey)).toBeNull();
     await expect.poll(() => otherPage.evaluate((key) => sessionStorage.getItem(key), siblingDraftKey)).not.toBeNull();
-    expect((await page.request.get(`/api/bots/${botId}`)).status()).toBe(404);
+    expect((await request.get(`/api/bots/${botId}`)).status()).toBe(404);
   });
 
-  test("warns before stopping active work from the Sidebar, cancels without effects, then deletes after the Turn stops", async ({ page }) => {
+  test("warns before stopping active work from the Sidebar, cancels without effects, then deletes after the Turn stops", async ({ page, request }) => {
     await page.goto("/");
     const fallbackBotId = await createBot(page, "Active deletion fallback");
     const botName = "Delete active from Sidebar";
@@ -117,7 +117,7 @@ test.describe("direct local Bot deletion", () => {
 
     await expect(confirmation).not.toBeVisible();
     await expect(botRow.getByTestId("sidebar-activity-point")).toBeVisible();
-    const unchangedThread = await page.request.get(`/api/threads/${threadId}`);
+    const unchangedThread = await request.get(`/api/threads/${threadId}`);
     expect(unchangedThread.ok()).toBeTruthy();
     expect((await unchangedThread.json() as { activeTurn?: { id: string } }).activeTurn?.id).toBeTruthy();
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), draftKey)).not.toBeNull();
@@ -128,8 +128,8 @@ test.describe("direct local Bot deletion", () => {
 
     await expect(botRow).toHaveCount(0);
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)bot=${fallbackBotId}(?:&|$)`));
-    expect((await page.request.get(`/api/bots/${botId}`)).status()).toBe(404);
-    expect((await page.request.get(`/api/threads/${threadId}`)).status()).toBe(404);
+    expect((await request.get(`/api/bots/${botId}`)).status()).toBe(404);
+    expect((await request.get(`/api/threads/${threadId}`)).status()).toBe(404);
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), draftKey)).toBeNull();
   });
 
@@ -196,6 +196,6 @@ test.describe("direct local Bot deletion", () => {
     await expect(settings.getByRole("button", { name: `Delete ${botName}` })).toHaveCount(0);
     await expect(page).toHaveURL(/\/$/);
     await expect(page.getByRole("heading", { name: "Create your first bot" })).toBeVisible();
-    expect((await page.request.get(`/api/bots/${botId}`)).status()).toBe(404);
+    expect((await request.get(`/api/bots/${botId}`)).status()).toBe(404);
   });
 });
