@@ -1,8 +1,7 @@
 import type { JSX, RefObject } from "react";
 import { useEffect, useState } from "react";
-import { Bot, Mic, Palette } from "lucide-react";
+import { Bell, Bot, Palette } from "lucide-react";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
-import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -13,9 +12,8 @@ import { Item } from "@astryxdesign/core/Item";
 import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
-import type { BotViewDto, DictationDto } from "@omarchy-bot/protocol";
+import type { BotViewDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
-import { VoiceSettingsControl } from "./VoiceSettingsControl.tsx";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 
 export interface SettingsDialogProps {
@@ -28,18 +26,15 @@ export interface SettingsDialogProps {
   botsLoading?: boolean;
   botsError?: string;
   onRetryBots?: () => void;
-  dictation: DictationDto;
-  autoSendVoice: boolean;
-  onAutoSendVoiceChange: (enabled: boolean) => void;
   notificationPermission: NotificationPermission | "unsupported";
   onRequestNotifications: () => void;
 }
 
-type SettingsSectionId = "appearance" | "voice" | "bots";
+type SettingsSectionId = "appearance" | "notifications" | "bots";
 
 const SETTINGS_SECTIONS = [
   { id: "appearance", label: "Appearance", icon: Palette },
-  { id: "voice", label: "Voice", icon: Mic },
+  { id: "notifications", label: "Notifications", icon: Bell },
   { id: "bots", label: "Bots", icon: Bot },
 ] as const satisfies ReadonlyArray<{
   id: SettingsSectionId;
@@ -55,9 +50,6 @@ interface SettingsContentProps extends Pick<
   | "botsLoading"
   | "botsError"
   | "onRetryBots"
-  | "dictation"
-  | "autoSendVoice"
-  | "onAutoSendVoiceChange"
   | "notificationPermission"
   | "onRequestNotifications"
 > {
@@ -83,15 +75,12 @@ function AppearanceSection(): JSX.Element {
   );
 }
 
-function VoiceSection({
-  autoSendVoice,
-  onAutoSendVoiceChange,
-  dictation,
+function NotificationsSection({
   notificationPermission,
   onRequestNotifications,
 }: Pick<
   SettingsContentProps,
-  "autoSendVoice" | "onAutoSendVoiceChange" | "dictation" | "notificationPermission" | "onRequestNotifications"
+  "notificationPermission" | "onRequestNotifications"
 >): JSX.Element {
   const notificationsDescription =
     notificationPermission === "unsupported"
@@ -104,20 +93,9 @@ function VoiceSection({
   return (
     <VStack gap={2}>
       <VStack gap={0.5}>
-        <Heading level={3}>Voice and notifications</Heading>
-        <Text color="secondary">Control browser-local input and attention preferences.</Text>
+        <Heading level={3}>Notifications</Heading>
+        <Text color="secondary">Control alerts for background Bot activity.</Text>
       </VStack>
-      {dictation.state === "unavailable" ? (
-        <Banner
-          status="warning"
-          title="Voice dictation unavailable"
-          description={
-            dictation.error
-            ?? "Voxtype is unavailable. Install or start Voxtype, then reopen Settings to check again."
-          }
-        />
-      ) : null}
-      <VoiceSettingsControl value={autoSendVoice} onChange={onAutoSendVoiceChange} />
       <Item label="Desktop notifications" description={notificationsDescription} align="start" />
       {notificationPermission === "default" ? (
         <Button
@@ -210,9 +188,6 @@ function SettingsContent({
   botsLoading = false,
   botsError,
   onRetryBots,
-  dictation,
-  autoSendVoice,
-  onAutoSendVoiceChange,
   notificationPermission,
   onRequestNotifications,
   compactNav,
@@ -269,11 +244,8 @@ function SettingsContent({
           aria-busy={botsLoading || operationPending || undefined}
         >
           {selected.id === "appearance" ? <AppearanceSection /> : null}
-          {selected.id === "voice" ? (
-            <VoiceSection
-              autoSendVoice={autoSendVoice}
-              onAutoSendVoiceChange={onAutoSendVoiceChange}
-              dictation={dictation}
+          {selected.id === "notifications" ? (
+            <NotificationsSection
               notificationPermission={notificationPermission}
               onRequestNotifications={onRequestNotifications}
             />
@@ -304,9 +276,6 @@ export function SettingsDialog({
   botsLoading = false,
   botsError,
   onRetryBots,
-  dictation,
-  autoSendVoice,
-  onAutoSendVoiceChange,
   mobileReturnFocusRef,
   notificationPermission,
   onRequestNotifications,
@@ -319,9 +288,6 @@ export function SettingsDialog({
       botsLoading={botsLoading}
       {...(botsError !== undefined ? { botsError } : {})}
       {...(onRetryBots !== undefined ? { onRetryBots } : {})}
-      dictation={dictation}
-      autoSendVoice={autoSendVoice}
-      onAutoSendVoiceChange={onAutoSendVoiceChange}
       notificationPermission={notificationPermission}
       onRequestNotifications={onRequestNotifications}
       compactNav={isMobile}

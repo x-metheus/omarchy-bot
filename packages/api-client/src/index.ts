@@ -21,8 +21,6 @@ import type {
   CreateBotBodyDto,
   DeleteBotResultDto,
   DeviceDto,
-  DictationDto,
-  DictationResultDto,
   EventEnvelope,
   MessageDto,
   PatchBotBodyDto,
@@ -336,21 +334,6 @@ export class ApiClient {
   }
   attachmentUrl(id: string): string {
     return this.withToken(`${this.base}/api/attachments/${id}`);
-  }
-
-
-  // ----- dictation -----
-  dictation(): Promise<DictationDto> {
-    return this.req("/api/dictation");
-  }
-  startDictation(): Promise<DictationDto> {
-    return this.req("/api/dictation/start", { method: "POST" });
-  }
-  stopDictation(): Promise<DictationResultDto> {
-    return this.req("/api/dictation/stop", { method: "POST" });
-  }
-  cancelDictation(): Promise<DictationDto> {
-    return this.req("/api/dictation/cancel", { method: "POST" });
   }
 
 

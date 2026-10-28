@@ -15,7 +15,6 @@ import type {
   ScreenProjectionService,
 } from "../modules/computer/screenProjection.ts";
 import type { AvatarService } from "../modules/avatars/avatarService.ts";
-import type { DictationService } from "../modules/dictation/dictationService.ts";
 import type { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { handleAvatarRequest } from "./avatarRoutes.ts";
 import { handleThreadFeatureRequest } from "./threadRoutes.ts";
@@ -23,7 +22,6 @@ import { handleBotAttentionRequest } from "./botAttentionRoutes.ts";
 import { handleBotDeletionRequest } from "./botDeletionRoutes.ts";
 import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleProjectionRequest } from "./projectionRoutes.ts";
-import { handleDictationRequest } from "./dictationRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import { handlePluginRequest } from "./pluginRoutes.ts";
 import type { PluginsService } from "../modules/plugins/plugins.ts";
@@ -52,7 +50,6 @@ export interface DaemonServices {
   turns: TurnService;
   avatars: AvatarService;
   attachments: AttachmentsService;
-  dictation: DictationService;
   plugins: PluginsService;
   computer: ComputerBroker;
   screens: BotScreenManager;
@@ -359,9 +356,6 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       return json(result, 202);
     }
 
-
-    const dictationResponse = await handleDictationRequest(req, svc.dictation, pathname);
-    if (dictationResponse) return dictationResponse;
 
     const projectionResponse = await handleProjectionRequest(req, svc.computer, svc.projections);
     if (projectionResponse) return projectionResponse;

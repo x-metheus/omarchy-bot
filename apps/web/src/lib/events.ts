@@ -8,8 +8,7 @@ export type QueryTag =
   | "threads"
   | "messages"
   | "turns"
-  | "computer"
-  | "dictation";
+  | "computer";
 
 export type Invalidate = (tag: QueryTag, threadId?: string) => void;
 
@@ -148,9 +147,6 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
     case "computer.state.changed":
       invalidate("computer");
       invalidate("bots");
-      return;
-    case "dictation.state.changed":
-      invalidate("dictation");
       return;
     default:
       return;
