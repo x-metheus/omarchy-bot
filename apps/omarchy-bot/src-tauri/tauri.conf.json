@@ -12,5 +12,12 @@
     }
   },
   "bundle": { "active": true, "targets": ["appimage"], "icon": ["icons/icon.png"], "category": "Utility", "shortDescription": "Conversations and Bot Screens" },
-  "plugins": { "deep-link": { "desktop": { "schemes": ["omarchy-bot"] } } }
+  "plugins": {
+    "deep-link": { "desktop": { "schemes": ["omarchy-bot"] } },
+    "updater": {
+      "pubkey": "UNCONFIGURED-DEVELOPMENT-BUILD",
+      "endpoints": ["https://github.com/XMethues/omarchy-bot/releases/download/app-latest/latest.json"],
+      "requireSignedVersion": true
+    }
+  }
 }

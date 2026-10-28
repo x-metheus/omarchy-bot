@@ -32,10 +32,19 @@ cleanup() { [[ -z ${xvfb_pid:-} ]] || kill "$xvfb_pid" 2>/dev/null || true; rm -
 trap cleanup EXIT
 Xvfb "$DISPLAY" -screen 0 1440x1000x24 -nolisten tcp > "$session/xvfb.log" 2>&1 &
 xvfb_pid=$!
-# Extract exactly the packaged filesystem; a stable path lets AppHandle::restart
-# reconnect WebDriver without an AppImage mount disappearing with its launcher.
-cd "$session"
-/artifact/omarchy-bot.AppImage --appimage-extract > extract.log
+if [[ ${OMARCHY_BOT_UPDATER_SMOKE:-0} == 1 ]]; then
+  # A writable real AppImage exercises replacement and restart, without FUSE.
+  cp /artifact/omarchy-bot.AppImage "$session/installed.AppImage"
+  chmod 755 "$session/installed.AppImage"
+  cat > "$OMARCHY_BOT_SMOKE_APP" <<EOF
+#!/bin/sh
+exec "$session/installed.AppImage" "\$@"
+EOF
+  chmod 755 "$OMARCHY_BOT_SMOKE_APP"
+else
+  # Extract exactly the packaged filesystem for the general WebKit smoke.
+  cd "$session"
+  /artifact/omarchy-bot.AppImage --appimage-extract > extract.log
 cat > "$OMARCHY_BOT_SMOKE_APP" <<EOF
 #!/bin/sh
 exec "$session/squashfs-root/AppRun" "\$@"
@@ -47,6 +56,7 @@ export DBUS_SESSION_BUS_ADDRESS=unix:path=$session/unavailable-session-bus
 exec "$session/squashfs-root/AppRun" "\$@"
 EOF
 chmod 755 "$OMARCHY_BOT_SMOKE_APP-no-keyring"
+fi
 cc /src/scripts/sway-runtime/conformance/x11-fixture.c -lX11 -o "$session/x11-fixture"
 export OMARCHY_BOT_X11_FIXTURE=$session/x11-fixture
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$session/tls.key" -out "$session/tls.pem" -days 1 -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' > "$session/openssl.log" 2>&1

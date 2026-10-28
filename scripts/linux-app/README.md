@@ -18,3 +18,62 @@ Coverage includes Add Service on first run, a clear self-signed TLS error, start
 The native app restarts once after pairing or unpairing to load the CSP from the stored connection. The smoke reconnects after that restart. While unpaired, the Add Service screen must be able to contact a supplied Service address; after pairing only that Service's HTTP and WebSocket origins are allowed alongside local IPC.
 
 The smoke's artifact SHA-256, runtime versions, concise results, Service/driver logs and final Takeover screenshot are saved to `.lane/linux-app/evidence/`. Screenshots capture only the container's private Xvfb display. CI runs these same scripts and uploads the packaged artifact and evidence. This suite proves Linux WebKitGTK behavior; Chromium UI tests remain separate.
+
+## Signed builds and updater smoke
+
+Unsigned developer builds keep the default `0.1.0` version and cannot install updates. A signed build requires all of `APP_VERSION` (stable `X.Y.Z`, no leading zeros), `TAURI_UPDATER_PUBKEY` (the public key contents), `TAURI_UPDATER_ENDPOINT` (the HTTPS manifest URL), and `TAURI_SIGNING_PRIVATE_KEY` (the private key contents). `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` supplies the key's password, or is empty for an unencrypted test key. The wrapper forwards these through the container environment; do not put signing values in shell arguments, source files, `.env` files, logs, or workflow artifacts.
+
+The build embeds the version, public key, and endpoint in the AppImage, enables Tauri updater artifacts, and writes these files to `.lane/dist`:
+
+```text
+omarchy-bot_VERSION_amd64.AppImage
+omarchy-bot_VERSION_amd64.AppImage.sha256
+omarchy-bot_VERSION_amd64.AppImage.sig
+```
+
+To exercise native updates with disposable signing material, run:
+
+```sh
+bash scripts/linux-app/updater-smoke.sh
+```
+
+This uses the same pinned container flow, builds signed `0.1.0` and `0.1.1` images with an ephemeral key, and serves a private loopback updater endpoint. The packaged WebKitGTK checks cover finding the newer version, refusing a tampered AppImage without replacing the installed image, installing the genuine signed image, and restarting into it. The insecure-HTTP override belongs only to this smoke; release endpoints require HTTPS. Run this before a production signed build because the smoke writes its own build outputs. Neither test keys nor release keys belong in uploaded evidence.
+
+## Release setup
+
+Create one Tauri updater keypair using the CLI already in the repository's container. After the ordinary build above has prepared `omarchy-bot-linux-app`, use a private directory and the CLI's interactive password prompt:
+
+```sh
+mkdir -p .lane/linux-app/release-signing
+chmod 700 .lane/linux-app/release-signing
+docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -v "$PWD/.lane/linux-app/release-signing:/keys" \
+  omarchy-bot-linux-app cargo tauri signer generate -w /keys/omarchy-bot.key
+chmod 600 .lane/linux-app/release-signing/omarchy-bot.key
+```
+
+Keep the private key and password in the maintainer's secret storage with a recoverable backup. Losing the key prevents updates for apps that trust its public half. Provision GitHub through repository Settings → Secrets and variables → Actions:
+
+| Location | Name | Value |
+| --- | --- | --- |
+| Repository variable | `TAURI_UPDATER_PUBKEY` | Entire contents of `omarchy-bot.key.pub`, not its path |
+| Environment `app-release` secret | `TAURI_SIGNING_PRIVATE_KEY` | Entire contents of `omarchy-bot.key`, not its path |
+| Environment `app-release` secret | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password chosen during generation |
+
+Create the `app-release` environment, restrict its deployment tags to `app-v*`, and protect release tags against replacement. The public key is safe to distribute; it must match the private key. Release builds inject it into the app, so no generated key file needs to be committed. The existing `.lane/` and private-key ignores are safeguards, not permission to publish signing material. Keep the same public key for already installed apps; replacing only the GitHub keypair does not rotate their trust.
+
+The workflow derives `APP_VERSION` from the tag and sets `TAURI_UPDATER_ENDPOINT` to `https://github.com/OWNER/REPO/releases/download/app-latest/latest.json` for the current repository. It fails before signing when the version, public key, endpoint, or private key is missing. Private signing values are available only in the signed-build step, never in the updater test, smoke, manifest, or publication steps.
+
+## Publishing and rollback
+
+The [app release workflow](../../.github/workflows/app-release.yml) runs for `app-vX.Y.Z` tags, independently of Service `runtime-*` releases. A maintainer creates and publishes the tag after reviewing the intended commit; no workflow dispatch or version change in the Service is needed. Only stable numeric versions are accepted; prerelease and build-metadata tags are rejected.
+
+Before publication CI runs the ephemeral-key updater smoke, builds with the release key, smokes that release AppImage, verifies its SHA-256 sidecar, and constructs `latest.json`. Each versioned release contains the AppImage, `.sha256`, `.sig`, and `latest.json`. The versioned release is immutable by workflow policy: an existing release makes publication fail rather than replacing its assets. Do not move an app version tag or replace its binaries.
+
+The manifest has `version`, RFC 3339 `pub_date`, and `platforms["linux-x86_64"]` containing an immutable `app-vX.Y.Z` artifact URL and the actual `.sig` contents. In the ticket's phrase “signed updater manifest,” signing means Tauri's artifact signature carried by this manifest; there is no separate JSON signature format. The updater verifies the downloaded AppImage against the embedded public key, and requires its signed version to match the advertised version. SHA-256 sidecars are useful for manual downloads, but do not replace this signature check. See the [Tauri updater format](https://v2.tauri.app/plugin/updater/#static-json-file).
+
+After the versioned release is published, CI uploads its manifest to the rolling `app-latest` release only when the version increases. That channel release is marked prerelease solely to keep it separate from GitHub's global latest-release selection; it serves stable app versions. The updater always uses `/releases/download/app-latest/latest.json`, because Service releases also use GitHub Releases and `/releases/latest/` may resolve to a Service release. App releases also opt out of GitHub's global latest selection. Release jobs are serialized so an older concurrent release cannot overwrite a newer channel manifest.
+
+If promotion fails after the immutable release has published, inspect the release and uploaded CI evidence, then upload that release's existing `latest.json` to `app-latest` after checking its version and artifact URL. Rerunning publication intentionally cannot overwrite the immutable release. To stop rollout, restore the previous release's exact manifest at `app-latest`; apps already running a newer version do not downgrade. To recover those installs, release the corrected or reverted application under a higher app version with the same signing key. Never relabel an old signature with a higher version.
+
+GitHub secret provisioning, protected-tag/environment behavior, public asset downloads, and promotion at the real endpoint require a real GitHub release run and remain pending until a maintainer performs it. No tag push is part of local verification. The general container smoke runs an extracted AppRun; the updater smoke launches a writable AppImage through its own extract-and-run mode and exercises replacement and restart of that actual AppImage without FUSE. Ordinary FUSE-mounted installed-app behavior remains a separate real-machine check. macOS WKWebView/notarization and Windows WebView2/signing/restart checks remain pending platform work; this workflow publishes only Linux x86_64 and makes no macOS or Windows support claim.

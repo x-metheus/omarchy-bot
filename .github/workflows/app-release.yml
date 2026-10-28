@@ -1,0 +1,125 @@
+name: app-release
+
+on:
+  push:
+    tags: ["app-v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: app-release
+  cancel-in-progress: false
+
+jobs:
+  linux-appimage:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    environment: app-release
+    env:
+      TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+      TAURI_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/download/app-latest/latest.json
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate independent app version and public updater configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#app-v}
+          if [[ ! $GITHUB_REF_NAME =~ ^app-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo '::error::App release tags must be app-vX.Y.Z with no leading zeros.'
+            exit 1
+          fi
+          : "${version:?APP_VERSION is required}"
+          : "${TAURI_UPDATER_PUBKEY:?Set the TAURI_UPDATER_PUBKEY repository variable to the Tauri public key contents}"
+          : "${TAURI_UPDATER_ENDPOINT:?TAURI_UPDATER_ENDPOINT is required}"
+          [[ $TAURI_UPDATER_ENDPOINT == "https://github.com/${GITHUB_REPOSITORY}/releases/download/app-latest/latest.json" ]]
+          printf 'APP_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+      - name: Prove signed update, tamper refusal, and restart in private WebKitGTK
+        run: bash scripts/linux-app/updater-smoke.sh
+      - name: Build signed release AppImage in pinned container
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${APP_VERSION:?APP_VERSION is required}"
+          : "${TAURI_UPDATER_PUBKEY:?TAURI_UPDATER_PUBKEY is required}"
+          : "${TAURI_UPDATER_ENDPOINT:?TAURI_UPDATER_ENDPOINT is required}"
+          : "${TAURI_SIGNING_PRIVATE_KEY:?Set TAURI_SIGNING_PRIVATE_KEY in the app-release environment secrets}"
+          bash scripts/build-linux-app.sh
+      - name: Smoke the release AppImage in private WebKitGTK
+        run: bash scripts/smoke-linux-app.sh ".lane/dist/omarchy-bot_${APP_VERSION}_amd64.AppImage"
+      - name: Prepare and check Tauri updater manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="omarchy-bot_${APP_VERSION}_amd64.AppImage"
+          test -s ".lane/dist/$artifact"
+          test -s ".lane/dist/$artifact.sig"
+          test -s ".lane/dist/$artifact.sha256"
+          (cd .lane/dist && sha256sum --check "$artifact.sha256")
+          jq --null-input \
+            --arg version "$APP_VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$artifact" \
+            --rawfile signature ".lane/dist/$artifact.sig" \
+            '{version: $version, pub_date: $pub_date, platforms: {"linux-x86_64": {url: $url, signature: $signature}}}' \
+            > .lane/dist/latest.json
+          jq --exit-status \
+            --arg version "$APP_VERSION" \
+            --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$artifact" \
+            --rawfile signature ".lane/dist/$artifact.sig" \
+            '.version == $version and .platforms["linux-x86_64"].url == $url and .platforms["linux-x86_64"].signature == $signature and ($signature | length > 0)' \
+            .lane/dist/latest.json
+      - name: Publish immutable app release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact=".lane/dist/omarchy-bot_${APP_VERSION}_amd64.AppImage"
+          printf '%s\n' \
+            "Omarchy Bot ${APP_VERSION} for Linux x86_64. App versions are independent of Service runtime versions." \
+            '' \
+            'Includes the AppImage, SHA-256 checksum, Tauri updater signature, and latest.json manifest.' \
+            'macOS and Windows release/WebView checks remain pending; this release contains Linux only.' \
+            > "$RUNNER_TEMP/app-release-notes.md"
+          gh release create "$GITHUB_REF_NAME" \
+            "$artifact" "$artifact.sha256" "$artifact.sig" .lane/dist/latest.json \
+            --verify-tag --latest=false --title "Omarchy Bot ${APP_VERSION}" \
+            --notes-file "$RUNNER_TEMP/app-release-notes.md"
+      - name: Promote newest app manifest at stable endpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Service runtime releases also exist, so GitHub's /latest is not the app channel.
+          releases=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[] | select(.tag_name == "app-latest") | .id')
+          if [[ -n $releases ]]; then
+            gh release download app-latest --pattern latest.json --dir "$RUNNER_TEMP/app-current"
+            current=$(jq --exit-status --raw-output '.version | select(test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' "$RUNNER_TEMP/app-current/latest.json")
+            if [[ $current == "$APP_VERSION" ]] || ! printf '%s\n' "$current" "$APP_VERSION" | sort --version-sort --check=quiet; then
+              echo "Leaving app-latest at $current; release $APP_VERSION remains available by its versioned tag."
+              exit 0
+            fi
+            gh release upload app-latest .lane/dist/latest.json --clobber
+          else
+            gh release create app-latest .lane/dist/latest.json \
+              --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title 'Omarchy Bot updater channel' \
+              --notes 'Stable Linux app updater manifest; artifact URLs point to immutable app-vX.Y.Z releases. This rolling tag is separate from Service runtime releases.'
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-release-${{ github.ref_name }}-evidence
+          path: |
+            .lane/dist/*.AppImage
+            .lane/dist/*.AppImage.sig
+            .lane/dist/*.AppImage.sha256
+            .lane/dist/latest.json
+            .lane/linux-app/evidence/
+          if-no-files-found: error

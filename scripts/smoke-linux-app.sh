@@ -18,4 +18,5 @@ mkdir -p "$root/.lane/linux-app/evidence"
 docker run --rm --init --shm-size=1g \
   -v "$root:/src" -v "$artifact:/artifact/omarchy-bot.AppImage:ro" -w /src \
   -e USER=omarchy -e LOGNAME=omarchy -e OMARCHY_BOT_SMOKE_UID="$(id -u)" -e OMARCHY_BOT_SMOKE_GID="$(id -g)" \
+  -e OMARCHY_BOT_UPDATER_SMOKE -e OMARCHY_BOT_UPDATE_ARTIFACT \
   omarchy-bot-linux-app bash /src/scripts/linux-app/session.sh
