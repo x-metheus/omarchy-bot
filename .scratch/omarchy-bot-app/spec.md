@@ -196,4 +196,4 @@ Good tests drive external behavior through the highest available seam and never 
 - There are no installed Services yet, so the browser UI is removed immediately with no migration or release hold. Until a platform's app passes its smoke suite, that platform has no client; Linux is expected first, then macOS, then Windows.
 - The macOS dmg needs an Apple Developer account for notarization, and the signed Windows installer needs a code-signing certificate; the Tauri updater needs its own signing key held as a release secret.
 - The protocol version starts at 1 with this cutover, since removing static serving, the return URL, and dictation are all breaking changes.
-- The vertical-slice tickets for this spec go under `issues/`, written with `to-tickets`.
+- The vertical-slice tickets for this spec are under `issues/`. Tickets 01, 06, and 08 start immediately.
