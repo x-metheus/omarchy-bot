@@ -1,10 +1,11 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PLUGIN_PROVIDERS } from "../../packages/protocol/src/pluginProviders.ts";
 import type { InstalledSkillDto, PluginAccountDto, PluginStateDto, SkillCommandDto } from "../../packages/protocol/src/plugins.ts";
+import type { EventEnvelope } from "../../packages/protocol/src/events.ts";
 import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
 import { api, apiStatus, authedFetch, startDaemon, type Harness } from "./helpers/harness.ts";
 
@@ -149,7 +150,7 @@ async function startServices() {
   async function authorize(actor: string, scopes = [driveScope, gmailScope], accountId?: string): Promise<PluginAccountDto> {
     pending = undefined;
     const authorization = await api<{ url: string }>(h, "POST", "/api/plugins/authorize", {
-      providerId: "google", returnUrl: h.baseUrl, ...(accountId ? { accountId } : {}),
+      providerId: "google", ...(accountId ? { accountId } : {}),
     });
     expect(new URL(authorization.url).origin).toBe("https://accounts.google.com");
     return (await finishAuthorization(actor, scopes, accountId)).account;
@@ -157,33 +158,59 @@ async function startServices() {
   return { h, sources, state, authorize, finishAuthorization, pendingAuthorization: () => pending, oauthStarts: () => oauthStartRequests };
 }
 
-test("a Paired Device authorizes from a remote client origin and returns there without leaking credentials", async () => {
+async function authorizationEvent(h: Harness, type: string) {
+  const socket = new WebSocket(`${h.baseUrl.replace(/^http/, "ws")}/api/events?access_token=${encodeURIComponent(h.token)}`);
+  const ready = Promise.withResolvers<void>();
+  const event = Promise.withResolvers<EventEnvelope>();
+  socket.onopen = () => socket.send(JSON.stringify({ type: "hello" }));
+  socket.onmessage = (message) => {
+    const frame = JSON.parse(String(message.data)) as { type: string; envelope?: EventEnvelope };
+    if (frame.type === "hello") ready.resolve();
+    if (frame.type === "event" && frame.envelope?.type === type) event.resolve(frame.envelope);
+  };
+  await ready.promise;
+  return async () => {
+    try { return await event.promise; }
+    finally { socket.close(); }
+  };
+}
+
+test("a Paired Device authorizes from a remote client origin with a Service callback and app return link", async () => {
   const { h, finishAuthorization, pendingAuthorization } = await startServices();
   expect(h.token).not.toBe("");
   const authorization = await authedFetch(h, `${h.baseUrl}/api/plugins/authorize`, {
     method: "POST",
     headers: { "content-type": "application/json", origin: "https://remote.example" },
-    body: JSON.stringify({ providerId: "google", returnUrl: "https://remote.example/" }),
+    body: JSON.stringify({ providerId: "google" }),
   });
   const authorizationBody = await authorization.json() as { url: string };
   expect(authorization.status, JSON.stringify(authorizationBody)).toBe(200);
   expect(new URL(authorizationBody.url).origin).toBe("https://accounts.google.com");
   const transaction = pendingAuthorization();
   if (!transaction) throw new Error("Publisher did not receive an OAuth start request");
-  expect(transaction.callbackUrl).toBe("https://remote.example/api/plugins/oauth/callback");
+  expect(transaction.callbackUrl).toBe(`${h.baseUrl}/api/plugins/oauth/callback`);
 
+  const firstApp = await authorizationEvent(h, "plugin.authorization_completed");
+  const secondApp = await authorizationEvent(h, "plugin.authorization_completed");
   const { response, page, token } = await finishAuthorization("fixture-actor-remote");
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
   expect(response.headers.get("referrer-policy")).toBe("no-referrer");
   const returnLink = page.match(/<a href="([^"]+)">Return to Omarchy Bot<\/a>/)?.[1];
   expect(returnLink).toBeDefined();
-  expect(new URL(returnLink!).href).toBe("https://remote.example/");
+  expect(returnLink).toBe("omarchy-bot://");
   expect(page).not.toContain(token);
   expect(page).not.toContain(h.token);
+  const account = (await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts[0]!;
+  for (const receive of [firstApp, secondApp]) {
+    const event = await receive();
+    expect(event).toMatchObject({ aggregateType: "plugin", aggregateId: account.id, payload: { providerId: "google", accountId: account.id, status: "completed" } });
+    expect(JSON.stringify(event)).not.toContain(token);
+    expect(JSON.stringify(event)).not.toContain(h.token);
+  }
 }, 40_000);
 
-test.each(["https://evil.example/", "https://remote.example/next"])("remote OAuth rejects return URL %s before contacting the publisher", async (returnUrl) => {
+test.each(["https://evil.example/", "https://remote.example/next"])("OAuth rejects the removed returnUrl field %s before contacting the publisher", async (returnUrl) => {
   const { h, oauthStarts } = await startServices();
   const response = await authedFetch(h, `${h.baseUrl}/api/plugins/authorize`, {
     method: "POST",
@@ -191,8 +218,60 @@ test.each(["https://evil.example/", "https://remote.example/next"])("remote OAut
     body: JSON.stringify({ providerId: "google", returnUrl }),
   });
   expect(response.status).toBe(400);
-  expect(await response.json()).toEqual({ error: "Authorization must return to the initiating client origin" });
+  expect((await response.json()).error).toContain("returnUrl");
   expect(oauthStarts()).toBe(0);
+}, 40_000);
+
+test.each(["cancelled", "invalid-code", "wrong-transaction"])("OAuth %s publishes a scoped failure and permits retry", async (failure) => {
+  const { h, pendingAuthorization, oauthStarts } = await startServices();
+  await api(h, "POST", "/api/plugins/authorize", { providerId: "google" });
+  const transaction = pendingAuthorization()!;
+  const receive = await authorizationEvent(h, "plugin.authorization_failed");
+  const callback = new URL(transaction.callbackUrl);
+  callback.searchParams.set("state", transaction.localState);
+  callback.searchParams.set("brokerState", failure === "wrong-transaction" ? "wrong" : transaction.brokerState);
+  callback.searchParams.set(failure === "cancelled" ? "error" : "code", failure === "cancelled" ? "access_denied" : "invalid-code");
+  const response = await fetch(callback);
+  expect(response.ok).toBe(false);
+  expect(await response.text()).toContain('<a href="omarchy-bot://">Return to Omarchy Bot</a>');
+  expect(await receive()).toMatchObject({ aggregateType: "plugin", aggregateId: "google", payload: { providerId: "google", status: "failed" } });
+  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts).toEqual([]);
+  expect((await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "google" })).status).toBe(200);
+  expect(oauthStarts()).toBe(2);
+}, 40_000);
+
+test("an expired reconnect publishes its known account failure and consumes the state", async () => {
+  const { h, authorize, pendingAuthorization } = await startServices();
+  const account = await authorize("fixture-expired");
+  await api(h, "POST", "/api/plugins/authorize", { providerId: "google", accountId: account.id });
+  const transaction = pendingAuthorization()!;
+  const receive = await authorizationEvent(h, "plugin.authorization_failed");
+  const callback = new URL(transaction.callbackUrl);
+  callback.searchParams.set("state", transaction.localState);
+  let response: Response;
+  setSystemTime(Date.now() + 16 * 60_000);
+  try { response = await fetch(callback); }
+  finally { setSystemTime(); }
+  expect(response.status).toBe(400);
+  expect(await response.text()).toContain("expired");
+  expect(await receive()).toMatchObject({ aggregateType: "plugin", aggregateId: account.id, payload: { providerId: "google", accountId: account.id, status: "failed" } });
+  expect((await fetch(callback)).status).toBe(400);
+  expect((await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "google", accountId: account.id })).status).toBe(200);
+}, 10_000);
+
+test.each(["authenticated", "pending", "error"])("native authorization without a browser URL preserves %s state and retry", async (outcome) => {
+  const { h } = await startServices();
+  const control = path.join(h.home, "conformance", "pi-fake-pi-1.json");
+  await writeFile(control, JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: outcome === "error" ? { error: "Provider consent failed" } : { authenticated: outcome === "authenticated" } }));
+  const response = await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "intercom", serviceId: "intercom" });
+  expect(response.status).toBe(outcome === "error" ? 502 : 200);
+  if (outcome !== "error") expect(response.body).toEqual({});
+  const account = (await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts.find(entry => entry.providerId === "intercom")!;
+  expect(account.status).toBe(outcome === "authenticated" ? "connected" : "reauthorize");
+  if (outcome === "error") expect(account.error).toContain("Provider consent failed");
+  await writeFile(control, JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: { authenticated: true } }));
+  expect((await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "intercom", accountId: account.id, serviceId: "intercom" })).status).toBe(200);
+  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts.find(entry => entry.id === account.id)?.status).toBe("connected");
 }, 40_000);
 
 async function usable(h: Harness, state: PluginStateDto, name: string, result: number): Promise<InstalledSkillDto> {

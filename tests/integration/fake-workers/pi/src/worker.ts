@@ -34,6 +34,9 @@ import {
   type ToolChannelFrame,
 } from "../../../../../packages/agent-contract/src/tool-channel.ts";
 import { readJsonl } from "../../../../../packages/agent-contract/src/framing.ts";
+import type { NativeMcpStatus } from "../../../../../packages/agent-contract/src/plugin-protocol.ts";
+import { nativeMcpRevision } from "../../../../../packages/agent-contract/src/native-mcp-revision.ts";
+import { nativeMcpConfigFile, nativeMcpPrivateDir } from "../../../../../packages/agent-contract/src/native-mcp-config.ts";
 
 const write = (msg: unknown): void => {
   process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -131,6 +134,7 @@ interface FakeProbeControl {
   };
   fakeAbortBehavior?: "fail_once" | "ignore_once";
   fakeAbortReleaseFile?: string;
+  fakeMcpAuthorization?: { authenticated?: boolean; error?: string };
 }
 
 function dataDir(): string | undefined {
@@ -220,6 +224,7 @@ interface FakeSession {
 const sessions = new Map<string, FakeSession>();
 const failedOnce = new Set<string>();
 const failedAbortOnce = new Set<string>();
+const mcpStatuses = new Map<string, NativeMcpStatus>();
 const ignoredAbortOnce = new Set<string>();
 
 const respond = (requestId: string, payload: unknown): void => {
@@ -412,6 +417,16 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         agentVersion: AGENT_VERSION,
         capabilities: currentCapabilities,
       } satisfies ProbePayload);
+      break;
+    }
+    case "resources.list":
+      respond(msg.requestId!, { skills: [], mcp: [...mcpStatuses.values()] });
+      break;
+    case "mcp.control": {
+      const authorization = probeControl().fakeMcpAuthorization ?? {};
+      const name = String(msg.server);
+      mcpStatuses.set(name, { name, configurationRevision: nativeMcpRevision(String(msg.cwd), nativeMcpConfigFile(nativeMcpPrivateDir())), status: authorization.authenticated ? "connected" : "needs-auth", toolCount: authorization.authenticated ? 1 : 0, disabled: false });
+      respond(msg.requestId!, { servers: [...mcpStatuses.values()], result: authorization });
       break;
     }
     case "session.open": {

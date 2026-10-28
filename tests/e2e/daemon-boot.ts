@@ -8,6 +8,24 @@ import { loadConfig } from "../../apps/daemon/src/bootstrap/config.ts";
 import { main } from "../../apps/daemon/src/bootstrap/main.ts";
 import { applyMigration, MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
 import { AVATAR_RENDERER_ID } from "../../packages/protocol/src/index.ts";
+import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
+
+if (process.env.OMARCHY_BOT_E2E_OAUTH === "1") {
+  process.env.PLUGIN_CLOUD_URL = "https://oauth-e2e.invalid";
+  process.env.OAUTH_STATE_SECRET = "isolated-oauth-e2e-state-secret-32-bytes";
+  process.env.OAUTH_GITHUB_CLIENT_ID = "e2e-github-client";
+  process.env.OAUTH_GITHUB_CLIENT_SECRET = "e2e-github-secret";
+  const originalFetch = globalThis.fetch;
+  // Only publisher transport and provider endpoints are substituted; Service HTTP and WebSockets are real.
+  globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (url.origin === "https://oauth-e2e.invalid") return handlePluginCloudRequest(request);
+    if (url.href === "https://github.com/login/oauth/access_token") return Response.json({ access_token: "e2e-provider-token", scope: "read:user repo read:org", token_type: "bearer" });
+    if (url.href === "https://api.github.com/user") return Response.json({ id: 12345, login: "e2e-github-person" });
+    return originalFetch(request);
+  }, { preconnect: originalFetch.preconnect });
+}
 
 const dataDir = process.env.OMARCHY_BOT_HOME;
 if (dataDir === undefined) throw new Error("OMARCHY_BOT_HOME is required for E2E startup");

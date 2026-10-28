@@ -150,7 +150,7 @@ export async function main(options: MainOptions = {}): Promise<{
     if (origin.hostname === "0.0.0.0") origin.hostname = "127.0.0.1";
     if (origin.hostname === "[::]") origin.hostname = "[::1]";
     return origin.origin;
-  });
+  }, (event) => { events.append("plugin", event.accountId ?? event.providerId, `plugin.authorization_${event.status}`, event); });
   const devices = new SidecarBroker(cfg.sharedWorkspaceDir);
   const pairing = new PairingService(db);
   const pairingHostSecret = pairing.ensureHostSecret(cfg.stateDir);

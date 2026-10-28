@@ -44,6 +44,8 @@ const QUERY_KEYS: Tags = {
   messages: ["messages"],
   turns: ["turns"],
   computer: ["computer"],
+  plugins: ["plugins"],
+  "plugin-commands": ["plugin-commands"],
 };
 
 type RightRegionState =

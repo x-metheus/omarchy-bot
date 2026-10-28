@@ -17,6 +17,8 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import { SKILL_CATALOG_PAGE_SIZE, type BotViewDto, type InstalledSkillDto, type McpConnectionDto, type PluginAccountDto, type PluginStateDto, type SaveMcpBody } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
+import { getShell } from "../lib/shell.ts";
+import { onPluginAuthorization } from "../lib/events.ts";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 import { ServicesBrowser } from "./ServicesBrowser.tsx";
 import { SkillCreationForm } from "./SkillCreationForm.tsx";
@@ -120,23 +122,17 @@ function McpAuthorization({ connectionId, busy, execute }: {
   const [redirectUrl, setRedirectUrl] = useState("");
   const [notice, setNotice] = useState("");
   const authorize = (redirect?: string): void => {
-    const popup = redirect ? null : window.open("about:blank", "_blank");
-    if (popup) popup.opener = null;
     setNotice("");
     execute(async () => {
-      try {
-        const result = await api.authorizeMcp(connectionId, redirect);
-        if (result.error) throw new Error(result.error);
-        if (result.authorizationUrl) {
-          if (popup) popup.location.replace(result.authorizationUrl);
-          else window.location.assign(result.authorizationUrl);
-          setNotice("Complete consent with the provider, then return here. Authorization is not complete yet.");
-        } else {
-          popup?.close();
-          setNotice(result.authenticated ? "Authorization completed. Check the connection to discover its tools." : "Authorization is not complete. Follow the provider’s consent instructions.");
-        }
-        setRedirectUrl("");
-      } catch (error) { popup?.close(); throw error; }
+      const result = await api.authorizeMcp(connectionId, redirect);
+      if (result.error) throw new Error(result.error);
+      if (result.authorizationUrl) {
+        await getShell().browser.open(result.authorizationUrl);
+        setNotice("Complete consent in your system browser, then return to Omarchy Bot. Authorization is not complete yet.");
+      } else {
+        setNotice(result.authenticated ? "Authorization completed. Check the connection to discover its tools." : "Authorization is not complete. Follow the provider’s consent instructions.");
+      }
+      setRedirectUrl("");
     }, "");
   };
   return <VStack gap={2}>
@@ -235,6 +231,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
   const [editing, setEditing] = useState<McpConnectionDto | "new">();
   const [confirm, setConfirm] = useState<{ kind: "mcp" | "skill" | "account"; id: string; name: string } | { kind: "service"; accountId: string; serviceId: string; name: string }>();
   const [notice, setNotice] = useState("");
+  const [authorizationNotice, setAuthorizationNotice] = useState("");
   const change = useMutation({
     mutationFn: async (action: () => Promise<unknown>) => {
       await action();
@@ -243,6 +240,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
   });
   const run = async (action: () => Promise<unknown>, message = "Saved. File resources are updated immediately; active native sessions may need to reload configuration."): Promise<void> => {
     setNotice("");
+    setAuthorizationNotice("");
     await change.mutateAsync(action);
     setNotice(message);
   };
@@ -251,19 +249,18 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
   const service = provider?.services.find((entry) => entry.id === selectedService);
   const busy = change.isPending;
 
-  useEffect(() => { setConfirm(undefined); setNotice(""); change.reset(); }, [section]);
+  useEffect(() => { setConfirm(undefined); setNotice(""); setAuthorizationNotice(""); change.reset(); }, [section]);
+  useEffect(() => onPluginAuthorization((event) => {
+    setAuthorizationNotice(event.type === "plugin.authorization_completed"
+      ? "Account connected."
+      : "Authorization failed. Try Add account or Reconnect again.");
+  }), []);
 
   const authorize = (providerId: PluginAccountDto["providerId"], accountId?: string): void => {
-    // Open synchronously so browser popup protection does not discard the consent tab.
-    const popup = window.open("about:blank", "_blank");
-    if (popup) popup.opener = null;
     execute(async () => {
-      try {
-        const result = await api.authorizePlugin({ providerId, returnUrl: window.location.origin, ...(accountId === undefined ? {} : { accountId }), ...(selectedService === undefined ? {} : { serviceId: selectedService }) });
-        if (popup) popup.location.replace(result.url);
-        else window.location.assign(result.url);
-      } catch (error) { popup?.close(); throw error; }
-    }, "Complete authorization in the provider tab, then return here.");
+      const result = await api.authorizePlugin({ providerId, ...(accountId === undefined ? {} : { accountId }), ...(selectedService === undefined ? {} : { serviceId: selectedService }) });
+      if (result.url) await getShell().browser.open(result.url);
+    }, "Check the account status below. If prompted, complete consent in your system browser, then return to Omarchy Bot.");
   };
 
   if (state.isPending) return <Text>Loading global plugins…</Text>;
@@ -278,7 +275,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
     </div>
     {state.isError ? <Banner status="warning" title="Plugin state could not be refreshed" description={apiErrorMessage(state.error, "Showing previously loaded state.")} /> : null}
     {change.isError ? <Banner status="error" title="Change not completed" description={apiErrorMessage(change.error, "Plugin operation failed.")} /> : null}
-    {busy ? <Text role="status">Applying change…</Text> : notice ? <Text role="status">{notice}</Text> : null}
+    {authorizationNotice ? <Text role="status">{authorizationNotice}</Text> : busy ? <Text role="status">Applying change…</Text> : notice ? <Text role="status">{notice}</Text> : null}
     {data.cloudError ? <Banner status="warning" title="Catalog or publisher unavailable" description={`${data.cloudError} Native connections and local Skills remain available.`} /> : null}
     {confirm ? <VStack gap={2} {...stylex.props(styles.card)}>
       <Heading level={2}>{confirm.kind === "account" ? "Disconnect" : "Remove"} {confirm.name}?</Heading>

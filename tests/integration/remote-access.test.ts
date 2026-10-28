@@ -9,6 +9,7 @@ import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/compu
 const saved = { ...process.env };
 let root: string;
 let daemon: { stop(): Promise<void> } | undefined;
+const originalFetch = globalThis.fetch;
 beforeEach(() => {
   root = mkdtempSync(path.join(os.tmpdir(), "remote-access-"));
   process.env.OMARCHY_BOT_HOME = path.join(root, "data");
@@ -22,6 +23,7 @@ beforeEach(() => {
 afterEach(async () => {
   await daemon?.stop();
   daemon = undefined;
+  globalThis.fetch = originalFetch;
   for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
   Object.assign(process.env, saved);
   rmSync(root, { recursive: true, force: true });
@@ -78,37 +80,39 @@ test("startup identifies a missing certificate path", () => {
   expect(() => loadConfig()).toThrow(process.env.OMARCHY_BOT_TLS_CERT);
 });
 
-const originError = "Authorization must return to the initiating client origin";
 for (const scenario of [
-  { name: "declared proxy", proxy: "127.0.0.1", pass: true },
-  { name: "HTTP from a proxy terminating TLS", proxy: "127.0.0.1", proto: "http", returnUrl: "http://bot.example/", pass: true },
-  { name: "another peer", proxy: "10.1.2.3", pass: false },
-  { name: "no proxy", proxy: "", pass: false },
-  { name: "matching browser Origin", proxy: "127.0.0.1", origin: "https://bot.example", pass: true },
-  { name: "redirect outside browser Origin", proxy: "127.0.0.1", origin: "https://bot.example", returnUrl: "https://evil.example/", pass: false },
-  { name: "invalid forwarded scheme", proxy: "127.0.0.1", proto: "javascript", pass: false },
-  { name: "forwarded host path", proxy: "127.0.0.1", host: "evil.example/path", pass: false },
-  { name: "forwarded userinfo", proxy: "127.0.0.1", host: "user:pass@evil.example", pass: false },
-  { name: "comma separated proxy headers", proxy: "127.0.0.1", proto: "https, http", host: "bot.example, internal", pass: true },
+  { name: "declared proxy", proxy: "127.0.0.1", forwarded: true },
+  { name: "HTTP from a proxy terminating TLS", proxy: "127.0.0.1", proto: "http", forwarded: true },
+  { name: "another peer", proxy: "10.1.2.3", forwarded: false },
+  { name: "no proxy", proxy: "", forwarded: false },
+  { name: "remote app Origin", proxy: "127.0.0.1", origin: "tauri://localhost", forwarded: true },
+  { name: "invalid forwarded scheme", proxy: "127.0.0.1", proto: "javascript", forwarded: false },
+  { name: "forwarded host path", proxy: "127.0.0.1", host: "evil.example/path", forwarded: false },
+  { name: "forwarded userinfo", proxy: "127.0.0.1", host: "user:pass@evil.example", forwarded: false },
+  { name: "comma separated proxy headers", proxy: "127.0.0.1", proto: "https, http", host: "bot.example, internal", forwarded: true },
 ]) {
-  test(`OAuth origin fallback respects ${scenario.name}`, async () => {
+  test(`OAuth Service callback respects ${scenario.name}`, async () => {
     process.env.OMARCHY_BOT_TRUSTED_PROXY = scenario.proxy;
+    let callbackUrl: string | undefined;
+    globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).pathname === "/api/plugins/oauth/start") {
+        callbackUrl = (await request.json() as { callbackUrl: string }).callbackUrl;
+        return Response.json({ url: "https://accounts.google.com/o/oauth2/v2/auth?state=fixture" });
+      }
+      return originalFetch(request);
+    }, { preconnect: originalFetch.preconnect });
     const h = await startDaemon(path.join(root, "daemon"), { waitForAgentReady: false });
     daemon = h;
     // Peer identity comes from the socket, never forwarded-for headers.
     const response = await fetch(`${h.baseUrl}/api/plugins/authorize`, {
       method: "POST",
       headers: { authorization: `Bearer ${h.token}`, "content-type": "application/json", "x-forwarded-proto": scenario.proto ?? "https", "x-forwarded-host": scenario.host ?? "bot.example", ...("origin" in scenario ? { origin: scenario.origin } : {}) },
-      body: JSON.stringify({ providerId: "google", accountId: "missing-account", returnUrl: scenario.returnUrl ?? "https://bot.example/" }),
+      body: JSON.stringify({ providerId: "google" }),
     });
-    const body = await response.json();
-    if (scenario.pass) {
-      expect(response.status).not.toBe(400);
-      expect(body.error).not.toBe(originError);
-    } else {
-      expect(response.status).toBe(400);
-      expect(body.error).toBe(originError);
-    }
+    expect(response.status).toBe(200);
+    const origin = scenario.forwarded ? `${scenario.proto === "http" ? "http" : "https"}://bot.example` : h.baseUrl;
+    expect(callbackUrl).toBe(`${origin}/api/plugins/oauth/callback`);
   });
 }
 
@@ -145,16 +149,11 @@ test("HTTPS and WSS preserve the paired-device gate", async () => {
     const response = await request("/api/plugins/authorize", {
       method: "POST",
       headers: { authorization: `Bearer ${paired.token}`, "content-type": "application/json", "x-forwarded-proto": scheme, "x-forwarded-host": "bot.example" },
-      body: JSON.stringify({ providerId: "google", accountId: "missing-account", returnUrl: `${scheme}://bot.example/` }),
+      body: JSON.stringify({ providerId: "google", accountId: "missing-account" }),
     });
     const body = await response.json();
-    if (scheme === "http") {
-      expect(response.status).toBe(400);
-      expect(body.error).toBe(originError);
-    } else {
-      expect(response.status).not.toBe(400);
-      expect(body.error).not.toBe(originError);
-    }
+    expect(response.status).toBe(404);
+    expect(body.error).toBe("Provider account not found");
   }
   const socketResult = (token?: string) => {
     const { promise, resolve } = Promise.withResolvers<boolean>();

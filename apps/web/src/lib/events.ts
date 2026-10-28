@@ -8,7 +8,9 @@ export type QueryTag =
   | "threads"
   | "messages"
   | "turns"
-  | "computer";
+  | "computer"
+  | "plugins"
+  | "plugin-commands";
 
 export type Invalidate = (tag: QueryTag, threadId?: string) => void;
 
@@ -83,6 +85,12 @@ let handlers: {
   getNotificationContext?: () => NotificationContext;
 } | undefined;
 
+const authorizationListeners = new Set<(envelope: EventEnvelope) => void>();
+export function onPluginAuthorization(listener: (envelope: EventEnvelope) => void): () => void {
+  authorizationListeners.add(listener);
+  return () => { authorizationListeners.delete(listener); };
+}
+
 function payloadOf(envelope: EventEnvelope): Record<string, unknown> {
   return (envelope.payload ?? {}) as Record<string, unknown>;
 }
@@ -95,6 +103,12 @@ function threadIdOf(envelope: EventEnvelope): string | undefined {
 function route(envelope: EventEnvelope, invalidate: Invalidate): void {
   const p = payloadOf(envelope);
   switch (envelope.type) {
+    case "plugin.authorization_completed":
+    case "plugin.authorization_failed":
+      invalidate("plugins");
+      invalidate("plugin-commands");
+      for (const listener of authorizationListeners) listener(envelope);
+      return;
     case "agent.status":
     case "agent.error":
     case "agent.worker_crash":

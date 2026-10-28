@@ -174,6 +174,9 @@ export class ApiClient {
   checkMcp(id: string): Promise<McpConnectionDto> {
     return this.req(`/api/plugins/mcp/${encodeURIComponent(id)}/check`, { method: "POST", body: "{}" });
   }
+  authorizeMcp(id: string, redirectUrl?: string): Promise<{ authorizationUrl?: string; authenticated?: boolean; error?: string }> {
+    return this.req(`/api/plugins/mcp/${encodeURIComponent(id)}/authorize`, { method: "POST", body: JSON.stringify(redirectUrl === undefined ? {} : { redirectUrl }) });
+  }
   searchSkills(query = "", cursor?: string, view = "trending"): Promise<SkillCatalogDto> {
     const search = new URLSearchParams({ q: query, view });
     if (cursor !== undefined) search.set("cursor", cursor);
@@ -197,7 +200,7 @@ export class ApiClient {
   pluginCommands(): Promise<SkillCommandDto[]> {
     return this.req("/api/plugins/commands");
   }
-  authorizePlugin(body: AuthorizePluginBody): Promise<{ url: string }> {
+  authorizePlugin(body: AuthorizePluginBody): Promise<{ url?: string }> {
     return this.req("/api/plugins/authorize", { method: "POST", body: JSON.stringify(body) });
   }
   labelPluginAccount(id: string, label: string): Promise<void> {
