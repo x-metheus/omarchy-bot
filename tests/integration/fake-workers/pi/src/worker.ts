@@ -13,6 +13,7 @@
  *   process-only     completes with Thinking, Tool, and Native Event records but no Response
  *   attachment-echo validates the daemon's managed worker paths and echoes metadata/content
  *   computer:<action> invokes the daemon-owned Bot Screen tool bridge
+ *   browser:<action>[:<args JSON>] invokes the daemon-owned structural browser tool bridge
  *   local.run:<command> invokes the daemon-owned Local Sidecar tool bridge
  *
  *   send_bot_message:<targetBotId>:<text>[:retry] invokes the daemon-owned mailbox bridge;
@@ -252,6 +253,20 @@ function requestComputer(
 ): Promise<unknown> {
   return toolChannel.call(
     "computer",
+    { action: action.name, args: action.args },
+    { ...context, toolCallId },
+    signal,
+  );
+}
+
+function requestBrowser(
+  context: ComputerTurnContext,
+  toolCallId: string,
+  action: { name: string; args: Record<string, unknown> },
+  signal: AbortSignal,
+): Promise<unknown> {
+  return toolChannel.call(
+    "browser",
     { action: action.name, args: action.args },
     { ...context, toolCallId },
     signal,
@@ -702,10 +717,11 @@ readJsonl(Bun.stdin.stream(), (raw) => {
           }
           return;
         }
-        if (text.startsWith("computer:")) {
+        if (text.startsWith("computer:") || text.startsWith("browser:")) {
+          const toolName = text.startsWith("browser:") ? "browser" : "computer";
           const binding = computerTurnContext(msg.computer);
           const parts = text.split(":");
-          const toolCallId = `computer-${command.turnId}`;
+          const toolCallId = `${toolName}-${command.turnId}`;
           respond(msg.requestId!, { accepted: true });
           write({
             type: "event",
@@ -713,14 +729,14 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               type: "tool.started",
               sessionId,
               id: toolCallId,
-              name: "computer",
+              name: toolName,
               status: "running",
               target: parts[1],
             },
           });
           if (parts[1] === "crash-agent") process.exit(17);
           try {
-            if (binding === undefined) throw new Error("computer tool binding missing");
+            if (binding === undefined) throw new Error(`${toolName} tool binding missing`);
             const context = { ...binding };
             if (parts[2] === "mismatch") context.surfaceId = parts[3] ?? "";
             if (parts[2] === "stale") context.turnId = `stale-${context.turnId}`;
@@ -731,19 +747,21 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             const requestToolCallId = parts[2] === "missing-tool-call"
               ? ""
               : toolCallId;
-            const action = parts[1] === "click"
-              ? { name: "click", args: { x: 4, y: 5 } }
-              : parts[1] === "type"
-                ? { name: "type", args: { text: parts.slice(2).join(":") } }
-                : parts[1] === "open_url"
-                  ? { name: "open_url", args: { url: parts.slice(2).join(":") } }
-                  : parts[1] === "list_windows"
-                    ? { name: "list_windows", args: {} }
-                    : parts[1] === "screenshot"
-                      ? { name: "screenshot", args: {} }
-                      : { name: "observe", args: {} };
+            const action = toolName === "browser"
+              ? { name: parts[1] ?? "snapshot", args: parts[2]?.startsWith("{") ? JSON.parse(parts.slice(2).join(":")) : {} }
+              : parts[1] === "click"
+                ? { name: "click", args: { x: 4, y: 5 } }
+                : parts[1] === "type"
+                  ? { name: "type", args: { text: parts.slice(2).join(":") } }
+                  : parts[1] === "open_url"
+                    ? { name: "open_url", args: { url: parts.slice(2).join(":") } }
+                    : parts[1] === "list_windows"
+                      ? { name: "list_windows", args: {} }
+                      : parts[1] === "screenshot"
+                        ? { name: "screenshot", args: {} }
+                        : { name: "observe", args: {} };
             s.streaming = true;
-            const result = await requestComputer(
+            const result = await (toolName === "browser" ? requestBrowser : requestComputer)(
               context,
               requestToolCallId,
               action,
@@ -755,7 +773,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
                 type: "tool.completed",
                 sessionId,
                 id: toolCallId,
-                name: "computer",
+                name: toolName,
                 status: "completed",
               },
             });
@@ -769,7 +787,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
                 type: "tool.completed",
                 sessionId,
                 id: toolCallId,
-                name: "computer",
+                name: toolName,
                 status: "error",
                 errorSummary: redactToolErrorSummary(message),
               },

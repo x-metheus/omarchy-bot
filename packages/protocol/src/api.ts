@@ -364,6 +364,7 @@ export const ComputerViewDto = z.object({
   state: z.enum(["starting", "ready", "bot-using", "needs-you", "user-control", "unavailable"]),
   takeover: z.enum(["unavailable", "available", "active"]),
   activity: z.string().optional(),
+  takeoverReason: z.string().optional(),
   unavailableReason: z.literal("capacity").optional(),
   capacity: z.object({
     active: z.number().int().nonnegative(),

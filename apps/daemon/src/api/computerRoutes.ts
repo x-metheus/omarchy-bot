@@ -10,7 +10,12 @@ function json(data: unknown, status = 200): Response {
 
 /** Maps one Bot Screen lifecycle and control state to public vocabulary. */
 export function computerView(state: ComputerBrokerState, lifecycle: BotScreenLifecycle): ComputerViewDto {
-  const identity = { botId: state.botId, surfaceId: state.surfaceId, takeover: state.takeover };
+  const identity = {
+    botId: state.botId,
+    surfaceId: state.surfaceId,
+    takeover: state.takeover,
+    ...(state.takeoverReason === undefined ? {} : { takeoverReason: state.takeoverReason }),
+  };
   const preview = state.lastImageAt === undefined ? {} : { previewAt: state.lastImageAt };
   if (lifecycle.admission?.reason === "capacity") {
     const { active, limit } = lifecycle.admission;
@@ -33,6 +38,9 @@ export function computerView(state: ComputerBrokerState, lifecycle: BotScreenLif
       activity: lifecycle.failure ?? "Screen unavailable.",
       ...preview,
     };
+  }
+  if (state.takeoverReason !== undefined && !state.webControlActive) {
+    return { ...identity, state: "needs-you", activity: "Screen needs you.", ...preview };
   }
   if (state.screenUse === "human") {
     return { ...identity, state: "user-control", activity: "You have control.", ...preview };

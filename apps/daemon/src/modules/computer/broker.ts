@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
-import type { AgentComputerToolOutput } from "@omarchy-bot/agent-contract";
-import { isInputAction, isSurfaceId, type ComputerAction, type SurfaceId } from "@omarchy-bot/domain";
+import type { AgentBrowserToolOutput, AgentComputerToolOutput } from "@omarchy-bot/agent-contract";
+import { isBrowserInputAction, isInputAction, isSurfaceId, type BrowserAction, type ComputerAction, type SurfaceId } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
 import type {
   BotScreenBoundActionResult,
@@ -40,6 +40,8 @@ interface PendingAgentTool {
   completion: Deferred<AgentComputerToolOutput>;
   actionError?: unknown;
   cancellation?: Error;
+  freshResult: () => Promise<AgentComputerToolOutput>;
+  takeoverReason?: string;
 }
 
 export type WebControlRevoker = (surfaceId: SurfaceId) => Promise<void>;
@@ -50,6 +52,8 @@ export interface ComputerBrokerState {
   screenUse: "idle" | "bot" | "human";
   takeover: "unavailable" | "available" | "active";
   lastImageAt?: string;
+  takeoverReason?: string;
+  webControlActive: boolean;
 }
 
 export interface ComputerSurfaceOwner {
@@ -178,6 +182,9 @@ export class ComputerBroker {
       ...owner,
       screenUse,
       takeover,
+      webControlActive: this.lease.webSurfaceIds().includes(owner.surfaceId),
+      ...(this.#pendingAgentTools.get(owner.surfaceId)?.takeoverReason !== undefined
+        ? { takeoverReason: this.#pendingAgentTools.get(owner.surfaceId)!.takeoverReason } : {}),
       ...(surface.last_image_at !== null ? { lastImageAt: surface.last_image_at } : {}),
     };
   }
@@ -222,19 +229,11 @@ export class ComputerBroker {
       await this.lease.revoke(owner.surfaceId);
       this.projections.suspendInput(owner.surfaceId);
       if (pending.cancellation !== undefined) throw pending.cancellation;
-      const capture = await this.#invokeAction(
-        owner,
-        pending.turnId,
-        { name: "observe", args: {} },
-      );
-      if (pending.cancellation !== undefined) throw pending.cancellation;
-      const result = await this.#withImageFile(
-        owner,
-        await this.#recordActionResult(owner, capture),
-      );
+      const result = await pending.freshResult();
       if (pending.cancellation !== undefined) throw pending.cancellation;
       await this.lease.settleAgentTool(owner.surfaceId, pending.toolCallId);
       this.#transitionAuthority(owner, "idle");
+      delete pending.takeoverReason;
       pending.completion.resolve(result);
       this.#event(owner);
       return result.text === undefined ? {} : { observation: result.text };
@@ -332,6 +331,30 @@ export class ComputerBroker {
     const owner = this.#requireOwner(input);
     return this.#recordActionResult(owner, await this.#invokeAction(owner, turnId, action));
   }
+  async #invokeBrowserAction(owner: ComputerSurfaceOwner, turnId: string, action: BrowserAction, signal: AbortSignal): Promise<AgentComputerToolOutput> {
+    this.#requireOwner(owner);
+    if (!isBrowserInputAction(action.name)) return this.screens.browserAct(owner, action, undefined, signal);
+    await this.screens.ensureReady(owner);
+    const generation = this.db.query(`SELECT runtime_generation FROM bot_surfaces WHERE surface_id = ?`).get(owner.surfaceId) as { runtime_generation: number };
+    return this.lease.performBotInput(
+      { surfaceId: owner.surfaceId, runtimeGeneration: generation.runtime_generation },
+      { turnId, signal, run: (send) => this.screens.browserAct(owner, action, send, signal) },
+    );
+  }
+
+  agentBrowserAct(input: ComputerSurfaceOwner, turnId: string, toolCallId: string, action: BrowserAction, signal: AbortSignal): Promise<AgentBrowserToolOutput> {
+    let reason: string | undefined;
+    if (action.name === "request_takeover") {
+      if (typeof action.args.reason !== "string" || action.args.reason.trim() === "" || action.args.reason.length > 200) {
+        return Promise.reject(new Error("request_takeover requires a non-empty reason of at most 200 characters"));
+      }
+      reason = action.args.reason.trim();
+    }
+    return this.#agentAct(input, turnId, toolCallId, signal,
+      () => this.#invokeBrowserAction(input, turnId, action, signal),
+      () => this.#invokeBrowserAction(input, turnId, { name: "snapshot", args: {} }, signal), reason);
+  }
+
 
   /** Executes one SDK computer tool call for its authoritative Bot Screen. */
   async agentToolAct(
@@ -340,6 +363,18 @@ export class ComputerBroker {
     toolCallId: string,
     action: ComputerAction,
     signal: AbortSignal,
+  ): Promise<AgentComputerToolOutput> {
+    return this.#agentAct(input, turnId, toolCallId, signal,
+      () => this.#invokeAction(input, turnId, action, signal),
+      async () => this.#withImageFile(input, await this.#recordActionResult(input, await this.#invokeAction(input, turnId, { name: "observe", args: {} }, signal))),
+      undefined,
+      async (result) => this.#withImageFile(input, await this.#recordActionResult(input, result)));
+  }
+
+  async #agentAct(
+    input: ComputerSurfaceOwner, turnId: string, toolCallId: string, signal: AbortSignal,
+    run: () => Promise<BotScreenBoundActionResult>, freshResult: () => Promise<AgentComputerToolOutput>, takeoverReason?: string,
+    finish: (result: BotScreenBoundActionResult) => Promise<AgentComputerToolOutput> = async (result) => result,
   ): Promise<AgentComputerToolOutput> {
     const owner = this.#requireOwner(input);
     return this.#serializeSurfaceOperation(owner.surfaceId, async () => {
@@ -353,6 +388,8 @@ export class ComputerBroker {
         actionDone: deferred<void>(),
         activated: deferred<void>(),
         completion: deferred<AgentComputerToolOutput>(),
+        freshResult,
+        ...(takeoverReason !== undefined ? { takeoverReason } : {}),
       };
       pending.activated.promise.catch(() => {});
       pending.completion.promise.catch(() => {});
@@ -371,12 +408,13 @@ export class ComputerBroker {
       signal.addEventListener("abort", cancel, { once: true });
 
       try {
-        let initial: BotScreenBoundActionResult;
+        let initial: BotScreenBoundActionResult | undefined;
         try {
           this.projections.suspendInput(owner.surfaceId);
           await this.lease.revoke(owner.surfaceId);
           signal.throwIfAborted();
-          initial = await this.#invokeAction(owner, turnId, action, signal);
+          if (takeoverReason !== undefined && !await this.screens.ensureReady(owner)) throw new Error(this.screens.status(owner).failure ?? "Bot Screen is unavailable");
+          initial = await run();
           signal.throwIfAborted();
         } catch (error) {
           pending.actionError = error;
@@ -387,11 +425,12 @@ export class ComputerBroker {
           pending.actionDone.resolve();
         }
 
+        if (takeoverReason !== undefined) await this.takeOver(owner);
         if (pending.cancellation !== undefined) throw pending.cancellation;
         if (!this.lease.takeoverRequested(owner.surfaceId)) {
           await this.lease.settleAgentTool(owner.surfaceId, toolCallId);
           this.#transitionAuthority(owner, "idle");
-          return this.#withImageFile(owner, await this.#recordActionResult(owner, initial));
+          return finish(initial!);
         }
         await pending.activated.promise;
         if (pending.cancellation !== undefined) throw pending.cancellation;
@@ -404,7 +443,7 @@ export class ComputerBroker {
         }
         this.#event(owner);
       }
-    });
+    }, signal);
   }
 
   async snapshot(input: ComputerSurfaceOwner): Promise<{ bytes: Uint8Array; mediaType: string } | undefined> {
@@ -489,20 +528,29 @@ export class ComputerBroker {
   async #serializeSurfaceOperation<T>(
     surfaceId: SurfaceId,
     operation: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
     const previous = this.#surfaceOperations.get(surfaceId) ?? Promise.resolve();
-    const result = previous.catch(() => {}).then(operation);
+    const result = previous.catch(() => {}).then(() => {
+      signal?.throwIfAborted();
+      return operation();
+    });
     const settled = result.then(
       () => {},
       () => {},
     );
     this.#surfaceOperations.set(surfaceId, settled);
+    const aborted = Promise.withResolvers<never>();
+    const cancel = (): void => aborted.reject(signal?.reason instanceof Error ? signal.reason : new Error("computer tool call cancelled"));
+    if (signal?.aborted) cancel();
+    else signal?.addEventListener("abort", cancel, { once: true });
+    void settled.then(() => {
+      if (this.#surfaceOperations.get(surfaceId) === settled) this.#surfaceOperations.delete(surfaceId);
+    });
     try {
-      return await result;
+      return await (signal === undefined ? result : Promise.race([result, aborted.promise]));
     } finally {
-      if (this.#surfaceOperations.get(surfaceId) === settled) {
-        this.#surfaceOperations.delete(surfaceId);
-      }
+      signal?.removeEventListener("abort", cancel);
     }
   }
 }

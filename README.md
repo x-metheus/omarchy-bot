@@ -81,9 +81,9 @@ It requires Bun 1.4+, Bash, `flock`, a systemd user manager socket (`$XDG_RUNTIM
 
 A host without a systemd user manager cannot use `install`; start the Service with the container path below or with `scripts/serve.sh` directly.
 
-The runtime archive contains no browser. `install` and `update` install the browser pack by default, on every Service Host and even under the host-browser opt-in, where it remains the fallback. Every host therefore runs the same pinned Chrome for Testing build: Agent control needs one known version with launch flags the Service owns, and nothing depends on what the host installed. By default the pack comes from `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<version>/`, inferred from the runtime archive's file name; a local runtime archive without that name needs an explicit `--browser-pack <file-or-https-url>`: a local archive with its adjacent `.sha256` sidecar, or an HTTPS URL whose archive and `.sha256` are both downloaded. `--no-browser-pack` skips the pack entirely. The adjacent `<source>.sha256` sidecar is verified before anything is written, and a mismatch aborts before the unit is installed. The pin an `update` targets is the one in the runtime archive it installs, while `install` reusing an installed Service keeps that runtime's pin. `update` replaces the pack only when the installed pin differs from the target release or the installation is incomplete, and it keeps an unchanged pin only while the installed `browser --version` succeeds, so a same-pin pack that no longer runs is repaired instead of preserved. A repair reuses the release recorded when the runtime was installed; an installation older than that record needs an explicit `--browser-pack`. The pack is extracted to `~/.local/share/omarchy-bot/runtime/browser/`, never onto the host, and `uninstall` removes it with `runtime/`.
+The runtime archive contains no browser. `install` and `update` install the browser pack by default, on every Service Host and even under the host-browser opt-in, where it remains the fallback. Every host therefore runs the same pinned Chrome for Testing build: Agent control needs one known version with launch flags the Service owns, and nothing depends on what the host installed. The daemon launches that browser with `--remote-debugging-pipe`, so the `browser` tool can read the same visible window's accessibility tree and act on it over a private inherited pipe; no TCP debugging port is opened and the browser window stays on the Bot Screen. By default the pack comes from `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<version>/`, inferred from the runtime archive's file name; a local runtime archive without that name needs an explicit `--browser-pack <file-or-https-url>`: a local archive with its adjacent `.sha256` sidecar, or an HTTPS URL whose archive and `.sha256` are both downloaded. `--no-browser-pack` skips the pack entirely. The adjacent `<source>.sha256` sidecar is verified before anything is written, and a mismatch aborts before the unit is installed. The pin an `update` targets is the one in the runtime archive it installs, while `install` reusing an installed Service keeps that runtime's pin. `update` replaces the pack only when the installed pin differs from the target release or the installation is incomplete, and it keeps an unchanged pin only while the installed `browser --version` succeeds, so a same-pin pack that no longer runs is repaired instead of preserved. A repair reuses the release recorded when the runtime was installed; an installation older than that record needs an explicit `--browser-pack`. The pack is extracted to `~/.local/share/omarchy-bot/runtime/browser/`, never onto the host, and `uninstall` removes it with `runtime/`.
 
-A host browser is never used unless you opt in with `OMARCHY_BOT_BROWSER=host` in the installing environment: `install`/`update`/`reconfigure` persist it in the unit and `<dataDir>/service.json`, and an empty value clears it. Any other value is rejected. Snap-confined browsers are skipped even then, and an opted-in host without a usable browser falls back to the pack. Chrome for Testing ships no Widevine module, so DRM-protected video does not play in Bot Screens.
+A host browser is never used unless you opt in with `OMARCHY_BOT_BROWSER=host` in the installing environment: `install`/`update`/`reconfigure` persist it in the unit and `<dataDir>/service.json`, and an empty value clears it. Any other value is rejected. Snap-confined browsers are skipped even then, and an opted-in host without a usable browser falls back to the pack. Chrome for Testing ships no Widevine module, so DRM-protected video does not play in Bot Screens. Chromium also reports `navigator.webdriver` for the `--remote-debugging-pipe` switch that Agent browser control requires, so some sites can recognize the Bot browser; the Service does not spoof or hide that signal, and such sites may need a human Takeover.
 
 The generated unit records `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `OMARCHY_BOT_HOST`, `OMARCHY_BOT_PORT`, `PATH`, `XDG_RUNTIME_DIR`, and, when configured, `OMARCHY_BOT_TLS_CERT`, `OMARCHY_BOT_TLS_KEY`, `OMARCHY_BOT_TRUSTED_PROXY`, and `OMARCHY_BOT_BROWSER`. TLS and proxy settings come from `--tls-cert`/`--tls-key`/`--trusted-proxy` flags or those variables in the installing environment. `install`/`update` leave an existing unit alone unless a TLS flag or one of those three variables is supplied, or `OMARCHY_BOT_BROWSER` is present in the installing environment, in which case they rewrite the unit and restart it instead of only starting it; [Remote access](#remote-access) documents the exact TLS rules. Writing the unit also saves the connection settings to `<dataDir>/service.json` (mode 0600, no host secret) so later CLI commands reach the installed address and scheme.
 
@@ -192,6 +192,7 @@ CLI environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `XDG_CONFIG_HO
 - **One Bot Computer, multiple Bot Screens.** Each active Screen owns an output and workspace in a shared, pure-headless Sway runtime. Screens do not own separate compositors, browser profiles, or input seats.
 - **Tabbed Bot Screens.** Each workspace shows one full-width application with readable titles for the other open windows. Dialogs and file pickers float centered above the application.
 - **Coordinated desktop input.** The runtime serializes actions across Screens. Human Web Control holds the shared input seat until control is returned; background applications can continue running.
+- **Structure-first browser control.** Agents operate the visible pack browser through a `browser` tool: a snapshot of the accessibility tree with Element Refs, then clicks, typing, and selection delivered as real input on this Screen. Screenshots and raw input remain the fallback for canvases and anything the tree does not describe. CAPTCHAs, anti-bot challenges, logins, and payment are handed to the user through Takeover with a visible reason; a Bot never tries to solve or bypass them. The `OMARCHY_BOT_BROWSER=host` opt-in remains `computer`-only, because a host browser has no Service-owned pipe.
 - **Viewing is not execution.** Closing a viewer does not stop the Screen's applications. WayVNC supplies on-demand, view-only RFB projection; Computer Broker remains the input authority.
 - **Work files outlive a Bot.** Deleting a Bot removes its Service-owned data and targeted Screen runtime/workspace, not Shared Workspace files, Agent-owned Native Sessions, or the shared Bot Computer profile.
 
@@ -460,7 +461,7 @@ reduced-motion case asserts the product's static working avatar before capture.
 Review snapshot differences before updating; browser and system-font changes can
 still affect raster output.
 
-Real Pi conformance makes model calls and requires a configured Agent. It runs in a private child process with fixture `HOME`/XDG directories, temporary copies of Pi's credential and model configuration, and removes the fixture — record and native sessions included — on completion:
+Real Pi conformance makes model calls and requires a configured Agent. It runs in a private child process with fixture `HOME`/XDG directories, temporary copies of Pi's credential and model configuration, and removes the fixture — record and native sessions included — on completion. It needs the same prepared Sway bundle, font directory, and browser pack as the portable-browser run below, provided through `OMARCHY_BOT_SWAY_BUNDLE_DIR`, `OMARCHY_BOT_FONT_DIR`, and `OMARCHY_BOT_BROWSER_PACK_DIR` (or the individual binary overrides); its final step opens a loopback form in the pack browser, snapshots it, fills it by Element Ref, and reads the submitted receipt back:
 
 ```bash
 bun test tests/conformance/pi.test.ts
@@ -495,6 +496,25 @@ bun test tests/integration/bot-screen-portable-browser-conformance.test.ts
 ```
 
 `OMARCHY_BOT_SWAY_BIN` and `OMARCHY_BOT_WLR_RANDR_BIN` are required; `grim` and `dbus-daemon` come from `OMARCHY_BOT_GRIM_BIN` and `OMARCHY_BOT_DBUS_DAEMON_BIN` or from `PATH`. The three helper overrides avoid building the native helpers from source; without them the test compiles them, which needs a C toolchain and Wayland development files.
+
+Real browser-tool conformance drives the same pack through the `browser` tool in one private Sway Bot Computer. It opens a loopback form, asserts snapshot refs and a stale-ref failure, types and selects through real input, waits for and reads the submitted receipt, samples page-side neutrality signals including `navigator.webdriver`, checks the browser process tree owns no TCP listener, keeps two Screens' tabs separate, and holds an agent-requested Takeover with its reason until “I'm done” returns a fresh snapshot. It needs the same bundle, font directory, and pack, and skips without the flag:
+
+```bash
+sway=$PWD/.lane/dist/sway
+OMARCHY_BOT_REAL_PORTABLE_BROWSER=1 \
+OMARCHY_BOT_SWAY_BIN=$sway/bin/sway \
+OMARCHY_BOT_SWAYMSG_BIN=$sway/bin/swaymsg \
+OMARCHY_BOT_WLR_RANDR_BIN=$sway/bin/wlr-randr \
+OMARCHY_BOT_WAYVNC_BIN=$sway/bin/wayvnc \
+OMARCHY_BOT_GRIM_BIN=$sway/bin/grim \
+OMARCHY_BOT_DBUS_DAEMON_BIN=$sway/bin/dbus-daemon \
+OMARCHY_BOT_INPUT_HELPER_BIN=$sway/bin/omarchy-bot-wayland-input \
+OMARCHY_BOT_CAPTURE_HELPER_BIN=$sway/bin/omarchy-bot-wayland-capture \
+OMARCHY_BOT_DESKTOP_BIN=$sway/bin/omarchy-bot-desktop \
+OMARCHY_BOT_FONT_DIR=$PWD/.lane/fonts \
+OMARCHY_BOT_BROWSER_PACK_DIR=$PWD/.lane/browser \
+bun test tests/integration/browser-real-conformance.test.ts
+```
 
 ## Bot-to-Bot mail
 

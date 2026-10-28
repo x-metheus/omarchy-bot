@@ -21,6 +21,8 @@ import {
   writeJsonl,
   AGENT_CAPABILITY_INVENTORY_VERSION,
   AGENT_COMPUTER_TOOL,
+  AGENT_BROWSER_TOOL,
+  type AgentBrowserToolOutput,
   type AgentCommand,
   type AgentBotMessageToolContext,
   type AgentBotMessageToolOutput,
@@ -40,10 +42,11 @@ import {
   type LocalActionName,
   type SessionOpenedPayload,
 } from "@omarchy-bot/agent-contract";
-import { isSurfaceId, type ComputerAction } from "@omarchy-bot/domain";
+import { isSurfaceId, type BrowserAction, type ComputerAction } from "@omarchy-bot/domain";
 import { normalizeSessionEvent, toNormalizedMessages, type SessionRuntime } from "./normalize.ts";
 import { sdkVersion } from "./sdk-version.ts";
 import { createComputerTool } from "./computer-tool.ts";
+import { createBrowserTool } from "./browser-tool.ts";
 import { createLocalTool } from "./local-tool.ts";
 import { createBotMessageTool } from "./bot-message-tool.ts";
 import { thinkingCapabilityForProbe } from "./thinking-capability.ts";
@@ -82,6 +85,16 @@ function requestComputer(
   return toolChannel
     .call(AGENT_COMPUTER_TOOL.name, { action: action.name, args: action.args }, context, signal ?? new AbortController().signal)
     .then((result) => result as AgentComputerToolOutput);
+}
+
+function requestBrowser(
+  context: AgentComputerToolContext,
+  action: BrowserAction,
+  signal: AbortSignal | undefined,
+): Promise<AgentBrowserToolOutput> {
+  return toolChannel
+    .call(AGENT_BROWSER_TOOL.name, { action: action.name, args: action.args }, context, signal ?? new AbortController().signal)
+    .then((result) => result as AgentBrowserToolOutput);
 }
 
 function requestBotMessage(
@@ -205,6 +218,10 @@ async function openSession(
     () => newEntry?.computer,
     { request: requestComputer },
   );
+  const browserTool = createBrowserTool(
+    () => newEntry?.computer,
+    { request: requestBrowser },
+  );
   const botMessageTool = createBotMessageTool(
     () => newEntry?.botMessage,
     { request: requestBotMessage },
@@ -241,7 +258,7 @@ async function openSession(
     modelRuntime: rt,
     ...(model !== undefined ? { model } : {}),
     resourceLoader: nativeMcp.loader,
-    customTools: [computerTool, botMessageTool, localTool, ...pluginTools],
+    customTools: [computerTool, browserTool, botMessageTool, localTool, ...pluginTools],
   }));
 
   const nativeSessionId = session.sessionFile ?? `mem:${sessionId}`;

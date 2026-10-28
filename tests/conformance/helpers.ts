@@ -59,6 +59,34 @@ export function createConformanceHome() {
   }
 }
 
+/** A loopback-only form whose receipt is revealed only after a real submission. */
+export function startBrowserConformanceFixture() {
+  const value = `PI-BROWSER-${crypto.randomUUID()}`;
+  const receipt = `BROWSER-RECEIPT-${crypto.randomUUID()}`;
+  const submissions: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname !== "/") return new Response("Not found", { status: 404 });
+      if (request.method === "POST") {
+        const submitted = (await request.formData()).get("message");
+        if (submitted !== value) return new Response("Incorrect form value", { status: 400 });
+        submissions.push(submitted);
+        return new Response(`<!doctype html><title>Browser conformance result</title><h1>Form submitted</h1><p>${receipt}</p>`, {
+          headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+        });
+      }
+      if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
+      return new Response(`<!doctype html><title>Browser conformance form</title><h1>Local browser fixture</h1><form method="post"><label for="message">Conformance message</label><input id="message" name="message" required><button type="submit">Submit form</button></form>`, {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
+    },
+  });
+  return { url: server.url.href, value, receipt, submissions, stop: () => server.stop(true) };
+}
+
 export async function startConformanceDaemon(): Promise<ConformanceDaemon> {
   const root = process.env.OMARCHY_BOT_CONFORMANCE_HOME;
   if (!root || process.env.HOME !== root) throw new Error("run Pi conformance through pi.test.ts for private HOME isolation");
@@ -75,9 +103,11 @@ export async function startConformanceDaemon(): Promise<ConformanceDaemon> {
   const repo = path.resolve(import.meta.dir, "../..");
   process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR ??= path.join(repo, ".lane/dist/sway");
   process.env.OMARCHY_BOT_FONT_DIR ??= path.join(repo, ".lane/fonts");
-  for (const dir of [process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR, process.env.OMARCHY_BOT_FONT_DIR]) {
+  process.env.OMARCHY_BOT_BROWSER_PACK_DIR ??= path.join(repo, ".lane/browser");
+  delete process.env.OMARCHY_BOT_BROWSER; // Always exercise the owned pack, never a host browser.
+  for (const dir of [process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR, process.env.OMARCHY_BOT_FONT_DIR, process.env.OMARCHY_BOT_BROWSER_PACK_DIR]) {
     if (!existsSync(dir)) {
-      throw new Error(`conformance needs ${dir}; run scripts/build-sway-runtime.sh .lane/dist and scripts/prepare-fonts.sh .lane/fonts, or set OMARCHY_BOT_SWAY_BUNDLE_DIR / OMARCHY_BOT_FONT_DIR`);
+      throw new Error(`conformance needs ${dir}; set OMARCHY_BOT_SWAY_BUNDLE_DIR, OMARCHY_BOT_FONT_DIR and OMARCHY_BOT_BROWSER_PACK_DIR to prepared runtime assets`);
     }
   }
   const agentEnv = sanitizedEnv();
