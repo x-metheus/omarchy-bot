@@ -214,10 +214,12 @@ From a local checkout:
 
 ```bash
 bun install
-bun run dev
+OMARCHY_BOT_DEV=1 bun run dev
 ```
 
 Open **<http://127.0.0.1:7322>**. The daemon listens on `127.0.0.1:7321`; Vite proxies `/api` and WebSockets to it.
+
+The Service allows CORS and WebSocket connections from the app's fixed origins: `tauri://localhost`, `http://tauri.localhost`, and `https://tauri.localhost`. Set `OMARCHY_BOT_DEV=1` on the Service process to also allow HTTP development origins at exactly `localhost`, `127.0.0.1`, or `[::1]`, with any valid port. This opt-in defaults off and is not written into installed Service units. Preflight needs no token; actual API requests and WebSocket upgrades still require a Paired Device token in the `Authorization: Bearer` header or `access_token` query parameter. CORS never allows credentials (cookies). WebSockets without an Origin, such as the Local Sidecar, follow normal token authentication; foreign Origins are refused before authentication.
 
 ### Official website
 

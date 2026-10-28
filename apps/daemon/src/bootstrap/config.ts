@@ -41,6 +41,8 @@ export interface Config {
   /** HTTP listener address; remote listeners require TLS or a declared proxy. */
   host: string;
   port: number;
+  /** Explicit opt-in for loopback browser development origins. */
+  development: boolean;
   tlsCert?: string;
   tlsKey?: string;
   /** Single proxy peer IP; IPv4 must use canonical dotted-quad notation. */
@@ -120,6 +122,7 @@ export function loadConfig(): Config {
     ...(tlsKey ? { tlsKey } : {}),
     ...(trustedProxy ? { trustedProxy } : {}),
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
+    development: process.env.OMARCHY_BOT_DEV === "1",
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
     botDeletionTerminalTimeoutMs: Number(process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS ?? 30_000),
     botScreenCapacity: botScreenCapacity(screenProfile.name),
