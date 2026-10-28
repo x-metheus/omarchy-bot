@@ -147,7 +147,6 @@ describe("binary Bot Activity", () => {
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
 
     const failed = await sendToThread(h, cancelled.threadId, "fail");
-    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
     await waitThreadIdle(h, failed.threadId);
     const failedThread = await api<ThreadDto>(h, "GET", `/api/threads/${failed.threadId}`);
     expect(failedThread.latestTurn).toMatchObject({ status: "failed", reason: "fake failure" });
@@ -166,6 +165,9 @@ describe("binary Bot Activity", () => {
       .filter((event) => event.aggregateId === botId && event.type === "bot.activity");
     expect(activityEvents.length).toBeGreaterThan(0);
     expect(activityEvents.every((event) => BotActivityEventPayload.safeParse(event.payload).success)).toBeTrue();
+    const failedActivity = activityEvents.map(event => BotActivityEventPayload.parse(event.payload))
+      .filter(event => event.turnId === failed.turnId).map(event => event.status);
+    expect(failedActivity).toEqual(["active", "inactive"]);
   });
 
   test("stays active until concurrent Threads have all become terminal", async () => {

@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import type { BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage, randomUuid } from "../lib/api.ts";
-import { requestDesktopNotificationPermission, startEventPump, type QueryTag } from "../lib/events.ts";
+import { requestDesktopNotificationPermission, startEventPump, stopEventPump, type QueryTag } from "../lib/events.ts";
 import { mostRecentlyActiveBot, Sidebar } from "../components/Sidebar.tsx";
 import { clearDraftsByBot, restoreDrafts, takeDraftsByBot } from "../lib/drafts.ts";
 import { ConversationHeader } from "../components/ConversationHeader.tsx";
@@ -108,6 +108,7 @@ function HomeScreen(): JSX.Element {
         botName: (botId) => botNamesRef.current[botId],
       };
     });
+    return stopEventPump;
   }, [qc, invalidate]);
 
   useEffect(() => {

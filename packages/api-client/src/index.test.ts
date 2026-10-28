@@ -113,6 +113,51 @@ describe("ApiClient Paired Device token", () => {
   });
 });
 
+test("every HTTP fetch path reports a revoked device while preserving the 401 error", async () => {
+  let unauthorized = 0;
+  const client = new ApiClient({
+    baseUrl: "http://127.0.0.1:7321",
+    deviceToken: "revoked-token",
+    onUnauthorized: () => { unauthorized++; },
+    fetch: Object.assign(async () => new Response('{"error":"unauthorized"}', { status: 401 }), { preconnect: fetch.preconnect }),
+  });
+  for (const request of [
+    () => client.listAgents(),
+    () => client.uploadAvatar("bot-1", new Blob(["avatar"])),
+    () => client.stageAttachment("bot-1", "a7126bac-a201-413f-a212-5f495aba0cda", new File(["attachment"], "file.txt")),
+  ]) {
+    await expect(request()).rejects.toMatchObject({ status: 401 });
+  }
+  expect(unauthorized).toBe(3);
+});
+
+test("delayed 401 responses from replaced credentials leave the new connection paired", async () => {
+  for (const change of ["token", "address"]) {
+    for (const method of ["json", "avatar", "attachment", "projection"]) {
+      let token = "old-token";
+      let baseUrl = "https://old.example";
+      let unauthorized = 0;
+      const pending = Promise.withResolvers<Response>();
+      const client = new ApiClient({
+        baseUrl: () => baseUrl,
+        deviceToken: () => token,
+        onUnauthorized: () => { unauthorized++; },
+        fetch: Object.assign(() => pending.promise, { preconnect: fetch.preconnect }),
+      });
+      const oldRequest = method === "json" ? client.listAgents()
+        : method === "avatar" ? client.uploadAvatar("bot-1", new Blob(["avatar"]))
+        : method === "attachment" ? client.stageAttachment("bot-1", "a7126bac-a201-413f-a212-5f495aba0cda", new File(["attachment"], "file.txt"))
+        : client.fetchResponse("https://old.example/api/computer/projection?access_token=old-token");
+      if (change === "token") token = "new-token";
+      else baseUrl = "https://new.example";
+      pending.resolve(new Response("unauthorized", { status: 401 }));
+      if (method === "projection") expect((await oldRequest as Response).status).toBe(401);
+      else await expect(oldRequest).rejects.toMatchObject({ status: 401 });
+      expect(unauthorized).toBe(0);
+    }
+  }
+});
+
 describe("ApiClient This Device tag", () => {
   test("reads the running Sidecar identity on every send and strips body claims", async () => {
     const sent: SentRequest[] = [];

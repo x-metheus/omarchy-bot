@@ -12,7 +12,7 @@ if (new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== expected) {
 }
 const runtime = path.join(staging, "runtime");
 extractRuntimeArchive(archive, runtime);
-for (const required of ["scripts/serve.sh", "sway/.omarchy-bot-runtime", "fonts", "apps/web/dist", "workers/pi/src/worker.ts"]) {
+for (const required of ["scripts/serve.sh", "sway/.omarchy-bot-runtime", "fonts", "workers/pi/src/worker.ts"]) {
   if (!existsSync(path.join(runtime, required))) {
     throw new Error(`runtime archive is missing ${required}`);
   }

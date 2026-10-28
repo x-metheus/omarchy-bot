@@ -137,9 +137,15 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
 }
 
 // The app installs __OMARCHY_BOT_SHELL__ before the Web UI bundle loads.
-declare global { var __OMARCHY_BOT_SHELL__: Shell | undefined; }
-let memoryShell: Shell | undefined;
+declare global {
+  var __OMARCHY_BOT_SHELL__: Shell | undefined;
+  var __OMARCHY_BOT_MEMORY_SHELL__: MemoryShell | undefined;
+}
+export interface MemoryShell extends Shell {
+  receivePairingRequest(request: PairingRequest): void;
+  receiveApproval(approval: LocalApproval): Promise<LocalApprovalDecision>;
+}
 export function getShell(): Shell {
-  return globalThis.__OMARCHY_BOT_SHELL__ ?? (memoryShell ??= createMemoryShell());
+  return globalThis.__OMARCHY_BOT_SHELL__ ?? (globalThis.__OMARCHY_BOT_MEMORY_SHELL__ ??= createMemoryShell());
 }
 export function installShell(next: Shell): void { globalThis.__OMARCHY_BOT_SHELL__ = next; }

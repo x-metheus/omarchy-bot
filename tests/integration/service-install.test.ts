@@ -92,7 +92,7 @@ const route=new URL(request.url).pathname;
 if(route==="/api/health" && request.method==="GET")return Response.json({ok:true});
 if(request.headers.get("authorization")!==${JSON.stringify(`Bearer ${secret}`)})return new Response("unauthorized",{status:401});
 if(route==="/api/devices/paired")return Response.json({devices:[]});
-if(route==="/api/pairing/codes" && request.method==="POST")return Response.json({code:"ABCD2345",url:"/pair?code=ABCD2345"});
+if(route==="/api/pairing/codes" && request.method==="POST")return Response.json({code:"ABCD2345",url:"omarchy-bot://pair?service="+encodeURIComponent(new URL(request.url).origin)+"&code=ABCD2345"});
 return new Response("not found",{status:404});}});
 SERVICE
 `;
@@ -117,7 +117,7 @@ SERVICE
   writeFileSync(hook, `const original=globalThis.fetch; globalThis.fetch=async(input,init)=>{const url=String(input); if(!url.startsWith("https://github.com/")) return original(input,init); if(!url.startsWith(${JSON.stringify(`https://github.com/XMethues/omarchy-bot/releases/download/runtime-${options.revision ?? "fixture"}/`)})) throw new Error("unexpected fixture URL: "+url); require("node:fs").appendFileSync(${JSON.stringify(path.join(root, "downloads"))},url+"\\n"); const response=new Response(url.endsWith(".sha256") ? ${JSON.stringify(packHash)} : Bun.file(${JSON.stringify(pack)})); Object.defineProperty(response,"url",{value:url}); return response;};`);
   const archiveArgs = ["--archive", archive, "--checksum", checksum];
   return { root, env, layout, archiveArgs, checksum, secret, serve, bin, pack, hook,
-    pairingUrl: `${options.tls ? "https" : "http"}://127.0.0.1:${env.OMARCHY_BOT_PORT}/pair?code=ABCD2345` };
+    pairingUrl: `omarchy-bot://pair?service=${encodeURIComponent(`${options.tls ? "https" : "http"}://127.0.0.1:${env.OMARCHY_BOT_PORT}`)}&code=ABCD2345` };
 }
 
 async function cli(setup: { env: NodeJS.ProcessEnv; hook?: string; cliPath?: string }, args: string[]) {
@@ -137,7 +137,7 @@ function recorded(file: string): string[] {
 test("installs on a non-Omarchy fixture, pairs, reuses the Service, and preserves user data on uninstall", async () => {
   const setup = await fixture();
   const installed = await cli(setup, ["install", ...setup.archiveArgs]);
-  expect(installed).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+  expect(installed).toEqual({ code: 0, stdout: `address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
   expect(readFileSync(setup.layout.servePath, "utf8")).toBe(setup.serve);
   expect(readFileSync(path.join(setup.layout.currentDir, ".archive-sha256"), "utf8").trim()).toBe(createHash("sha256").update(readFileSync(setup.archiveArgs[1]!)).digest("hex"));
   expect(readFileSync(setup.layout.unitPath, "utf8")).toContain(`ExecStart=${setup.layout.servePath}`);
@@ -148,7 +148,7 @@ test("installs on a non-Omarchy fixture, pairs, reuses the Service, and preserve
   expect(installed.stdout + installed.stderr).not.toContain(setup.secret);
 
   const second = await cli(setup, ["install", "--archive", "missing", "--checksum", "missing"]);
-  expect(second).toEqual({ code: 0, stdout: `reusing installed Service\npairing: ${setup.pairingUrl}\n`, stderr: "" });
+  expect(second).toEqual({ code: 0, stdout: `reusing installed Service\naddress: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
   expect(recorded(setup.env.SYSTEMCTL_CALLS!).filter(line => line.includes("enable"))).toHaveLength(1);
   expect(recorded(setup.env.SYSTEMCTL_CALLS!).at(-1)).toBe("--user start omarchy-bot.service");
   expect(recorded(setup.env.OPEN_CALLS!)).toEqual([setup.pairingUrl, setup.pairingUrl]);
@@ -174,7 +174,7 @@ test("default listener settings survive install reuse, update, and reconfigure",
   const setup = await fixture();
   delete setup.env.OMARCHY_BOT_HOST;
   delete setup.env.OMARCHY_BOT_PORT;
-  const pairing = "pairing: http://127.0.0.1:7321/pair?code=ABCD2345\n";
+  const pairing = "address: http://127.0.0.1:7321\ncode: ABCD2345\npairing: omarchy-bot://pair?service=http%3A%2F%2F127.0.0.1%3A7321&code=ABCD2345\n";
   expect(await cli(setup, ["install", ...setup.archiveArgs])).toEqual({ code: 0, stdout: pairing, stderr: "" });
   const saved = JSON.parse(readFileSync(path.join(setup.layout.dataDir, "service.json"), "utf8"));
   expect(saved).toMatchObject({ OMARCHY_BOT_HOST: "127.0.0.1", OMARCHY_BOT_PORT: "7321" });
@@ -187,7 +187,7 @@ test.each(["install", "update", "reconfigure"])("legacy empty listener defaults 
   const setup = await fixture();
   delete setup.env.OMARCHY_BOT_HOST;
   delete setup.env.OMARCHY_BOT_PORT;
-  const pairing = "pairing: http://127.0.0.1:7321/pair?code=ABCD2345\n";
+  const pairing = "address: http://127.0.0.1:7321\ncode: ABCD2345\npairing: omarchy-bot://pair?service=http%3A%2F%2F127.0.0.1%3A7321&code=ABCD2345\n";
   expect(await cli(setup, ["install", ...setup.archiveArgs])).toEqual({ code: 0, stdout: pairing, stderr: "" });
   writeFileSync(path.join(setup.layout.dataDir, "service.json"), JSON.stringify({ OMARCHY_BOT_HOST: "", OMARCHY_BOT_PORT: "" }));
   const args = command === "reconfigure" ? [command] : [command, ...setup.archiveArgs];
@@ -243,7 +243,7 @@ test("update replaces the installed runtime after checksum verification", async 
   writeFileSync(setup.layout.servePath, "original");
   writeFileSync(path.join(setup.layout.currentDir, "old-file"), "obsolete");
   const result = await cli(setup, ["update", ...setup.archiveArgs]);
-  expect(result).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+  expect(result).toEqual({ code: 0, stdout: `address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
   expect(readFileSync(setup.layout.servePath, "utf8")).toBe(setup.serve);
   expect(existsSync(path.join(setup.layout.currentDir, "old-file"))).toBe(false);
   expect(readdirSync(setup.layout.runtimeDir).sort()).toEqual(["browser", "current"]);
@@ -257,7 +257,7 @@ test("update and install reuse select the target runtime pin rather than the exe
   const target = await fixture({ pin: "chrome-for-testing-target-fixture-linux64", revision: "target-release" });
   expect(readFileSync(target.archiveArgs[1]!)).not.toEqual(readFileSync(setup.archiveArgs[1]!));
   const updated = await cli({ ...setup, hook: target.hook, cliPath: path.join(setup.layout.currentDir, "apps/cli/src/main.ts") }, ["update", ...target.archiveArgs]);
-  expect(updated).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+  expect(updated).toEqual({ code: 0, stdout: `address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
   const marker = path.join(setup.layout.browserPackDir, ".omarchy-bot-assets");
   expect(readFileSync(marker, "utf8")).toBe("chrome-for-testing-target-fixture-linux64\n");
   expect(recorded(path.join(target.root, "downloads"))).toEqual([
@@ -265,7 +265,7 @@ test("update and install reuse select the target runtime pin rather than the exe
     "https://github.com/XMethues/omarchy-bot/releases/download/runtime-target-release/omarchy-bot-browser-chrome-for-testing-target-fixture-linux64-x86_64.tar.zst.sha256",
   ]);
   writeFileSync(path.join(setup.layout.browserPackDir, "keep"), "retained runtime pin");
-  expect(await cli(setup, ["install", ...setup.archiveArgs, "--browser-pack", setup.pack])).toEqual({ code: 0, stdout: `reusing installed Service\npairing: ${setup.pairingUrl}\n`, stderr: "" });
+  expect(await cli(setup, ["install", ...setup.archiveArgs, "--browser-pack", setup.pack])).toEqual({ code: 0, stdout: `reusing installed Service\naddress: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
   expect(readFileSync(marker, "utf8")).toBe("chrome-for-testing-target-fixture-linux64\n");
   expect(readFileSync(path.join(setup.layout.browserPackDir, "keep"), "utf8")).toBe("retained runtime pin");
   rmSync(setup.layout.browserPackDir, { recursive: true });
@@ -285,7 +285,7 @@ test.each(["missing", "broken", "target archive"])("a prior two-argument runtime
     }
   }
   const args = mode === "target archive" ? ["update", ...setup.archiveArgs] : ["install", "--archive", "missing", "--checksum", "missing"];
-  expect(await cli(setup, args)).toEqual({ code: 0, stdout: `${mode === "target archive" ? "" : "reusing installed Service\n"}pairing: ${setup.pairingUrl}\n`, stderr: "" });
+  expect(await cli(setup, args)).toEqual({ code: 0, stdout: `${mode === "target archive" ? "" : "reusing installed Service\n"}address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
   const version = Bun.spawnSync([path.join(setup.layout.browserPackDir, "browser"), "--version"], { env: setup.env });
   expect(version.stderr.toString()).toBe("");
   expect(version.exitCode).toBe(0);
@@ -330,7 +330,7 @@ test("a failing custom opener is reported after successful install without faili
   setup.env.OPEN_EXIT = "7";
   const result = await cli(setup, ["install", ...setup.archiveArgs]);
   expect(result.code).toBe(0);
-  expect(result.stdout).toBe(`pairing: ${setup.pairingUrl}\n`);
+  expect(result.stdout).toBe(`address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`);
   expect(result.stderr).toContain("opener");
   expect(result.stderr).toContain("7");
   expect(result.stderr).not.toContain(setup.secret);
@@ -363,7 +363,7 @@ test("doctor's advertised update repairs a same-pin browser that exits 7 or has 
   for (const broken of ["#!/bin/sh\nexit 7\n", "#!/nonexistent/browser-loader\n"]) {
     writeFileSync(browser, broken, { mode: 0o755 });
     expect((await cli(setup, ["doctor"])).stdout).toContain("browser pack:");
-    expect(await cli(setup, ["update", ...setup.archiveArgs, "--browser-pack", setup.pack])).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+    expect(await cli(setup, ["update", ...setup.archiveArgs, "--browser-pack", setup.pack])).toEqual({ code: 0, stdout: `address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
     expect(readFileSync(browser, "utf8")).not.toBe(broken);
     const version = Bun.spawnSync([browser, "--version"], { env: setup.env });
     expect(version.exitCode).toBe(0);
@@ -374,7 +374,7 @@ test("doctor's advertised update repairs a same-pin browser that exits 7 or has 
 test("installs the release pack by default on native, snap and browserless hosts and keeps the same pin on update", async () => {
   for (const browser of ["native", "snap", "absent"] as const) {
     const setup = await fixture({ browser });
-    expect(await cli(setup, ["install", ...setup.archiveArgs])).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+    expect(await cli(setup, ["install", ...setup.archiveArgs])).toEqual({ code: 0, stdout: `address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
     expect(existsSync(path.join(setup.layout.browserPackDir, "browser"))).toBe(true);
     const downloads = path.join(setup.root, "downloads");
     expect(recorded(downloads)).toEqual([
@@ -466,7 +466,7 @@ test("install and update health waits connect to an existing TLS-bound Service",
   writeFileSync(setup.layout.unitPath, `ExecStart=${setup.layout.servePath}\nEnvironment=OMARCHY_BOT_TLS_CERT=${setup.env.OMARCHY_BOT_TLS_CERT}\nEnvironment=OMARCHY_BOT_TLS_KEY=${setup.env.OMARCHY_BOT_TLS_KEY}\n`);
   for (const command of ["install", "update"]) {
     const result = await cli(setup, [command, ...setup.archiveArgs]);
-    expect(result).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+    expect(result).toEqual({ code: 0, stdout: `address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
   }
 });
 
@@ -476,12 +476,12 @@ test("TLS flags configure the unit and reconfigure restarts without replacing th
   delete setup.env.OMARCHY_BOT_TLS_CERT;
   delete setup.env.OMARCHY_BOT_TLS_KEY;
   const installed = await cli(setup, ["install", ...setup.archiveArgs, "--tls-cert", cert, "--tls-key", key, "--trusted-proxy", "127.0.0.1"]);
-  expect(installed).toEqual({ code: 0, stdout: `pairing: ${setup.pairingUrl}\n`, stderr: "" });
+  expect(installed).toEqual({ code: 0, stdout: `address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
   const unit = readFileSync(setup.layout.unitPath, "utf8");
   expect(unit).toContain(`Environment=OMARCHY_BOT_TLS_CERT=${cert}`);
   expect(unit).toContain(`Environment=OMARCHY_BOT_TLS_KEY=${key}`);
   expect(unit).toContain("Environment=OMARCHY_BOT_TRUSTED_PROXY=127.0.0.1");
-  expect((await cli(setup, ["pair"])).stdout).toBe(`pairing: ${setup.pairingUrl}\n`);
+  expect((await cli(setup, ["pair"])).stdout).toBe(`address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`);
   const marker = path.join(setup.layout.currentDir, "retain-runtime");
   writeFileSync(marker, "unchanged");
   expect(await cli(setup, ["reconfigure", "--tls-cert", cert, "--tls-key", key, "--trusted-proxy", "::1"])).toEqual({ code: 0, stdout: "Service reconfigured.\n", stderr: "" });
@@ -508,7 +508,7 @@ test("install and update carry TLS and trusted proxy environment and reconfigure
   expect(readFileSync(setup.layout.unitPath, "utf8")).not.toContain("OMARCHY_BOT_TRUSTED_PROXY");
   delete setup.env.OMARCHY_BOT_TLS_CERT;
   delete setup.env.OMARCHY_BOT_TLS_KEY;
-  expect((await cli(setup, ["pair"])).stdout).toContain("pairing: http://");
+  expect((await cli(setup, ["pair"])).stdout).toContain("address: http://");
 });
 
 test("install creates an executable local launcher that invokes installed help and pairing, uninstall removes it", async () => {
@@ -520,7 +520,7 @@ test("install creates an executable local launcher that invokes installed help a
   for (const args of [["--help"], ["pair", "--help"], ["pair"]]) {
     const child = Bun.spawn([launcher, ...args], { env, stdout: "pipe", stderr: "pipe" });
     expect(await child.exited).toBe(0);
-    expect(await new Response(child.stdout).text()).toContain(args.length === 1 && args[0] === "pair" ? `pairing: ${setup.pairingUrl}` : "Usage: omarchy-bot");
+    expect(await new Response(child.stdout).text()).toContain(args.length === 1 && args[0] === "pair" ? `address: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}` : "Usage: omarchy-bot");
     expect(await new Response(child.stderr).text()).toBe("");
   }
   expect((await cli(setup, ["uninstall"])).code).toBe(0);

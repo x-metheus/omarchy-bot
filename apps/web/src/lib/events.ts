@@ -77,6 +77,7 @@ export function notifyForAttentionEvent(
 let cursor: number | undefined;
 let socket: WebSocket | undefined;
 let started = false;
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let handlers: {
   invalidate: Invalidate;
   onSnapshotRequired: () => void;
@@ -171,6 +172,7 @@ export function startEventPump(
   started = true;
   let retries = 0;
 
+  const connectIfStarted = (): void => { if (started) connect(); };
   const connect = (): void => {
     let notificationsReady = cursor !== undefined;
     socket = api.connectEvents(
@@ -206,8 +208,21 @@ export function startEventPump(
         cursor = undefined;
         current?.onSnapshotRequired();
       }
-      setTimeout(connect, Math.min(1000 * 2 ** retries, 10_000));
+      reconnectTimer = setTimeout(connectIfStarted, Math.min(1000 * 2 ** retries, 10_000));
     };
   };
   connect();
+}
+
+export function stopEventPump(): void {
+  started = false;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = undefined;
+  if (socket !== undefined) {
+    socket.onclose = null;
+    socket.close();
+    socket = undefined;
+  }
+  cursor = undefined;
+  handlers = undefined;
 }

@@ -169,12 +169,11 @@ test("HTTPS and WSS preserve the paired-device gate", async () => {
   expect(await socketResult()).toBe(false);
 }, 15000);
 
-test.skipIf(!existsSync(path.resolve(import.meta.dir, "../../apps/web/dist/index.html")))("SPA documents prevent token referrer leaks and caching", async () => {
+test("Service serves no SPA documents even with a device token", async () => {
   const h = await startDaemon(path.join(root, "daemon"), { waitForAgentReady: false });
   daemon = h;
   for (const pathname of ["/", "/index.html", "/client/route"]) {
     const response = await fetch(`${h.baseUrl}${pathname}?access_token=private`);
-    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
-    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.status).toBe(404);
   }
 });

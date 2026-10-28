@@ -1,11 +1,13 @@
 import { ApiClient, randomUuid } from "@omarchy-bot/api-client";
 import { isDeviceId } from "@omarchy-bot/domain";
 import { getShell } from "./shell.ts";
+import { deviceRevoked } from "./pairing.ts";
 export { randomUuid };
 
 export const api = new ApiClient({
   baseUrl: () => getShell().service.baseUrl(),
   deviceToken: () => getShell().service.deviceToken(),
+  onUnauthorized: deviceRevoked,
   localSidecarDeviceId: () => {
     const status = getShell().localSidecar.status();
     return status.running && status.deviceId !== undefined && isDeviceId(status.deviceId)
