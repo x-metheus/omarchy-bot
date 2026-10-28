@@ -4,14 +4,18 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
-- [ ] CORS preflight from each allowlisted origin succeeds without a token and returns the allowed methods and headers
-- [ ] Actual requests from an allowlisted origin still require a device token and return 401 without one
-- [ ] Requests from a non-allowlisted origin get no CORS allow headers
-- [ ] Credentials (cookies) are never allowed in CORS responses
-- [ ] Loopback development origins are allowed only in development mode
-- [ ] WebSocket upgrades with a foreign Origin are refused before token checks; absent or allowlisted Origins proceed to normal authentication
-- [ ] Covered by tests at the Service HTTP/WebSocket boundary using the in-process harness
+- [x] CORS preflight from each allowlisted origin succeeds without a token and returns the allowed methods and headers
+- [x] Actual requests from an allowlisted origin still require a device token and return 401 without one
+- [x] Requests from a non-allowlisted origin get no CORS allow headers
+- [x] Credentials (cookies) are never allowed in CORS responses
+- [x] Loopback development origins are allowed only in development mode
+- [x] WebSocket upgrades with a foreign Origin are refused before token checks; absent or allowlisted Origins proceed to normal authentication
+- [x] Covered by tests at the Service HTTP/WebSocket boundary using the in-process harness
+
+## Comments
+
+Implemented Tauri-origin CORS (`tauri://localhost`, `http[s]://tauri.localhost`) with unauthenticated preflight while token auth stays enforced on actual requests, no credentials, and loopback origins only under opt-in `OMARCHY_BOT_DEV=1`; all WS upgrades reject foreign Origins before authentication. Review clean. Final `bun test`: 790 pass, 17 skip, 0 fail; `bun run typecheck` passed.

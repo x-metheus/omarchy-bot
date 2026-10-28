@@ -71,6 +71,7 @@ export default async function globalSetup(): Promise<void> {
       OMARCHY_BOT_HOME: dataDir,
       OMARCHY_BOT_STATE: stateDir,
       OMARCHY_BOT_PORT: port,
+      OMARCHY_BOT_DEV: "1",
       OMARCHY_BOT_WORKERS_DIR: path.join(repoRoot, "tests/integration/fake-workers"),
     },
     stdio: ["ignore", "pipe", "inherit"],

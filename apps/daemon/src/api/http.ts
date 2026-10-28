@@ -130,6 +130,19 @@ export function publicOrigin(cfg: Config, peerAddress: string | undefined, heade
   try { return new URL(`${scheme}://${host}`).origin; } catch { return listenerUrl.origin; }
 }
 
+const APP_ORIGINS: Record<string, true> = {
+  "tauri://localhost": true,
+  "http://tauri.localhost": true,
+  "https://tauri.localhost": true,
+};
+
+function allowedOrigin(cfg: Config, origin: string | null): boolean {
+  if (origin === null) return false;
+  if (Object.hasOwn(APP_ORIGINS, origin)) return true;
+  if (!cfg.development || !/^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?$/.test(origin)) return false;
+  try { new URL(origin); return true; } catch { return false; }
+}
+
 const PairingCodeBody = z.object({ name: z.string().trim().min(1).max(80) });
 const PairingExchangeBody = z.object({
   code: z.string().trim().min(1),
@@ -155,6 +168,20 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
   const route = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const pathname = url.pathname;
+
+    const origin = req.headers.get("origin");
+    if (req.headers.get("upgrade")?.toLowerCase() === "websocket" && origin !== null && !allowedOrigin(svc.cfg, origin)) {
+      return json({ error: "origin not allowed" }, 403);
+    }
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: allowedOrigin(svc.cfg, origin) ? {
+          "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+          "access-control-allow-headers": "authorization, content-type, x-command-id, x-bot-id, x-attachment-draft-token",
+        } : {},
+      });
+    }
 
     // Gate first: no Bot, Thread, or host data, and no upgrade, before a token is proven.
     // Public: health, the pairing exchange, and the provider's browser redirect (its state is single-use).
@@ -355,12 +382,20 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
   };
 
   const handle = async (req: Request): Promise<Response> => {
+    let response: Response;
     try {
-      return await route(req);
+      response = await route(req);
     } catch (err) {
-      if (err instanceof HttpError) return json({ error: err.message, ...(err.extra ?? {}) }, err.status);
-      return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      response = err instanceof HttpError
+        ? json({ error: err.message, ...(err.extra ?? {}) }, err.status)
+        : json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
+    const origin = req.headers.get("origin");
+    if (response) {
+      response.headers.append("vary", "Origin");
+      if (origin !== null && allowedOrigin(svc.cfg, origin)) response.headers.set("access-control-allow-origin", origin);
+    }
+    return response;
   };
 
   const server = Bun.serve<WsData>({
