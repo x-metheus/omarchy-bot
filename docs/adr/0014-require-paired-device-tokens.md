@@ -1,6 +1,6 @@
 # Require paired device tokens for every Bot Client
 
-Status: accepted on 2026-10-24. Supersedes [ADR 0004](0004-defer-web-control-transport-security.md). Implementation is tracked by [the standalone Linux Service specification](../../.scratch/standalone-linux-service/spec.md).
+Status: accepted on 2026-10-24. Supersedes [ADR 0004](0004-defer-web-control-transport-security.md). Implementation is tracked by [the standalone Linux Service specification](../../.scratch/standalone-linux-service/spec.md). Amended on 2026-10-28 by [ADR 0015](0015-omarchy-bot-app-is-the-only-bot-client.md): the Service serves no `/pair` page or static client, and installation ends by opening an `omarchy-bot://pair` deep link.
 
 A standalone Service runs on shared workstations and cloud hosts ([ADR 0013](0013-run-a-standalone-linux-service.md)), where an unauthenticated listener hands any local user or network peer the Bots' shells, files, and Bot Screens. Every HTTP request and WebSocket upgrade, including the projection and RFB sockets and the Local Sidecar device channel, therefore presents a **device token** issued by pairing. Loopback is not exempt, because on a multi-user host every local account can reach `127.0.0.1`.
 
