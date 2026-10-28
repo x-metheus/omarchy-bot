@@ -67,3 +67,39 @@ test("memory connection survives harness reload and storage failure leaves it un
   await expect(blocked.service.store("https://service.example", "token")).rejects.toThrow("quota");
   expect(blocked.service.deviceToken()).toBeUndefined();
 });
+
+test("key mapping persists true and false per device without following the Service connection", async () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+    removeItem: (key: string) => { values.delete(key); },
+  };
+  const shell = createMemoryShell({ storage, platform: "macos" });
+  expect(shell.keyMapping.metaSendsSuper()).toBe(false);
+  await shell.keyMapping.setMetaSendsSuper(true);
+  expect(createMemoryShell({ storage }).keyMapping.metaSendsSuper()).toBe(true);
+  expect(createMemoryShell({ storage, metaSendsSuper: false }).keyMapping.metaSendsSuper()).toBe(false);
+  await shell.service.clear();
+  expect(createMemoryShell({ storage }).keyMapping.metaSendsSuper()).toBe(true);
+  await shell.keyMapping.setMetaSendsSuper(false);
+  expect(createMemoryShell({ storage }).keyMapping.metaSendsSuper()).toBe(false);
+  expect(createMemoryShell({ storage: null }).keyMapping.metaSendsSuper()).toBe(false);
+  const blocked = createMemoryShell({ storage: { ...storage, setItem() { throw new Error("quota"); } } });
+  await expect(blocked.keyMapping.setMetaSendsSuper(true)).rejects.toThrow("quota");
+  expect(blocked.keyMapping.metaSendsSuper()).toBe(false);
+});
+
+test("the harness reports the browser platform unless the shell platform is supplied", () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  try {
+    for (const [platform, expected] of [["MacIntel", "macos"], ["Win32", "windows"], ["Linux x86_64", "linux"]] as const) {
+      Object.defineProperty(globalThis, "navigator", { configurable: true, value: { platform } });
+      expect(createMemoryShell({ storage: null }).keyMapping.platform()).toBe(expected);
+      expect(createMemoryShell({ storage: null, platform: "linux" }).keyMapping.platform()).toBe("linux");
+    }
+  } finally {
+    if (original === undefined) Reflect.deleteProperty(globalThis, "navigator");
+    else Object.defineProperty(globalThis, "navigator", original);
+  }
+});

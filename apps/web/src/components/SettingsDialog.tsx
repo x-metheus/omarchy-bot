@@ -1,6 +1,6 @@
 import type { JSX, RefObject } from "react";
 import { useEffect, useState } from "react";
-import { Bell, Bot, Palette } from "lucide-react";
+import { Bell, Bot, Keyboard, Palette } from "lucide-react";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
@@ -10,11 +10,13 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Item } from "@astryxdesign/core/Item";
 import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
+import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import type { BotViewDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
+import { getShell } from "../lib/shell.ts";
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -30,12 +32,13 @@ export interface SettingsDialogProps {
   onRequestNotifications: () => void;
 }
 
-type SettingsSectionId = "appearance" | "notifications" | "bots";
+type SettingsSectionId = "appearance" | "notifications" | "bots" | "keyboard";
 
 const SETTINGS_SECTIONS = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "bots", label: "Bots", icon: Bot },
+  { id: "keyboard", label: "Keyboard", icon: Keyboard },
 ] as const satisfies ReadonlyArray<{
   id: SettingsSectionId;
   label: string;
@@ -105,6 +108,41 @@ function NotificationsSection({
           data-testid="enable-notifications"
         />
       ) : null}
+    </VStack>
+  );
+}
+
+function KeyboardSection(): JSX.Element {
+  const mapping = getShell().keyMapping;
+  const [metaSendsSuper, setMetaSendsSuper] = useState(mapping.metaSendsSuper());
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+  const save = async (value: boolean): Promise<void> => {
+    setSaving(true);
+    setError(undefined);
+    try {
+      await mapping.setMetaSendsSuper(value);
+      setMetaSendsSuper(value);
+    } catch {
+      setError("Couldn’t save the keyboard preference. Try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <VStack gap={2}>
+      <Heading level={3}>Keyboard</Heading>
+      <Text color="secondary">Bot Screen shortcuts during Web Control, saved for this device.</Text>
+      <Switch
+        label="Send ⌘ as Super"
+        description={metaSendsSuper ? "⌘ and ⌥ send Super." : "⌘ sends Ctrl and ⌥ sends Super."}
+        value={metaSendsSuper}
+        isLoading={saving}
+        isDisabled={saving}
+        onChange={(value) => { void save(value); }}
+        {...(error === undefined ? {} : { status: { type: "error" as const, message: error } })}
+      />
+      <Text color="secondary">⌘V keeps pasting text from this device.</Text>
     </VStack>
   );
 }
@@ -197,12 +235,13 @@ function SettingsContent({
 }: SettingsContentProps): JSX.Element {
   const [section, setSection] = useState<SettingsSectionId>("appearance");
   const operationPending = deletingBotId !== undefined;
+  const sections = SETTINGS_SECTIONS.filter((entry) => entry.id !== "keyboard" || getShell().keyMapping.platform() === "macos");
 
   useEffect(() => {
     if (open) setSection("appearance");
   }, [open]);
 
-  const selected = SETTINGS_SECTIONS.find((entry) => entry.id === section) ?? SETTINGS_SECTIONS[0];
+  const selected = sections.find((entry) => entry.id === section) ?? sections[0]!;
 
   return (
     <Layout
@@ -221,7 +260,7 @@ function SettingsContent({
         <LayoutPanel width={compactNav ? 148 : 220} hasDivider isScrollable>
           <nav aria-label="Settings sections">
             <VStack gap={0.5}>
-              {SETTINGS_SECTIONS.map((entry) => (
+              {sections.map((entry) => (
                 <Item
                   key={entry.id}
                   startContent={<Icon icon={entry.icon} size="sm" />}
@@ -244,6 +283,7 @@ function SettingsContent({
           aria-busy={botsLoading || operationPending || undefined}
         >
           {selected.id === "appearance" ? <AppearanceSection /> : null}
+          {selected.id === "keyboard" ? <KeyboardSection /> : null}
           {selected.id === "notifications" ? (
             <NotificationsSection
               notificationPermission={notificationPermission}

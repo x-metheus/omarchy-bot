@@ -42,6 +42,7 @@ export interface Shell {
 export const DEVICE_TOKEN_STORAGE_KEY = "omarchy-bot.device-token";
 export const SERVICE_URL_STORAGE_KEY = "omarchy-bot.service-url";
 const DEFAULT_SERVICE_URL = "http://127.0.0.1:7321";
+const META_SENDS_SUPER_STORAGE_KEY = "omarchy-bot.meta-sends-super";
 type ConnectionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 interface MemoryShellOptions {
@@ -57,17 +58,23 @@ function browserStorage(): ConnectionStorage | undefined {
   try { return globalThis.localStorage; } catch { return undefined; }
 }
 
+function browserPlatform(): ShellPlatform {
+  const platform = globalThis.navigator?.platform ?? "";
+  return /mac/i.test(platform) ? "macos" : /win/i.test(platform) ? "windows" : "linux";
+}
+
 export function createMemoryShell(options: MemoryShellOptions = {}) {
   // Harness persistence stands in for the app's keychain; callers only see the shell.
   const storage = options.storage === undefined ? browserStorage() : options.storage;
   let baseUrl = options.baseUrl ?? DEFAULT_SERVICE_URL;
   let token = options.deviceToken;
+  let metaSendsSuper = options.metaSendsSuper ?? false;
   try {
     baseUrl = options.baseUrl ?? storage?.getItem(SERVICE_URL_STORAGE_KEY) ?? baseUrl;
     token = options.deviceToken ?? storage?.getItem(DEVICE_TOKEN_STORAGE_KEY) ?? token;
+    metaSendsSuper = options.metaSendsSuper ?? (storage?.getItem(META_SENDS_SUPER_STORAGE_KEY) === "true");
   } catch { /* Blocked browser storage leaves the harness unpaired. */ }
   baseUrl = baseUrl.replace(/\/+$/, "");
-  let metaSendsSuper = options.metaSendsSuper ?? false;
   const pairingListeners = new Set<(request: PairingRequest) => void>();
   const approvalListeners = new Set<(approval: LocalApproval) => void>();
   const decisions = new Map<string, (decision: LocalApprovalDecision) => void>();
@@ -116,9 +123,12 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
       },
     },
     keyMapping: {
-      platform: () => options.platform ?? "linux",
+      platform: () => options.platform ?? browserPlatform(),
       metaSendsSuper: () => metaSendsSuper,
-      async setMetaSendsSuper(value: boolean) { metaSendsSuper = value; },
+      async setMetaSendsSuper(value: boolean) {
+        storage?.setItem(META_SENDS_SUPER_STORAGE_KEY, String(value));
+        metaSendsSuper = value;
+      }
     },
     receivePairingRequest(request: PairingRequest) {
       for (const listener of pairingListeners) listener(request);

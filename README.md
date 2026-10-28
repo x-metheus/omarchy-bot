@@ -220,6 +220,8 @@ The Local Sidecar connects outbound using `OMARCHY_BOT_SERVICE_URL` (`ws://…` 
 
 The Web UI reads native capabilities through one six-capability `shell` interface: Service connection, pairing intake, system browser, updates, Local Sidecar, and key mapping. The app installs its Tauri adapter before the Web bundle loads; the Vite harness and Chromium tests use the memory adapter. Every send reads the shell's current Sidecar status and carries its valid `dev_<32hex>` identity only while that Sidecar is running, so the Service can resolve **This Device**. No running Sidecar means no tag. The app's Tauri adapter and bundled Sidecar ship in later tickets; this seam does not claim WebView compatibility. See [ADR 0015](docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md) and [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md#client-side-device-identity).
 
+On macOS, Web Control maps ⌘ to Ctrl and ⌥ to Super. Settings → Keyboard → “Send ⌘ as Super” changes Command for this device; Option still sends Super. The shell stores the preference independently of the paired Service, so unpairing does not reset it. The Vite memory shell detects the browser platform and persists the preference in that harness origin’s localStorage; the native app adapter owns its install’s storage. Linux and Windows keep their existing key handling. ⌘V and Ctrl+V retain the local plain-text paste path rather than forwarding a remote V key.
+
 ## Development
 
 From a local checkout:
