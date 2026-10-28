@@ -10,12 +10,12 @@ The browser stays a visible window on the Bot Screen, so users watch and take ov
 
 **Blocked by:** 17
 
-**Status:** open
+**Status:** resolved
 
 Spec: [standalone Linux Service](../spec.md)
 
 - [x] The daemon launches the pack browser with `--remote-debugging-pipe` and a private profile per Bot Computer, which stays the shared profile of Computer ADR 0009. No TCP debugging port is ever opened, and a test asserts that no listening socket appears. Teardown is targeted to that browser's process tree.
-- [ ] Launching stays neutral to anti-bot checks: a real window, no automation flags, `navigator.webdriver` false, and no CDP `Runtime.enable` on page targets. Page scripts run only in isolated worlds. A conformance test checks these from inside a page.
+- [x] Launching adds no automation signal beyond what the pipe implies: a real window, no automation flags, and no CDP `Runtime.enable` on page targets. `navigator.webdriver` is true because Chromium sets it for `--remote-debugging-pipe`, and the Service does not hide it (revised 2026-10-28, see Comments). Page scripts run only in isolated worlds. A conformance test checks these from inside a page.
 - [x] A `browser` tool contract lives in `packages/agent-contract` beside `computer-tool.ts`, with these actions:
   - `snapshot` returns the accessibility tree, with refs, roles, names, values and states, trimmed to a size limit.
   - `click`, `type` and `select` act on a ref.
@@ -106,3 +106,11 @@ This comment supersedes the “validation pending” and “unverified” lists 
 **Acceptance.** Checked: pipe launch/profile/no-TCP/targeted teardown; the `browser` contract and stale-ref message; real input with scroll-into-view; Broker arbitration and Takeover holds; `request_takeover` with visible reason, hold, fresh snapshot and challenge guidance; Pi and scripted exposure with the real-model form step; README, CONTEXT glossary and ADR 0012. Unchecked: anti-bot neutrality, because the pinned Chrome for Testing build hardcodes the automation-controlled feature for `--remote-debugging-pipe` (Chromium 156 `content/child/runtime_features.cc:343`, crbug 40746300), so `navigator.webdriver` is true before any client attaches. No spoof, feature override, flag patch or launch-script suppression was added; the conformance assertion stays intact. This is a native control-channel blocker, not an unverified test.
 
 **Not verified.** The clean full suite finished before the last catch-guard tweak, so that exact tree was not re-run as a whole; the post-guard focused and real-smoke runs cover the changed path. Also not verified: a second device scale or output; Chromium singleton handoff on repeated `open_url`; and pipe loss across a daemon restart. Coordinate mapping is proven only on the exercised 20 px scrollbar/zoom fixture with a 1 px tolerance. A real container image build and an offline-distro install path were not rerun for this change; the suite exercises those paths only through its fixture tests, whose earlier two failures came from an inherited pack override and are cleared in the clean suite. Sites can still block the Bot for IP-reputation or policy reasons, which are outside the Service’s control. **Status remains open** because the neutrality criterion is unmet.
+
+### 2026-10-28 — webdriver criterion revised
+
+The user chose to accept `navigator.webdriver === true`. Chromium sets it for `--remote-debugging-pipe` itself (`content/child/runtime_features.cc`), so keeping it false would have meant a TCP debugging endpoint, which was rejected for security, or hiding it with `--disable-blink-features=AutomationControlled`, which is the evasion this design declines. The criterion now requires no automation signal beyond what the pipe implies. The real-browser conformance test asserts `true`, and Computer ADR 0012 records the decision. Sites that challenge the Bot because of it go to the user through `request_takeover`.
+
+## Answer
+
+Resolved: Agents drive the visible pack browser through a private CDP pipe with an accessibility-tree `browser` tool, real input and Takeover integration. `navigator.webdriver` stays true by decision. Evidence is in the comments above.

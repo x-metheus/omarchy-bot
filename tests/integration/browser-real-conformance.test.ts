@@ -256,7 +256,9 @@ realTest("real portable browser completes a form through Broker input and holds 
     const resolutions = commands.filter(command => command.method === "DOM.resolveNode");
     expect(resolutions.length).toBeGreaterThan(0);
     expect(resolutions.every(command => typeof command.params.executionContextId === "number")).toBe(true);
-    expect(webdriver).toBe(false);
+    // Chromium enables its automation-controlled feature for --remote-debugging-pipe,
+    // and the Service deliberately leaves that honest signal alone (Computer ADR 0012).
+    expect(webdriver).toBe(true);
   } finally {
     await viewer?.close();
     await h?.stop();
