@@ -58,3 +58,8 @@ test("Native Sessions map the shared local tool definition rather than a private
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("local description tells the Agent This Device's operating system and shell", () => {
+  const tool = createLocalTool(() => undefined, { request: async () => { throw new Error("unexpected dispatch"); } }, { os: "macos", shell: "posix-sh" });
+  expect(tool.description).toContain("This Device runs macos with posix-sh");
+});

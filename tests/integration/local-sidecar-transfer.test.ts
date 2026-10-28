@@ -124,7 +124,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
       stderr: "pipe",
       env: {
         ...process.env,
-        OMARCHY_BOT_DAEMON_PORT: String(h.port),
+        OMARCHY_BOT_SERVICE_URL: `ws://127.0.0.1:${h.port}`,
         OMARCHY_BOT_DEVICE_ID: DEVICE_A,
         OMARCHY_BOT_DEVICE_TOKEN: pairedToken(h),
         OMARCHY_BOT_HOSTNAME: "laptop",

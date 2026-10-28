@@ -32,12 +32,17 @@ describe("outbound Local Sidecar device roster", () => {
     expect(await api<DeviceDto[]>(harness, "GET", "/api/devices")).toEqual([]);
   });
 
-  test("registers hostname and OS capabilities on the public roster", async () => {
+  test.each([
+    { os: "linux", shell: "posix-sh" },
+    { os: "macos", shell: "posix-sh" },
+    { os: "windows", shell: "powershell-5.1" },
+  ] as const)("registers hostname, OS, shell, and capabilities: %s", async (identity) => {
     const harness = await boot();
     const sidecar = await connect();
     const registered = await sidecar.register({
       deviceId: DEVICE_A,
       hostname: "laptop",
+      ...identity,
       capabilities: ["shell", "search", "files", "transfer"],
     });
     expect(registered).toEqual({ type: "registered", deviceId: DEVICE_A });
@@ -46,9 +51,21 @@ describe("outbound Local Sidecar device roster", () => {
         id: DEVICE_A,
         hostname: "laptop",
         online: true,
+        ...identity,
         capabilities: ["shell", "search", "files", "transfer"],
       },
     ]);
+  });
+
+  test("rejects missing or invalid OS and shell before listing a device", async () => {
+    const harness = await boot();
+    for (const identity of [{}, { os: "linux" }, { shell: "posix-sh" }, { os: "other", shell: "posix-sh" }, { os: "macos", shell: "bash" }]) {
+      const sidecar = await connect();
+      sidecar.send({ type: "register", deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"], ...identity });
+      expect((await sidecar.waitForFrame((frame) => frame.type === "registered" || frame.type === "error")).type).toBe("error");
+      expect(await api<DeviceDto[]>(harness, "GET", "/api/devices")).toEqual([]);
+      await sidecar.close();
+    }
   });
 
   test("rejects screenshot and Takeover capabilities without listing the device", async () => {
@@ -99,6 +116,7 @@ describe("outbound Local Sidecar device roster", () => {
         id: DEVICE_A,
         hostname: "laptop-2",
         online: true,
+        os: "linux", shell: "posix-sh",
         capabilities: ["shell", "files"],
       },
     ]);

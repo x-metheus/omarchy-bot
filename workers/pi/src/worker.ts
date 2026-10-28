@@ -229,6 +229,7 @@ async function openSession(
   const localTool = createLocalTool(
     () => newEntry?.local,
     { request: requestLocal },
+    options.local,
   );
   const sessionId = `s_${crypto.randomUUID()}`;
   const pluginTools = createPluginTools(options.plugins, () => newEntry?.plugins);
@@ -343,6 +344,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
           instructions: cmd.options.instructions,
           ...(cmd.options.model !== undefined ? { model: cmd.options.model } : {}),
           ...(cmd.options.plugins !== undefined ? { plugins: cmd.options.plugins } : {}),
+          ...(cmd.options.local !== undefined ? { local: cmd.options.local } : {}),
         });
         return;
       case "session.resume": {
@@ -356,6 +358,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
           instructions: cmd.options.instructions,
           ...(cmd.options.model !== undefined ? { model: cmd.options.model } : {}),
           ...(cmd.options.plugins !== undefined ? { plugins: cmd.options.plugins } : {}),
+          ...(cmd.options.local !== undefined ? { local: cmd.options.local } : {}),
         }, holder);
         return;
       }

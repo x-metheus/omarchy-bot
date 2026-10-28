@@ -4,13 +4,19 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
-- [ ] The Sidecar connects to `ws` and `wss` Service URLs and authenticates with `access_token`
-- [ ] Registration without valid `os` and `shell` is rejected
-- [ ] The `local` tool description for a Turn names This Device's OS and shell
-- [ ] The POSIX executor keeps existing cancel/timeout process-group teardown behavior
-- [ ] macOS credential locations are refused on macOS; existing Linux refusals unchanged
-- [ ] Covered by the Local Sidecar integration suite, including a `wss` case against a TLS harness
+- [x] The Sidecar connects to `ws` and `wss` Service URLs and authenticates with `access_token`
+- [x] Registration without valid `os` and `shell` is rejected
+- [x] The `local` tool description for a Turn names This Device's OS and shell
+- [x] The POSIX executor keeps existing cancel/timeout process-group teardown behavior
+- [x] macOS credential locations are refused on macOS; existing Linux refusals unchanged
+- [x] Covered by the Local Sidecar integration suite, including a `wss` case against a TLS harness
+
+## Comments
+
+Implemented the outbound URL-based Sidecar: `OMARCHY_BOT_SERVICE_URL` (`ws`/`wss`), device token auth, required `os`/`shell` registration carried through the roster into the `local` tool description, and a POSIX executor behind an executor interface that preserves process-group teardown on cancel, timeout, and shutdown. Secret-directory refusal is defined per OS (Linux unchanged; macOS lists refused on macOS), with screenshot, pointer, and compositor refusals everywhere. No native macOS execution; Linux integration tests exercise the OS policy cases.
+
+Verification: full `bun test` 798 pass, 17 skip, 0 fail (4,792 assertions, 815 tests / 120 files, 527.33s); nested Pi conformance 11/11 steps pass; `bun run typecheck` (`tsc --noEmit`) success in 6.60s.

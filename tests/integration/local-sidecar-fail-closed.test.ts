@@ -7,6 +7,7 @@ import {
   makeBot,
   messages,
   sendToBot,
+  sendToThread,
   startDaemon,
   waitThreadIdle,
   type Harness,
@@ -20,7 +21,7 @@ interface SessionObservation {
   type: string;
   botId?: string;
   threadId?: string;
-  options?: { cwd?: string };
+  options?: { cwd?: string; local?: { os: string; shell: string } };
 }
 
 function workerObservations(h: Harness): SessionObservation[] {
@@ -167,6 +168,30 @@ describe("fail closed and keep Sidecars distinct", () => {
     const afterReconnect = await messages(h, sent.threadId);
     expect(toolNamed(afterReconnect, "local")?.toolCall?.status).toBe("error");
     expect(afterReconnect.some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "completed")).toBeFalse();
+  });
+
+  test("session open and resume describe only the sender's online device", async () => {
+    h = await startDaemon();
+    const sidecar = await connect();
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "Mac", os: "macos", shell: "posix-sh", capabilities: ["shell"] });
+    const botId = await makeBot(h, "Device syntax Bot");
+    const first = await sendToBot(h, botId, "hello", DEVICE_A);
+    await waitThreadIdle(h, first.threadId);
+    await sendToThread(h, first.threadId, "hello again", DEVICE_A);
+    await waitThreadIdle(h, first.threadId);
+    await sendToThread(h, first.threadId, "untagged");
+    await waitThreadIdle(h, first.threadId);
+    await sendToThread(h, first.threadId, "unknown", DEVICE_B);
+    await waitThreadIdle(h, first.threadId);
+    await sidecar.close();
+    await waitRoster(h, (devices) => devices.length === 0);
+    await sendToThread(h, first.threadId, "offline", DEVICE_A);
+    await waitThreadIdle(h, first.threadId);
+    const sessions = workerObservations(h).filter((observation) => observation.threadId === first.threadId);
+    expect(sessions.map((session) => session.type)).toEqual(["session.open", "session.resume", "session.resume", "session.resume", "session.resume"]);
+    expect(sessions.map((session) => session.options?.local)).toEqual([
+      { os: "macos", shell: "posix-sh" }, { os: "macos", shell: "posix-sh" }, undefined, undefined, undefined,
+    ]);
   });
 
   test("native bash with a Sidecar online keeps Shared Workspace cwd and creates no sidecar jobs", async () => {

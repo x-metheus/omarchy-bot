@@ -1,4 +1,5 @@
 import type { AgentPluginSnapshot } from "./plugin-protocol.ts";
+import type { LocalDeviceIdentity } from "./local-protocol.ts";
 
 export interface Hello {
   type: "hello";
@@ -13,5 +14,6 @@ export interface OpenSessionOptionsLike {
   instructions: string;
   model?: string;
   plugins?: AgentPluginSnapshot;
+  local?: LocalDeviceIdentity;
 }
 

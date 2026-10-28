@@ -50,6 +50,7 @@ describe("same-host viewers have no This Device", () => {
       id: DEVICE_A,
       hostname: "off-host-laptop",
       online: true,
+      os: "linux", shell: "posix-sh",
       capabilities: ["shell"],
     }]);
 

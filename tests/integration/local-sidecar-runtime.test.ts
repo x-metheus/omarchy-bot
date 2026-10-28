@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -50,7 +50,7 @@ const never = async (probe: () => boolean, message: string, timeoutMs = 1_000): 
   }
 };
 
-describe("plugin-runtime Bun Local Sidecar", () => {
+describe("Local Sidecar process", () => {
   let h: Harness | undefined;
   let child: ReturnType<typeof Bun.spawn> | undefined;
 
@@ -64,6 +64,73 @@ describe("plugin-runtime Bun Local Sidecar", () => {
     h = undefined;
   });
 
+  test.each(["http://127.0.0.1", "https://127.0.0.1", "ws://user:secret@127.0.0.1", "not-a-url"])("rejects invalid Service URL %s", async (service) => {
+    const rejected = Bun.spawn({ cmd: [process.execPath, sidecarMain], stdout: "pipe", stderr: "pipe", env: { ...process.env, OMARCHY_BOT_SERVICE_URL: service } });
+    expect(await rejected.exited).toBe(1);
+    expect(await new Response(rejected.stdout).text()).not.toContain('"type":"registered"');
+  });
+
+  test("wss uses a trusted TLS certificate and access_token for an approved command", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-sidecar-tls-"));
+    const cert = path.join(root, "cert.pem");
+    const key = path.join(root, "key.pem");
+    const generated = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1"]);
+    expect(generated.exitCode).toBe(0);
+    const token = "tls+paired/token?secret";
+    const result = Promise.withResolvers<unknown>();
+    const registered = Promise.withResolvers<unknown>();
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      tls: { cert: Bun.file(cert), key: Bun.file(key) },
+      fetch(request, server) {
+        const url = new URL(request.url);
+        if (url.pathname !== "/api/devices" || url.searchParams.get("access_token") !== token) return new Response(null, { status: 401 });
+        if (server.upgrade(request)) return;
+        return new Response(null, { status: 400 });
+      },
+      websocket: {
+        message(ws, message) {
+          const frame = JSON.parse(String(message));
+          if (frame.type === "register") {
+            registered.resolve(frame);
+            ws.send(JSON.stringify({ type: "registered", deviceId: frame.deviceId }));
+            ws.send(JSON.stringify({ type: "local.job", jobId: "tls-smoke", hostname: "tls-laptop", botId: "bot", turnId: "turn", action: "run", command: "printf tls-smoke" }));
+          } else if (frame.type === "local.result") result.resolve(frame);
+        },
+      },
+    });
+    try {
+      for (const env of [{ NODE_EXTRA_CA_CERTS: undefined, OMARCHY_BOT_DEVICE_TOKEN: token }, { NODE_EXTRA_CA_CERTS: cert, OMARCHY_BOT_DEVICE_TOKEN: "unpaired" }]) {
+        const rejected = Bun.spawn({
+          cmd: [process.execPath, sidecarMain], stdout: "pipe", stderr: "pipe",
+          env: { ...process.env, OMARCHY_BOT_SERVICE_URL: `wss://127.0.0.1:${server.port}`, OMARCHY_BOT_DEVICE_ID: DEVICE_A, OMARCHY_BOT_SIDECAR_ROOT: root, ...env },
+        });
+        expect(await rejected.exited).toBe(1);
+        expect(await new Response(rejected.stdout).text()).not.toContain('"type":"registered"');
+      }
+      child = Bun.spawn({
+        cmd: [process.execPath, sidecarMain], stdin: "pipe", stdout: "pipe", stderr: "pipe",
+        env: { ...process.env, NODE_EXTRA_CA_CERTS: cert, OMARCHY_BOT_SERVICE_URL: `wss://127.0.0.1:${server.port}`, OMARCHY_BOT_DEVICE_ID: DEVICE_A, OMARCHY_BOT_DEVICE_TOKEN: token, OMARCHY_BOT_SIDECAR_ROOT: root },
+      });
+      let stdout = "";
+      if (!child.stdout || typeof child.stdout === "number") throw new Error("stdout is not a pipe");
+      const stream = child.stdout;
+      void (async () => { for await (const chunk of stream) stdout += new TextDecoder().decode(chunk); })();
+      await until(() => stdout.includes('"type":"ask"'), "TLS Sidecar never asked");
+      expect(await registered.promise).toMatchObject({ type: "register", os: process.platform === "darwin" ? "macos" : "linux", shell: "posix-sh" });
+      if (!child.stdin || typeof child.stdin === "number") throw new Error("stdin is not a pipe");
+      child.stdin.write(`${JSON.stringify({ type: "allow-once", jobId: "tls-smoke" })}\n`);
+      expect(await result.promise).toMatchObject({ type: "local.result", ok: true, text: "tls-smoke", exitCode: 0 });
+      child.kill("SIGTERM");
+      await child.exited;
+      child = undefined;
+    } finally {
+      if (child) { child.kill("SIGKILL"); await child.exited; child = undefined; }
+      await server.stop(true);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 25_000);
+
   test("outbound production Sidecar registers, asks, runs, and unregisters without stopping plugin-host work", async () => {
     h = await startDaemon();
     const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sidecar-runtime-"));
@@ -76,7 +143,7 @@ describe("plugin-runtime Bun Local Sidecar", () => {
       stderr: "pipe",
       env: {
         ...process.env,
-        OMARCHY_BOT_DAEMON_PORT: String(h.port),
+        OMARCHY_BOT_SERVICE_URL: `ws://127.0.0.1:${h.port}`,
         OMARCHY_BOT_DEVICE_ID: DEVICE_A,
         OMARCHY_BOT_DEVICE_TOKEN: pairedToken(h),
         OMARCHY_BOT_HOSTNAME: "runtime-laptop",
@@ -107,6 +174,8 @@ describe("plugin-runtime Bun Local Sidecar", () => {
         id: DEVICE_A,
         hostname: "runtime-laptop",
         online: true,
+        os: process.platform === "darwin" ? "macos" : "linux",
+        shell: "posix-sh",
         capabilities: ["shell", "search", "files", "transfer"],
       },
     ]);
@@ -164,7 +233,7 @@ describe("plugin-runtime Bun Local Sidecar", () => {
       stderr: "pipe",
       env: {
         ...process.env,
-        OMARCHY_BOT_DAEMON_PORT: String(h.port),
+        OMARCHY_BOT_SERVICE_URL: `ws://127.0.0.1:${h.port}`,
         OMARCHY_BOT_DEVICE_ID: DEVICE_A,
         OMARCHY_BOT_DEVICE_TOKEN: pairedToken(h),
         OMARCHY_BOT_HOSTNAME: "stale-laptop",
@@ -202,8 +271,9 @@ describe("plugin-runtime Bun Local Sidecar", () => {
     expect(existsSync(path.join(root, ".omarchy-bot-local-policy.json"))).toBeFalse();
   }, 70_000);
 
-  test("a Sidecar killed while a descendant job runs leaves no survivor behind", async () => {
+  test.each(["shutdown", "cancel", "timeout"] as const)("%s tears down a running Sidecar process tree", async (trigger) => {
     h = await startDaemon();
+    if (trigger === "timeout") h.svc.cfg.turnTimeoutMs = 3_000;
     const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sidecar-shutdown-"));
     // The remembered Always rule lets the job run without an Ask card.
     writeFileSync(
@@ -219,7 +289,7 @@ describe("plugin-runtime Bun Local Sidecar", () => {
       stderr: "pipe",
       env: {
         ...process.env,
-        OMARCHY_BOT_DAEMON_PORT: String(h.port),
+        OMARCHY_BOT_SERVICE_URL: `ws://127.0.0.1:${h.port}`,
         OMARCHY_BOT_DEVICE_ID: DEVICE_A,
         OMARCHY_BOT_DEVICE_TOKEN: pairedToken(h),
         OMARCHY_BOT_HOSTNAME: "shutdown-laptop",
@@ -241,7 +311,7 @@ describe("plugin-runtime Bun Local Sidecar", () => {
     await until(() => stdout.includes('"type":"registered"'), "production Local Sidecar never registered");
 
     const botId = await makeBot(h, "Shutdown Sidecar Bot");
-    await sendToBot(h, botId, `local.run:${DESCENDANT_COMMAND}`, DEVICE_A);
+    const sent = await sendToBot(h, botId, `local.run:${DESCENDANT_COMMAND}`, DEVICE_A);
     const pidFile = path.join(root, "descendant.pid");
     await until(() => existsSync(pidFile), "Sidecar descendant never became ready");
     const pid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
@@ -249,10 +319,15 @@ describe("plugin-runtime Bun Local Sidecar", () => {
     expect(processAlive(pid)).toBeTrue();
 
     try {
-      // SIGTERM starts the shutdown path: the Sidecar must tear the job down before it exits.
-      sidecar.kill("SIGTERM");
-      await until(() => sidecar.exitCode !== null, "production Local Sidecar never exited after SIGTERM");
-      child = undefined;
+      if (trigger === "shutdown") {
+        sidecar.kill("SIGTERM");
+        await until(() => sidecar.exitCode !== null, "production Local Sidecar never exited after SIGTERM");
+        child = undefined;
+      } else {
+        if (trigger === "cancel") await h.svc.turns.abortTurn(sent.turnId, "cancel process tree");
+        await waitThreadIdle(h, sent.threadId);
+        await until(() => !processAlive(pid), "cancelled or timed-out descendant survived");
+      }
 
       expect(processAlive(pid)).toBeFalse();
       writeFileSync(path.join(root, "release"), "");

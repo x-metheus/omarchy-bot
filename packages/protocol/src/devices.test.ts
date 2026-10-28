@@ -15,11 +15,13 @@ describe("Local Sidecar device roster DTOs", () => {
     expect(DeviceDto.parse({
       id: deviceId,
       hostname: "laptop",
+      os: "linux", shell: "posix-sh",
       online: true,
       capabilities: ["shell", "search", "files", "transfer"],
     })).toEqual({
       id: deviceId,
       hostname: "laptop",
+      os: "linux", shell: "posix-sh",
       online: true,
       capabilities: ["shell", "search", "files", "transfer"],
     });
@@ -29,24 +31,28 @@ describe("Local Sidecar device roster DTOs", () => {
     expect(DeviceDto.safeParse({
       id: deviceId,
       hostname: "laptop",
+      os: "linux", shell: "posix-sh",
       online: true,
       capabilities: ["screenshot"],
     }).success).toBeFalse();
     expect(DeviceDto.safeParse({
       id: deviceId,
       hostname: "laptop",
+      os: "linux", shell: "posix-sh",
       online: true,
       capabilities: ["Takeover"],
     }).success).toBeFalse();
     expect(DeviceDto.safeParse({
       id: "bot_0123456789abcdef0123456789abcdef",
       hostname: "laptop",
+      os: "linux", shell: "posix-sh",
       online: true,
       capabilities: ["shell"],
     }).success).toBeFalse();
     expect(DeviceDto.safeParse({
       id: deviceId,
       hostname: "laptop",
+      os: "linux", shell: "posix-sh",
       online: false,
       capabilities: ["shell"],
     }).success).toBeFalse();
@@ -59,6 +65,7 @@ describe("Local Sidecar device channel frames", () => {
       type: "register",
       deviceId,
       hostname: "laptop",
+      os: "linux", shell: "posix-sh",
       capabilities: ["shell"],
     }).type).toBe("register");
     expect(DeviceHeartbeatFrame.parse({ type: "heartbeat" })).toEqual({ type: "heartbeat" });
@@ -72,12 +79,14 @@ describe("Local Sidecar device channel frames", () => {
       type: "register",
       deviceId,
       hostname: "laptop",
+      os: "linux", shell: "posix-sh",
       capabilities: ["shell", "screenshot"],
     }).success).toBeFalse();
     expect(DeviceRegisterFrame.safeParse({
       type: "register",
       deviceId,
       hostname: "",
+      os: "linux", shell: "posix-sh",
       capabilities: ["shell"],
     }).success).toBeFalse();
   });
