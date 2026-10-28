@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { SurfaceIdDto } from "@omarchy-bot/protocol";
 import { ApiClient } from "./index.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -21,6 +22,63 @@ function stubFetch(sent: SentRequest[]): typeof fetch {
     );
   }) as unknown as typeof fetch;
 }
+
+describe("ApiClient Service address", () => {
+  test("reads the current Service for HTTP, browser URLs, and events", async () => {
+    let serviceUrl = "http://127.0.0.1:7321/";
+    const requests: string[] = [];
+    const client = new ApiClient({
+      baseUrl: () => serviceUrl,
+      deviceToken: "paired-token",
+      fetch: (async (input: string | URL | Request): Promise<Response> => {
+        requests.push(String(input));
+        return new Response("{}", { headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+    });
+    const owner = { botId: "bot-1", surfaceId: SurfaceIdDto.parse("surf_0123456789abcdef0123456789abcdef") };
+    const sockets: string[] = [];
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = class {
+      constructor(readonly url: string | URL) {
+        sockets.push(String(url));
+      }
+    } as unknown as typeof WebSocket;
+    try {
+      expect(client.baseUrl).toBe("http://127.0.0.1:7321");
+      await client.listAgents();
+      await client.uploadAvatar("bot-1", new Blob(["avatar"]));
+      await client.stageAttachment("bot-1", "a7126bac-a201-413f-a212-5f495aba0cda", new File(["attachment"], "file.txt"));
+      expect(client.avatarUrl("bot-1")).toBe("http://127.0.0.1:7321/api/bots/bot-1/avatar?access_token=paired-token");
+      expect(client.attachmentUrl("attachment-1")).toBe("http://127.0.0.1:7321/api/attachments/attachment-1?access_token=paired-token");
+      expect(client.computerProjectionUrl(owner)).toBe("http://127.0.0.1:7321/api/computer/projection?botId=bot-1&surfaceId=surf_0123456789abcdef0123456789abcdef&access_token=paired-token");
+      client.connectEvents(undefined, () => {});
+
+      serviceUrl = "https://service.example///";
+      expect(client.baseUrl).toBe("https://service.example");
+      await client.listAgents();
+      await client.uploadAvatar("bot-1", new Blob(["avatar"]));
+      await client.stageAttachment("bot-1", "a7126bac-a201-413f-a212-5f495aba0cda", new File(["attachment"], "file.txt"));
+      expect(client.avatarUrl("bot-1")).toBe("https://service.example/api/bots/bot-1/avatar?access_token=paired-token");
+      expect(client.attachmentUrl("attachment-1")).toBe("https://service.example/api/attachments/attachment-1?access_token=paired-token");
+      expect(client.computerProjectionUrl(owner)).toBe("https://service.example/api/computer/projection?botId=bot-1&surfaceId=surf_0123456789abcdef0123456789abcdef&access_token=paired-token");
+      client.connectEvents(undefined, () => {});
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+    expect(requests).toEqual([
+      "http://127.0.0.1:7321/api/agents",
+      "http://127.0.0.1:7321/api/bots/bot-1/avatar/upload",
+      "http://127.0.0.1:7321/api/attachments/stage",
+      "https://service.example/api/agents",
+      "https://service.example/api/bots/bot-1/avatar/upload",
+      "https://service.example/api/attachments/stage",
+    ]);
+    expect(sockets).toEqual([
+      "ws://127.0.0.1:7321/api/events?access_token=paired-token",
+      "wss://service.example/api/events?access_token=paired-token",
+    ]);
+  });
+});
 
 describe("ApiClient Paired Device token", () => {
   test("sends the token as a Bearer header and on the events socket", async () => {
@@ -56,6 +114,49 @@ describe("ApiClient Paired Device token", () => {
 });
 
 describe("ApiClient This Device tag", () => {
+  test("reads the running Sidecar identity on every send and strips body claims", async () => {
+    const sent: SentRequest[] = [];
+    let deviceId: string | undefined;
+    const client = new ApiClient({
+      fetch: stubFetch(sent),
+      localSidecarDeviceId: () => deviceId,
+    });
+
+    await client.sendBotMessage("bot-1", { text: "no Sidecar", deviceId: DEVICE_B });
+    deviceId = DEVICE_A;
+    await client.sendBotMessage("bot-1", { text: "Sidecar started", deviceId: DEVICE_B });
+    deviceId = DEVICE_B;
+    await client.sendMessage("thread-1", { text: "Sidecar changed", deviceId: DEVICE_A });
+    deviceId = undefined;
+    await client.sendMessage("thread-1", { text: "Sidecar stopped", deviceId: DEVICE_A });
+
+    expect(sent.map((request) => request.body)).toEqual([
+      { text: "no Sidecar" },
+      { text: "Sidecar started", deviceId: DEVICE_A },
+      { text: "Sidecar changed", deviceId: DEVICE_B },
+      { text: "Sidecar stopped" },
+    ]);
+  });
+
+  test("refuses malformed dynamic identities before either send reaches the Service", async () => {
+    const sent: SentRequest[] = [];
+    let deviceId = DEVICE_A;
+    const client = new ApiClient({
+      fetch: stubFetch(sent),
+      localSidecarDeviceId: () => deviceId,
+    });
+
+    await client.sendBotMessage("bot-1", { text: "valid identity" });
+    deviceId = "not-a-device";
+    expect(() => client.sendBotMessage("bot-1", { text: "invalid identity" })).toThrow(
+      "localSidecarDeviceId must be a Local Sidecar device identity",
+    );
+    expect(() => client.sendMessage("thread-1", { text: "invalid identity" })).toThrow(
+      "localSidecarDeviceId must be a Local Sidecar device identity",
+    );
+    expect(sent).toHaveLength(1);
+  });
+
   test("a client with a device id tags its sends", async () => {
     const sent: SentRequest[] = [];
     const client = new ApiClient({ baseUrl: "http://127.0.0.1:7321", fetch: stubFetch(sent), localSidecarDeviceId: DEVICE_A });

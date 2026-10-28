@@ -82,7 +82,6 @@ function installBrowser(descriptor: unknown = sessionDescriptor()): ProjectionRe
     window: {
       setTimeout,
       clearTimeout,
-      location: new URL("https://client.example/thread"),
     },
     fetch: async (input: string | URL | Request, init?: RequestInit) => {
       requests.push({
@@ -108,7 +107,7 @@ function connection(callbacks: {
   errors?: string[];
 } = {}): ScreenProjectionConnection {
   return new ScreenProjectionConnection(
-    "/api/computer/projection",
+    "https://client.example/api/computer/projection",
     { botId: "bot", surfaceId: SURFACE_ID },
     {
       onState: (state) => callbacks.states?.push(state),

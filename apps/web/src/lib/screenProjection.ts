@@ -12,7 +12,7 @@ import {
   type ScreenProjectionModeDto,
   type ScreenProjectionPreviewFrameHeaderDto as PreviewFrameHeader,
 } from "@omarchy-bot/protocol";
-import { withDeviceToken } from "./deviceToken.ts";
+import { withDeviceToken } from "./urls.ts";
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const CONNECTION_TIMEOUT_MS = 10_000;
@@ -743,7 +743,7 @@ export class ScreenProjectionConnection {
   }
 
   #projectionEndpoint(): string {
-    const endpoint = new URL(this.endpoint, window.location.href);
+    const endpoint = new URL(this.endpoint);
     endpoint.searchParams.set("botId", this.owner.botId);
     endpoint.searchParams.set("surfaceId", this.owner.surfaceId);
     return withDeviceToken(endpoint.href);
@@ -751,7 +751,7 @@ export class ScreenProjectionConnection {
 
   #resolveSessionSocketUrl(raw: string, label: string): string {
     if (this.#sessionId === undefined) throw new Error(`The Bot Screen returned an invalid ${label} connection.`);
-    const endpoint = new URL(this.endpoint, window.location.href);
+    const endpoint = new URL(this.endpoint);
     const resolved = new URL(raw, endpoint);
     if (
       (resolved.protocol !== "http:" && resolved.protocol !== "https:")
@@ -765,7 +765,7 @@ export class ScreenProjectionConnection {
   }
 
   #resolveSnapshotUrl(raw: string): string {
-    const endpoint = new URL(this.endpoint, window.location.href);
+    const endpoint = new URL(this.endpoint);
     const resolved = new URL(raw, endpoint);
     if (
       (resolved.protocol !== "http:" && resolved.protocol !== "https:")

@@ -358,10 +358,11 @@ export class BrowserSurfaceSession {
       viewport: { width: 1920, height: 1080 },
       ignoreHTTPSErrors: true,
     });
-    if (token) {
-      // The web client reads its device token from localStorage; seed it before the app boots.
-      await context.addInitScript((value) => localStorage.setItem("omarchy-bot.device-token", value), token);
-    }
+    // Keep the memory shell on the LAN HTTPS proxy for HTTP and WebSocket traffic.
+    await context.addInitScript(({ serviceUrl, token }) => {
+      localStorage.setItem("omarchy-bot.service-url", serviceUrl);
+      if (token) localStorage.setItem("omarchy-bot.device-token", token);
+    }, { serviceUrl: lanEndpoint, token });
     const page = await context.newPage();
     await page.addInitScript(installBrowserInstrumentation);
     await page.goto(`${lanEndpoint}/?bot=${encodeURIComponent(owner.botId)}`, { waitUntil: "domcontentloaded" });

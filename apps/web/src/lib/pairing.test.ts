@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { consumePairingCode, pairingError } from "./pairing.ts";
-import { DEVICE_TOKEN_STORAGE_KEY } from "./deviceToken.ts";
+import { createMemoryShell, getShell, installShell } from "./shell.ts";
 
+const originalShell = getShell();
 const saved = new Map<string, string>();
 const originalWindow = globalThis.window;
 const originalHistory = globalThis.history;
@@ -16,6 +17,7 @@ afterEach(() => {
     localStorage: originalLocalStorage,
   });
   saved.clear();
+  installShell(originalShell);
 });
 
 function install(pathname: string, search: string, response: { status: number; body: unknown }): string[] {
@@ -29,6 +31,7 @@ function install(pathname: string, search: string, response: { status: number; b
       return new Response(JSON.stringify(response.body), { status: response.status });
     },
   });
+  installShell(createMemoryShell({ baseUrl: "https://service.example" }));
   return requests;
 }
 
@@ -40,8 +43,8 @@ test("exchanges a pairing code, stores the token, and leaves /pair", async () =>
 
   await consumePairingCode();
 
-  expect(requests).toEqual(["/api/pairing/exchange", "/"]);
-  expect(saved.get(DEVICE_TOKEN_STORAGE_KEY)).toBe("a".repeat(64));
+  expect(requests).toEqual(["https://service.example/api/pairing/exchange", "/"]);
+  expect(getShell().service.deviceToken()).toBe("a".repeat(64));
   expect(pairingError()).toBeUndefined();
 });
 
@@ -50,8 +53,8 @@ test("a rejected code keeps the stored token and reports the daemon error", asyn
 
   await consumePairingCode();
 
-  expect(requests).toEqual(["/api/pairing/exchange", "/"]);
-  expect(saved.has(DEVICE_TOKEN_STORAGE_KEY)).toBe(false);
+  expect(requests).toEqual(["https://service.example/api/pairing/exchange", "/"]);
+  expect(getShell().service.deviceToken()).toBeUndefined();
   expect(pairingError()).toBe("unauthorized");
 });
 
@@ -68,6 +71,7 @@ test("a storage failure reports that the used link must be replaced", async () =
       },
     },
   });
+  installShell(createMemoryShell({ baseUrl: "https://service.example" }));
 
   await consumePairingCode();
 
