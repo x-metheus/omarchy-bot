@@ -60,8 +60,10 @@ async function main(): Promise<void> {
     throw new Error("OMARCHY_BOT_SERVICE_URL must be a ws or wss Service URL without credentials");
   }
   const platform = process.platform;
-  if (platform !== "linux" && platform !== "darwin") throw new Error(`Local Sidecar execution is not supported on ${platform}`);
-  const identity = { os: platform === "darwin" ? "macos" as const : "linux" as const, shell: "posix-sh" as const };
+  if (platform !== "linux" && platform !== "darwin" && platform !== "win32") throw new Error(`Local Sidecar execution is not supported on ${platform}`);
+  const identity = platform === "win32"
+    ? { os: "windows" as const, shell: "powershell-5.1" as const }
+    : { os: platform === "darwin" ? "macos" as const : "linux" as const, shell: "posix-sh" as const };
   const deviceId = requiredEnv("OMARCHY_BOT_DEVICE_ID");
   if (!isDeviceId(deviceId)) throw new Error("OMARCHY_BOT_DEVICE_ID must be a Local Sidecar device identity");
   const token = requiredEnv("OMARCHY_BOT_DEVICE_TOKEN");

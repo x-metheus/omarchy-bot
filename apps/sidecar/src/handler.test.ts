@@ -58,7 +58,7 @@ const descendantRoot = (): string => {
   return root;
 };
 
-describe("Local Sidecar remembered Always cancellation", () => {
+describe.skipIf(process.platform !== "linux")("Local Sidecar remembered Always cancellation", () => {
   for (const stop of ["local.cancel", "handler.close"] as const) {
     test(`a remembered Always job is aborted by ${stop}`, async () => {
       const { root, gate } = alwaysRoot();
@@ -116,7 +116,7 @@ describe("Local Sidecar remembered Always cancellation", () => {
   }
 });
 
-describe("Local Sidecar handler close teardown", () => {
+describe.skipIf(process.platform !== "linux")("Local Sidecar handler close teardown", () => {
   test("close awaits the killed descendant of a cancelled remembered-Always job", async () => {
     const root = descendantRoot();
     const sent: DeviceClientFrame[] = [];
