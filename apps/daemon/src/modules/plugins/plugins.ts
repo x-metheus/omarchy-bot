@@ -13,7 +13,7 @@ import {
 } from "@omarchy-bot/protocol";
 import { HttpError } from "../bots/bots.ts";
 import { CatalogClient } from "./catalogClient.ts";
-import { Grant, ProviderAccounts } from "./providerAccounts.ts";
+import { Grant, ProviderAccounts, type PluginAuthorizationEvent } from "./providerAccounts.ts";
 import { toolOperation } from "./pluginDispatch.ts";
 import { SkillInstalls } from "./skillInstall.ts";
 import { ServiceBundles } from "./serviceBundles.ts";
@@ -69,7 +69,7 @@ export class PluginsService {
 
   constructor(private readonly rootDir: string, private readonly cwd: string, private readonly nativeResources: () => Promise<NativePluginResources>,
     private readonly nativeControl?: (input: Pick<Extract<AgentCommand, { type: "mcp.control" }>, "action" | "server" | "redirectUrl">) => Promise<NativeMcpControlResult>,
-    private readonly clientOrigin?: () => string) {
+    private readonly serviceOrigin?: () => string, authorizationEvent?: (event: PluginAuthorizationEvent) => void) {
     mkdirSync(rootDir, { recursive: true, mode: 0o700 });
     if (!lstatSync(rootDir).isDirectory() || lstatSync(rootDir).isSymbolicLink()) throw new Error("Plugin state directory must be a private real directory");
     chmodSync(rootDir, 0o700);
@@ -149,6 +149,7 @@ export class PluginsService {
       release: (providerId, serviceId) => this.bundles.release(providerId, serviceId),
       authorizeMcp: (id) => this.authorizeMcp(id),
       checkMcp: (id) => this.checkMcp(id),
+      ...(authorizationEvent === undefined ? {} : { authorizationEvent }),
     });
     this.#ready = this.#initializeServices();
   }
@@ -356,11 +357,12 @@ export class PluginsService {
     }
   }
 
-  async authorize(body: AuthorizePluginBody): Promise<{ url: string }> {
-    return this.accounts.authorize(body);
+  async authorize(body: AuthorizePluginBody, callbackOrigin = this.serviceOrigin?.()): Promise<{ url?: string }> {
+    if (!callbackOrigin) throw new HttpError(503, "Service authorization requires a configured Service origin");
+    return this.accounts.authorize(body, callbackOrigin);
   }
 
-  async finishAuthorization(url: URL): Promise<{ returnUrl: string; label: string }> {
+  async finishAuthorization(url: URL): Promise<{ label: string }> {
     return this.accounts.finishAuthorization(url);
   }
 
@@ -426,13 +428,11 @@ export class PluginsService {
         if (released) throw new Error("Plugin turn snapshot was released");
         if (name !== "manage_plugins") throw new Error("Plugin management tool does not belong to this turn");
         const input = PluginManageInput.parse(args);
-        if (input.action === "authorize_service" && !this.clientOrigin) throw new HttpError(503, "Service authorization requires a configured daemon client origin");
         const row = toolOperation(input.action);
         if (!row) throw new HttpError(404, "Unknown plugin operation");
         const { action, ...fields } = input;
         const result = await row.handler(this, {
           ...fields, ...(input.id === undefined ? {} : { accountId: input.id }),
-          ...(action === "authorize_service" && this.clientOrigin ? { returnUrl: this.clientOrigin() } : {}),
           tool: true, signal,
         } as Parameters<typeof row.handler>[1]);
         return this.#toolOutput({ content: [{ type: "text", text: JSON.stringify(result) }] });

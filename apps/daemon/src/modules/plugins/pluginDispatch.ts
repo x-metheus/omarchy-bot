@@ -18,7 +18,7 @@ export interface PluginCall {
   enabled?: boolean;
   providerId?: z.infer<typeof AuthorizePluginBody>["providerId"];
   accountId?: string;
-  returnUrl?: string;
+  callbackOrigin?: string;
   /** Set only by manage_plugins. HTTP responses stay the route status. */
   tool?: boolean;
   signal?: AbortSignal;
@@ -64,8 +64,8 @@ const handlers: Record<PluginAction, Handler> = {
   remove_skill: (plugins, call) => { plugins.removeSkill(text(call.id, "Select an exact plugin id from list or search")); return { removed: true }; },
   update_skills: async (plugins) => { await plugins.updateSkills(); return plugins.state(); },
   authorize_service: async (plugins, call) => {
-    if (!call.providerId || !call.returnUrl) throw new HttpError(400, "Specify the provider id");
-    const authorization = await plugins.authorize({ providerId: call.providerId, returnUrl: call.returnUrl, ...(call.accountId === undefined ? {} : { accountId: call.accountId }), ...(call.serviceId === undefined ? {} : { serviceId: call.serviceId }) });
+    if (!call.providerId) throw new HttpError(400, "Specify the provider id");
+    const authorization = await plugins.authorize({ providerId: call.providerId, ...(call.accountId === undefined ? {} : { accountId: call.accountId }), ...(call.serviceId === undefined ? {} : { serviceId: call.serviceId }) }, call.callbackOrigin);
     return call.tool ? { ...authorization, pendingAuthorization: true } : authorization;
   },
   enable_service: (plugins, call) => {

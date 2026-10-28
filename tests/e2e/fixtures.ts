@@ -8,7 +8,7 @@ export const SERVICE_ORIGIN = process.env.OMARCHY_BOT_E2E_SERVICE_URL
   ?? `http://127.0.0.1:${process.env.OMARCHY_BOT_E2E_PORT ?? "7399"}`;
 
 /** globalSetup writes the paired device token here. */
-export const AUTH_TOKEN_FILE = path.join(os.tmpdir(), "omarchy-bot-e2e-auth.json");
+export const AUTH_TOKEN_FILE = path.join(os.tmpdir(), `omarchy-bot-e2e-auth-${new URL(SERVICE_ORIGIN).port || "80"}.json`);
 
 function deviceToken(): string {
   const token: unknown = JSON.parse(readFileSync(AUTH_TOKEN_FILE, "utf8"));

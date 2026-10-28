@@ -35,8 +35,14 @@ export interface ProviderAccount {
 }
 
 interface OAuthPending {
-  providerId: PluginProviderId; accountId?: string; verifier: string; cloudUrl: string; returnUrl: string; expiresAt: number;
+  providerId: PluginProviderId; accountId?: string; verifier: string; cloudUrl: string; expiresAt: number;
   brokerState: string;
+}
+
+export interface PluginAuthorizationEvent {
+  providerId: PluginProviderId;
+  accountId?: string;
+  status: "completed" | "failed";
 }
 
 /** Host services the authorization flow needs. Provisioning arrives as callbacks so this module never imports PluginsService. */
@@ -54,6 +60,7 @@ export interface ProviderAccountsHost {
   release(providerId: PluginProviderId, serviceId: string): void;
   authorizeMcp(id: string): Promise<{ authorizationUrl?: string; authenticated?: boolean; error?: string }>;
   checkMcp(id: string): Promise<unknown>;
+  authorizationEvent?(event: PluginAuthorizationEvent): void;
 }
 
 export interface AccountGrant {
@@ -179,7 +186,7 @@ export class ProviderAccounts {
     };
   }
 
-  async authorize(body: AuthorizePluginBody): Promise<{ url: string }> {
+  async authorize(body: AuthorizePluginBody, callbackOrigin: string): Promise<{ url?: string }> {
     const cloudUrl = this.host.cloudUrl();
     const account = body.accountId === undefined ? undefined : this.host.accounts().find((entry) => entry.id === body.accountId);
     if (body.accountId !== undefined && (!account || account.providerId !== body.providerId)) throw new HttpError(404, "Provider account not found");
@@ -188,19 +195,19 @@ export class ProviderAccounts {
     for (const [state, entry] of this.#oauth) if (entry.expiresAt < Date.now()) this.#oauth.delete(state);
     const localState = randomBytes(32).toString("base64url");
     const verifier = randomBytes(32).toString("base64url");
-    const callback = new URL("/api/plugins/oauth/callback", body.returnUrl);
+    const callback = new URL("/api/plugins/oauth/callback", callbackOrigin);
     const result = OAuthStartResponse.parse(await this.host.publisher.request("oauth/start", { providerId: body.providerId, callbackUrl: callback.href,
       localState, challenge: createHash("sha256").update(verifier).digest("base64url") }));
     if (new URL(result.url).origin !== new URL(PLUGIN_PROVIDERS[body.providerId].authorizeUrl).origin) throw new HttpError(502, "Publisher returned an unexpected authorization origin");
     const brokerState = new URL(result.url).searchParams.get("state");
     if (!brokerState) throw new HttpError(502, "Publisher authorization did not include its transaction binding");
-    this.#oauth.set(localState, { providerId: body.providerId, verifier, brokerState, cloudUrl, returnUrl: new URL(body.returnUrl).origin, expiresAt: Date.now() + 15 * 60_000,
+    this.#oauth.set(localState, { providerId: body.providerId, verifier, brokerState, cloudUrl, expiresAt: Date.now() + 15 * 60_000,
       ...(body.accountId === undefined ? {} : { accountId: body.accountId }) });
     return result;
   }
 
   /** Native MCP authorization provisions the Service first, then hands the connection's own OAuth flow back to the caller. */
-  async authorizeNative(body: AuthorizePluginBody, previous?: ProviderAccount): Promise<{ url: string }> {
+  async authorizeNative(body: AuthorizePluginBody, previous?: ProviderAccount): Promise<{ url?: string }> {
     const provider = PLUGIN_PROVIDERS[body.providerId];
     if (previous && !previous.native) throw new HttpError(409, "An API grant cannot be silently rebound to native MCP authorization. Add a separate Service account.");
     const serviceId = body.serviceId ?? previous?.native?.serviceId ?? (provider.services.length === 1 ? provider.services[0]!.id : undefined);
@@ -224,7 +231,7 @@ export class ProviderAccounts {
       const result = await this.host.authorizeMcp(connection.id);
       if (result.error) throw new HttpError(502, result.error);
       if (result.authenticated) await this.host.checkMcp(connection.id);
-      return { url: result.authorizationUrl ?? body.returnUrl };
+      return result.authorizationUrl ? { url: result.authorizationUrl } : {};
     } catch (error) {
       account.error = redactToolErrorSummary(error instanceof Error ? error.message : error);
       this.host.persist();
@@ -232,50 +239,57 @@ export class ProviderAccounts {
     }
   }
 
-  async finishAuthorization(url: URL): Promise<{ returnUrl: string; label: string }> {
+  async finishAuthorization(url: URL): Promise<{ label: string }> {
     const state = url.searchParams.get("state") ?? "";
     const pending = this.#oauth.get(state);
-    if (!pending || pending.expiresAt < Date.now()) throw new HttpError(400, "Authorization state is missing, expired, or already used. Start again from Plugins.");
+    if (!pending) throw new HttpError(400, "Authorization state is missing, expired, or already used. Start again from Plugins.");
     this.#oauth.delete(state);
-    const code = url.searchParams.get("code");
-    const brokerState = url.searchParams.get("brokerState");
-    if (url.searchParams.has("error") || !code || !brokerState) throw new HttpError(400, "Authorization was not granted");
-    if (brokerState !== pending.brokerState) throw new HttpError(400, "Authorization callback belongs to a different publisher transaction");
-    const tokens = PublisherTokenResponse.parse(await this.host.publisher.request("oauth/token", { grantType: "authorization_code", code, state: brokerState, verifier: pending.verifier }, pending.cloudUrl));
-    const metadata: Record<string, unknown> = {};
-    for (const key of TOKEN_METADATA_KEYS) if (key !== "refresh_token" && key !== "expires_in" && key !== "refresh_token_expires_in" && key !== "scope" && tokens[key] !== undefined) metadata[key] = tokens[key];
-    const grant: Grant = { generation: randomUUID(), accessToken: tokens.access_token, scopes: (tokens.scope ?? "").split(/[\s,]+/).filter(Boolean), cloudUrl: pending.cloudUrl, metadata,
-      ...(tokens.refresh_token === undefined ? {} : { refreshToken: tokens.refresh_token }), ...(tokens.expires_in === undefined ? {} : { expiresAt: Date.now() + tokens.expires_in * 1000 }) };
-    const identity = await identifyAccount(pending.providerId, grant, this.host.cwd, this.authenticatedFetch(pending.providerId, grant));
-    const previous = pending.accountId === undefined ? undefined : this.host.accounts().find((account) => account.id === pending.accountId);
-    if (pending.accountId !== undefined && !previous) throw new HttpError(409, "Account was removed during authorization");
-    if (previous && previous.identity !== identity.identity) throw new HttpError(409, "A different provider identity was authorized. Use Add account instead of reconnecting this account.");
-    if (!grant.refreshToken && previous?.status === "connected" && previous.grant?.cloudUrl === grant.cloudUrl && previous.grant.refreshToken) {
-      grant.refreshToken = previous.grant.refreshToken;
-    }
-    const services = PLUGIN_PROVIDERS[pending.providerId].services.filter((service) => hasScopes(grant, service)).map((service) => service.id);
-    const account: ProviderAccount = { id: previous?.id ?? `account_${randomUUID().replace(/-/g, "")}`, providerId: pending.providerId,
-      label: previous?.label ?? identity.label, identity: identity.identity, enabledServices: previous ? previous.enabledServices.filter((id) => services.includes(id)) : services,
-      bundleErrors: { ...previous?.bundleErrors },
-      status: "connected", grant, nativeManaged: true };
-    const accounts = this.host.accounts();
-    const previousIndex = accounts.findIndex((entry) => entry.id === account.id);
-    if (previousIndex >= 0) accounts.splice(previousIndex, 1);
-    accounts.push(account);
-    for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
-      this.host.change(account, service.id);
-      if (!account.enabledServices.includes(service.id)) {
-        const connection = this.host.mcp.serviceConnections(account.id).find((entry) => entry.name === this.host.serviceName(account, service.id));
-        if (connection) this.host.mcp.enable(connection.id, false, true);
-        this.host.release(account.providerId, service.id);
+    try {
+      if (pending.expiresAt < Date.now()) throw new HttpError(400, "Authorization state expired. Start again from Plugins.");
+      const code = url.searchParams.get("code");
+      const brokerState = url.searchParams.get("brokerState");
+      if (url.searchParams.has("error") || !code || !brokerState) throw new HttpError(400, "Authorization was not granted");
+      if (brokerState !== pending.brokerState) throw new HttpError(400, "Authorization callback belongs to a different publisher transaction");
+      const tokens = PublisherTokenResponse.parse(await this.host.publisher.request("oauth/token", { grantType: "authorization_code", code, state: brokerState, verifier: pending.verifier }, pending.cloudUrl));
+      const metadata: Record<string, unknown> = {};
+      for (const key of TOKEN_METADATA_KEYS) if (key !== "refresh_token" && key !== "expires_in" && key !== "refresh_token_expires_in" && key !== "scope" && tokens[key] !== undefined) metadata[key] = tokens[key];
+      const grant: Grant = { generation: randomUUID(), accessToken: tokens.access_token, scopes: (tokens.scope ?? "").split(/[\s,]+/).filter(Boolean), cloudUrl: pending.cloudUrl, metadata,
+        ...(tokens.refresh_token === undefined ? {} : { refreshToken: tokens.refresh_token }), ...(tokens.expires_in === undefined ? {} : { expiresAt: Date.now() + tokens.expires_in * 1000 }) };
+      const identity = await identifyAccount(pending.providerId, grant, this.host.cwd, this.authenticatedFetch(pending.providerId, grant));
+      const previous = pending.accountId === undefined ? undefined : this.host.accounts().find((account) => account.id === pending.accountId);
+      if (pending.accountId !== undefined && !previous) throw new HttpError(409, "Account was removed during authorization");
+      if (previous && previous.identity !== identity.identity) throw new HttpError(409, "A different provider identity was authorized. Use Add account instead of reconnecting this account.");
+      if (!grant.refreshToken && previous?.status === "connected" && previous.grant?.cloudUrl === grant.cloudUrl && previous.grant.refreshToken) {
+        grant.refreshToken = previous.grant.refreshToken;
       }
+      const services = PLUGIN_PROVIDERS[pending.providerId].services.filter((service) => hasScopes(grant, service)).map((service) => service.id);
+      const account: ProviderAccount = { id: previous?.id ?? `account_${randomUUID().replace(/-/g, "")}`, providerId: pending.providerId,
+        label: previous?.label ?? identity.label, identity: identity.identity, enabledServices: previous ? previous.enabledServices.filter((id) => services.includes(id)) : services,
+        bundleErrors: { ...previous?.bundleErrors },
+        status: "connected", grant, nativeManaged: true };
+      const accounts = this.host.accounts();
+      const previousIndex = accounts.findIndex((entry) => entry.id === account.id);
+      if (previousIndex >= 0) accounts.splice(previousIndex, 1);
+      accounts.push(account);
+      for (const service of PLUGIN_PROVIDERS[account.providerId].services) {
+        this.host.change(account, service.id);
+        if (!account.enabledServices.includes(service.id)) {
+          const connection = this.host.mcp.serviceConnections(account.id).find((entry) => entry.name === this.host.serviceName(account, service.id));
+          if (connection) this.host.mcp.enable(connection.id, false, true);
+          this.host.release(account.providerId, service.id);
+        }
+      }
+      this.host.persist(true);
+      for (const service of PLUGIN_PROVIDERS[account.providerId].services) if (account.enabledServices.includes(service.id)) {
+        try { await this.host.provision(account, service, true); }
+        catch (error) { account.bundleErrors[service.id] = redactToolErrorSummary(error instanceof Error ? error.message : error); this.host.persist(); }
+      }
+      this.host.authorizationEvent?.({ providerId: account.providerId, accountId: account.id, status: "completed" });
+      return { label: account.label };
+    } catch (error) {
+      this.host.authorizationEvent?.({ providerId: pending.providerId, ...(pending.accountId === undefined ? {} : { accountId: pending.accountId }), status: "failed" });
+      throw error;
     }
-    this.host.persist(true);
-    for (const service of PLUGIN_PROVIDERS[account.providerId].services) if (account.enabledServices.includes(service.id)) {
-      try { await this.host.provision(account, service, true); }
-      catch (error) { account.bundleErrors[service.id] = redactToolErrorSummary(error instanceof Error ? error.message : error); this.host.persist(); }
-    }
-    return { returnUrl: pending.returnUrl, label: account.label };
   }
 
   clearPending(): void { this.#oauth.clear(); }

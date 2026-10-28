@@ -329,6 +329,12 @@ unrelated Turns. Provider-side revocation can still interrupt a running call.
   there is no REST business fallback. Provider-specific
   setup, account eligibility, consent, and separate external-client login still
   apply. See the [provider endpoints and setup references](packages/protocol/src/pluginProviders.ts).
+  **Add account** and **Reconnect** open provider consent in the system browser.
+  The OAuth callback stays on the Service and offers an `omarchy-bot://` link
+  back to Omarchy Bot. Completion and failure refresh plugin state in every
+  connected app through the event stream; a failed or cancelled attempt can
+  be retried with **Add account** or **Reconnect**. Authorization requests carry
+  no client return URL.
 - **Create a Skill:** the [official OpenAI Skill Creator](https://github.com/openai/skills/tree/main/skills/.system/skill-creator),
   its complete resources, and vendored PyYAML are supplied locally. Ordinary
   Python 3 is required; Pi creation needs no Codex/Claude installation or
