@@ -54,6 +54,7 @@ export interface ApiClientOptions {
    * before pairing picks the token up once it is stored. The getter wins.
    */
   deviceToken?: string | (() => string | undefined) | undefined;
+  onUnauthorized?: () => void;
 }
 
 export interface ComputerSurfaceOwner {
@@ -82,11 +83,12 @@ export class ApiClient {
   private readonly f: typeof fetch;
   private readonly localSidecarDeviceId: () => string | undefined;
   private readonly token: () => string | undefined;
+  private readonly onUnauthorized: (() => void) | undefined;
 
   constructor(opts: ApiClientOptions = {}) {
     const baseUrl = opts.baseUrl ?? "";
     this.base = typeof baseUrl === "function" ? baseUrl : () => baseUrl;
-    this.f = opts.fetch ?? fetch.bind(globalThis);
+    this.f = opts.fetch ?? ((input, init) => globalThis.fetch(input, init)) as typeof fetch;
     const deviceId = opts.localSidecarDeviceId;
     if (typeof deviceId !== "function" && deviceId !== undefined && !isDeviceId(deviceId)) {
       throw new Error("localSidecarDeviceId must be a Local Sidecar device identity");
@@ -94,15 +96,25 @@ export class ApiClient {
     this.localSidecarDeviceId = typeof deviceId === "function" ? deviceId : () => deviceId;
     const token = opts.deviceToken;
     this.token = typeof token === "function" ? token : () => token;
+    this.onUnauthorized = opts.onUnauthorized;
   }
 
   get baseUrl(): string {
     return this.base().replace(/\/+$/, "");
   }
 
-  private authHeaders(): Record<string, string> {
+  async fetchResponse(url: string, init?: RequestInit): Promise<Response> {
+    const baseUrl = this.baseUrl;
     const token = this.token();
-    return token ? { authorization: `Bearer ${token}` } : {};
+    const response = await this.f(url, {
+      ...init,
+      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...init?.headers },
+    });
+    const address = new URL(url, baseUrl || "http://localhost");
+    const requestToken = address.searchParams.get("access_token") ?? token;
+    if (response.status === 401 && baseUrl === this.baseUrl && requestToken === this.token()
+      && address.origin === new URL(baseUrl || "http://localhost").origin) this.onUnauthorized?.();
+    return response;
   }
 
   /** Browsers cannot set headers on WebSockets, `<img>`, or noVNC: carry the token in the query. */
@@ -117,10 +129,9 @@ export class ApiClient {
   }
 
   private async req<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await this.f(`${this.baseUrl}${path}`, {
+    const res = await this.fetchResponse(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
-        ...this.authHeaders(),
         "content-type": "application/json",
         "x-command-id": randomUuid(),
         ...(init?.headers ?? {}),
@@ -256,9 +267,9 @@ export class ApiClient {
     return this.req(`/api/bots/${id}/avatar/generate`, { method: "POST" });
   }
   async uploadAvatar(id: string, file: Blob): Promise<BotDto> {
-    const res = await this.f(`${this.baseUrl}/api/bots/${id}/avatar/upload`, {
+    const res = await this.fetchResponse(`${this.baseUrl}/api/bots/${id}/avatar/upload`, {
       method: "POST",
-      headers: { ...this.authHeaders(), "content-type": file.type || "application/octet-stream", "x-command-id": randomUuid() },
+      headers: { "content-type": file.type || "application/octet-stream", "x-command-id": randomUuid() },
       body: file,
     });
     if (!res.ok) {
@@ -320,10 +331,9 @@ export class ApiClient {
   async stageAttachment(botId: string, draftToken: AttachmentDraftTokenDto, file: File): Promise<AttachmentDto> {
     const form = new FormData();
     form.append("file", file);
-    const res = await this.f(`${this.baseUrl}/api/attachments/stage`, {
+    const res = await this.fetchResponse(`${this.baseUrl}/api/attachments/stage`, {
       method: "POST",
       headers: {
-        ...this.authHeaders(),
         "x-bot-id": botId,
         "x-attachment-draft-token": draftToken,
         "x-command-id": randomUuid(),

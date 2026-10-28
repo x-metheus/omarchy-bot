@@ -13,6 +13,7 @@ import {
   type ScreenProjectionPreviewFrameHeaderDto as PreviewFrameHeader,
 } from "@omarchy-bot/protocol";
 import { withDeviceToken } from "./urls.ts";
+import { api } from "./api.ts";
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const CONNECTION_TIMEOUT_MS = 10_000;
@@ -135,7 +136,7 @@ export class ScreenProjectionConnection {
     this.#armConnectionDeadline("Couldn’t connect to the Bot Screen.");
     try {
       const endpoint = this.#projectionEndpoint();
-      const response = await fetch(endpoint, {
+      const response = await api.fetchResponse(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION }),
@@ -355,7 +356,7 @@ export class ScreenProjectionConnection {
     this.callbacks.onFrame(undefined);
     this.callbacks.onState("closed");
     if (this.#sessionId !== undefined) {
-      void fetch(this.#projectionEndpoint(), {
+      void api.fetchResponse(this.#projectionEndpoint(), {
         method: "DELETE",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ sessionId: this.#sessionId }),
@@ -726,7 +727,7 @@ export class ScreenProjectionConnection {
   ): Promise<void> {
     let snapshotAvailable = false;
     try {
-      const response = await fetch(this.#snapshotUrl ?? this.#defaultSnapshotUrl());
+      const response = await api.fetchResponse(this.#snapshotUrl ?? this.#defaultSnapshotUrl());
       if (!response.ok || response.headers.get("content-type") !== "image/png") throw new Error();
       this.callbacks.onFrame(await response.blob());
       snapshotAvailable = true;

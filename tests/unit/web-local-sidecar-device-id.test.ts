@@ -1,19 +1,19 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createMemoryShell, getShell, installShell, type LocalSidecarStatus } from "../../apps/web/src/lib/shell.ts";
+import { api } from "../../apps/web/src/lib/api.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const originalFetch = globalThis.fetch;
 const originalShell = getShell();
 const sent: Array<{ url: string; body: Record<string, unknown> }> = [];
-globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-  sent.push({ url: String(input), body: JSON.parse(String(init?.body)) });
-  return Response.json({ threadId: "thread-1", messageId: "message-1", turnId: "turn-1", action: "sent" }, { status: 202 });
-}) as typeof fetch;
-// Load the singleton after installing the network boundary; a static import binds the real fetch.
-const { api } = await import("../../apps/web/src/lib/api.ts");
-globalThis.fetch = originalFetch;
+beforeEach(() => {
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    sent.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+    return Response.json({ threadId: "thread-1", messageId: "message-1", turnId: "turn-1", action: "sent" }, { status: 202 });
+  }) as typeof fetch;
+});
 
-afterEach(() => { installShell(originalShell); sent.length = 0; });
+afterEach(() => { globalThis.fetch = originalFetch; installShell(originalShell); sent.length = 0; });
 
 for (const [label, status, tagged] of [
   ["absent Sidecar", { running: false }, false],

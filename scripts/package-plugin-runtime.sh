@@ -10,7 +10,6 @@ out_dir=$(CDPATH= cd -- "$out_dir" && pwd)
 asset=omarchy-bot-runtime-${sha}-x86_64.tar.zst
 
 required=(
-  apps/web/dist
   apps/daemon/dist/native-pointer/omarchy-bot-wayland-input
   apps/daemon/dist/native-capture/omarchy-bot-wayland-capture
   apps/daemon/dist/native-bot-desktop/omarchy-bot-desktop
@@ -125,6 +124,7 @@ done
 
 # Keep the site workspace manifest, not publisher code, assets, or local secrets.
 tar -C "$root" --exclude=node_modules \
+  --exclude=apps/web/dist \
   --exclude=apps/site/public --exclude=apps/site/src --exclude=apps/site/dist \
   --exclude=apps/site/api --exclude=apps/site/server --exclude=apps/site/.vercel \
   --exclude='apps/site/.env*' \

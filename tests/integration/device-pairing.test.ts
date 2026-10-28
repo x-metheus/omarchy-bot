@@ -296,10 +296,10 @@ describe("unpaired callers", () => {
     expect(await res.json()).toEqual({ ok: true, version: daemonPkg.version, protocol: 1 });
   });
 
-  test("static SPA paths are not gated so the pairing page can load", async () => {
-    for (const path of ["/", "/pair?code=ABCD2345", "/missing-static-file.js"]) {
+  test("former static, SPA fallback and pairing paths return 404", async () => {
+    for (const path of ["/", "/index.html", "/pair?code=ABCD2345", "/client/route", "/missing-static-file.js"]) {
       const res = await fetch(`${h.baseUrl}${path}`);
-      expect(res.status).not.toBe(401);
+      expect(res.status).toBe(404);
     }
   });
 
@@ -320,7 +320,7 @@ describe("pairing exchange", () => {
   test("issues a one-time code and a code is exchanged exactly once", async () => {
     const issued = await issueCode("Test Client");
     expect(issued.code).toMatch(/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$/);
-    expect(issued.url).toBe(`/pair?code=${issued.code}`);
+    expect(issued.url).toBe(`omarchy-bot://pair?service=${encodeURIComponent(h.baseUrl)}&code=${issued.code}`);
     expect(Date.parse(issued.expiresAt)).toBeGreaterThan(Date.now());
     const stored = h.svc.db.query("SELECT code_hash FROM pairing_codes").all() as { code_hash: string }[];
     expect(stored.some((row) => row.code_hash === issued.code)).toBe(false);
@@ -457,8 +457,14 @@ test("interface-bound TLS CLI management retains loopback host authorization and
     const issued = await cli(["pair"]);
     expect(issued.code).toBe(0);
     expect(issued.stderr).toBe("");
-    expect(issued.stdout).toStartWith(`pairing: ${origin}/pair?code=`);
-    const code = new URL(issued.stdout.trim().slice("pairing: ".length)).searchParams.get("code");
+    const [addressLine, codeLine, pairingLine] = issued.stdout.trim().split("\n");
+    expect(addressLine).toBe(`address: ${origin}`);
+    const link = new URL(pairingLine!.slice("pairing: ".length));
+    expect(link.protocol).toBe("omarchy-bot:");
+    expect(link.hostname).toBe("pair");
+    expect(link.searchParams.get("service")).toBe(origin);
+    const code = link.searchParams.get("code");
+    expect(codeLine).toBe(`code: ${code}`);
     const exchanged = await fetch(`${origin}/api/pairing/exchange`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, name: "Interface browser" }), tls: { rejectUnauthorized: false } });
     expect(exchanged.status).toBe(201);
     const { device } = await exchanged.json() as { device: { id: string } };

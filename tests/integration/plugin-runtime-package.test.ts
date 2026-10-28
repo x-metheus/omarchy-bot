@@ -230,6 +230,7 @@ test("packages a runnable production dependency tree without mutating the source
     cwd: fixture.root,
   });
   assertSucceeded(extract, "runtime extraction");
+  expect(existsSync(path.join(extracted, "apps/web/dist"))).toBe(false);
 
   expect(readFileSync(path.join(extracted, "sway/.omarchy-bot-runtime"), "utf8"))
     .toBe(`sway-fixture-v1\n${fixture.bundleSha256}\n`);
@@ -280,6 +281,19 @@ test("packages a runnable production dependency tree without mutating the source
   });
   assertSucceeded(sourceAfter, "source fixture consumer after packaging");
 }, 60_000);
+
+test("packages the runtime without a Web build", () => {
+  const fixture = createFixture();
+  rmSync(path.join(fixture.root, "apps/web/dist"), { recursive: true });
+  const installEnv = { ...process.env, BUN_INSTALL_CACHE_DIR: fixture.cache };
+  assertSucceeded(run(["bun", "install"], { cwd: fixture.root, env: installEnv }), "fixture dependency install");
+  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle, fixture.fonts], {
+    cwd: projectRoot,
+    env: { ...installEnv, OMARCHY_BOT_PLUGIN_REVISION: "without-web" },
+  });
+  assertSucceeded(packaged, "runtime packaging without a Web build");
+  expect(existsSync(path.join(fixture.output, "omarchy-bot-runtime-without-web-x86_64.tar.zst"))).toBe(true);
+});
 
 test("refuses a Sway bundle that does not match the pinned checksum without writing an archive", () => {
   const fixture = createFixture();

@@ -28,8 +28,6 @@ import type { PluginsService } from "../modules/plugins/plugins.ts";
 import type { DevicePort, SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import type { PairingService } from "../modules/pairing/pairing.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
-import { existsSync } from "node:fs";
-import path from "node:path";
 import { isIPv4 } from "node:net";
 import { CreateBotBody, PatchBotBody, SendMessageBody, PROTOCOL_VERSION } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
@@ -203,7 +201,9 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       const hostAuthorized = fromServiceHost(req) && svc.pairing.hostSecretMatches(presentedToken(req, url), svc.pairingHostSecret);
       if (pairedDeviceId === undefined && !hostAuthorized) return json({ error: "unauthorized" }, 401);
       const body = await parseBody(req, PairingCodeBody);
-      return json(svc.pairing.issueCode(body.name));
+      const issued = svc.pairing.issueCode(body.name);
+      const origin = publicOrigin(svc.cfg, server.requestIP(req)?.address, req.headers, url);
+      return json({ ...issued, url: `omarchy-bot://pair?service=${encodeURIComponent(origin)}&code=${issued.code}` });
     }
 
     if (pathname === "/api/pairing/exchange" && req.method === "POST") {
@@ -362,15 +362,6 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
 
     const computerResponse = await handleComputerRequest(req, svc.computer, svc.screens);
     if (computerResponse) return computerResponse;
-
-    // Release: serve the built web UI if present.
-    const dist = path.resolve(import.meta.dir, "../../../web/dist");
-    if (existsSync(dist) && req.method === "GET" && !pathname.startsWith("/api/")) {
-      const file = pathname === "/" ? "/index.html" : pathname;
-      const f = Bun.file(path.join(dist, file));
-      const document = await f.exists() ? f : Bun.file(path.join(dist, "index.html"));
-      return new Response(document, { headers: { "referrer-policy": "no-referrer", ...(document.type.startsWith("text/html") ? { "cache-control": "no-store" } : {}) } });
-    }
 
     return notFound("not found");
   };
