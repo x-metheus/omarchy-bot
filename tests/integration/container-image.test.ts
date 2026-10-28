@@ -73,7 +73,7 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
     await docker("volume", "create", volume);
     await launch();
     await docker("exec", name, "sh", "-c", 'mkdir -p "$OMARCHY_BOT_HOME/conformance"; printf %s \'{"ok":true,"image":"verified"}\' > "$OMARCHY_BOT_HOME/conformance/pi-fake-pi-1.json"');
-    expect(await healthy()).toEqual({ ok: true, version: "0.1.0" });
+    expect(await healthy()).toEqual({ ok: true, version: "0.1.0", protocol: 1 });
     expect(Number(await docker("exec", name, "id", "-u"))).toBeGreaterThan(0);
     expect(await docker("exec", name, "bun", "-e", 'console.log(require("node:fs").readFileSync("/proc/1/status", "utf8").match(/^Uid:\\s+(\\d+)/m)[1])')).toBe("1000");
     expect(await docker("inspect", "--format", "{{.HostConfig.NetworkMode}}", name)).toBe("none");

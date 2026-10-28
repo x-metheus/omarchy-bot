@@ -1,3 +1,5 @@
+import { queryOptions } from "@tanstack/react-query";
+import { PROTOCOL_VERSION } from "@omarchy-bot/protocol";
 import { ApiClient, randomUuid } from "@omarchy-bot/api-client";
 import { isDeviceId } from "@omarchy-bot/domain";
 import { getShell } from "./shell.ts";
@@ -12,6 +14,19 @@ export const api = new ApiClient({
       ? status.deviceId : undefined;
   },
 });
+
+export function serviceHealthQuery() {
+  return queryOptions({
+    queryKey: ["health", getShell().service.baseUrl()],
+    queryFn: () => api.health(),
+    staleTime: 0,
+  });
+}
+
+export function isSupportedServiceProtocol(protocol: unknown): boolean {
+  return typeof protocol === "number" && Number.isInteger(protocol)
+    && protocol >= 1 && protocol <= PROTOCOL_VERSION;
+}
 
 export function trimSendText(text: string): string {
   return text.replace(/\s+$/, "");

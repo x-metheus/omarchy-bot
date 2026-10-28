@@ -31,7 +31,7 @@ import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { isIPv4 } from "node:net";
-import { CreateBotBody, PatchBotBody, SendMessageBody } from "@omarchy-bot/protocol";
+import { CreateBotBody, PatchBotBody, SendMessageBody, PROTOCOL_VERSION } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
 import { AGENT_IDS, type AgentId } from "@omarchy-bot/domain";
 import daemonPackage from "../../package.json" with { type: "json" };
@@ -271,7 +271,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       return json({ error: "expected websocket upgrade" }, 426);
     }
 
-    if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION });
+    if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION, protocol: PROTOCOL_VERSION });
     const pluginResponse = await handlePluginRequest(req, svc.plugins, pathname, publicOrigin(svc.cfg, server.requestIP(req)?.address, req.headers, url));
     if (pluginResponse !== undefined) return pluginResponse;
 

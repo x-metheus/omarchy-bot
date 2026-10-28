@@ -290,10 +290,10 @@ describe("unpaired callers", () => {
     }
   });
 
-  test("health stays unauthenticated and reveals only liveness and version", async () => {
+  test("health stays unauthenticated and reveals only liveness, version, and protocol", async () => {
     const res = await fetch(`${h.baseUrl}/api/health`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, version: daemonPkg.version });
+    expect(await res.json()).toEqual({ ok: true, version: daemonPkg.version, protocol: 1 });
   });
 
   test("static SPA paths are not gated so the pairing page can load", async () => {

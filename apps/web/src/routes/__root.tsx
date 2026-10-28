@@ -4,6 +4,7 @@ import { neutralTheme } from "@astryxdesign/theme-neutral/built";
 import { Banner } from "@astryxdesign/core/Banner";
 import type { JSX } from "react";
 import { pairingError } from "../lib/pairing.ts";
+import { ProtocolGate } from "../components/ProtocolGate.tsx";
 
 function Root(): JSX.Element {
   const error = pairingError();
@@ -12,7 +13,7 @@ function Root(): JSX.Element {
       {error === undefined ? null : (
         <Banner status="error" title="Pairing failed" description={error} container="section" />
       )}
-      <Outlet />
+      <ProtocolGate><Outlet /></ProtocolGate>
     </Theme>
   );
 }

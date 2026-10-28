@@ -99,7 +99,9 @@ In a checkout, `bun run serve` calls the same entry. It requires Linux x86_64, B
 
 Without `XDG_RUNTIME_DIR`, the entry creates `/tmp/ob-<uid>` with mode 0700 and exports it for transient sockets and the Bot Computer runtime. The short path leaves room for Linux's Unix-socket pathname limit. A per-user Service lock lives under `/tmp/omarchy-bot-<uid>/`, independent of login sessions and launcher settings. A second launch fails promptly and reports the running Service's PID. The Omarchy plugin starts and stops the Service through its systemd user unit. Shell hot reload keeps the plugin loaded, and a crash or SIGKILL leaves the Service running. A graceful Quickshell teardown also leaves the Service and its active Turns running: the teardown helper waits instead of stopping, and only a persisted disable stops the Service while removal of the plugin source directory uninstalls it and keeps user data.
 
-`GET /api/health` accepts no token and returns only liveness and the Service version, for example `{"ok":true,"version":"0.1.0"}`. Control requests require a Paired Device token, including on loopback. Non-loopback listeners require TLS or a declared TLS-terminating proxy.
+`GET /api/health` accepts no token and returns only liveness, the Service version, and the client protocol version, for example `{"ok":true,"version":"0.1.0","protocol":1}`. The client protocol is owned by `@omarchy-bot/protocol` and raised on every breaking change. Omarchy Bot checks it before opening the workspace; this app supports protocol 1. A newer Service requires updating Omarchy Bot through the app's update action; an older Service (including one without the field) requires updating the Service on its Linux host. Control requests require a Paired Device token, including on loopback. Non-loopback listeners require TLS or a declared TLS-terminating proxy.
+
+The workspace closes its event connection and cancels reconnects when a later health check reports an incompatible Service. Dropped event connections recheck health before reconnecting. Malformed health responses keep the workspace closed and offer a retry.
 
 ### Container on a headless Linux host
 
