@@ -1112,7 +1112,8 @@ test.describe("contextual computer sheet", () => {
     )).toBe(2);
   });
 
-  test("sends shortcuts and plain-text paste only from expanded desktop control and releases on blur", async ({ page }) => {
+  for (const platform of ["Linux x86_64", "Win32"]) test(`sends unchanged ${platform} shortcuts and plain-text paste and releases on blur`, async ({ page }) => {
+    await page.addInitScript((platform) => Object.defineProperty(navigator, "platform", { value: platform }), platform);
     await installProjectionPeer(page);
     await page.route("**/api/computer/**", async (route) => {
       if (await fulfillProjection(route)) return;
@@ -1128,6 +1129,9 @@ test.describe("contextual computer sheet", () => {
     await page.setViewportSize({ width: 1280, height: 760 });
     await page.goto("/");
     await createBot(page, "Keyboard Bot");
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Settings", exact: true }).getByRole("button", { name: "Keyboard", exact: true })).toHaveCount(0);
+    await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     await page.keyboard.press("Control+L");
     expect(await page.evaluate(
@@ -1140,7 +1144,9 @@ test.describe("contextual computer sheet", () => {
     await expect(control).toContainText("Click, scroll, or type to control");
     await control.focus();
     await page.keyboard.down("Control");
-    await page.keyboard.press("l");
+    await page.keyboard.down("l");
+    await page.keyboard.down("l");
+    await page.keyboard.up("l");
     await page.keyboard.up("Control");
     await control.evaluate((element) => {
       const clipboard = new DataTransfer();
@@ -1199,6 +1205,147 @@ test.describe("contextual computer sheet", () => {
     expect(rfbMessageTypes).not.toContain(4);
     expect(rfbMessageTypes).not.toContain(5);
     expect(rfbMessageTypes).not.toContain(6);
+  });
+
+  test("maps macOS Command and Option shortcuts and preserves local paste", async ({ page }) => {
+    await page.addInitScript(() => Object.defineProperty(navigator, "platform", { value: "MacIntel" }));
+    await installProjectionPeer(page);
+    let takeover = false;
+    await page.route("**/api/computer/**", async (route) => {
+      if (await fulfillProjection(route)) return;
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/computer/take-control") takeover = true;
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"), surfaceId: url.searchParams.get("surfaceId"),
+        state: takeover ? "user-control" : "ready", takeover: takeover ? "active" : "available", activity: "Screen ready.",
+      });
+    });
+    await page.setViewportSize({ width: 1280, height: 760 });
+    await page.goto("/");
+    await createBot(page, "Mac Keyboard Bot");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    await page.getByRole("button", { name: "Take control", exact: true }).click();
+    const control = page.getByTestId("expanded-web-control");
+    await expect(control).toContainText("Click, scroll, or type to control");
+    await control.focus();
+    await page.keyboard.press("Meta+c");
+    await page.keyboard.press("Alt+x");
+    await page.keyboard.press("Meta+v");
+    await control.evaluate((element) => {
+      const clipboard = new DataTransfer();
+      clipboard.setData("text/plain", "macOS paste");
+      element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }));
+    });
+    const messages = await page.evaluate(() => (window as typeof window & {
+      __screenInputMessages: Array<Record<string, unknown>>;
+    }).__screenInputMessages);
+    expect(messages.map(({ type, code, state, modifiers, text }) => ({ type, code, state, modifiers, text }))).toEqual([
+      { type: "key", code: "ControlLeft", state: "pressed", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "KeyC", state: "pressed", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "KeyC", state: "released", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "ControlLeft", state: "released", modifiers: { control: false, alt: false, shift: false, meta: false } },
+      { type: "key", code: "MetaLeft", state: "pressed", modifiers: { control: false, alt: false, shift: false, meta: true } },
+      { type: "key", code: "KeyX", state: "pressed", modifiers: { control: false, alt: false, shift: false, meta: true } },
+      { type: "key", code: "KeyX", state: "released", modifiers: { control: false, alt: false, shift: false, meta: true } },
+      { type: "key", code: "MetaLeft", state: "released", modifiers: { control: false, alt: false, shift: false, meta: false } },
+      { type: "key", code: "ControlLeft", state: "pressed", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "ControlLeft", state: "released", modifiers: { control: false, alt: false, shift: false, meta: false } },
+      { type: "paste", text: "macOS paste" },
+    ]);
+    // The daemon rejects duplicate keydowns and inconsistent translated modifiers.
+    await page.keyboard.down("Control");
+    await page.keyboard.down("Meta");
+    await page.keyboard.up("Control");
+    await page.keyboard.press("x");
+    await page.keyboard.up("Meta");
+    await page.keyboard.down("Meta");
+    await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await expect(control).not.toContainText("Click, scroll, or type to control");
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(control).toContainText("Click, scroll, or type to control");
+    await page.keyboard.up("Meta");
+    await control.focus();
+    await page.keyboard.press("a");
+    const resumed = await page.evaluate(() => (window as typeof window & {
+      __screenInputMessages: Array<Record<string, unknown>>;
+    }).__screenInputMessages.slice(11));
+    expect(resumed.map(({ type, code, state, modifiers, reason }) => ({ type, code, state, modifiers, reason }))).toEqual([
+      { type: "key", code: "ControlLeft", state: "pressed", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "KeyX", state: "pressed", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "KeyX", state: "released", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "ControlLeft", state: "released", modifiers: { control: false, alt: false, shift: false, meta: false } },
+      { type: "key", code: "ControlLeft", state: "pressed", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "release-control", reason: "blur" },
+      { type: "key", code: "KeyA", state: "pressed", modifiers: { control: false, alt: false, shift: false, meta: false } },
+      { type: "key", code: "KeyA", state: "released", modifiers: { control: false, alt: false, shift: false, meta: false } },
+    ]);
+    await control.evaluate((element) => {
+      for (const [code, type, metaKey, repeat] of [
+        ["MetaRight", "keydown", true, false], ["MetaRight", "keydown", true, true],
+        ["ArrowLeft", "keydown", true, false], ["ArrowLeft", "keydown", true, true], ["ArrowLeft", "keydown", true, true],
+        ["MetaRight", "keyup", false, false],
+      ] as const) element.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, code, metaKey, repeat }));
+    });
+    const repeatedShortcuts = await page.evaluate(() => (window as typeof window & {
+      __screenInputMessages: Array<Record<string, unknown>>;
+    }).__screenInputMessages.slice(19));
+    expect(repeatedShortcuts.map(({ code, state }) => ({ code, state }))).toEqual([
+      { code: "ControlRight", state: "pressed" },
+      { code: "ArrowLeft", state: "pressed" }, { code: "ArrowLeft", state: "released" },
+      { code: "ArrowLeft", state: "pressed" }, { code: "ArrowLeft", state: "released" },
+      { code: "ArrowLeft", state: "pressed" }, { code: "ArrowLeft", state: "released" },
+      { code: "ControlRight", state: "released" },
+    ]);
+  });
+
+  test("persists the macOS Command to Super override in Settings for this device", async ({ page }) => {
+    await page.addInitScript(() => Object.defineProperty(navigator, "platform", { value: "MacIntel" }));
+    await installProjectionPeer(page);
+    await page.route("**/api/computer/**", async (route) => {
+      if (await fulfillProjection(route)) return;
+      const url = new URL(route.request().url());
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"), surfaceId: url.searchParams.get("surfaceId"),
+        state: "ready", takeover: "unavailable", activity: "Screen ready.",
+      });
+    });
+    await page.setViewportSize({ width: 1280, height: 760 });
+    await page.goto("/");
+    await createBot(page, "Mac Override Bot");
+    const openKeyboardSettings = async () => {
+      await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+      const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+      await settings.getByRole("button", { name: "Keyboard", exact: true }).click();
+      return settings;
+    };
+    let settings = await openKeyboardSettings();
+    await expect(settings.getByRole("switch", { name: "Send ⌘ as Super" })).not.toBeChecked();
+    await settings.getByRole("switch", { name: "Send ⌘ as Super" }).check();
+    await expect(settings.getByRole("switch", { name: "Send ⌘ as Super" })).toBeChecked();
+    await page.reload();
+    settings = await openKeyboardSettings();
+    await expect(settings.getByRole("switch", { name: "Send ⌘ as Super" })).toBeChecked();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    await page.getByRole("button", { name: "Open Web Control" }).click();
+    const control = page.getByTestId("expanded-web-control");
+    await expect(control).toContainText("Click, scroll, or type to control");
+    await control.focus();
+    await page.keyboard.press("Meta+c");
+    await page.keyboard.press("Alt+x");
+    const messages = await page.evaluate(() => (window as typeof window & {
+      __screenInputMessages: Array<Record<string, unknown>>;
+    }).__screenInputMessages);
+    expect(messages.map(({ code, state, modifiers }) => ({ code, state, modifiers }))).toEqual([
+      { code: "MetaLeft", state: "pressed", modifiers: { control: false, alt: false, shift: false, meta: true } },
+      { code: "KeyC", state: "pressed", modifiers: { control: false, alt: false, shift: false, meta: true } },
+      { code: "KeyC", state: "released", modifiers: { control: false, alt: false, shift: false, meta: true } },
+      { code: "MetaLeft", state: "released", modifiers: { control: false, alt: false, shift: false, meta: false } },
+      { code: "MetaLeft", state: "pressed", modifiers: { control: false, alt: false, shift: false, meta: true } },
+      { code: "KeyX", state: "pressed", modifiers: { control: false, alt: false, shift: false, meta: true } },
+      { code: "KeyX", state: "released", modifiers: { control: false, alt: false, shift: false, meta: true } },
+      { code: "MetaLeft", state: "released", modifiers: { control: false, alt: false, shift: false, meta: false } },
+    ]);
   });
 
 

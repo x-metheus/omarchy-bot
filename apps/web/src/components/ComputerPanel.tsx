@@ -27,6 +27,8 @@ import {
   type ScreenProjectionState,
 } from "../lib/screenProjection.ts";
 import RFB from "@novnc/novnc";
+import { getShell } from "../lib/shell.ts";
+import { MacOSKeyMapping } from "../lib/keyMapping.ts";
 
 export interface ComputerSurfaceProps {
   bot: Pick<BotViewDto, "id" | "name">;
@@ -354,6 +356,7 @@ export function ComputerSurface({
   const expandedViewRef = useRef<HTMLDivElement | null>(null);
   const pressedPointersRef = useRef(new Map<number, number>());
   const browserPasteKeysRef = useRef(new Set<string>());
+  const macOSKeysRef = useRef(new MacOSKeyMapping());
   const expandedReconnectCountRef = useRef(0);
   const expandedStableTimerRef = useRef<number | undefined>(undefined);
 
@@ -382,6 +385,7 @@ export function ComputerSurface({
     }
     pressedPointersRef.current.clear();
     browserPasteKeysRef.current.clear();
+    macOSKeysRef.current.clear();
   }, []);
   useLayoutEffect(() => {
     clearTimeout(expandedStableTimerRef.current);
@@ -660,16 +664,21 @@ export function ComputerSurface({
       return;
     }
     if (state === "released" && browserPasteKeysRef.current.delete(event.code)) return;
-    if (event.repeat) {
+    const mapping = getShell().keyMapping;
+    if (event.repeat && mapping.platform() !== "macos") {
       event.preventDefault();
       return;
     }
-    const sent = connectionRef.current?.keyTransition(event.code, state, {
-      control: event.ctrlKey,
-      alt: event.altKey,
-      shift: event.shiftKey,
-      meta: event.metaKey,
-    }) ?? false;
+    const connection = connectionRef.current;
+    const sent = mapping.platform() === "macos"
+      ? macOSKeysRef.current.transition(event.code, state, mapping.metaSendsSuper(),
+          (code, state, modifiers) => connection?.keyTransition(code, state, modifiers) ?? false)
+      : connection?.keyTransition(event.code, state, {
+          control: event.ctrlKey,
+          alt: event.altKey,
+          shift: event.shiftKey,
+          meta: event.metaKey,
+        }) ?? false;
     if (sent) event.preventDefault();
   };
   const pasteExpandedText = (event: ReactClipboardEvent<HTMLDialogElement>): void => {
