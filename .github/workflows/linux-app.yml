@@ -1,0 +1,44 @@
+name: linux-app
+on:
+  pull_request:
+    paths:
+      - "apps/omarchy-bot/**"
+      - "apps/web/**"
+      - "apps/daemon/**"
+      - "packages/**"
+      - "scripts/linux-app/**"
+      - "scripts/build-linux-app.sh"
+      - "scripts/smoke-linux-app.sh"
+      - "scripts/sway-runtime/**"
+      - "scripts/build-sway-runtime.sh"
+      - "scripts/prepare-fonts.sh"
+      - "scripts/*browser*"
+      - "tests/integration/fake-workers/**"
+      - "tests/e2e/daemon-boot.ts"
+      - "bun.lock"
+      - ".github/workflows/linux-app.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: linux-app-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  webkit-appimage:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build packaged Linux app in pinned container
+        run: bash scripts/build-linux-app.sh
+      - name: Smoke packaged AppImage in private WebKitGTK session
+        run: bash scripts/smoke-linux-app.sh .lane/dist/omarchy-bot_0.1.0_amd64.AppImage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-app-webkit-evidence
+          path: |
+            .lane/dist/*.AppImage
+            .lane/dist/*.AppImage.sha256
+            .lane/linux-app/evidence/
+          if-no-files-found: error

@@ -44,6 +44,40 @@ test("wrong code and unreachable Service explain how to retry", async ({ page })
   await expect(page.getByRole("heading", { name: "Add Service" })).toBeVisible();
 });
 
+test("remote plaintext Service addresses are refused before exchanging a code", async ({ page }) => {
+  const exchanges: string[] = [];
+  await page.route("http://service.example/api/pairing/exchange", route => {
+    exchanges.push(route.request().url());
+    return route.fulfill({ status: 401, contentType: "application/json", body: "{}" });
+  });
+  await page.goto("/");
+  await page.getByLabel("Service address").fill("http://service.example");
+  await page.getByLabel("Pairing code").fill("PRIVATE234");
+  await page.getByRole("button", { name: "Pair", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("HTTPS or a loopback HTTP address");
+  expect(exchanges).toEqual([]);
+});
+
+test("native keychain failures explain recovery after the code is exchanged", async ({ page }) => {
+  const issued = await issueCode();
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Add Service" })).toBeVisible();
+  await page.evaluate(() => {
+    const shell = globalThis.__OMARCHY_BOT_MEMORY_SHELL__!;
+    globalThis.__OMARCHY_BOT_SHELL__ = {
+      ...shell,
+      service: { ...shell.service, async store() { throw new Error("Could not access the OS keychain. Unlock your Secret Service keyring and try again."); } },
+    };
+  });
+  await page.getByLabel("Service address").fill(SERVICE_ORIGIN);
+  await page.getByLabel("Pairing code").fill(issued.code);
+  await page.getByRole("button", { name: "Pair", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Unlock your Secret Service keyring");
+  await expect(page.getByRole("alert")).toContainText("Ask the Service Host for a new code");
+  await expect(page.getByRole("heading", { name: "Add Service" })).toBeVisible();
+  expect(await page.evaluate(() => globalThis.__OMARCHY_BOT_SHELL__!.service.deviceToken())).toBeUndefined();
+});
+
 test("shell pairing intake pairs without entering an address or code", async ({ page }) => {
   const issued = await issueCode();
   await page.goto("/");

@@ -33,9 +33,10 @@ export function ProtocolGate({ children }: { children: ReactNode }): JSX.Element
     }
   }
 
+  const certificateError = health.error instanceof Error && health.error.name === "TlsCertificateError";
   if (health.isError || health.data === undefined) {
     return health.isError
-      ? <Banner status="error" title="Cannot connect to the Service" description="Check the Service is running and try again." container="section"
+      ? <Banner status="error" title={certificateError ? "Service TLS certificate is not trusted" : "Cannot connect to the Service"} description={certificateError ? health.error.message : "Check the Service is running and try again."} container="section"
           endContent={<Button label="Try again" isLoading={health.isFetching} onClick={() => void health.refetch()} />} />
       : <Text>Connecting to the Service…</Text>;
   }

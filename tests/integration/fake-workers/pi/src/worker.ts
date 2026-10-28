@@ -770,11 +770,13 @@ readJsonl(Bun.stdin.stream(), (raw) => {
                   ? { name: "type", args: { text: parts.slice(2).join(":") } }
                   : parts[1] === "open_url"
                     ? { name: "open_url", args: { url: parts.slice(2).join(":") } }
-                    : parts[1] === "list_windows"
-                      ? { name: "list_windows", args: {} }
-                      : parts[1] === "screenshot"
-                        ? { name: "screenshot", args: {} }
-                        : { name: "observe", args: {} };
+                    : parts[1] === "open_app"
+                      ? { name: "open_app", args: { app: parts.slice(2).join(":") } }
+                      : parts[1] === "list_windows"
+                        ? { name: "list_windows", args: {} }
+                        : parts[1] === "screenshot"
+                          ? { name: "screenshot", args: {} }
+                          : { name: "observe", args: {} };
             s.streaming = true;
             const result = await (toolName === "browser" ? requestBrowser : requestComputer)(
               context,

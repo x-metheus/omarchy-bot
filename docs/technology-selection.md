@@ -40,7 +40,7 @@ Use the richest official interface for each Agent. Every installed version must 
 
 Use React 19 because Astryx and the stable TanStack React adapters cover the required accessible conversation interactions. Streaming updates are buffered, transcript rows subscribe selectively, and long histories may use TanStack Virtual. Computer frames do not flow through ordinary React message state.
 
-The Web frontend is also the foundation of Omarchy Bot, as recorded in [ADR 0010](adr/0010-reuse-web-client-in-tauri.md). Reuse its UI and daemon-facing behavior; keep native shell details out of shared business logic and keep execution in the Service. This is a present architecture constraint, not a requirement to add Tauri dependencies or native scaffolding now; actual WebView codec/input compatibility must be verified when that client is built.
+The Web frontend is embedded in the Linux Tauri application at `apps/omarchy-bot`, as recorded in [ADR 0010](adr/0010-reuse-web-client-in-tauri.md) and [ADR 0015](adr/0015-omarchy-bot-app-is-the-only-bot-client.md). UI and Service-facing HTTP/WebSocket behavior stay shared; native capabilities remain behind `shell` and execution stays in the Service. The packaged AppImage has a dedicated WebKitGTK smoke suite; Chromium tests cover the shared UI only. See the [Linux build and smoke commands](../README.md#linux-application).
 
 ### Astryx policy
 

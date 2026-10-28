@@ -1,0 +1,20 @@
+# Linux AppImage and WebKit smoke
+
+Run from a Linux x86_64 checkout with Docker available:
+
+```sh
+bash scripts/build-linux-app.sh
+bash scripts/smoke-linux-app.sh .lane/dist/omarchy-bot_0.1.0_amd64.AppImage
+```
+
+The build container pins Rust 1.93.1 by image digest, Debian packages to the 2026-10-20 snapshot, Bun 1.4.4 by checksum, tauri-cli 2.12.4 and tauri-driver 2.1.0 with their Cargo locks. The application's Cargo.lock and bun.lock fix its dependencies; `bundler.sha256` verifies AppRun and all linuxdeploy tools before packaging, including the upstream continuously published AppImage plugin. Initial image and dependency downloads need network. Toolchains stay in the image, and Cargo caches, build output and Bun caches stay under `.lane/linux-app`; no host package or global Cargo configuration is changed.
+
+The build embeds the shared production Web UI and writes the AppImage and SHA-256 sidecar to `.lane/dist`. The smoke script provisions the repository's checksum-pinned Sway runtime, fonts and browser pack through their existing scripts. It extracts the actual AppImage inside a fresh container, then drives that packaged AppRun through tauri-driver and the container's matching WebKitWebDriver. Extraction avoids a host FUSE requirement and keeps the executable path stable across the application's pairing restart.
+
+Each smoke has its own temporary HOME, XDG directories, Xvfb display, D-Bus session and unlocked Secret Service. No host display, session bus, keyring, home, or graphical environment is mounted. Container root installs one ephemeral certificate in the disposable container trust store, then drops to the checkout's UID before running the application and Service. The real Service runs with the repository's scripted Agent worker; HTTP, event and projection WebSockets, Sway, Xwayland, noVNC and input execution are real. The fixture paints magenta at launch, cyan after a pointer event and yellow after a keyboard event; the smoke observes these pixels in the WebKit canvas.
+
+Coverage includes Add Service on first run, a clear self-signed TLS error, startup and forwarded deep-link exchanges, OS keychain persistence across process restart, absence of the actual token in localStorage, useful unavailable-keychain errors with recovery of the original credential, paired-origin CSP violations, cross-origin re-pairing, a Bot reply over the event stream, Screen Projection, and keyboard and pointer Takeover reaching the Bot Screen. The forwarding assertion changes the currently controlled document and checks unchanged process/window identity before any restart. A real Markdown link click must reach a private system-opener recorder. A managed text attachment is staged through the UI, sent, clicked, and saved with its exact authenticated contents in the private Downloads directory; its URL must never reach that opener. A trusted HTTPS Service is paired, restarted with an unrelated untrusted certificate, and reopened from the stored connection to prove the TLS-specific screen. Actual Service revocation must delete the credential and preserve its explanatory notice and address. A second revocation makes the notice directory unwritable and proves secret deletion, Add Service recovery, and successful pairing again. Local Sidecar approval is ticket 09 and is not claimed by this ticket's smoke.
+
+The native app restarts once after pairing or unpairing to load the CSP from the stored connection. The smoke reconnects after that restart. While unpaired, the Add Service screen must be able to contact a supplied Service address; after pairing only that Service's HTTP and WebSocket origins are allowed alongside local IPC.
+
+The smoke's artifact SHA-256, runtime versions, concise results, Service/driver logs and final Takeover screenshot are saved to `.lane/linux-app/evidence/`. Screenshots capture only the container's private Xvfb display. CI runs these same scripts and uploads the packaged artifact and evidence. This suite proves Linux WebKitGTK behavior; Chromium UI tests remain separate.

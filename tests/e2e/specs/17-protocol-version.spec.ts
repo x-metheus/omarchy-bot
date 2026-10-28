@@ -124,6 +124,24 @@ test("an unavailable health probe keeps the workspace closed and can be retried"
   await expect(page.getByRole("navigation", { name: "Bot navigation" })).toBeVisible();
 });
 
+test("an untrusted paired Service certificate explains TLS recovery", async ({ page }) => {
+  await page.addInitScript(() => {
+    const fetch = window.fetch.bind(window);
+    window.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input), location.href).pathname === "/api/health") {
+        const error = new Error("The Service TLS certificate is not trusted. Install a publicly trusted certificate, or connect through an SSH tunnel to loopback.");
+        error.name = "TlsCertificateError";
+        throw error;
+      }
+      return fetch(input, init);
+    }, fetch);
+  });
+  await page.goto("/");
+  await expect(page.getByRole("alert")).toContainText("TLS certificate is not trusted");
+  await expect(page.getByRole("alert")).toContainText("SSH tunnel");
+  await expect(page.getByRole("navigation", { name: "Bot navigation" })).toHaveCount(0);
+});
+
 test("a null health envelope blocks safely and recovers after retry", async ({ page }) => {
   const traffic = serviceTraffic(page);
   const errors: string[] = [];

@@ -300,6 +300,7 @@ function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentD
       density="compact"
       {...(downloadUrl !== undefined ? { href: downloadUrl } : {})}
       data-testid={downloadUrl !== undefined ? "message-file-attachment" : "staged-file-row"}
+      data-attachment-name={attachment.name}
     />
   );
 }
