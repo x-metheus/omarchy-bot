@@ -333,7 +333,12 @@ export class TurnService {
     const nativeSessionId = startOptions.freshSession
       ? undefined
       : this.threads.getNativeSession(threadId);
-    const options = { cwd: resolveWorkCwd(thread.cwd), instructions: botRow?.instructions ?? "", ...(pluginLease ? { plugins: pluginLease.snapshot } : {}) };
+    const device = startOptions.deviceId === undefined ? undefined : this.devices.get(startOptions.deviceId);
+    const options = {
+      cwd: resolveWorkCwd(thread.cwd), instructions: botRow?.instructions ?? "",
+      ...(pluginLease ? { plugins: pluginLease.snapshot } : {}),
+      ...(device ? { local: { os: device.os, shell: device.shell } } : {}),
+    };
     if (
       nativeSessionId !== undefined
       && !this.agents.capabilityInventory(agentId)?.nativeThreadActions.includes("resume")

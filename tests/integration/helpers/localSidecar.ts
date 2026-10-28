@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { confinedPath } from "../../../packages/domain/src/paths.ts";
 import type {
-  DeviceClientFrame,
+  DeviceRegisterFrame,
   DeviceLocalJobFrame,
   DeviceServerFrame,
 } from "../../../packages/protocol/src/index.ts";
@@ -16,6 +16,8 @@ import {
 export interface LocalSidecarRegistration {
   deviceId: string;
   hostname: string;
+  os?: DeviceRegisterFrame["os"];
+  shell?: DeviceRegisterFrame["shell"];
   capabilities: Array<"shell" | "search" | "files" | "transfer">;
 }
 
@@ -31,10 +33,11 @@ export class LocalSidecarFixture {
   #observing = true;
   #handler;
 
-  private constructor(private readonly ws: WebSocket, sandbox: string) {
+  private constructor(private readonly ws: WebSocket, sandbox: string, deviceOs?: DeviceRegisterFrame["os"]) {
     this.sandbox = sandbox;
     this.#handler = createLocalJobHandler({
       root: sandbox,
+      os: deviceOs,
       approver: {
         ask: (ask) => {
           if (this.#autoAllow) return Promise.resolve("allow-once");
@@ -72,14 +75,14 @@ export class LocalSidecarFixture {
     });
   }
 
-  static async connect(port: number, token?: string): Promise<LocalSidecarFixture> {
+  static async connect(port: number, token?: string, deviceOs?: DeviceRegisterFrame["os"]): Promise<LocalSidecarFixture> {
     const query = token ? `?access_token=${encodeURIComponent(token)}` : "";
     const ws = new WebSocket(`ws://127.0.0.1:${port}/api/devices${query}`);
     await waitOpen(ws);
-    return new LocalSidecarFixture(ws, mkdtempSync(path.join(os.tmpdir(), "omarchy-local-sidecar-")));
+    return new LocalSidecarFixture(ws, mkdtempSync(path.join(os.tmpdir(), "omarchy-local-sidecar-")), deviceOs);
   }
 
-  send(frame: DeviceClientFrame): void {
+  send(frame: unknown): void {
     this.ws.send(JSON.stringify(frame));
   }
 
@@ -88,6 +91,8 @@ export class LocalSidecarFixture {
       type: "register",
       deviceId: registration.deviceId,
       hostname: registration.hostname,
+      os: registration.os ?? "linux",
+      shell: registration.shell ?? "posix-sh",
       capabilities: registration.capabilities,
     });
     return this.waitForFrame((frame) => frame.type === "registered" || frame.type === "error");

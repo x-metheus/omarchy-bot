@@ -6,6 +6,7 @@ import {
   type AgentLocalToolOutput,
   type AgentLocalTurnContext,
   type LocalActionName,
+  type LocalDeviceIdentity,
 } from "@omarchy-bot/agent-contract";
 
 export interface PiLocalBridge {
@@ -28,11 +29,12 @@ export interface PiLocalBridge {
 export function createLocalTool(
   turnContext: () => AgentLocalTurnContext | undefined,
   bridge: PiLocalBridge,
+  device?: LocalDeviceIdentity,
 ) {
   return defineTool({
     name: AGENT_LOCAL_TOOL.name,
     label: "Local Sidecar",
-    description: AGENT_LOCAL_TOOL.description,
+    description: device === undefined ? AGENT_LOCAL_TOOL.description : `${AGENT_LOCAL_TOOL.description} This Device runs ${device.os} with ${device.shell}; write commands in that shell's syntax.`,
     promptSnippet: AGENT_LOCAL_TOOL.systemPrompt.summary,
     promptGuidelines: [...AGENT_LOCAL_TOOL.systemPrompt.guidelines],
     parameters: LOCAL_SCHEMA,

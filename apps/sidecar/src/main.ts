@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Outbound-only Local Sidecar. TypeScript run by the plugin-runtime Bun.
+ * Outbound-only Local Sidecar, bundled with Omarchy Bot.
  * Never listens. Not an Agent worker, plugin daemon, or Bot Screen.
  */
 import { mkdirSync } from "node:fs";
@@ -55,8 +55,13 @@ async function readDecisions(onDecision: (decision: { type: LocalAskDecision; jo
 }
 
 async function main(): Promise<void> {
-  const port = Number(requiredEnv("OMARCHY_BOT_DAEMON_PORT"));
-  if (!Number.isInteger(port) || port <= 0) throw new Error("OMARCHY_BOT_DAEMON_PORT must be a positive integer");
+  const service = new URL(requiredEnv("OMARCHY_BOT_SERVICE_URL"));
+  if ((service.protocol !== "ws:" && service.protocol !== "wss:") || service.username || service.password) {
+    throw new Error("OMARCHY_BOT_SERVICE_URL must be a ws or wss Service URL without credentials");
+  }
+  const platform = process.platform;
+  if (platform !== "linux" && platform !== "darwin") throw new Error(`Local Sidecar execution is not supported on ${platform}`);
+  const identity = { os: platform === "darwin" ? "macos" as const : "linux" as const, shell: "posix-sh" as const };
   const deviceId = requiredEnv("OMARCHY_BOT_DEVICE_ID");
   if (!isDeviceId(deviceId)) throw new Error("OMARCHY_BOT_DEVICE_ID must be a Local Sidecar device identity");
   const token = requiredEnv("OMARCHY_BOT_DEVICE_TOKEN");
@@ -64,12 +69,15 @@ async function main(): Promise<void> {
   const root = path.resolve(requiredEnv("OMARCHY_BOT_SIDECAR_ROOT"));
   mkdirSync(root, { recursive: true });
 
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/devices?access_token=${encodeURIComponent(token)}`);
+  const channel = new URL("/api/devices", service);
+  channel.searchParams.set("access_token", token);
+  const ws = new WebSocket(channel);
   await waitOpen(ws);
   const send = (frame: DeviceClientFrame): void => ws.send(JSON.stringify(frame));
   const asks = new Map<string, { resolve(decision: LocalAskDecision): void }>();
   const handler = createLocalJobHandler({
     root,
+    os: identity.os,
     send,
     approver: {
       ask(ask: LocalAsk) {
@@ -107,7 +115,7 @@ async function main(): Promise<void> {
     }
   });
 
-  send({ type: "register", deviceId, hostname, capabilities: ["shell", "search", "files", "transfer"] });
+  send({ type: "register", deviceId, hostname, ...identity, capabilities: ["shell", "search", "files", "transfer"] });
   const heartbeat = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) send({ type: "heartbeat" });
   }, HEARTBEAT_MS);

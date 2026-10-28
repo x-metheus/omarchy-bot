@@ -6,8 +6,9 @@ import {
   type DeviceLocalJobFrame,
   type DeviceServerFrame,
 } from "@omarchy-bot/protocol";
-import type { LocalActionName } from "@omarchy-bot/agent-contract";
+import type { LocalActionName, LocalDeviceIdentity } from "@omarchy-bot/agent-contract";
 import { executeLocalJob, ruleKey } from "./execute.ts";
+import type { LocalExecutor } from "./posix.ts";
 
 export interface LocalAsk {
   jobId: string;
@@ -29,6 +30,8 @@ export interface LocalApprover {
 
 export interface LocalJobHandlerOptions {
   root: string;
+  os?: LocalDeviceIdentity["os"] | undefined;
+  executor?: LocalExecutor;
   approver: LocalApprover;
   send(frame: DeviceClientFrame): void;
   observe?(event: { action: LocalActionName; rule: string; executed: boolean }): void;
@@ -75,7 +78,7 @@ export function createLocalJobHandler(options: LocalJobHandlerOptions): {
   const run = (job: DeviceLocalJobFrame, signal: AbortSignal): void => {
     if (cancelled.has(job.jobId) || signal.aborted) return;
     options.observe?.({ action: job.action, rule: ruleKey(job), executed: true });
-    const execution = executeLocalJob(job, options.root, signal).then((result) => finish(job, result));
+    const execution = executeLocalJob(job, options.root, signal, options).then((result) => finish(job, result));
     running.add(execution);
     // A settled executor is dropped; a rejected one stays so close() reports it.
     void execution.then(() => running.delete(execution), () => undefined);
