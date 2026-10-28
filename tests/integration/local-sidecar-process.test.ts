@@ -96,6 +96,23 @@ test("production Sidecar authenticates, registers its shell, asks and returns ou
   }
 }, 25_000);
 
+test("production Sidecar exits and abandons a pending Ask when the app closes stdin", async () => {
+  const sidecar = await startSidecar();
+  try {
+    sidecar.send({ type: "local.job", jobId: "stdin-eof", action: "write", hostname: "paired", botId: "bot", turnId: "turn", path: "orphan.txt", contents: "must not be written" });
+    await until(() => sidecar.stdout().includes('"type":"ask"'), "Sidecar never asked for approval");
+
+    sidecar.child.stdin.end();
+
+    await until(() => sidecar.child.exitCode !== null, "Sidecar survived the app closing stdin");
+    expect(await sidecar.child.exited).toBe(0);
+    expect(sidecar.frames.some((frame) => frame.type === "local.result")).toBeFalse();
+    expect(existsSync(path.join(sidecar.root, "orphan.txt"))).toBeFalse();
+  } finally {
+    await sidecar.close();
+  }
+}, 25_000);
+
 test("production Sidecar refuses this OS's credential stores for every file action", async () => {
   const sidecar = await startSidecar();
   const stores = windows ? ["AppData/Local/Microsoft/Credentials", "AppData/Roaming/Microsoft/Protect", "AppData/Local/Microsoft/Vault", "AppData/Roaming/Microsoft/Crypto"]

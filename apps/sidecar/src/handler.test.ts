@@ -58,6 +58,49 @@ const descendantRoot = (): string => {
   return root;
 };
 
+describe("Local Sidecar remembered policy across restarts", () => {
+  for (const decision of ["always", "never"] as const) {
+    test(`${decision} survives restarting the handler with the same root`, async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), "sidecar-policy-restart-"));
+      roots.push(root);
+      const asks: LocalAsk[] = [];
+
+      for (const jobId of ["before-restart", "after-restart"]) {
+        const sent: DeviceClientFrame[] = [];
+        const handler = createLocalJobHandler({
+          root,
+          approver: {
+            ask(ask) {
+              asks.push(ask);
+              return Promise.resolve(decision);
+            },
+          },
+          send: (frame) => sent.push(frame),
+        });
+        try {
+          handler.receive({
+            type: "local.job", jobId, action: "run", hostname: "laptop",
+            botId: "bot_1", turnId: "turn_1", command: "echo persisted",
+          });
+          expect(await waitFor(() => sent.length > 0)).toBeTrue();
+          expect(asks).toHaveLength(1);
+          if (decision === "always") {
+            expect(sent).toHaveLength(1);
+            expect(sent[0]).toMatchObject({ type: "local.result", jobId, ok: true, exitCode: 0 });
+            const result = sent[0];
+            if (result?.type !== "local.result" || !result.ok) throw new Error("remembered command failed");
+            expect(result.text?.trim()).toBe("persisted");
+          } else {
+            expect(sent).toEqual([{ type: "local.result", jobId, ok: false, error: "Local Sidecar Never allowed this work" }]);
+          }
+        } finally {
+          await handler.close();
+        }
+      }
+    });
+  }
+});
+
 describe.skipIf(process.platform !== "linux")("Local Sidecar remembered Always cancellation", () => {
   for (const stop of ["local.cancel", "handler.close"] as const) {
     test(`a remembered Always job is aborted by ${stop}`, async () => {

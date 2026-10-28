@@ -35,6 +35,20 @@ test("memory pairing intake and approvals unsubscribe and exchange decisions", a
   await expect(shell.localSidecar.decide("unknown", "always")).rejects.toThrow("Unknown");
 });
 
+test("dismissed memory approvals fail closed and dismissal listeners unsubscribe", async () => {
+  const shell = createMemoryShell({ storage: null });
+  const dismissed: string[] = [];
+  const stop = shell.localSidecar.onApprovalDismiss(jobId => dismissed.push(jobId));
+  const decision = shell.receiveApproval({ jobId: "cancelled", hostname: "laptop", action: "run", command: "pwd" });
+  shell.receiveApprovalDismiss("cancelled");
+  expect(await decision).toBe("deny");
+  expect(dismissed).toEqual(["cancelled"]);
+  await expect(shell.localSidecar.decide("cancelled", "always")).rejects.toThrow("Unknown");
+  stop();
+  shell.receiveApprovalDismiss("other");
+  expect(dismissed).toEqual(["cancelled"]);
+});
+
 test("memory shell reports Sidecar and platform state and remembers key mapping", async () => {
   const defaults = createMemoryShell({ storage: null });
   expect(defaults.localSidecar.status()).toEqual({ running: false });

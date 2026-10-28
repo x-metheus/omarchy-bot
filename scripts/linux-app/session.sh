@@ -4,11 +4,13 @@ umask 077
 # Trust one ephemeral test certificate inside this disposable container only.
 if [[ $(id -u) -eq 0 ]]; then
   trust=$(mktemp -d /tmp/omarchy-bot-trust-XXXXXX)
-  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$trust/key.pem" -out "$trust/cert.pem" -days 1 -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' > "$trust/openssl.log" 2>&1
+  read -r offhost_ip _ <<< "$(hostname -I)"
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$trust/key.pem" -out "$trust/cert.pem" -days 1 -subj /CN=localhost -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:$offhost_ip" > "$trust/openssl.log" 2>&1
   cp "$trust/cert.pem" /usr/local/share/ca-certificates/omarchy-bot-smoke.crt
   update-ca-certificates > "$trust/trust.log" 2>&1
   chown -R "$OMARCHY_BOT_SMOKE_UID:$OMARCHY_BOT_SMOKE_GID" "$trust"
   export OMARCHY_BOT_SMOKE_TRUST=$trust
+  export OMARCHY_BOT_SMOKE_OFFHOST_IP=$offhost_ip NODE_EXTRA_CA_CERTS=$trust/cert.pem
   exec setpriv --reuid="$OMARCHY_BOT_SMOKE_UID" --regid="$OMARCHY_BOT_SMOKE_GID" --clear-groups bash /src/scripts/linux-app/session.sh
 fi
 session=$(mktemp -d /tmp/omarchy-bot-webkit-XXXXXX)

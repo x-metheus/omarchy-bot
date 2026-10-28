@@ -134,19 +134,19 @@ async function main(): Promise<void> {
     void pending.catch(() => undefined);
     return pending;
   };
-  void readDecisions((decision) => {
-    const id = decision.jobId ?? [...asks.keys()].at(-1);
-    const ask = id === undefined ? undefined : asks.get(id);
-    if (ask === undefined || id === undefined) return;
-    asks.delete(id);
-    ask.resolve(decision.type);
-  });
 
   const stop = (): void => {
     clearInterval(heartbeat);
     void beginTeardown();
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
   };
+  void readDecisions((decision) => {
+    const id = decision.jobId ?? [...asks.keys()].at(-1);
+    const ask = id === undefined ? undefined : asks.get(id);
+    if (ask === undefined || id === undefined) return;
+    asks.delete(id);
+    ask.resolve(decision.type);
+  }).then(stop, stop);
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   await closed;

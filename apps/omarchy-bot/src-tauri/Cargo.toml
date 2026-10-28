@@ -17,6 +17,7 @@ serde_json = "1"
 url = "2"
 keyring = { version = "=3.6.3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
 gio = "0.18"
+getrandom = "0.3"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "=2.5.5"

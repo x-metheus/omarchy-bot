@@ -87,6 +87,14 @@ function appPids(): number[] {
     catch { return []; }
   });
 }
+function sidecarPids(): number[] {
+  return readdirSync("/proc").filter(name => /^\d+$/.test(name)).flatMap(name => {
+    try {
+      return path.basename(readlinkSync(`/proc/${name}/exe`)) === "omarchy-bot-sidecar"
+        && readFileSync(`/proc/${name}/environ`, "utf8").split("\0").includes(`OMARCHY_BOT_SMOKE_DIR=${run}`) ? [Number(name)] : [];
+    } catch { return []; }
+  });
+}
 async function stop(): Promise<void> {
   if (session) await wd("DELETE", `/session/${session}`).catch(() => {});
   session = "";
@@ -97,7 +105,7 @@ async function stop(): Promise<void> {
   });
 }
 async function restart(): Promise<void> { await stop(); await start(); }
-async function bootService(port: number, tls: false | "trusted" | "untrusted" = false): Promise<string> {
+async function bootService(port: number, tls: false | "trusted" | "untrusted" = false, host = "127.0.0.1"): Promise<string> {
   const dir = path.join(run!, `service-${port}`);
   mkdirSync(path.join(dir, "data/conformance"), { recursive: true });
   mkdirSync(path.join(dir, "state"), { recursive: true });
@@ -108,7 +116,7 @@ async function bootService(port: number, tls: false | "trusted" | "untrusted" = 
     : ["bun", "tests/e2e/daemon-boot.ts"];
   const child = Bun.spawn(command, {
     env: { ...process.env, OMARCHY_BOT_HOME: path.join(dir, "data"), OMARCHY_BOT_STATE: path.join(dir, "state"),
-      OMARCHY_BOT_PORT: String(port), OMARCHY_BOT_HOST: "127.0.0.1", OMARCHY_BOT_DEV: "0",
+      OMARCHY_BOT_PORT: String(port), OMARCHY_BOT_HOST: host, OMARCHY_BOT_DEV: "0",
       OMARCHY_BOT_SCREEN_PROFILE: "720p",
       OMARCHY_BOT_WORKERS_DIR: path.resolve("tests/integration/fake-workers"),
       ...(tls ? { OMARCHY_BOT_TLS_CERT: tls === "trusted" ? path.join(process.env.OMARCHY_BOT_SMOKE_TRUST!, "cert.pem") : path.join(run!, "tls.pem"),
@@ -174,6 +182,8 @@ try {
   await restart();
   await element('button[aria-label="New bot"]');
   pass("startup deep link exchanges real pairing code and keychain survives process restart");
+  assert.deepEqual(sidecarPids(), [], "loopback Service must not start a Local Sidecar");
+  pass("loopback Service suppresses the bundled Sidecar");
   const stored = z.record(z.string(), z.string()).parse(await script("return Object.fromEntries(Object.entries(localStorage))"));
   const credential = Bun.spawnSync(["secret-tool", "lookup", "service", "com.omarchy.bot"]);
   assert.equal(credential.exitCode, 0, "native connection exists in OS Secret Service");
@@ -398,6 +408,132 @@ try {
   await restart();
   await element('button[aria-label="New bot"]');
   pass("revocation with unwritable notice still deletes secret and permits pairing recovery");
+
+  const offhostOrigin = `https://${process.env.OMARCHY_BOT_SMOKE_OFFHOST_IP}:7436`;
+  const offhostState = await bootService(7436, "trusted", "0.0.0.0");
+  const offhost = await issue(offhostState, "https://127.0.0.1:7436");
+  await stop();
+  await start([`omarchy-bot://pair?service=${encodeURIComponent(offhostOrigin)}&code=${encodeURIComponent(offhost.code)}`]);
+  await until("offhost pairing persists", async () => {
+    const saved = Bun.spawnSync(["secret-tool", "lookup", "service", "com.omarchy.bot"]);
+    return saved.exitCode === 0 && z.object({ baseUrl: z.string() }).parse(JSON.parse(saved.stdout.toString())).baseUrl === offhostOrigin || undefined;
+  });
+  await restart();
+  await element('button[aria-label="New bot"]');
+  await until("offhost app starts one bundled Sidecar", async () => sidecarPids().length === 1 || undefined);
+  pass("offhost Service starts one bundled Sidecar");
+  const saved = Bun.spawnSync(["secret-tool", "lookup", "service", "com.omarchy.bot"]);
+  const remoteConnection = z.object({ token: z.string() }).parse(JSON.parse(saved.stdout.toString()));
+  const remoteHeaders = { authorization: `Bearer ${remoteConnection.token}` };
+  async function remote(route: string): Promise<unknown> {
+    const response = await fetch(`${offhostOrigin}${route}`, { headers: remoteHeaders });
+    assert.ok(response.ok, `remote API ${route}: ${response.status}`);
+    return response.json();
+  }
+  const roster = z.array(z.object({ id: z.string(), os: z.string(), shell: z.string() }));
+  const registered = await until("Sidecar registration", async () => {
+    const devices = roster.parse(await remote("/api/devices"));
+    return devices.length === 1 ? devices[0] : undefined;
+  });
+  assert.match(registered.id, /^dev_[0-9a-f]{32}$/);
+  assert.equal(registered.os, "linux");
+  assert.equal(registered.shell, "posix-sh");
+  const deviceStatus = await until("native Sidecar ready", async () => {
+    const status = z.object({ running: z.boolean(), deviceId: z.string().optional() }).parse(await script("return window.__OMARCHY_BOT_SHELL__.localSidecar.status()"));
+    return status.running ? status : undefined;
+  });
+  assert.deepEqual(deviceStatus, { running: true, deviceId: registered.id });
+  await button("New bot");
+  await input("Name", "Sidecar smoke Bot");
+  await input("Job / Instructions", "Exercise approved local commands");
+  await wd("POST", `/session/${session}/element/${await element('input[type="radio"][value="pi"]')}/click`, {});
+  await button("Create bot");
+  await visible("Sidecar smoke Bot");
+  await script(`const original=window.fetch;window.__sidecarSendIds=[];window.fetch=function(input,options){
+    if(options?.method==='POST'&&String(input).endsWith('/messages'))window.__sidecarSendIds.push(JSON.parse(options.body).deviceId);
+    return original(input,options);
+  }`);
+  const transcript = z.array(z.object({ id: z.string(), kind: z.string(), text: z.string().optional(), toolCall: z.object({ name: z.string(), status: z.string() }).optional() }));
+  async function threadId(): Promise<string> {
+    return until("selected Sidecar smoke Thread", async () => {
+      const selection = z.object({ bot: z.string().nullable(), thread: z.string().nullable() }).parse(await script("const url=new URL(location.href);return {bot:url.searchParams.get('bot'),thread:url.searchParams.get('thread')}"));
+      return selection.bot && selection.thread ? selection.thread : undefined;
+    });
+  }
+  async function localTurn(command: string, decision?: string, succeeds = true): Promise<void> {
+    const previousThread = await threadId();
+    const previousTools = previousThread === "blank" ? 0 : transcript.parse(await remote(`/api/threads/${previousThread}/messages`)).filter(message => message.toolCall?.name === "local").length;
+    await send(`local.run:${command}`);
+    if (decision) {
+      await element('[data-testid="local-approval"]');
+      assert.equal(await script("return document.querySelector('[data-testid=local-approval-detail]').textContent"), command);
+      if (command === "printf sidecar-smoke") {
+        assert.equal(Bun.spawnSync(["python3", "scripts/linux-app/capture.py", path.join(evidence, "local-approval.png")]).exitCode, 0, "capture exact packaged approval");
+      }
+      await button(decision);
+    }
+    const messages = await until("local Tool Call reaches expected terminal status", async () => {
+      const current = await threadId();
+      if (current === "blank") return undefined;
+      const messages = transcript.parse(await remote(`/api/threads/${current}/messages`));
+      const tools = messages.filter(message => message.toolCall?.name === "local");
+      return tools.length > previousTools && tools.at(-1)?.toolCall?.status === (succeeds ? "completed" : "error") ? messages : undefined;
+    });
+    assert.equal(messages.filter(message => message.toolCall?.name === "local").at(-1)?.toolCall?.status, succeeds ? "completed" : "error");
+    await until("local turn idle", async () => script("return !document.querySelector('[data-testid=working-avatar]')"));
+    if (!succeeds) {
+      await visible("Turn failed");
+      await button("Close");
+    }
+    assert.equal(await script("return !!document.querySelector('[data-testid=local-approval]')"), false);
+  }
+  await localTurn("printf sidecar-smoke", "Allow once");
+  await until("approved command output in conversation", async () => script("return [...document.querySelectorAll('[data-testid=assistant-message]')].some(e=>e.textContent==='sidecar-smoke')"));
+  assert.deepEqual(await script("return window.__sidecarSendIds"), [registered.id]);
+  pass("approved local.run executes exact command and message dev_ tag matches registered Sidecar");
+  await localTurn("printf sidecar-always", "Always allow");
+  await localTurn("printf sidecar-never", "Never allow", false);
+  await localTurn("printf sidecar-always");
+  const localThread = await threadId();
+  await restart();
+  await visible("Sidecar smoke Bot");
+  await until("same install re-registers", async () => roster.parse(await remote("/api/devices"))[0]?.id === registered.id || undefined);
+  await until("native Sidecar ready after restart", async () => script("return window.__OMARCHY_BOT_SHELL__.localSidecar.status().running"));
+  assert.deepEqual(await script("return window.__OMARCHY_BOT_SHELL__.localSidecar.status()"), { running: true, deviceId: registered.id });
+  await localTurn("printf sidecar-always");
+  await localTurn("printf sidecar-never", undefined, false);
+  pass("Always/Never policies and cryptographic dev_ identity survive app restart");
+
+  await send("local.run:printf pending-disconnect");
+  await element('[data-testid="local-approval"]');
+  for (const pid of sidecarPids()) process.kill(pid, "SIGTERM");
+  await until("disconnected Sidecar dismisses required approval", async () => script("return !document.querySelector('[data-testid=local-approval]') && !window.__OMARCHY_BOT_SHELL__.localSidecar.status().running"));
+  await until("disconnect fails pending local Tool Call", async () => transcript.parse(await remote(`/api/threads/${localThread}/messages`)).filter(message => message.toolCall?.name === "local").at(-1)?.toolCall?.status === "error" || undefined);
+  await restart();
+  assert.equal(await threadId(), localThread);
+  await until("native Sidecar ready after disconnect restart", async () => script("return window.__OMARCHY_BOT_SHELL__.localSidecar.status().running"));
+  pass("Sidecar disconnect dismisses required approval and app accepts a new Ask after restart");
+
+  await send("local.run:printf pending-quit");
+  await element('[data-testid="local-approval"]');
+  await stop();
+  await until("quit terminates bundled child", async () => sidecarPids().length === 0 || undefined);
+  await until("quit fails pending local Tool Call", async () => transcript.parse(await remote(`/api/threads/${localThread}/messages`)).filter(message => message.toolCall?.name === "local").at(-1)?.toolCall?.status === "error" || undefined);
+  pass("quit terminates Sidecar and Service fails pending local job");
+  await start();
+  await visible("Sidecar smoke Bot");
+  await until("Sidecar available after reopening", async () => sidecarPids().length === 1 && roster.parse(await remote("/api/devices")).length === 1 || undefined);
+  assert.equal(await threadId(), localThread);
+  await until("native Sidecar ready after reopening", async () => script("return window.__OMARCHY_BOT_SHELL__.localSidecar.status().running"));
+  await send("local.run:printf pending-unpair");
+  await element('[data-testid="local-approval"]');
+  await asyncScript("const done=arguments[arguments.length-1];window.__OMARCHY_BOT_SHELL__.service.clear().then(()=>done(true),e=>done(String(e)))").catch(() => {});
+  await until("unpair removes credential and child", async () => sidecarPids().length === 0 && Bun.spawnSync(["secret-tool", "lookup", "service", "com.omarchy.bot"]).exitCode === 1 || undefined);
+  await until("unpair fails pending local Tool Call", async () => transcript.parse(await remote(`/api/threads/${localThread}/messages`)).filter(message => message.toolCall?.name === "local").at(-1)?.toolCall?.status === "error" || undefined);
+  await restart();
+  await visible("Add Service");
+  assert.deepEqual(sidecarPids(), []);
+  pass("unpair terminates Sidecar, fails pending local job and restarts at Add Service");
 } catch (error) {
   const downloads = path.join(process.env.HOME!, "Downloads");
   console.error("Private Downloads on failure:", existsSync(downloads) ? readdirSync(downloads).map(name => ({ name, bytes: Bun.file(path.join(downloads, name)).size })) : "missing");
