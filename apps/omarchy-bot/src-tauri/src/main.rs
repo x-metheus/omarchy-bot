@@ -1,5 +1,8 @@
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
@@ -23,21 +26,26 @@ struct PairingRequest {
     code: String,
 }
 
+struct Sidecar {
+    child: Child,
+    stdin: ChildStdin,
+    device_id: String,
+    registered: bool,
+    approvals: Vec<serde_json::Value>,
+    pending: HashSet<String>,
+}
+
 struct ShellState {
     origin: Option<String>,
     keychain: Mutex<()>,
     pending_pairing: Mutex<Option<PairingRequest>>,
     restart_link: Mutex<Option<String>>,
+    sidecar: Mutex<Option<Sidecar>>,
 }
 
 fn service_origin(value: &str) -> Result<Url, String> {
     let url = Url::parse(value).map_err(|_| "Enter a valid Service origin.")?;
-    let loopback = match url.host() {
-        Some(url::Host::Domain(host)) => host == "localhost",
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    };
+    let loopback = is_loopback_service(&url);
     if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
         || !url.username().is_empty() || url.password().is_some()
         || url.path() != "/" || url.query().is_some() || url.fragment().is_some()
@@ -46,6 +54,128 @@ fn service_origin(value: &str) -> Result<Url, String> {
     }
     Ok(url)
 }
+fn is_loopback_service(url: &Url) -> bool {
+    // shortcut: loopback tunnels also suppress the Sidecar; revisit when host identity is negotiated.
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+fn start_sidecar(app: &tauri::AppHandle, connection: &Connection) -> Result<(), String> {
+    let mut service = service_origin(&connection.base_url)?;
+    if is_loopback_service(&service) { return Ok(()); }
+    let config = app.path().app_config_dir().map_err(|_| "Could not locate app configuration.")?;
+    std::fs::create_dir_all(&config).map_err(|_| "Could not create app configuration.")?;
+    let identity_path = config.join("sidecar-device-id");
+    let device_id = match std::fs::read_to_string(&identity_path) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut random = [0u8; 16];
+            getrandom::fill(&mut random).map_err(|_| "Could not generate Local Sidecar identity.")?;
+            let identity = format!("dev_{}", random.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+            std::fs::write(&identity_path, &identity).map_err(|_| "Could not persist Local Sidecar identity.")?;
+            identity
+        },
+        Err(_) => return Err("Could not read Local Sidecar identity.".into()),
+    };
+    if device_id.len() != 36 || !device_id.starts_with("dev_") || !device_id.as_bytes()[4..].iter().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)) {
+        return Err("The stored Local Sidecar identity is invalid.".into());
+    }
+    let root = app.path().app_local_data_dir().map_err(|_| "Could not locate Local Sidecar data.")?.join("sidecar");
+    std::fs::create_dir_all(&root).map_err(|_| "Could not create Local Sidecar data.")?;
+    service.set_scheme(if service.scheme() == "https" { "wss" } else { "ws" }).map_err(|_| "Invalid Sidecar Service URL.")?;
+    let executable = std::env::current_exe().map_err(|_| "Could not locate bundled Local Sidecar.")?;
+    let binary = executable.with_file_name(if cfg!(windows) { "omarchy-bot-sidecar.exe" } else { "omarchy-bot-sidecar" });
+    let mut child = Command::new(binary)
+        .env("OMARCHY_BOT_SERVICE_URL", service.as_str())
+        .env("OMARCHY_BOT_DEVICE_ID", &device_id)
+        .env("OMARCHY_BOT_DEVICE_TOKEN", &connection.token)
+        .env("OMARCHY_BOT_SIDECAR_ROOT", root)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|_| "Could not start bundled Local Sidecar.")?;
+    let stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    *app.state::<ShellState>().sidecar.lock().map_err(|_| "Local Sidecar is busy.")? = Some(Sidecar {
+        child, stdin, device_id, registered: false, approvals: Vec::new(), pending: HashSet::new(),
+    });
+    // Drain diagnostics without forwarding child output that may contain credentials.
+    std::thread::spawn(move || { let _ = std::io::copy(&mut BufReader::new(stderr), &mut std::io::sink()); });
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break; };
+            let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line) else { continue; };
+            let state = handle.state::<ShellState>();
+            let Ok(mut guard) = state.sidecar.lock() else { break; };
+            let Some(sidecar) = guard.as_mut() else { break; };
+            match frame["type"].as_str() {
+                Some("registered") if frame["deviceId"].as_str() == Some(&sidecar.device_id) => sidecar.registered = true,
+                Some("ask") => {
+                    if let Some(job) = frame["jobId"].as_str() {
+                        if sidecar.pending.insert(job.to_owned()) { sidecar.approvals.push(frame); }
+                    }
+                },
+                Some("ask.dismiss") => {
+                    if let Some(job) = frame["jobId"].as_str() {
+                        sidecar.pending.remove(job);
+                        sidecar.approvals.retain(|ask| ask["jobId"].as_str() != Some(job));
+                        sidecar.approvals.push(frame.clone());
+                    }
+                },
+                _ => {},
+            }
+            drop(guard);
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.eval("window.dispatchEvent(new Event('omarchy-sidecar')); ");
+            }
+        }
+        stop_sidecar(&handle.state::<ShellState>());
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.eval("window.dispatchEvent(new Event('omarchy-sidecar')); ");
+        }
+    });
+    Ok(())
+}
+
+fn stop_sidecar(state: &ShellState) {
+    let sidecar = state.sidecar.lock().ok().and_then(|mut guard| guard.take());
+    if let Some(mut sidecar) = sidecar {
+        drop(sidecar.stdin);
+        // Closing stdin asks the Sidecar to stop its command trees before it exits.
+        for _ in 0..100 {
+            if matches!(sidecar.child.try_wait(), Ok(Some(_))) { return; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = sidecar.child.kill();
+        let _ = sidecar.child.wait();
+    }
+}
+
+#[tauri::command]
+fn sidecar_events(state: tauri::State<ShellState>) -> Result<serde_json::Value, String> {
+    let mut guard = state.sidecar.lock().map_err(|_| "Local Sidecar is busy.")?;
+    Ok(match guard.as_mut() {
+        Some(sidecar) => serde_json::json!({ "status": { "running": sidecar.registered, "deviceId": sidecar.device_id }, "approvals": std::mem::take(&mut sidecar.approvals) }),
+        None => serde_json::json!({ "status": { "running": false }, "approvals": [] }),
+    })
+}
+
+#[tauri::command]
+fn sidecar_decide(state: tauri::State<ShellState>, job_id: String, decision: String) -> Result<(), String> {
+    if !matches!(decision.as_str(), "allow-once" | "deny" | "always" | "never") { return Err("Invalid Local Sidecar decision.".into()); }
+    let mut guard = state.sidecar.lock().map_err(|_| "Local Sidecar is busy.")?;
+    let sidecar = guard.as_mut().ok_or("No Local Sidecar is running.")?;
+    if !sidecar.pending.contains(&job_id) { return Err("This local approval is no longer pending.".into()); }
+    let frame = serde_json::json!({ "type": decision, "jobId": job_id });
+    writeln!(sidecar.stdin, "{frame}").and_then(|_| sidecar.stdin.flush()).map_err(|_| "Could not deliver Local Sidecar decision.")?;
+    sidecar.pending.remove(&job_id);
+    Ok(())
+}
+
 
 fn pairing_request(value: &str) -> Option<PairingRequest> {
     let url = Url::parse(value).ok()?;
@@ -102,6 +232,7 @@ fn store_connection(app: tauri::AppHandle, state: tauri::State<ShellState>, base
     let secret = serde_json::to_string(&Connection { base_url: origin, token }).map_err(|_| "Could not encode the Service connection.")?;
     keychain()?.set_password(&secret).map_err(keychain_error)?;
     if let Ok(directory) = app.path().app_config_dir() { let _ = std::fs::remove_file(directory.join("revoked-service")); }
+    stop_sidecar(&state);
     app.exit(RESTART);
     Ok(())
 }
@@ -118,6 +249,7 @@ fn clear_connection(app: tauri::AppHandle, state: tauri::State<ShellState>) -> R
         let notice = std::fs::create_dir_all(&directory).and_then(|_| std::fs::write(directory.join("revoked-service"), origin));
         if notice.is_err() { eprintln!("The revoked credential was cleared, but its Service address could not be retained."); }
     }
+    stop_sidecar(&state);
     app.exit(RESTART);
     Ok(())
 }
@@ -225,13 +357,16 @@ fn main() {
     let application = builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
-        .manage(ShellState { origin, keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment])
+        .manage(ShellState { origin, keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None), sidecar: Mutex::new(None) })
+        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, sidecar_events, sidecar_decide])
         .setup(move |app| {
             let revoked = if connection.is_none() {
                 std::fs::read_to_string(app.path().app_config_dir()?.join("revoked-service")).ok()
                     .and_then(|origin| service_origin(&origin).ok()).map(|url| url.origin().ascii_serialization())
             } else { None };
+            if let Some(connection) = &connection {
+                if let Err(error) = start_sidecar(app.handle(), connection) { eprintln!("{error}"); }
+            }
             let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked });
             let script = format!("({})({});", include_str!("shell.js"), initial);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
@@ -247,7 +382,9 @@ fn main() {
     let mut environment = handle.env();
     // Rebuild argv at the process boundary so consumed pairing codes are never replayed.
     environment.args_os.truncate(1);
-    let exit = application.run_return(|_, _| {});
+    let exit = application.run_return(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) { stop_sidecar(&app.state::<ShellState>()); }
+    });
     if exit == RESTART {
         if let Ok(mut link) = handle.state::<ShellState>().restart_link.lock() {
             if let Some(link) = link.take() { environment.args_os.push(link.into()); }

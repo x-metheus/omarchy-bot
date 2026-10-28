@@ -30,6 +30,7 @@ export interface Shell {
   readonly localSidecar: {
     status(): LocalSidecarStatus;
     onApproval(listener: (approval: LocalApproval) => void): () => void;
+    onApprovalDismiss(listener: (jobId: string) => void): () => void;
     decide(approvalId: string, decision: LocalApprovalDecision): Promise<void>;
   };
   readonly keyMapping: {
@@ -77,6 +78,7 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
   baseUrl = baseUrl.replace(/\/+$/, "");
   const pairingListeners = new Set<(request: PairingRequest) => void>();
   const approvalListeners = new Set<(approval: LocalApproval) => void>();
+  const approvalDismissListeners = new Set<(jobId: string) => void>();
   const decisions = new Map<string, (decision: LocalApprovalDecision) => void>();
 
   return {
@@ -115,6 +117,10 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
         approvalListeners.add(listener);
         return () => { approvalListeners.delete(listener); };
       },
+      onApprovalDismiss(listener: (jobId: string) => void) {
+        approvalDismissListeners.add(listener);
+        return () => { approvalDismissListeners.delete(listener); };
+      },
       async decide(approvalId: string, decision: LocalApprovalDecision) {
         const resolve = decisions.get(approvalId);
         if (resolve === undefined) throw new Error("Unknown Local Sidecar approval.");
@@ -140,9 +146,16 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
       for (const listener of approvalListeners) listener(approval);
       return promise;
     },
+    receiveApprovalDismiss(jobId: string) {
+      const resolve = decisions.get(jobId);
+      decisions.delete(jobId);
+      resolve?.("deny");
+      for (const listener of approvalDismissListeners) listener(jobId);
+    },
   } satisfies Shell & {
     receivePairingRequest(request: PairingRequest): void;
     receiveApproval(approval: LocalApproval): Promise<LocalApprovalDecision>;
+    receiveApprovalDismiss(jobId: string): void;
   };
 }
 
@@ -154,6 +167,7 @@ declare global {
 export interface MemoryShell extends Shell {
   receivePairingRequest(request: PairingRequest): void;
   receiveApproval(approval: LocalApproval): Promise<LocalApprovalDecision>;
+  receiveApprovalDismiss(jobId: string): void;
 }
 export function getShell(): Shell {
   return globalThis.__OMARCHY_BOT_SHELL__ ?? (globalThis.__OMARCHY_BOT_MEMORY_SHELL__ ??= createMemoryShell());

@@ -5,6 +5,37 @@ function installNativeShell(initial) {
   try { metaSendsSuper = localStorage.getItem("omarchy-bot.meta-sends-super") === "true"; } catch { /* Connection storage remains the OS keychain. */ }
   let pending = initial.pairing;
   const listeners = new Set();
+  let sidecarStatus = { running: false };
+  const approvalListeners = new Set();
+  const approvalDismissListeners = new Set();
+  const activeApprovals = new Set();
+  const approvals = [];
+  async function receiveSidecar() {
+    try {
+      const events = await invoke("sidecar_events");
+      sidecarStatus = events.status;
+      for (const approval of events.approvals) {
+        if (approval.type === "ask.dismiss") {
+          activeApprovals.delete(approval.jobId);
+          for (let index = approvals.length - 1; index >= 0; index--) {
+            if (approvals[index].jobId === approval.jobId) approvals.splice(index, 1);
+          }
+          for (const listener of approvalDismissListeners) listener(approval.jobId);
+        } else {
+          activeApprovals.add(approval.jobId);
+          if (approvalListeners.size === 0) approvals.push(approval);
+          else for (const listener of approvalListeners) listener(approval);
+        }
+      }
+      if (!sidecarStatus.running) {
+        for (const jobId of activeApprovals) for (const listener of approvalDismissListeners) listener(jobId);
+        activeApprovals.clear();
+        approvals.length = 0;
+      }
+    } catch { sidecarStatus = { running: false }; }
+  }
+  window.addEventListener("omarchy-sidecar", () => { void receiveSidecar(); });
+  void receiveSidecar();
   async function receivePairing() {
     const request = await invoke("take_pairing_request");
     if (!request) return;
@@ -66,9 +97,23 @@ function installNativeShell(initial) {
       restart: () => invoke("restart_app"),
     },
     localSidecar: {
-      status: () => ({ running: false }),
-      onApproval: () => () => {},
-      async decide() { throw new Error("No Local Sidecar is running."); },
+      status: () => ({ ...sidecarStatus }),
+      onApproval(listener) {
+        approvalListeners.add(listener);
+        const pending = approvals.splice(0);
+        queueMicrotask(() => {
+          if (approvalListeners.has(listener)) for (const approval of pending) {
+            if (activeApprovals.has(approval.jobId)) listener(approval);
+          }
+          else approvals.unshift(...pending);
+        });
+        return () => approvalListeners.delete(listener);
+      },
+      onApprovalDismiss(listener) {
+        approvalDismissListeners.add(listener);
+        return () => approvalDismissListeners.delete(listener);
+      },
+      decide: (jobId, decision) => invoke("sidecar_decide", { jobId, decision }),
     },
     keyMapping: {
       platform: () => "linux",

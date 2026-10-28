@@ -2,6 +2,7 @@
 set -euo pipefail
 bash /src/scripts/linux-app/prepare-bundler.sh
 if [[ ! -d node_modules ]]; then bun install --frozen-lockfile; fi
+bun scripts/build-sidecar.ts
 bun run --filter=@omarchy-bot/web build
 cd apps/omarchy-bot
 [[ -f src-tauri/Cargo.lock ]] || cargo generate-lockfile --manifest-path src-tauri/Cargo.toml

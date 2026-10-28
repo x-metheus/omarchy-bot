@@ -6,6 +6,7 @@ import { connectionState, pairService, subscribeConnection } from "../lib/pairin
 import { getShell } from "../lib/shell.ts";
 import { AddService } from "../components/AddService.tsx";
 import { ProtocolGate } from "../components/ProtocolGate.tsx";
+import { LocalApprovalPrompt } from "../components/LocalApprovalPrompt.tsx";
 import { useQueryClient } from "@tanstack/react-query";
 
 function Root(): JSX.Element {
@@ -15,7 +16,7 @@ function Root(): JSX.Element {
   useEffect(() => getShell().pairing.onRequest(request => { void pairService(request); }), []);
   return (
     <Theme theme={neutralTheme}>
-      {connection.paired ? <ProtocolGate><Outlet /></ProtocolGate> : <AddService />}
+      {connection.paired ? <><ProtocolGate><Outlet /></ProtocolGate><LocalApprovalPrompt /></> : <AddService />}
     </Theme>
   );
 }
