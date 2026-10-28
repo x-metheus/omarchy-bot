@@ -13,10 +13,10 @@ afterAll(async () => {
 });
 
 describe("health probe", () => {
-  test("answers without a token with only liveness and the Service version", async () => {
+  test("answers without a token with only liveness, Service version, and client protocol", async () => {
     const res = await fetch(`${h.baseUrl}/api/health`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
-    expect(await res.json()).toEqual({ ok: true, version: daemonPkg.version });
+    expect(await res.json()).toEqual({ ok: true, version: daemonPkg.version, protocol: 1 });
   });
 });

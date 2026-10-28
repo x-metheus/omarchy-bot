@@ -13,7 +13,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import type { BotViewDto } from "@omarchy-bot/protocol";
-import { api, apiErrorMessage, randomUuid } from "../lib/api.ts";
+import { api, apiErrorMessage, isSupportedServiceProtocol, randomUuid, serviceHealthQuery } from "../lib/api.ts";
 import { requestDesktopNotificationPermission, startEventPump, type QueryTag } from "../lib/events.ts";
 import { mostRecentlyActiveBot, Sidebar } from "../components/Sidebar.tsx";
 import { clearDraftsByBot, restoreDrafts, takeDraftsByBot } from "../lib/drafts.ts";
@@ -101,7 +101,10 @@ function HomeScreen(): JSX.Element {
   );
 
   useEffect(() => {
-    startEventPump(invalidate, () => void qc.invalidateQueries(), () => {
+    return startEventPump(invalidate, () => void qc.invalidateQueries(), async () => {
+      const health = await qc.fetchQuery(serviceHealthQuery());
+      return isSupportedServiceProtocol(health.protocol);
+    }, () => {
       const current = selectedBotRef.current;
       return {
         ...(current !== undefined ? { selectedBotId: current } : {}),

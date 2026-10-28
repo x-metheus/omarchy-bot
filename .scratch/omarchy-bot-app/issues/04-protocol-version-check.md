@@ -4,12 +4,20 @@
 
 **Blocked by:** 02 (Web UI runs behind the `shell` seam)
 
-**Status:** ready-for-agent
+**Status:** needs-info
 
 Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
-- [ ] Health probe includes the protocol version, still without authentication and without Bot, Thread, or host data
-- [ ] A supported version connects normally
-- [ ] A Service ahead of the app shows "update Omarchy Bot"; a Service behind shows "update the Service"
-- [ ] No other screen is reachable while the mismatch screen is shown
-- [ ] Covered by a Service-boundary test and an e2e spec with a simulated mismatched Service
+- [x] Health probe includes the protocol version, still without authentication and without Bot, Thread, or host data
+- [x] A supported version connects normally
+- [x] A Service ahead of the app shows "update Omarchy Bot"; a Service behind shows "update the Service"
+- [x] No other screen is reachable while the mismatch screen is shown
+- [x] Covered by a Service-boundary test and an e2e spec with a simulated mismatched Service
+
+## Comments
+
+Implemented the shared protocol-version health field (`protocol: 1`, owned by the protocol package), a root compatibility gate with update directions and shell updater, malformed-envelope recovery, and socket lifecycle cleanup, revalidation, and reconnect checks. Final review (`ProtocolFinalReview`) found the work correct with no actionable findings and confirmed all five behavioral criteria are implemented and covered; the boxes above are checked on that review evidence, not on a whole-suite pass.
+
+Checks: typecheck passed. Full isolated Chromium: 94 passed, 0 skipped, 0 failed (17 protocol cases). Affected Bun suites: 77 passed, 3 skipped, 0 failed. The mandatory full `bun test` is **not** green: 807 passed, 17 skipped, 1 failed (825 tests / 122 files), because `tests/conformance/helpers.ts:110` requires a prepared `.lane/dist/sway` runtime that is absent in this environment. Earlier sibling asset-env overrides reached real Pi step 2 but returned empty assistant text instead of `CONFORM-STREAM-OK`; the provider cause is unproven, and a global browser override contaminated two fixture tests. No host actions and no source-level skips were used. Native WebView and the real updater remain unverified; both are later app efforts.
+
+**Blocked on:** the prepared `.lane/dist/sway` conformance runtime (or an environment where the mandatory full suite can pass), then a clean full-suite run to resolve. Provider behavior behind the empty `CONFORM-STREAM-OK` response is unresolved. Revert to `ready-for-agent` once the prerequisite exists.

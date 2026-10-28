@@ -74,15 +74,6 @@ export function notifyForAttentionEvent(
   );
 }
 
-let cursor: number | undefined;
-let socket: WebSocket | undefined;
-let started = false;
-let handlers: {
-  invalidate: Invalidate;
-  onSnapshotRequired: () => void;
-  getNotificationContext?: () => NotificationContext;
-} | undefined;
-
 function payloadOf(envelope: EventEnvelope): Record<string, unknown> {
   return (envelope.payload ?? {}) as Record<string, unknown>;
 }
@@ -154,24 +145,41 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
 }
 
 /**
- * Single shared WS connection with cursor-based replay. On snapshot_required
+ * Workspace-owned WS connection with cursor-based replay. On snapshot_required
  * (or repeated reconnects) callers refetch everything; the cursor resets.
  */
 export function startEventPump(
   invalidate: Invalidate,
   onSnapshotRequired: () => void,
+  beforeReconnect: () => Promise<boolean>,
   getNotificationContext?: () => NotificationContext,
-): void {
-  handlers = {
+): () => void {
+  let cursor: number | undefined;
+  let socket: WebSocket | undefined;
+  let reconnectTimer: number | undefined;
+  let stopped = false;
+  let handlers: {
+    invalidate: Invalidate;
+    onSnapshotRequired: () => void;
+    getNotificationContext?: () => NotificationContext;
+  } | undefined = {
     invalidate,
     onSnapshotRequired,
     ...(getNotificationContext !== undefined ? { getNotificationContext } : {}),
   };
-  if (started) return;
-  started = true;
   let retries = 0;
 
-  const connect = (): void => {
+  const connect = async (): Promise<void> => {
+    if (stopped) return;
+    if (retries > 0) {
+      try {
+        if (!(await beforeReconnect())) return;
+      } catch {
+        if (!stopped) reconnectTimer = window.setTimeout(() => void connect(), 10_000);
+        return;
+      }
+      if (stopped) return;
+    }
     let notificationsReady = cursor !== undefined;
     socket = api.connectEvents(
       cursor,
@@ -200,14 +208,28 @@ export function startEventPump(
       },
     );
     socket.onclose = () => {
+      if (stopped) return;
       retries += 1;
       if (retries > 5) {
         const current = handlers;
         cursor = undefined;
         current?.onSnapshotRequired();
       }
-      setTimeout(connect, Math.min(1000 * 2 ** retries, 10_000));
+      reconnectTimer = window.setTimeout(() => void connect(), Math.min(1000 * 2 ** retries, 10_000));
     };
   };
-  connect();
+  void connect();
+  return () => {
+    stopped = true;
+    clearTimeout(reconnectTimer);
+    handlers = undefined;
+    cursor = undefined;
+    if (socket !== undefined) {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onclose = null;
+      socket.close();
+      socket = undefined;
+    }
+  };
 }

@@ -143,6 +143,15 @@ export class ApiClient {
     return (await res.json()) as T;
   }
 
+  /** Protocol is untrusted: older Services omit it, and unsupported values must block the UI. */
+  async health(): Promise<{ ok: boolean; version: string; protocol?: unknown }> {
+    const health = await this.req<{ ok: boolean; version: string; protocol?: unknown }>("/api/health");
+    if (health === null || typeof health !== "object" || Array.isArray(health)) {
+      throw new Error("Invalid Service health response");
+    }
+    return health;
+  }
+
   // ----- agents -----
   listAgents(): Promise<AgentDto[]> {
     return this.req("/api/agents");
