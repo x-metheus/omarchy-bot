@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "omarchy-bot",
+  "version": "0.1.0",
+  "identifier": "com.omarchy.bot",
+  "build": { "frontendDist": "../../web/dist" },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+      "capabilities": [{ "identifier": "main", "windows": ["main"], "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"] }]
+    }
+  },
+  "bundle": { "active": true, "targets": ["appimage"], "icon": ["icons/icon.png"], "category": "Utility", "shortDescription": "Conversations and Bot Screens" },
+  "plugins": { "deep-link": { "desktop": { "schemes": ["omarchy-bot"] } } }
+}

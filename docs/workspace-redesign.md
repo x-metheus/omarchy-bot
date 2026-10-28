@@ -103,11 +103,11 @@ There is no persistent global TopNav.
 - On narrow screens the Sidebar becomes a drawer; the conversation Header supplies its opener.
 - Opening the app selects the most recently active Bot, not the previously viewed Bot. That Bot opens its most recently active Thread.
 
-### Future Omarchy Bot
+### Omarchy Bot application
 
-The current Web frontend will be reused for Omarchy Bot, not replaced by an independently implemented interface or a "Desktop" product. Conversation UI, Bot selection, Computer Surface behavior, and daemon-facing HTTP/WebSocket contracts stay shared; Agents, Native Sessions, the Bot Computer, routed Screens, and capture/input execution remain in the Service. A Local Sidecar starts only when Omarchy Bot is not connected to the Service on the same machine; on the Service Host it is a viewer.
+The Linux Omarchy Bot application embeds the current Web frontend. Conversation UI, Bot selection, Computer Surface behavior, and Service-facing HTTP/WebSocket contracts stay shared; Agents, Native Sessions, the Bot Computer, routed Screens, and capture/input execution remain in the Service. The application supplies keychain storage, pairing links, and system-browser access through `shell`.
 
-[ADR 0010](adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](adr/0011-local-sidecar-only-off-host.md) record this accepted evolution contract. Preserve the client/execution separation now without adding unused native scaffolding. Tauri packaging remains future work; the Service already ships paired device tokens with TLS, SSH-tunnel, and private-network remote access ([ADR 0014](adr/0014-require-paired-device-tokens.md)). The Local Sidecar daemon contract is TypeScript run by the plugin-runtime Bun. Actual WebView media/input support must be tested then rather than inferred from Chromium tests. Application-state ownership is unchanged; the Service's lifecycle belongs to its systemd user unit ([ADR 0013](adr/0013-run-a-standalone-linux-service.md)), not to the Omarchy plugin.
+[ADR 0010](adr/0010-reuse-web-client-in-tauri.md), [ADR 0011](adr/0011-local-sidecar-only-off-host.md), and [ADR 0015](adr/0015-omarchy-bot-app-is-the-only-bot-client.md) define the client/execution boundary. The Linux AppImage and its WebKitGTK smoke suite live in this repository; platform support requires that platform's real WebView checks, independently of Chromium results. The Service provides paired device tokens with TLS or loopback SSH-tunnel access ([ADR 0014](adr/0014-require-paired-device-tokens.md)). Bundled Local Sidecar delivery belongs to ticket 09; until then the Linux shell truthfully reports no running Sidecar and sends no This Device claim. Application-state ownership is unchanged; the Service's lifecycle belongs to its Launcher ([ADR 0013](adr/0013-run-a-standalone-linux-service.md)), not to the Omarchy plugin or the app.
 
 ## 3. Sidebar
 

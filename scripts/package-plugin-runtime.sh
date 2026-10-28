@@ -125,6 +125,7 @@ done
 # Keep the site workspace manifest, not publisher code, assets, or local secrets.
 tar -C "$root" --exclude=node_modules \
   --exclude=apps/web/dist \
+  --exclude=apps/omarchy-bot \
   --exclude=apps/site/public --exclude=apps/site/src --exclude=apps/site/dist \
   --exclude=apps/site/api --exclude=apps/site/server --exclude=apps/site/.vercel \
   --exclude='apps/site/.env*' \

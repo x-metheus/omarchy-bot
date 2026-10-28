@@ -32,16 +32,22 @@ export async function pairService({ serviceUrl, code }: PairingRequest): Promise
     if (!/^https?:$/.test(address.protocol) || address.username || address.password || address.pathname !== "/" || address.search || address.hash) {
       throw new Error("Enter an HTTP or HTTPS Service address without a path or credentials.");
     }
+    const loopback = address.hostname === "localhost" || address.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(address.hostname);
+    if (address.protocol === "http:" && !loopback) throw new Error("Use HTTPS or a loopback HTTP address through an SSH tunnel.");
     const response = await fetch(`${address.origin}/api/pairing/exchange`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ code: code.trim() }),
-    }).catch(() => { throw new Error("Could not reach the Service. Check the address, connection, and trusted TLS certificate."); });
+    }).catch((error: unknown) => {
+      if (error instanceof Error && error.name === "TlsCertificateError") throw error;
+      throw new Error("Could not reach the Service. Check the address and connection.");
+    });
     if (response.status === 401) throw new Error("This pairing code is invalid or has expired. Ask the Service Host for a new code.");
     const body: { token?: unknown } = await response.json();
     if (!response.ok || typeof body.token !== "string" || body.token.length === 0) throw new Error("The Service could not pair this device. Ask the Service Host for a new code.");
-    await getShell().service.store(address.origin, body.token).catch(() => {
-      throw new Error("The code was used, but this device could not store its token. Ask the Service Host for a new code.");
+    await getShell().service.store(address.origin, body.token).catch((error: unknown) => {
+      const reason = error instanceof Error ? ` ${error.message}` : typeof error === "string" ? ` ${error}` : "";
+      throw new Error(`The code was used, but this device could not store its token.${reason} Ask the Service Host for a new code.`);
     });
     publish({ paired: true, pending: false, serviceUrl: address.origin });
   } catch (error) {
