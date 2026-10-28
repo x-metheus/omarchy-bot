@@ -191,8 +191,7 @@ The Composer supports:
 
 - text;
 - local files;
-- images;
-- Voxtype dictation.
+- images.
 
 Enter sends; Shift+Enter inserts a newline. Sending while the Bot is working uses native steering rather than aborting and restarting the turn. The redirected instruction is applied after the Agent reaches a safe boundary following its current atomic action. There is no permanent Stop button in the Composer.
 
@@ -215,29 +214,14 @@ Enter sends; Shift+Enter inserts a newline. Sending while the Bot is working use
 
 ## 8. Voice input
 
-Voice is an input method, not an audio-message transport.
+Focus the Composer and use the client operating system's dictation. It types text into the focused draft on the user's own device. Review or edit the text and send normally; the Service never captures audio and the Composer has no microphone or voice auto-send setting.
 
-### Default behavior
+- **macOS Dictation:** press the Dictation key or the shortcut configured in System Settings → Keyboard → Dictation (commonly `Fn` / Globe twice).
+- **Windows:** `Win+H` opens voice typing.
+- **Omarchy Voxtype:** `Super+Ctrl+X` toggles dictation; hold `F9` to talk and release to finish.
+- **Phone keyboards:** tap the keyboard's microphone key.
 
-1. Clicking the microphone starts Voxtype recording.
-2. Clicking again stops recording and enters a transcribing state.
-3. The resulting text is inserted into the originating Composer draft at its insertion point.
-4. Existing text is preserved.
-5. The user may review or edit the transcript and presses Send explicitly, matching the observed Grok Bot behavior.
-Escape cancels recording. Empty speech or failure leaves the draft unchanged. Raw audio is not uploaded, attached, or retained by Omarchy Bot.
-
-### Optional auto-send
-
-Settings → Voice includes **Auto-send voice transcriptions**, off by default. When enabled, a successful transcript is inserted and then sent through the originating Thread's normal command path. During active work it becomes steering. Empty or failed transcription is never sent.
-
-The microphone integration uses Voxtype's stable file-output contract through the localhost daemon:
-
-```text
-record start --file=<runtime-file> --no-auto-submit --no-smart-auto-submit
-record stop --wait --json --wait-file <runtime-file>
-```
-
-The app does not depend on Voxtype's synthetic Return because file output bypasses the typing/paste auto-submit chain and synthetic input could target the wrong conversation. Omarchy's normal Voxtype shortcuts remain untouched and continue typing into the focused control.
+Dictated text follows the same window-local draft, attachment, and steering behavior as typed text.
 
 ## 9. Ordered rich transcript
 

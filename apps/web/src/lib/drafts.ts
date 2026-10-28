@@ -7,8 +7,6 @@ export interface ConversationDraft {
   cursor: number;
   stagedIds: string[];
   attachmentDraftToken?: string;
-  /** Insertion point captured when dictation starts. */
-  dictationAnchor?: number;
 }
 
 interface StorageLike {
@@ -53,16 +51,12 @@ function normalizeDraft(value: unknown): ConversationDraft | undefined {
       UUID_PATTERN.test(candidate.attachmentDraftToken)
     ? candidate.attachmentDraftToken
     : undefined;
-  const dictationAnchor = candidate.dictationAnchor === undefined
-    ? undefined
-    : normalizePosition(candidate.dictationAnchor, text.length, cursor);
 
   return {
     text,
     cursor,
     stagedIds,
     ...(attachmentDraftToken !== undefined ? { attachmentDraftToken } : {}),
-    ...(dictationAnchor !== undefined ? { dictationAnchor } : {}),
   };
 }
 
@@ -119,8 +113,7 @@ export function saveDraft(
     if (
       normalized.text === "" &&
       normalized.stagedIds.length === 0 &&
-      normalized.attachmentDraftToken === undefined &&
-      normalized.dictationAnchor === undefined
+      normalized.attachmentDraftToken === undefined
     ) {
       storage.removeItem(key);
     } else {

@@ -5,7 +5,7 @@ export const EventEnvelope = z.object({
   eventId: z.string(),
   cursor: z.number().int().nonnegative(),
   occurredAt: z.string(),
-  aggregateType: z.enum(["agent", "bot", "thread", "turn", "computer", "dictation"]),
+  aggregateType: z.enum(["agent", "bot", "thread", "turn", "computer"]),
   aggregateId: z.string(),
   type: z.string(),
   payload: z.unknown(),

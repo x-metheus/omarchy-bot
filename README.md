@@ -198,6 +198,16 @@ CLI environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `XDG_CONFIG_HO
 
 The accepted [product specification](docs/workspace-redesign.md), [shared Bot Computer decision](docs/adr/0009-share-work-files-isolate-bot-screens.md), and [domain context map](CONTEXT-MAP.md) define the boundaries.
 
+### Dictation
+
+Focus the Composer and use dictation on your own device. The operating system types the transcript into the draft; review or edit it, then send normally. The Service never captures microphone audio.
+
+- **macOS:** press the Dictation key or your configured Dictation shortcut (commonly `Fn` / Globe twice); enable or change it in System Settings → Keyboard → Dictation.
+- **Windows:** press `Win+H`.
+- **Omarchy:** use Voxtype with `Super+Ctrl+X` to toggle dictation, or hold `F9` to talk and release to finish.
+- **Phones:** use the microphone key on the on-screen keyboard.
+
+
 ## Status
 
 The current implementation includes a Bun daemon, React web client, SQLite persistence, and isolated Agent workers. Shared Sway runtime, routed Screens, shared application state, and selected-view projection are implemented.
@@ -398,7 +408,6 @@ accounts before presenting these connectors as publicly available.
 | **`curl` and `unzip`** | Omarchy plugin runtime download and container image asset preparation |
 | **Configured Pi installation** | Real Agent execution and Pi conformance |
 | **Docker** | Building the container image and running its conformance |
-| **Voxtype** | Composer dictation |
 | **Network during `install`/`update`** | Downloads the checksum-verified browser pack (Chrome for Testing plus its libraries) unless `--no-browser-pack` is passed; the Bot Computer never downloads at run time, and fonts ship inside the runtime archive |
 
 On first graphical use, the Service uses the SHA-256-pinned Bot Computer bundle shipped inside its runtime archive under `<dataDir>/runtime/current/sway`. It contains Sway, wlroots, WayVNC, wlr-randr, Xwayland, grim, a private D-Bus daemon, and prebuilt capture/input/desktop helpers with their loader, libraries, and runtime data. The same archive runs on glibc and musl x86_64 Linux hosts; host grim, D-Bus, and a C toolchain are unnecessary. Point `OMARCHY_BOT_SWAY_BUNDLE_DIR` at the checksum-prepared `.lane/dist/sway` directory output by `bash scripts/build-sway-runtime.sh .lane/dist` to develop against a local bundle, and explicit binary overrides remain available.
@@ -537,7 +546,7 @@ Mail does not forward the source Thread, Native Session, memory, attachments, or
 | :--- | :--- |
 | Product data, managed attachments, avatar uploads | `~/.local/share/omarchy-bot/` |
 | Persistent runtime state and launch logs | `~/.local/state/omarchy-bot/` |
-| Transient sockets and Voxtype transcript handoff | `$XDG_RUNTIME_DIR`; `serve` uses private `/tmp/ob-<uid>` when absent |
+| Transient sockets | `$XDG_RUNTIME_DIR`; `serve` uses private `/tmp/ob-<uid>` when absent |
 | Shared Workspace | User work files, separate from plugin source and conversation data |
 | Native Sessions | Owned by the selected Agent, not erased by Bot deletion |
 

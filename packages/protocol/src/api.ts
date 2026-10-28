@@ -341,21 +341,6 @@ export const MessageDto = z.object({
 export type MessageDto = z.infer<typeof MessageDto>;
 
 
-// ----- Dictation -----
-
-export const DictationDto = z.object({
-  state: z.enum(["unavailable", "idle", "recording", "transcribing"]),
-  recordingId: z.string().optional(),
-  error: z.string().optional(),
-});
-export type DictationDto = z.infer<typeof DictationDto>;
-
-export const DictationResultDto = z.object({
-  outcome: z.enum(["success", "empty", "timeout", "failure", "unavailable", "cancelled"]),
-  text: z.string().optional(),
-});
-export type DictationResultDto = z.infer<typeof DictationResultDto>;
-
 // ----- Computer -----
 
 export const ComputerViewDto = z.object({

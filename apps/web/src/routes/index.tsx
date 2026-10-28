@@ -25,7 +25,6 @@ import { BotSettingsPanel } from "../components/BotSettingsPanel.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
 import { PluginsDialog } from "../components/PluginsDialog.tsx";
 import { CapabilityPanel } from "../components/CapabilityPanel.tsx";
-import { useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
 
 export const Route = createFileRoute("/")({
@@ -43,7 +42,6 @@ const QUERY_KEYS: Tags = {
   bots: ["bots"],
   threads: ["threads"],
   messages: ["messages"],
-  dictation: ["dictation"],
   turns: ["turns"],
   computer: ["computer"],
 };
@@ -83,7 +81,6 @@ function HomeScreen(): JSX.Element {
   const [pendingDeleteBot, setPendingDeleteBot] = useState<BotViewDto | undefined>(undefined);
   const [deletingBotId, setDeletingBotId] = useState<string | undefined>(undefined);
   const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
-  const [autoSendVoice, setAutoSendVoice] = useVoiceAutoSendSetting();
   const [isOnline, setIsOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">(() =>
     typeof Notification === "undefined" ? "unsupported" : Notification.permission,
@@ -127,33 +124,6 @@ function HomeScreen(): JSX.Element {
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.listAgents(), refetchInterval: 30_000 });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api.listBots(), refetchInterval: 30_000 });
   botNamesRef.current = Object.fromEntries((bots.data ?? []).map((candidate) => [candidate.id, candidate.name]));
-  const dictation = useQuery({
-    queryKey: ["dictation"],
-    queryFn: () => api.dictation(),
-    refetchInterval: 15_000,
-  });
-  const dictationController = useMemo(
-    () => ({
-      state: dictation.data ?? { state: "unavailable" as const },
-      start: async () => {
-        const state = await api.startDictation();
-        qc.setQueryData(["dictation"], state);
-        return state;
-      },
-      stop: async () => {
-        const result = await api.stopDictation();
-        invalidate("dictation");
-        return result;
-      },
-      cancel: async () => {
-        const state = await api.cancelDictation();
-        qc.setQueryData(["dictation"], state);
-        return state;
-      },
-    }),
-    [dictation.data, invalidate, qc],
-  );
-
   const bot = useMemo(() => bots.data?.find((b) => b.id === selectedBotId), [bots.data, selectedBotId]);
   const computer = useQuery({
     queryKey: ["computer", bot?.id, bot?.surfaceId],
@@ -395,18 +365,6 @@ function HomeScreen(): JSX.Element {
                 await api.recheckAgent(bot.agentId);
                 await agents.refetch();
                 invalidate("bots");
-              }}
-              dictation={dictationController}
-              autoSendVoice={autoSendVoice}
-              onVoiceAutoSend={async (target, text) => {
-                const response =
-                  target.threadId !== undefined
-                    ? await api.sendMessage(target.threadId, { text, clientTag: randomUuid() })
-                    : await api.sendBotMessage(target.botId, { text, clientTag: randomUuid() });
-                invalidate("threads");
-                invalidate("bots");
-                invalidate("messages", target.threadId);
-                if (target.threadId === undefined && bot.id === target.botId && thread === undefined) onMessageSent(response.threadId);
               }}
               onMessageSent={onMessageSent}
               isAgentReady={isAgentReady}
@@ -657,17 +615,6 @@ function HomeScreen(): JSX.Element {
           ? { botsError: apiErrorMessage(bots.error, "Bots could not be loaded.") }
           : {})}
         {...(bots.error !== null ? { onRetryBots: () => void bots.refetch() } : {})}
-        dictation={
-          dictation.data
-          ?? {
-            state: "unavailable",
-            ...(dictation.error !== null
-              ? { error: apiErrorMessage(dictation.error, "Voice dictation status could not be checked.") }
-              : {}),
-          }
-        }
-        autoSendVoice={autoSendVoice}
-        onAutoSendVoiceChange={setAutoSendVoice}
         notificationPermission={notificationPermission}
         onRequestNotifications={() => {
           void requestDesktopNotificationPermission().then(setNotificationPermission);

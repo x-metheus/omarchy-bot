@@ -218,6 +218,22 @@ describe("window-local draft storage", () => {
     expect(loadDraft("bot_a", "thread_a", secondWindow)).toEqual({ text: "", cursor: 0, stagedIds: [] });
   });
 
+  test("drops a legacy dictation anchor while preserving text and attachments", () => {
+    const storage = new MemoryStorage();
+    const key = draftStorageKey("bot_a", "thread_a");
+    const draft = {
+      text: "ordinary draft",
+      cursor: 8,
+      stagedIds: ["att_keep"],
+      attachmentDraftToken: "6b7ffad2-779d-49eb-885a-7f0eb716b5b2",
+    };
+    storage.setItem(key, JSON.stringify({ ...draft, dictationAnchor: 3 }));
+
+    expect(loadDraft("bot_a", "thread_a", storage)).toEqual(draft);
+    saveDraft("bot_a", "thread_a", loadDraft("bot_a", "thread_a", storage), storage);
+    expect(JSON.parse(storage.getItem(key)!)).toEqual(draft);
+  });
+
   test("normalizes persisted state, migrates Foundation text, and clears only the owning bot", () => {
     const storage = new MemoryStorage();
     storage.setItem(draftStorageKey("bot_a", "thread_a"), "legacy text");
@@ -231,7 +247,6 @@ describe("window-local draft storage", () => {
         cursor: 99,
         stagedIds: ["att_1", "att_1", ""],
         attachmentDraftToken: "not-an-opaque-token",
-        dictationAnchor: -5,
       },
       storage,
     );
@@ -239,7 +254,6 @@ describe("window-local draft storage", () => {
       text: "short",
       cursor: 5,
       stagedIds: ["att_1"],
-      dictationAnchor: 0,
     });
     saveDraft("bot_ab", null, { text: "must remain", cursor: 11, stagedIds: [] }, storage);
 

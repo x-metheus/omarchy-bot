@@ -16,7 +16,6 @@ import { PortableSwayRuntimeSupply } from "../modules/computer/swayRuntimeSupply
 import type { BotComputerAssetSupply } from "../modules/computer/botComputerAssets.ts";
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
-import { DictationService } from "../modules/dictation/dictationService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { PluginsService } from "../modules/plugins/plugins.ts";
@@ -133,7 +132,6 @@ export async function main(options: MainOptions = {}): Promise<{
   );
 
   const events = new EventLog(db);
-  const dictation = new DictationService(cfg.dictationDir, cfg.voxtypeBin ?? "voxtype", events);
   const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
   const threads: ThreadsService = new ThreadsService(db, events, agents);
   const bots = new BotsService(db, events, agents, threads);
@@ -254,7 +252,6 @@ export async function main(options: MainOptions = {}): Promise<{
     turns,
     avatars,
     attachments,
-    dictation,
     plugins,
     computer,
     screens,
@@ -307,7 +304,6 @@ export async function main(options: MainOptions = {}): Promise<{
     clearInterval(statusTimer);
     clearInterval(deviceLiveness);
     devices.close();
-    await dictation.shutdown().catch(reportStopFailure("dictation"));
     mailbox.pauseDispatch();
     await turns.shutdown().catch(reportStopFailure("turns"));
     computer.shutdown();
@@ -327,7 +323,6 @@ export async function main(options: MainOptions = {}): Promise<{
     clearInterval(statusTimer);
     clearInterval(deviceLiveness);
     devices.close();
-    await dictation.shutdown();
     mailbox.pauseDispatch();
     await turns.shutdown();
     computer.shutdown();
