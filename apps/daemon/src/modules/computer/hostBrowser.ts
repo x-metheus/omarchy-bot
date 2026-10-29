@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
+import { parseDesktopEntry } from "./desktopEntry.ts";
 
 function parseDesktopExec(value: string): string[] {
   const argv: string[] = [];
@@ -44,19 +45,9 @@ function desktopApplicationCommand(
     .map((directory) => path.join(directory, "applications", application))
     .find((candidate) => existsSync(candidate));
   if (entryPath === undefined) throw new Error(`application desktop entry not found: ${application}`);
-  const lines = readFileSync(entryPath, "utf8").split(/\r?\n/);
-  let inDesktopEntry = false;
-  let type: string | undefined;
-  let exec: string | undefined;
-  for (const line of lines) {
-    if (line.startsWith("[")) {
-      inDesktopEntry = line === "[Desktop Entry]";
-    } else if (inDesktopEntry && line.startsWith("Type=")) {
-      type = line.slice("Type=".length);
-    } else if (inDesktopEntry && line.startsWith("Exec=")) {
-      exec = line.slice("Exec=".length);
-    }
-  }
+  const keys = parseDesktopEntry(readFileSync(entryPath, "utf8"));
+  const type = keys.get("Type");
+  const exec = keys.get("Exec");
   if (type !== "Application" || exec === undefined) {
     throw new Error(`invalid application desktop entry: ${application}`);
   }

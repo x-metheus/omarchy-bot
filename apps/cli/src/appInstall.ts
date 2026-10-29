@@ -2,6 +2,8 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { verifyChecksum } from "./archive.ts";
+import { verifyAppSignature } from "./appSignature.ts";
+import { parseDesktopEntry } from "../../daemon/src/modules/computer/desktopEntry.ts";
 import type { Layout } from "./layout.ts";
 
 const desktopId = "omarchy-bot.desktop";
@@ -77,7 +79,12 @@ async function download(url: string): Promise<Response> {
   return response;
 }
 
-export async function installApp(layout: Layout, env: NodeJS.ProcessEnv): Promise<void> {
+export async function installApp(layout: Layout, env: NodeJS.ProcessEnv): Promise<boolean> {
+  let publicKey = "";
+  if (!env.OMARCHY_BOT_APP_IMAGE || /^[a-z][a-z\d+.-]*:/i.test(env.OMARCHY_BOT_APP_IMAGE)) {
+    try { publicKey = readFileSync(new URL("./release-public-key", import.meta.url), "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  }
   if (existsSync(layout.desktopEntry) && !ownedDesktop(layout)) throw new Error(`Refusing to replace existing desktop entry: ${layout.desktopEntry}`);
   const receipt = `${layout.appImage}.installed`;
   if (existsSync(layout.appImage) && !ownedImage(layout)) throw new Error(`Refusing to replace existing AppImage: ${layout.appImage}`);
@@ -92,12 +99,15 @@ export async function installApp(layout: Layout, env: NodeJS.ProcessEnv): Promis
         if (typeof source !== "string" || !source.startsWith("https://")) throw new Error("App release manifest has no HTTPS linux-x86_64 AppImage");
       }
       let image = source;
-      if (/^[a-z][a-z\d+.-]*:/i.test(source)) {
-        image = join(temporary, "app.AppImage");
-        for (const suffix of ["", ".sha256"]) await Bun.write(`${image}${suffix}`, await download(`${source}${suffix}`));
-      }
-      try { verifyChecksum(image, `${image}.sha256`); }
-      catch (error) { throw new Error(`AppImage verification failed: ${error instanceof Error ? error.message : String(error)}`); }
+      try {
+        if (/^[a-z][a-z\d+.-]*:/i.test(source)) {
+          image = join(temporary, "app.AppImage");
+          for (const suffix of ["", ".sha256", ".sig"]) await Bun.write(`${image}${suffix}`, await download(`${source}${suffix}`));
+          verifyAppSignature(readFileSync(image), readFileSync(`${image}.sig`, "utf8"), publicKey);
+        }
+        // Explicit local artifacts are trusted development input, never a network fallback.
+        verifyChecksum(image, `${image}.sha256`);
+      } catch (error) { throw new Error(`AppImage verification failed: ${error instanceof Error ? error.message : String(error)}`); }
       mkdirSync(dirname(layout.appImage), { recursive: true });
       copyFileSync(image, staging);
       chmodSync(staging, 0o755);
@@ -109,6 +119,7 @@ export async function installApp(layout: Layout, env: NodeJS.ProcessEnv): Promis
   const exec = layout.appImage.replace(/%/g, "%%").replace(/[\\"`$]/g, "\\$&").replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r");
   publish(layout.desktopEntry, `${marker}[Desktop Entry]\nType=Application\nName=Omarchy Bot\nExec="${exec}" %u\nTerminal=false\nMimeType=${scheme};\n`);
   for (const file of mimePaths(layout)) publish(file, defaults(text(file), true));
+  return true;
 }
 
 export function uninstallApp(layout: Layout): void {
@@ -159,13 +170,7 @@ export function appDiagnostics(layout: Layout): string[] {
             if (!file) continue;
             const entry = text(file);
             if (!entry) continue;
-            const keys = new Map<string, string>();
-            let group = "";
-            for (const line of entry.split(/\r?\n/)) {
-              if (/^\s*\[.*\]\s*$/.test(line)) group = line.trim();
-              const setting = /^\s*([^#=]+?)\s*=\s*(.*?)\s*$/.exec(line);
-              if (group === "[Desktop Entry]" && setting) keys.set(setting[1]!, setting[2]!);
-            }
+            const keys = parseDesktopEntry(entry);
             return keys.get("Type") === "Application" && Boolean(keys.get("Exec")) && keys.get("Hidden") !== "true";
           }
           return false;

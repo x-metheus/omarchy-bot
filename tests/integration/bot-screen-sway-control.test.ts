@@ -815,23 +815,27 @@ test("open_url rejects an env-wrapped snap browser and uses the portable one", a
   }
 });
 
-test("open_url honors host opt-in for a real browser launched through env", async () => {
+test("open_url honors desktop INI whitespace and ignores other groups for an env-wrapped browser", async () => {
   const fixture = await startControlRuntime({ nativeBrowserName: "brave", hostBrowser: true });
   const url = "https://example.com/env-native";
   try {
     const applications = path.join(root!, "profiles", "computer", "data", "applications");
     writeFileSync(path.join(applications, "brave-browser.desktop"), [
-      "[Desktop Entry]",
-      "Type=Application",
-      `Exec=env BROWSER_FIXTURE=1 ${path.join(root!, "bin", "brave")} %U`,
+      "# Desktop settings may have whitespace around their keys and groups.",
+      "  [Desktop Entry]  ",
+      " Type = Application ",
+      ` Exec = env BROWSER_FIXTURE=1 ${path.join(root!, "bin", "brave")} --fixture-ini %U `,
+      "[Desktop Action Unused]",
+      "Type=Link",
+      "Exec=/missing-browser",
       "",
-    ].join("\n"));
+    ].join("\r\n"));
 
     await expect(
       fixture.runtime.launch({ url }),
     ).resolves.toEqual({ text: `opened ${url}` });
     expect(fixture.assets.browserCalls()).toBe(0);
-    expect(readFileSync(fixture.nativeArgv, "utf8").trim()).toBe(`--new-window ${url}`);
+    expect(readFileSync(fixture.nativeArgv, "utf8").trim()).toBe(`--fixture-ini --new-window ${url}`);
   } finally {
     await fixture.runtime.stop();
   }

@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { createMemoryShell, getShell, installShell, type LocalSidecarStatus } from "../../apps/web/src/lib/shell.ts";
+import { createMemoryShell, installShell, type LocalSidecarStatus } from "../../apps/web/src/lib/shell.ts";
 import { api } from "../../apps/web/src/lib/api.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const originalFetch = globalThis.fetch;
-const originalShell = getShell();
+const originalShell = globalThis.__OMARCHY_BOT_SHELL__;
 const sent: Array<{ url: string; body: Record<string, unknown> }> = [];
 beforeEach(() => {
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -13,7 +13,7 @@ beforeEach(() => {
   }) as typeof fetch;
 });
 
-afterEach(() => { globalThis.fetch = originalFetch; installShell(originalShell); sent.length = 0; });
+afterEach(() => { globalThis.fetch = originalFetch; globalThis.__OMARCHY_BOT_SHELL__ = originalShell; sent.length = 0; });
 
 for (const [label, status, tagged] of [
   ["absent Sidecar", { running: false }, false],

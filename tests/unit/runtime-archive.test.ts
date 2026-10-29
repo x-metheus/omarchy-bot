@@ -4,6 +4,7 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rea
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { assertNotRoot, extractRuntimeArchive, verifyChecksum } from "../../apps/cli/src/archive.ts";
+import { appSigningKey } from "../integration/helpers/appSignatureFixture.ts";
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(path.join(tmpdir(), "runtime-archive-")); });
@@ -151,7 +152,7 @@ test("extracts the runtime packager's hardlinked files while preserving symlinks
     return file;
   };
   const run = (args: string[]) => {
-    const result = Bun.spawnSync(args, { cwd: source, env: { ...process.env, OMARCHY_BOT_PLUGIN_REVISION: "hardlink-fixture" } });
+    const result = Bun.spawnSync(args, { cwd: source, env: { ...process.env, OMARCHY_BOT_PLUGIN_REVISION: "hardlink-fixture", TAURI_UPDATER_PUBKEY: appSigningKey().publicKey } });
     expect(result.exitCode, result.stderr.toString()).toBe(0);
   };
   write("package.json", JSON.stringify({ name: "archive-fixture", private: true, dependencies: { fixture: "file:packages/fixture" } }));

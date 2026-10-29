@@ -1,4 +1,5 @@
 function installNativeShell(initial) {
+  if (typeof window.__TAURI_INTERNALS__?.invoke !== "function") return;
   const invoke = (command, args) => window.__TAURI_INTERNALS__.invoke(command, args);
   let connection = initial.connection;
   let metaSendsSuper = false;
@@ -185,7 +186,7 @@ function installNativeShell(initial) {
       void window.__OMARCHY_BOT_SHELL__.browser.open(url.href).catch(error => showNotice(String(error)));
     }
   }, true);
-  const notice = initial.error ?? (initial.revoked ? "This device was revoked. Pair again with a new code from the Service Host." : null);
+  const notice = initial.error ?? (initial.revoked ? "This app's pairing was revoked. Pair again with a new code from the Service Host." : null);
   if (notice) window.addEventListener("DOMContentLoaded", () => {
     const message = document.createElement("p");
     message.setAttribute("role", "alert");

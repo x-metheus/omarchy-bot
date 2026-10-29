@@ -211,8 +211,12 @@ export async function run(
         else await startUnit(layout, env);
         await waitForHealth(layout);
         let appFailure: unknown;
+        let appSkipped = false;
         if (command === "install" && graphicalSession(env)) {
-          try { await installApp(layout, env); } catch (error) { appFailure = error; }
+          try {
+            appSkipped = !await installApp(layout, env);
+            if (appSkipped) io.error("Skipping Omarchy Bot app installation: this build has no release signing key. Use a release runtime to install the app. The Service is installed and running; pair using the address and code below.");
+          } catch (error) { appFailure = error; }
         }
         const pairing = await pairingUrl(layout).catch(error => {
           if (appFailure) throw new Error(`${appFailure instanceof Error ? appFailure.message : String(appFailure)}; could not issue pairing: ${error instanceof Error ? error.message : String(error)}`);
@@ -221,7 +225,7 @@ export async function run(
         const { url } = pairing;
         io.log(`address: ${pairing.address}\ncode: ${pairing.code}\npairing: ${url}`);
         if (appFailure) throw appFailure;
-        if (graphicalSession(env)) try {
+        if (graphicalSession(env) && !appSkipped) try {
           const opener = env.OMARCHY_BOT_OPEN || "xdg-open";
           const executable = Bun.which(opener, { PATH: env.PATH || "" });
           if (!executable) throw new Error("opener is missing from PATH");

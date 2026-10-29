@@ -469,7 +469,7 @@ fn main() {
     let network = if let Some(origin) = &origin {
         let socket = websocket_url(Url::parse(origin).expect("validated Service origin")).expect("WebSocket scheme");
         format!("{origin} {}", socket.origin().ascii_serialization())
-    } else { "http: https:".into() };
+    } else { "http://localhost:*/api/pairing/exchange http://127.0.0.1:*/api/pairing/exchange https://*:*/api/pairing/exchange".into() };
     policy = policy.replace("connect-src 'self' ipc: http://ipc.localhost", &format!("connect-src 'self' ipc: http://ipc.localhost {network}"));
     if let Some(origin) = &origin { policy = policy.replace("img-src 'self' data: blob:", &format!("img-src 'self' data: blob: {origin}")); }
     context.config_mut().app.security.csp = Some(tauri::utils::config::Csp::Policy(policy));

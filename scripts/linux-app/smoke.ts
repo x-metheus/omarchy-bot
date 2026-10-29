@@ -164,9 +164,39 @@ try {
   pass("packaged AppImage first run shows Add Service");
   const webOrigin = await script("return location.origin");
   assert.equal(webOrigin, "tauri://localhost");
-  const allowed = await asyncScript(`const done=arguments[arguments.length-1]; fetch(arguments[0]+'/api/health').then(r=>done(r.ok)).catch(e=>done(String(e)))`, [origin]);
-  assert.equal(allowed, true, "real WebKit custom-origin CORS health request");
+  const allowed = await asyncScript(`const done=arguments[arguments.length-1]; fetch(arguments[0]+'/api/pairing/exchange',{
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:'invalid-cors-code'})
+  }).then(r=>done(r.status)).catch(e=>done(String(e)))`, [origin]);
+  assert.equal(allowed, 401, "real WebKit custom-origin CORS pairing request");
   pass(`actual WebKit origin ${webOrigin} passes fixed Service CORS allowlist`);
+
+  const entry = z.string().parse(await script("return document.querySelector('script[type=module][src]').src"));
+  for (const state of ["missing", "broken"]) {
+    await asyncScript(`const done=arguments[arguments.length-1];
+      window.__OMARCHY_BOT_SHELL__=arguments[1]==='missing'?undefined:{service:null};
+      const entry=document.createElement('script');entry.type='module';
+      entry.src=arguments[0]+'?startup-check='+arguments[1];entry.onload=()=>done(true);entry.onerror=()=>done(false);
+      document.head.append(entry);`, [entry, state]);
+    await visible("Omarchy Bot could not start");
+    await visible("native shell");
+    assert.equal(await script("return document.querySelector('button')?.textContent === 'Pair'"), false);
+    assert.equal(await script("return window.__OMARCHY_BOT_MEMORY_SHELL__ === undefined"), true);
+    assert.equal(await script("return localStorage.getItem('omarchy-bot.device-token')"), null);
+    await wd("POST", `/session/${session}/refresh`, {});
+    await visible("Add Service");
+  }
+  pass("actual packaged entry blocks missing and broken native shell without memory credentials");
+
+  const unpairedCsp = z.object({ blocked: z.array(z.object({ uri: z.string(), directive: z.string() })) }).parse(await asyncScript(`const done=arguments[arguments.length-1];const blocked=[];
+    const violation=e=>blocked.push({uri:e.blockedURI,directive:e.effectiveDirective});
+    document.addEventListener('securitypolicyviolation',violation);
+    Promise.all(arguments[0].map(url=>fetch(url,{signal:AbortSignal.timeout(2000)}).catch(()=>false)))
+      .then(()=>setTimeout(()=>{document.removeEventListener('securitypolicyviolation',violation);done({blocked})},100));`,
+    [["http://192.0.2.1/api/pairing/exchange", "https://pairing.example.invalid/api/pairing/exchange", "https://unrelated.example.invalid/api/health"]]));
+  assert.ok(unpairedCsp.blocked.some(entry => entry.uri.startsWith("http://192.0.2.1") && entry.directive === "connect-src"), "unpaired CSP refuses nonloopback plaintext HTTP");
+  assert.ok(!unpairedCsp.blocked.some(entry => entry.uri.startsWith("https://pairing.example.invalid")), "unpaired CSP permits an arbitrary HTTPS pairing target");
+  assert.ok(unpairedCsp.blocked.some(entry => entry.uri.startsWith("https://unrelated.example.invalid") && entry.directive === "connect-src"), "unpaired CSP refuses unrelated HTTPS endpoints");
+  pass("unpaired CSP blocks nonloopback HTTP and limits HTTPS to the pairing exchange");
 
   await input("Service address", tlsOrigin);
   await input("Pairing code", "tls-smoke-code");
@@ -351,7 +381,7 @@ try {
   await until("revocation deletes native Secret Service credential", async () => Bun.spawnSync(["secret-tool", "lookup", "service", "com.omarchy.bot"]).exitCode === 1 || undefined);
   await restart();
   await visible("Add Service");
-  await visible("This device was revoked");
+  await visible("This app's pairing was revoked");
   const previousAddress = await script("const l=[...document.querySelectorAll('label')].find(e=>e.textContent.includes('Service address'));return document.getElementById(l.htmlFor).value");
   assert.equal(previousAddress, otherOrigin);
   pass("real revocation clears OS credential and retains visible notice and Service address after restart");

@@ -7,13 +7,13 @@ interface ConnectionState {
   message?: string;
 }
 
-let state: ConnectionState = {
+let state: ConnectionState | undefined;
+const listeners = new Set<() => void>();
+export const connectionState = (): ConnectionState => state ??= {
   paired: Boolean(getShell().service.deviceToken()),
   pending: false,
   serviceUrl: getShell().service.baseUrl(),
 };
-const listeners = new Set<() => void>();
-export const connectionState = (): ConnectionState => state;
 export function subscribeConnection(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
@@ -24,7 +24,7 @@ function publish(next: ConnectionState): void {
 }
 
 export async function pairService({ serviceUrl, code }: PairingRequest): Promise<void> {
-  if (state.pending) return;
+  if (connectionState().pending) return;
   publish({ paired: false, pending: true, serviceUrl });
   try {
     let address: URL;
@@ -56,11 +56,11 @@ export async function pairService({ serviceUrl, code }: PairingRequest): Promise
 }
 
 export function deviceRevoked(): void {
-  if (!state.paired) return;
+  if (!connectionState().paired) return;
   const serviceUrl = getShell().service.baseUrl();
-  publish({ paired: false, pending: true, serviceUrl, message: "This device was revoked. Pair again with a new code from the Service Host." });
+  publish({ paired: false, pending: true, serviceUrl, message: "This app's pairing was revoked. Pair again with a new code from the Service Host." });
   void getShell().service.clear().then(
-    () => publish({ ...state, pending: false }),
-    () => publish({ ...state, pending: false, message: "This device was revoked, but its stored token could not be cleared. Close the app and clear its connection before pairing again." }),
+    () => publish({ ...connectionState(), pending: false }),
+    () => publish({ ...connectionState(), pending: false, message: "This app's pairing was revoked, but its stored token could not be cleared. Close the app and clear its connection before pairing again." }),
   );
 }

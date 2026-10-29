@@ -1,29 +1,26 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider, createRouter } from "@tanstack/react-router";
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import { routeTree } from "./routeTree.gen.ts";
-import "./globals.css";
+import { startApp } from "./app.tsx";
+import { getShell } from "./lib/shell.ts";
 
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { retry: 1, staleTime: 5_000 },
-  },
-});
-
-const router = createRouter({ routeTree });
-
-declare module "@tanstack/react-router" {
-  interface Register {
-    router: typeof router;
+try {
+  const shell = getShell();
+  for (const [capability, methods] of [
+    [shell.service, ["baseUrl", "deviceToken", "store", "clear"]],
+    [shell.pairing, ["onRequest"]],
+    [shell.browser, ["open"]],
+    [shell.updates, ["check", "download", "restart"]],
+    [shell.localSidecar, ["status", "onApproval", "onApprovalDismiss", "decide"]],
+    [shell.keyMapping, ["platform", "metaSendsSuper", "setMetaSendsSuper"]],
+  ] as const) {
+    if (!capability || methods.some(method => typeof Reflect.get(capability, method) !== "function")) {
+      throw new Error("The native shell is broken.");
+    }
   }
+  shell.service.baseUrl();
+  shell.service.deviceToken();
+  startApp();
+} catch {
+  const message = document.createElement("p");
+  message.setAttribute("role", "alert");
+  message.textContent = "Omarchy Bot could not start because its native shell is unavailable or broken. Close and reopen the app. If the problem continues, reinstall Omarchy Bot.";
+  document.getElementById("root")!.replaceChildren(message);
 }
-
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>
-  </StrictMode>,
-);

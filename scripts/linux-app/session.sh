@@ -3,6 +3,17 @@ set -euo pipefail
 umask 077
 # Trust one ephemeral test certificate inside this disposable container only.
 if [[ $(id -u) -eq 0 ]]; then
+  if [[ ! -f /etc/omarchy-bot-linux-app || $(< /etc/omarchy-bot-linux-app) != omarchy-bot-linux-app-v1 ]] \
+    || [[ ! -f /.dockerenv && ! -f /run/.containerenv ]]; then
+    echo "CA trust requires the repository's Linux app container; refusing to modify host trust." >&2
+    exit 1
+  fi
+  if [[ ! ${OMARCHY_BOT_SMOKE_UID:-} =~ ^[1-9][0-9]*$ || ! ${OMARCHY_BOT_SMOKE_GID:-} =~ ^[1-9][0-9]*$ ]] \
+    || ! command -v setpriv >/dev/null \
+    || ! setpriv --reuid="$OMARCHY_BOT_SMOKE_UID" --regid="$OMARCHY_BOT_SMOKE_GID" --clear-groups /bin/true; then
+    echo "CA trust requires a working non-root smoke UID/GID and setpriv privilege drop." >&2
+    exit 1
+  fi
   trust=$(mktemp -d /tmp/omarchy-bot-trust-XXXXXX)
   read -r offhost_ip _ <<< "$(hostname -I)"
   openssl req -x509 -newkey rsa:2048 -nodes -keyout "$trust/key.pem" -out "$trust/cert.pem" -days 1 -subj /CN=localhost -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:$offhost_ip" > "$trust/openssl.log" 2>&1
