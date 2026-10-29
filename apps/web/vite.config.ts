@@ -5,6 +5,11 @@ import { tanstackRouter } from "@tanstack/router-plugin/vite";
 
 export default defineConfig(({ command }) => ({
   plugins: [
+    {
+      name: "development-shell",
+      apply: "serve",
+      transformIndexHtml: () => [{ tag: "script", attrs: { type: "module", src: "/src/dev-shell.ts" }, injectTo: "head" }],
+    },
     tanstackRouter({ target: "react", routesDirectory: "src/routes", generatedRouteTree: "src/routeTree.gen.ts" }),
     react(),
     stylex({

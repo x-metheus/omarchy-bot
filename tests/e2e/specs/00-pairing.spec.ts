@@ -14,6 +14,30 @@ async function issueCode(): Promise<{ code: string; url: string }> {
   return response.json();
 }
 
+for (const state of ["missing", "broken"] as const) {
+  test(`${state} native shell blocks startup without storing a token`, async ({ page }) => {
+    const exchanges: string[] = [];
+    await page.route("**/src/dev-shell.ts", route => route.fulfill({
+      contentType: "application/javascript",
+      body: state === "missing" ? "" : "globalThis.__OMARCHY_BOT_SHELL__ = { service: null };",
+    }));
+    await page.route("**/api/pairing/exchange", route => {
+      exchanges.push(route.request().url());
+      return route.fulfill({ status: 201, contentType: "application/json", body: '{"token":"must-not-be-stored"}' });
+    });
+    await page.goto("/");
+    await expect(page.getByRole("alert")).toContainText("Omarchy Bot could not start");
+    await expect(page.getByRole("alert")).toContainText("native shell");
+    await expect(page.getByRole("heading", { name: "Add Service" })).toBeHidden();
+    await expect(page.getByRole("button", { name: "Pair", exact: true })).toBeHidden();
+    expect(await page.evaluate(() => ({
+      memory: globalThis.__OMARCHY_BOT_MEMORY_SHELL__ !== undefined,
+      token: localStorage.getItem("omarchy-bot.device-token"),
+    }))).toEqual({ memory: false, token: null });
+    expect(exchanges).toEqual([]);
+  });
+}
+
 test("Add Service pairs by address and code and keeps the connection on reload", async ({ page }) => {
   const issued = await issueCode();
   const controlRequests: string[] = [];
@@ -121,7 +145,7 @@ test("a revoked device returns to Add Service, stops events, and can pair again"
   expect(revoked.status).toBe(204);
   await page.clock.runFor(30_100);
   await expect(page.getByRole("heading", { name: "Add Service" })).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText("This device was revoked");
+  await expect(page.getByRole("alert")).toContainText("This app's pairing was revoked");
   await expect.poll(() => eventClosed).toBe(true);
   expect(await page.evaluate(() => localStorage.getItem("omarchy-bot.device-token"))).toBeNull();
   const stoppedSockets = eventSockets;
@@ -143,5 +167,5 @@ pairedTest("projection HTTP 401 immediately returns the shell to Add Service", a
   await expect(page.getByRole("button", { name: "Open Computer Surface", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Add Service" })).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText("This device was revoked");
+  await expect(page.getByRole("alert")).toContainText("This app's pairing was revoked");
 });

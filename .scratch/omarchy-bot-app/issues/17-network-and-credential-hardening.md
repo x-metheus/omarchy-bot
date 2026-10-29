@@ -9,12 +9,22 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md). Origin: PR #10 code review (Spec (c), Standards judgement call on the CA store).
 
-- [ ] Unpaired CSP permits only what the pairing exchange needs. A test asserts that the generated policy refuses a non-loopback `http:` origin and an arbitrary `https:` origin that was not the pairing target. If arbitrary HTTPS pairing targets make a static policy impossible, record the narrowest workable policy and why
-- [ ] The packaged app shows a startup error when the native shell is absent; a test proves the memory shell is only selected explicitly
-- [ ] The installer refuses an AppImage with a missing, tampered or wrong-key signature and accepts a correctly signed one (tests with a disposable key)
-- [ ] The CA-trust step refuses to run outside the container even as root
-- [ ] Review cleanups in the same code: the installer's desktop-entry INI parsing exists once; the revoked-device message avoids the Avoid-listed "This Device" phrasing
+- [x] Unpaired CSP permits only what the pairing exchange needs. A test asserts that the generated policy refuses a non-loopback `http:` origin and an arbitrary `https:` origin that was not the pairing target. If arbitrary HTTPS pairing targets make a static policy impossible, record the narrowest workable policy and why
+- [x] The packaged app shows a startup error when the native shell is absent; a test proves the memory shell is only selected explicitly
+- [x] The installer refuses an AppImage with a missing, tampered or wrong-key signature and accepts a correctly signed one (tests with a disposable key)
+- [x] The CA-trust step refuses to run outside the container even as root
+- [x] Review cleanups in the same code: the installer's desktop-entry INI parsing exists once; the revoked-device message avoids the Avoid-listed "This Device" phrasing
+
+## Comments
+
+Unpaired CSP now allows only `/api/pairing/exchange` on canonical loopback HTTP and arbitrary HTTPS; non-loopback `http:` origins are refused. Recorded exception, as the criterion allows: a static policy cannot name an arbitrary HTTPS pairing target because the Service address is entered after the page loads, so the narrowest workable policy is an unrestricted HTTPS host with the exchange path restriction. The paired CSP is unchanged. WebKit's limits on literal IPv6 and other 127.x loopback forms are documented; no native transport was added.
+
+In the packaged app a missing or malformed native shell is a visible startup error and the Web UI never falls back to the memory shell, which is now selected only explicitly by the dev harness and Chromium tests. The installer verifies the downloaded AppImage's real minisign prehashed Ed25519 signature against the installer-adjacent packaged trust key and its checksum before publication, refusing wrong, missing, malformed or tampered input while preserving the Service, app data and database; runtime packaging validates a real `TAURI_UPDATER_PUBKEY` and fails closed when unprovisioned. The Linux smoke CA-trust script proves repository container markers and drops privileges before writing. Desktop-entry INI parsing is shared in one place, and the revoked-device message reads "This app's pairing was revoked."
+
+Verification: focused hardening suite 100 pass / 0 fail (672 assertions); boundary tests 2 pass; `bun run typecheck` exit 0. Packaged WebKit smoke passed (missing/broken bridge startup, unpaired CSP, paired restrictions, offhost HTTPS, projection/input/Sidecar/revocation); Chromium `00-pairing` 9 pass; installer FUSE/gio/keychain/uninstall data-preservation smoke passed; pinned Tauri signer interoperability checked with a disposable key and a tampered payload refused.
+
+Limits: real public-key provisioning for production releases remains a release prerequisite, not an implementation blocker; packaging fails closed until it is configured. Full `bun test` did not wholly pass: 867 pass, 31 skip, 1 fail (899 tests / 128 files). The sole failure is `tests/conformance/browserConformance` (`pi.steps.ts:137`, expected at least 5 tool calls, got 2; child exit 1), the known real-Pi conformance model/assets failure, accepted as a resolve exception and not caused by this ticket. The private Pi worktree config and host auth copy (0600, private 0700 directory) were removed; the host config was not modified. Signing keys used for the test were removed.

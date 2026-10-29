@@ -99,6 +99,10 @@ if [[ ${#font_files[@]} -eq 0 ]]; then
   exit 1
 fi
 
+# The installer trusts this configured key, never one supplied by the download origin.
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+bun -e 'const { updaterPublicKey } = await import(process.argv[1]); updaterPublicKey(process.env.TAURI_UPDATER_PUBKEY ?? "");' "$script_root/apps/cli/src/appSignature.ts"
+
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 
@@ -130,6 +134,8 @@ tar -C "$root" --exclude=node_modules \
   --exclude=apps/site/api --exclude=apps/site/server --exclude=apps/site/.vercel \
   --exclude='apps/site/.env*' \
   -cf - "${existing[@]}" | tar -C "$staging" -xf -
+mkdir -p "$staging/apps/cli/src"
+printf '%s\n' "$TAURI_UPDATER_PUBKEY" > "$staging/apps/cli/src/release-public-key"
 mkdir -p "$staging/sway"
 tar -xzf "$sway_bundle" -C "$staging/sway"
 printf '%s\n%s\n' "$sway_release" "$sway_sha256" > "$staging/sway/.omarchy-bot-runtime"
