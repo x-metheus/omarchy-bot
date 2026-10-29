@@ -18,7 +18,9 @@ jobs:
         include:
           - runner: ubuntu-22.04
             binary: sidecar
-          - runner: macos-latest
+          - runner: macos-15
+            binary: sidecar
+          - runner: macos-15-intel
             binary: sidecar
           - runner: windows-latest
             binary: sidecar.exe

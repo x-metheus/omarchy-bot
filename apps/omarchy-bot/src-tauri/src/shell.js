@@ -116,7 +116,7 @@ function installNativeShell(initial) {
       decide: (jobId, decision) => invoke("sidecar_decide", { jobId, decision }),
     },
     keyMapping: {
-      platform: () => "linux",
+      platform: () => initial.platform,
       metaSendsSuper: () => metaSendsSuper,
       async setMetaSendsSuper(value) {
         localStorage.setItem("omarchy-bot.meta-sends-super", String(value));

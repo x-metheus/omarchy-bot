@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -201,7 +202,7 @@ fn pairing_request(value: &str) -> Option<PairingRequest> {
 }
 
 fn keychain_error(error: keyring::Error) -> String {
-    format!("Could not access the OS keychain: {error}. Unlock your Secret Service keyring and try again; credentials were not discarded.")
+    format!("Could not access the OS keychain: {error}. Unlock your OS keychain and try again; credentials were not discarded.")
 }
 
 fn keychain() -> Result<keyring::Entry, String> {
@@ -263,6 +264,41 @@ fn open_browser(app: tauri::AppHandle, value: String) -> Result<(), String> {
     app.opener().open_url(url.as_str(), None::<&str>).map_err(|error| format!("Could not open the system browser: {error}"))
 }
 
+#[cfg(target_os = "linux")]
+fn certificate_untrusted_probe(url: &Url) -> bool {
+    let client = gio::SocketClient::new();
+    client.set_tls(true);
+    client.set_timeout(10);
+    match client.connect_to_uri(url.as_str(), 443, gio::Cancellable::NONE) {
+        Ok(stream) => { let _ = stream.close(gio::Cancellable::NONE); false },
+        Err(error) => error.matches(gio::TlsError::BadCertificate),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn certificate_untrusted_probe(url: &Url) -> bool {
+    use security_framework::{policy::SecPolicy, secure_transport::{HandshakeError, SslConnectionType, SslContext, SslProtocolSide}};
+    use std::net::{TcpStream, ToSocketAddrs};
+    let Some(host) = url.host() else { return false; };
+    let host = match host {
+        url::Host::Domain(domain) => std::borrow::Cow::Borrowed(domain),
+        url::Host::Ipv4(address) => std::borrow::Cow::Owned(address.to_string()),
+        url::Host::Ipv6(address) => std::borrow::Cow::Owned(address.to_string()),
+    };
+    let timeout = std::time::Duration::from_secs(10);
+    let Ok(addresses) = (host.as_ref(), url.port_or_known_default().unwrap_or(443)).to_socket_addrs() else { return false; };
+    let Some(stream) = addresses.filter_map(|address| TcpStream::connect_timeout(&address, timeout).ok()).next() else { return false; };
+    if stream.set_read_timeout(Some(timeout)).is_err() || stream.set_write_timeout(Some(timeout)).is_err() { return false; }
+    let Ok(mut context) = SslContext::new(SslProtocolSide::CLIENT, SslConnectionType::STREAM) else { return false; };
+    if context.set_peer_domain_name(&host).is_err() || context.set_break_on_server_auth(true).is_err() { return false; }
+    // Stop at server authentication: diagnose system trust without sending credentials or accepting an exception.
+    let Err(HandshakeError::Interrupted(handshake)) = context.handshake(stream) else { return false; };
+    if !handshake.server_auth_completed() { return false; }
+    let Ok(Some(mut trust)) = handshake.context().peer_trust2() else { return false; };
+    if trust.set_policy(&SecPolicy::create_ssl(SslProtocolSide::SERVER, Some(&host))).is_err() { return false; }
+    trust.evaluate_with_error().is_err()
+}
+
 #[tauri::command]
 async fn certificate_untrusted(state: tauri::State<'_, ShellState>, origin: String) -> Result<bool, String> {
     let url = service_origin(&origin)?;
@@ -270,15 +306,8 @@ async fn certificate_untrusted(state: tauri::State<'_, ShellState>, origin: Stri
     if state.origin.as_ref().is_some_and(|paired| paired != &url.origin().ascii_serialization()) {
         return Err("The certificate probe is restricted to the paired Service.".into());
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        let client = gio::SocketClient::new();
-        client.set_tls(true);
-        client.set_timeout(10);
-        match client.connect_to_uri(url.as_str(), 443, gio::Cancellable::NONE) {
-            Ok(stream) => { let _ = stream.close(gio::Cancellable::NONE); false },
-            Err(error) => error.matches(gio::TlsError::BadCertificate),
-        }
-    }).await.map_err(|_| "The TLS certificate check failed.".into())
+    tauri::async_runtime::spawn_blocking(move || certificate_untrusted_probe(&url))
+        .await.map_err(|_| "The TLS certificate check failed.".into())
 }
 
 #[tauri::command]
@@ -367,7 +396,7 @@ fn main() {
             if let Some(connection) = &connection {
                 if let Err(error) = start_sidecar(app.handle(), connection) { eprintln!("{error}"); }
             }
-            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked });
+            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "platform": std::env::consts::OS });
             let script = format!("({})({});", include_str!("shell.js"), initial);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Omarchy Bot").inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)
@@ -383,6 +412,11 @@ fn main() {
     // Rebuild argv at the process boundary so consumed pairing codes are never replayed.
     environment.args_os.truncate(1);
     let exit = application.run_return(|app, event| {
+        // Apple Events arrive after setup; the native queue retains links until the WebView subscribes.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = &event {
+            for url in urls { receive_link(app, url.as_str()); }
+        }
         if matches!(event, tauri::RunEvent::Exit) { stop_sidecar(&app.state::<ShellState>()); }
     });
     if exit == RESTART {
@@ -392,4 +426,46 @@ fn main() {
         tauri::process::restart(&environment);
     }
     std::process::exit(exit);
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificate_probe_rejects_untrusted_ipv6_tls() { check_certificate_probe("[::1]:0"); }
+
+    #[test]
+    fn certificate_probe_distinguishes_untrusted_tls_from_an_unreachable_service() {
+        check_certificate_probe("127.0.0.1:0");
+    }
+
+    fn check_certificate_probe(bind: &str) {
+        let directory = std::env::temp_dir().join(format!("omarchy-tls-{}-{}", std::process::id(), if bind.starts_with('[') { "ipv6" } else { "ipv4" }));
+        std::fs::create_dir_all(&directory).unwrap();
+        let certificate = directory.join("cert.pem");
+        let key = directory.join("key.pem");
+        let generated = Command::new("openssl").args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-keyout"])
+            .arg(&key).arg("-out").arg(&certificate).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        assert!(generated.success());
+        let listener = std::net::TcpListener::bind(bind).unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut server = Command::new("openssl").args(["s_server", "-accept", &address.to_string(), "-cert"])
+            .arg(&certificate).arg("-key").arg(&key).arg("-quiet")
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::net::TcpStream::connect(address).is_err() {
+                assert!(std::time::Instant::now() < deadline, "TLS fixture did not start");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(certificate_untrusted_probe(&Url::parse(&format!("https://{address}")).unwrap()));
+        });
+        let _ = server.kill();
+        let _ = server.wait();
+        std::fs::remove_dir_all(directory).unwrap();
+        result.unwrap();
+        assert!(!certificate_untrusted_probe(&Url::parse(&format!("https://{address}")).unwrap()));
+    }
 }
