@@ -96,7 +96,7 @@ Every native capability sits behind one `shell` interface, so a phone shell can 
 - Command execution is split behind one executor interface with two implementations: POSIX (current process-group leader and SIGTERM/SIGKILL escalation, used on Linux and macOS) and Windows (Windows PowerShell 5.1, the job assigned to a Job Object that is closed with kill-on-close on cancel or timeout). The rest of the job handler (approval, confinement, search, read, write, transfer, result truncation) is shared.
 - The secret-directory denylist is defined per operating system: the current POSIX list on Linux, plus `Library/Keychains` and other credential stores on macOS, plus `AppData` credential and key stores on Windows.
 - The compositor and screenshot refusal applies on every operating system.
-- The Sidecar is compiled with `bun build --compile` for each target (linux-x64, darwin-arm64, darwin-x64, windows-x64) and bundled in the app as a Tauri external binary. It no longer depends on the plugin runtime.
+- The Sidecar is a small standalone Rust program built for each target (`linux-x64`, `darwin-arm64`, `darwin-x64`, `windows-x64`) and bundled in the app as a Tauri external binary. It replaces the `bun build --compile` TypeScript Sidecar and no longer carries a Bun runtime. It remains a separate child process, isolating its lifetime and failures from the Tauri app and preserving the shipped-binary test boundary (ADR 0015).
 - The app starts the Sidecar as a child when it connects to a Service not on the same machine (the existing same-host check is unchanged), and terminates it on quit or unpair. Ask, Always, and Never decisions keep the existing stdin/stdout JSON line contract; the app renders the prompts and persists Always/Never per install.
 
 ### Web UI
@@ -151,8 +151,9 @@ Good tests drive external behavior through the highest available seam and never 
   - `os` and `shell` on registration, and their appearance in the `local` tool description.
   - Per-OS denylists.
   - Cancel tearing down a process tree on each operating system.
+  - Protocol wire types stay aligned through the shared canonical JSON fixtures in `packages/protocol/fixtures/sidecar/` defined by ADR 0015. TypeScript derives coverage requirements from the authoritative device-frame schemas and `LOCAL_SCHEMA`, failing if a frame variant, action, or property lacks a fixture, including both presence and absence for every optional property. It validates each fixture against those schemas with an unchanged JSON round-trip; Rust deserializes the same fixtures with unknown fields rejected and re-serializes equal JSON values. Adding an optional field or variant must fail coverage until the corpus and both consumers are updated.
 
-  The suite runs against the compiled binary in CI on Linux, macOS, and Windows runners. Windows-only cases (PowerShell syntax, Job Object teardown) run only there.
+  The suite selects the compiled Rust binary through `OMARCHY_BOT_TEST_SIDECAR_BINARY` in CI on Linux, macOS, and Windows runners; both protocol-fixture consumers also run there. Windows-only cases (PowerShell syntax, Job Object teardown) run only there.
 - **The `shell` interface.** The existing Chromium Playwright suite moves from the Service-served UI to the Vite-served bundle with the in-memory shell, pointed at the harness Service. New specs cover:
   - Add Service.
   - Deep-link pairing intake.
