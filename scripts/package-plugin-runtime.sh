@@ -10,7 +10,6 @@ out_dir=$(CDPATH= cd -- "$out_dir" && pwd)
 asset=omarchy-bot-runtime-${sha}-x86_64.tar.zst
 
 required=(
-  apps/web/dist
   apps/daemon/dist/native-pointer/omarchy-bot-wayland-input
   apps/daemon/dist/native-capture/omarchy-bot-wayland-capture
   apps/daemon/dist/native-bot-desktop/omarchy-bot-desktop
@@ -100,6 +99,15 @@ if [[ ${#font_files[@]} -eq 0 ]]; then
   exit 1
 fi
 
+# The installer trusts this configured key, never one supplied by the download origin.
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [[ -n ${TAURI_UPDATER_PUBKEY:-} ]]; then
+  bun -e 'const { updaterPublicKey } = await import(process.argv[1]); updaterPublicKey(process.env.TAURI_UPDATER_PUBKEY);' "$script_root/apps/cli/src/appSignature.ts"
+elif [[ ${RELEASE_BUILD:-} == true || ${RELEASE_BUILD:-} == 1 ]]; then
+  printf 'Omarchy Bot release runtime packaging requires TAURI_UPDATER_PUBKEY\n' >&2
+  exit 1
+fi
+
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 
@@ -125,10 +133,17 @@ done
 
 # Keep the site workspace manifest, not publisher code, assets, or local secrets.
 tar -C "$root" --exclude=node_modules \
+  --exclude=apps/web/dist \
+  --exclude=apps/cli/src/release-public-key \
+  --exclude=apps/omarchy-bot \
   --exclude=apps/site/public --exclude=apps/site/src --exclude=apps/site/dist \
   --exclude=apps/site/api --exclude=apps/site/server --exclude=apps/site/.vercel \
   --exclude='apps/site/.env*' \
   -cf - "${existing[@]}" | tar -C "$staging" -xf -
+if [[ -n ${TAURI_UPDATER_PUBKEY:-} ]]; then
+  mkdir -p "$staging/apps/cli/src"
+  printf '%s\n' "$TAURI_UPDATER_PUBKEY" > "$staging/apps/cli/src/release-public-key"
+fi
 mkdir -p "$staging/sway"
 tar -xzf "$sway_bundle" -C "$staging/sway"
 printf '%s\n%s\n' "$sway_release" "$sway_sha256" > "$staging/sway/.omarchy-bot-runtime"
@@ -142,6 +157,7 @@ printf 'Installing frozen production dependencies in runtime staging\n' >&2
   bun install --production --frozen-lockfile >&2
 )
 
-tar --zstd -cf "$out_dir/$asset" -C "$staging" .
+# Bun's dependency store uses hardlinks; the installer accepts only files, directories and symlinks.
+tar --hard-dereference --zstd -cf "$out_dir/$asset" -C "$staging" .
 (cd "$out_dir" && sha256sum -- "$asset" > "$asset.sha256")
 printf '%s\n' "$out_dir/$asset"

@@ -25,8 +25,6 @@ export interface Config {
   avatarsDir: string;
   /** Home-local Shared Workspace; distinct from product data under dataDir. */
   sharedWorkspaceDir: string;
-  /** Voxtype transcript targets live here; runtime dir preferred, state dir fallback. */
-  dictationDir: string;
   /** Transient child sockets and retained Bot-owned application profiles. */
   botScreenRuntimeDir: string;
   botScreenProfileDir: string;
@@ -36,11 +34,11 @@ export interface Config {
   botComputerBrowserPackDir: string;
   conformanceDir: string;
   statusPath: string;
-  /** Voxtype binary override (defaults to `voxtype` on PATH). */
-  voxtypeBin?: string;
   /** HTTP listener address; remote listeners require TLS or a declared proxy. */
   host: string;
   port: number;
+  /** Explicit opt-in for loopback browser development origins. */
+  development: boolean;
   tlsCert?: string;
   tlsKey?: string;
   /** Single proxy peer IP; IPv4 must use canonical dotted-quad notation. */
@@ -94,7 +92,6 @@ export function loadConfig(): Config {
   const dataDir = process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot");
   const stateDir = process.env.OMARCHY_BOT_STATE ?? path.join(os.homedir(), ".local/state/omarchy-bot");
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
-  const voxtypeBin = process.env.OMARCHY_BOT_VOXTYPE_BIN;
   const screenProfile = botScreenProfile();
   const cfg: Config = {
     dataDir,
@@ -104,7 +101,6 @@ export function loadConfig(): Config {
     attachmentsDir: path.join(dataDir, "attachments"),
     avatarsDir: path.join(dataDir, "avatars"),
     sharedWorkspaceDir: sharedWorkspaceDir(),
-    dictationDir: runtimeDir ? path.join(runtimeDir, "omarchy-bot", "dictation") : path.join(stateDir, "dictation"),
     botScreenRuntimeDir: runtimeDir
       ? path.join(runtimeDir, "omarchy-bot", "screens")
       : path.join(stateDir, "screen-runtime"),
@@ -114,12 +110,12 @@ export function loadConfig(): Config {
     botComputerBrowserPackDir: path.join(dataDir, "runtime", "browser"),
     conformanceDir: path.join(dataDir, "conformance"),
     statusPath: path.join(stateDir, "status.json"),
-    ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),
     host,
     ...(tlsCert ? { tlsCert } : {}),
     ...(tlsKey ? { tlsKey } : {}),
     ...(trustedProxy ? { trustedProxy } : {}),
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
+    development: process.env.OMARCHY_BOT_DEV === "1",
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
     botDeletionTerminalTimeoutMs: Number(process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS ?? 30_000),
     botScreenCapacity: botScreenCapacity(screenProfile.name),
@@ -132,7 +128,6 @@ export function loadConfig(): Config {
   mkdirSync(cfg.artifactsDir, { recursive: true });
   mkdirSync(cfg.attachmentsDir, { recursive: true });
   mkdirSync(cfg.avatarsDir, { recursive: true });
-  mkdirSync(cfg.dictationDir, { recursive: true });
   mkdirSync(cfg.botScreenProfileDir, { recursive: true });
   mkdirSync(cfg.conformanceDir, { recursive: true });
   return cfg;

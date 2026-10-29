@@ -13,7 +13,7 @@ import {
 } from "@omarchy-bot/protocol";
 import { HttpError } from "../bots/bots.ts";
 import { CatalogClient } from "./catalogClient.ts";
-import { Grant, ProviderAccounts } from "./providerAccounts.ts";
+import { AUTHORIZATION_TTL_MS, Grant, ProviderAccounts, type PluginAuthorizationEvent } from "./providerAccounts.ts";
 import { toolOperation } from "./pluginDispatch.ts";
 import { SkillInstalls } from "./skillInstall.ts";
 import { ServiceBundles } from "./serviceBundles.ts";
@@ -58,6 +58,7 @@ export class PluginsService {
   readonly publisher: CatalogClient;
   #nativeCache: { at: number; resources: NativePluginResources; error?: string } | undefined;
   #nativePending: Promise<NativePluginResources> | undefined;
+  #authorizations = new Map<string, { id: string; server: string; expiresAt: number; event: PluginAuthorizationEvent }>();
   readonly bundles: ServiceBundles;
   #timer: ReturnType<typeof setInterval>;
   #reconcileTimer: ReturnType<typeof setInterval>;
@@ -68,8 +69,8 @@ export class PluginsService {
   readonly packages: McpPackages;
 
   constructor(private readonly rootDir: string, private readonly cwd: string, private readonly nativeResources: () => Promise<NativePluginResources>,
-    private readonly nativeControl?: (input: Pick<Extract<AgentCommand, { type: "mcp.control" }>, "action" | "server" | "redirectUrl">) => Promise<NativeMcpControlResult>,
-    private readonly clientOrigin?: () => string) {
+    private readonly nativeControl?: (input: Pick<Extract<AgentCommand, { type: "mcp.control" }>, "action" | "server" | "redirectUrl" | "authorizationId" | "expiresAt">) => Promise<NativeMcpControlResult>,
+    private readonly serviceOrigin?: () => string, private readonly authorizationEvent?: (event: PluginAuthorizationEvent) => void) {
     mkdirSync(rootDir, { recursive: true, mode: 0o700 });
     if (!lstatSync(rootDir).isDirectory() || lstatSync(rootDir).isSymbolicLink()) throw new Error("Plugin state directory must be a private real directory");
     chmodSync(rootDir, 0o700);
@@ -123,6 +124,8 @@ export class PluginsService {
     }, 6 * 60 * 60 * 1000);
     this.#timer.unref();
     this.#reconcileTimer = setInterval(() => {
+      this.accounts.expirePending();
+      for (const [id, pending] of this.#authorizations) if (pending.expiresAt <= Date.now()) this.#finishNative(id, pending.id, "failed", "expired");
       try { this.skills.list(); this.packages.collect(); } catch (error) { this.#defaultError = error instanceof Error ? error.message : String(error); }
     }, 2000);
     this.#reconcileTimer.unref();
@@ -149,6 +152,7 @@ export class PluginsService {
       release: (providerId, serviceId) => this.bundles.release(providerId, serviceId),
       authorizeMcp: (id) => this.authorizeMcp(id),
       checkMcp: (id) => this.checkMcp(id),
+      ...(authorizationEvent === undefined ? {} : { authorizationEvent }),
     });
     this.#ready = this.#initializeServices();
   }
@@ -274,14 +278,76 @@ export class PluginsService {
 
   async authorizeMcp(id: string, redirectUrl?: string): Promise<{ authorizationUrl?: string; authenticated?: boolean; error?: string }> {
     if (!this.nativeControl) throw new HttpError(503, "The native Pi MCP runtime is unavailable");
-    const name = this.mcp.name(id);
-    const response = await this.nativeControl({ action: redirectUrl === undefined ? "auth-start" : "auth-complete", server: name, ...(redirectUrl === undefined ? {} : { redirectUrl }) });
-    this.mcp.updateStatus(response.servers);
-    return {
-      ...(typeof response.result?.authorizationUrl === "string" ? { authorizationUrl: response.result.authorizationUrl } : {}),
-      ...(typeof response.result?.authenticated === "boolean" ? { authenticated: response.result.authenticated } : {}),
-      ...(typeof response.result?.error === "string" ? { error: response.result.error } : {}),
-    };
+    const server = this.mcp.name(id);
+    let pending = this.#authorizations.get(id);
+    if (redirectUrl !== undefined && (!pending || pending.expiresAt <= Date.now())) {
+      if (pending) this.#finishNative(id, pending.id, "failed", "expired");
+      throw new HttpError(400, "Authorization is missing, expired, or already used. Start again from Plugins.");
+    }
+    if (redirectUrl === undefined) {
+      const account = this.#state.accounts.find(account => this.mcp.serviceConnections(account.id).some(connection => connection.id === id));
+      pending = { id: randomUUID(), server, expiresAt: Date.now() + AUTHORIZATION_TTL_MS,
+        event: { mcpId: id, status: "failed", ...(account ? { providerId: account.providerId, accountId: account.id } : {}) } };
+      this.#authorizations.set(id, pending);
+    }
+    const attempt = pending!;
+    try {
+      const response = await this.nativeControl({ action: redirectUrl === undefined ? "auth-start" : "auth-complete", server,
+        authorizationId: attempt.id, expiresAt: attempt.expiresAt, ...(redirectUrl === undefined ? {} : { redirectUrl }) });
+      if (this.#authorizations.get(id) !== attempt) return {};
+      this.mcp.updateStatus(response.servers);
+      const error = typeof response.result?.error === "string" ? redactToolErrorSummary(response.result.error) : undefined;
+      if (error) this.#finishNative(id, attempt.id, "failed", error);
+      else if (response.result?.authenticated === true) {
+        const failure = await this.#completeNative(id, attempt.id);
+        if (failure) return { error: failure };
+      }
+      return { ...(typeof response.result?.authorizationUrl === "string" ? { authorizationUrl: response.result.authorizationUrl } : {}),
+        ...(typeof response.result?.authenticated === "boolean" ? { authenticated: response.result.authenticated } : {}), ...(error ? { error } : {}) };
+    } catch (error) {
+      this.#finishNative(id, attempt.id, "failed", redactToolErrorSummary(error instanceof Error ? error.message : error));
+      throw error;
+    }
+  }
+
+  handleNativeAuthorization(payload: unknown): void {
+    const parsed = z.object({ server: z.string(), authorizationId: z.string(), status: z.enum(["completed", "failed"]), reason: z.string().optional() }).safeParse(payload);
+    if (!parsed.success) return;
+    const outcome = parsed.data;
+    for (const [id, pending] of this.#authorizations) if (pending.server === outcome.server && pending.id === outcome.authorizationId) {
+      if (pending.expiresAt <= Date.now()) this.#finishNative(id, pending.id, "failed", "expired");
+      else if (outcome.status === "completed") void this.#completeNative(id, pending.id).catch(() => undefined);
+      else this.#finishNative(id, pending.id, "failed", outcome.reason === "expired" ? "expired" : "auth_failed");
+      break;
+    }
+  }
+
+  async #completeNative(id: string, authorizationId: string): Promise<string | undefined> {
+    let failure: string | undefined;
+    try {
+      const connection = await this.checkMcp(id);
+      if (connection.status !== "connected") failure = "connect_failed";
+    } catch { failure = "connect_failed"; }
+    const pending = this.#authorizations.get(id);
+    if (pending && pending.id === authorizationId && pending.expiresAt <= Date.now()) failure = "expired";
+    this.#finishNative(id, authorizationId, failure ? "failed" : "completed", failure);
+    return failure;
+  }
+
+  #finishNative(id: string, authorizationId: string, status: "completed" | "failed", reason?: string): void {
+    const pending = this.#authorizations.get(id);
+    if (!pending || pending.id !== authorizationId) return;
+    if (pending.expiresAt <= Date.now()) { status = "failed"; reason = "expired"; }
+    this.#authorizations.delete(id);
+    if (reason === "expired") void this.nativeControl?.({ action: "auth-cancel", server: pending.server, authorizationId }).catch(() => undefined);
+    const account = this.#state.accounts.find(account => account.id === pending.event.accountId);
+    if (account) {
+      account.status = status === "completed" ? "connected" : "reauthorize";
+      if (status === "completed") delete account.error;
+      else account.error = reason ?? "auth_failed";
+      this.#persist();
+    }
+    this.authorizationEvent?.({ ...pending.event, status, ...(status === "failed" ? { reason: reason ?? "auth_failed" } : {}) });
   }
 
   catalog(query = "", cursor?: string, view = "trending"): Promise<SkillCatalogDto> {
@@ -356,11 +422,12 @@ export class PluginsService {
     }
   }
 
-  async authorize(body: AuthorizePluginBody): Promise<{ url: string }> {
-    return this.accounts.authorize(body);
+  async authorize(body: AuthorizePluginBody, callbackOrigin = this.serviceOrigin?.()): Promise<{ url?: string }> {
+    if (!callbackOrigin) throw new HttpError(503, "Service authorization requires a configured Service origin");
+    return this.accounts.authorize(body, callbackOrigin);
   }
 
-  async finishAuthorization(url: URL): Promise<{ returnUrl: string; label: string }> {
+  async finishAuthorization(url: URL): Promise<{ label: string }> {
     return this.accounts.finishAuthorization(url);
   }
 
@@ -426,13 +493,11 @@ export class PluginsService {
         if (released) throw new Error("Plugin turn snapshot was released");
         if (name !== "manage_plugins") throw new Error("Plugin management tool does not belong to this turn");
         const input = PluginManageInput.parse(args);
-        if (input.action === "authorize_service" && !this.clientOrigin) throw new HttpError(503, "Service authorization requires a configured daemon client origin");
         const row = toolOperation(input.action);
         if (!row) throw new HttpError(404, "Unknown plugin operation");
         const { action, ...fields } = input;
         const result = await row.handler(this, {
           ...fields, ...(input.id === undefined ? {} : { accountId: input.id }),
-          ...(action === "authorize_service" && this.clientOrigin ? { returnUrl: this.clientOrigin() } : {}),
           tool: true, signal,
         } as Parameters<typeof row.handler>[1]);
         return this.#toolOutput({ content: [{ type: "text", text: JSON.stringify(result) }] });
@@ -448,6 +513,7 @@ export class PluginsService {
     await this.packages.shutdown();
     await this.#ready;
     this.accounts.clearPending();
+    this.#authorizations.clear();
     await Promise.allSettled(this.skillInstalls.pending());
     await Promise.allSettled(this.bundles.pending());
   }

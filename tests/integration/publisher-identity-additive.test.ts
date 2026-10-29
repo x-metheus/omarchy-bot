@@ -66,7 +66,7 @@ test("authorization accepts a publisher identity with extra fields, ignores them
       identity: identityWithExtraFields,
     });
     const api = new ProviderAccounts(host);
-    await api.authorize({ providerId: "google", returnUrl: "https://client.example/" });
+    await api.authorize({ providerId: "google" }, "https://service.example");
     const finished = await api.finishAuthorization(new URL(`https://client.example/callback?state=${sent.localState}&code=code&brokerState=broker-state`));
     expect(finished.label).toBe("person@example.invalid");
     const stored = accounts[0]!.grant!.metadata.identity;
@@ -77,6 +77,6 @@ test("authorization accepts a publisher identity with extra fields, ignores them
 
   const { host, sent } = hostWith([], { access_token: "access", identity: { tid: "tenant" } });
   const strict = new ProviderAccounts(host);
-  await strict.authorize({ providerId: "google", returnUrl: "https://client.example/" });
+  await strict.authorize({ providerId: "google" }, "https://service.example");
   await expect(strict.finishAuthorization(new URL(`https://client.example/callback?state=${sent.localState}&code=code&brokerState=broker-state`))).rejects.toThrow();
 });

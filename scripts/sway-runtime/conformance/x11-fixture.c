@@ -7,8 +7,8 @@
  *
  * usage: x11-fixture [TITLE [RRGGBB]]
  *
- * Paints its background in the given color and flips to cyan on the first
- * left click, which is what the conformance test asserts in captured pixels.
+ * Paints its background in the given color, cyan on click, and yellow on a key.
+ * WebView smoke checks these real Bot Screen pixels after Takeover input.
  */
 #include <X11/Xlib.h>
 #include <stdio.h>
@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
     BlackPixel(display, screen),
     color);
   XStoreName(display, window, title);
-  XSelectInput(display, window, ExposureMask | ButtonPressMask | StructureNotifyMask);
+  XSelectInput(display, window, ExposureMask | ButtonPressMask | KeyPressMask | StructureNotifyMask);
   Atom deleteWindow = XInternAtom(display, "WM_DELETE_WINDOW", False);
   XSetWMProtocols(display, window, &deleteWindow, 1);
   XMapWindow(display, window);
@@ -52,8 +52,9 @@ int main(int argc, char **argv) {
       XSetWindowBackground(display, window, color);
       XClearWindow(display, window);
       XFlush(display);
-    } else if (event.type == ButtonPress) {
-      XSetWindowBackground(display, window, 0x00ffff);
+    } else if (event.type == ButtonPress || event.type == KeyPress) {
+      color = event.type == KeyPress ? 0xffff00 : 0x00ffff;
+      XSetWindowBackground(display, window, color);
       XClearWindow(display, window);
       XFlush(display);
     } else if (event.type == ClientMessage) {

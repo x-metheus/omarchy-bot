@@ -116,7 +116,7 @@ test("native authorize never calls the publisher token endpoint", async () => {
     authorizeMcp: async () => ({ authorizationUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?client_id=fixture" }),
     checkMcp: async () => undefined,
   });
-  const started = await accountsApi.authorize({ providerId: "microsoft", returnUrl: "https://client.example/", serviceId: "workiq" });
+  const started = await accountsApi.authorize({ providerId: "microsoft", serviceId: "workiq" }, "https://service.example");
   expect(started.url).toContain("login.microsoftonline.com");
   expect(routes).toEqual([]);
   expect(accounts).toHaveLength(1);

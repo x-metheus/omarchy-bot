@@ -18,6 +18,7 @@ import {
 } from "./helpers/bot-screen-load-observe.ts";
 import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 import { ProjectionClient } from "./helpers/projection-client.ts";
+import { buildFinalWebClient, startProjectionProxy } from "./helpers/bot-screen-browser-load.ts";
 import {
   CITED_FAKE_PROOFS,
   HUMAN_ONLY_HOST_CHECKS,
@@ -650,14 +651,20 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     };
     persist(report);
 
+    await buildFinalWebClient(path.resolve(import.meta.dir, "../.."));
+    const webHarness = startProjectionProxy(harness.baseUrl, "127.0.0.1");
+    const webOrigin = `http://127.0.0.1:${webHarness.port}`;
     const webBrowser = await chromium.launch({ headless: true });
     try {
       const page = await webBrowser.newPage();
       await page.addInitScript(
-        (token) => localStorage.setItem("omarchy-bot.device-token", token),
-        harness.token,
+        ({ token, serviceUrl }) => {
+          localStorage.setItem("omarchy-bot.device-token", token);
+          localStorage.setItem("omarchy-bot.service-url", serviceUrl);
+        },
+        { token: harness.token, serviceUrl: webOrigin },
       );
-      await page.goto(`${harness.baseUrl}/?bot=${owners[0]!.botId}`);
+      await page.goto(`${webOrigin}/?bot=${owners[0]!.botId}`);
       await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
       await page.getByRole("button", { name: "Open Web Control", exact: true }).waitFor();
       const firstPaintStarted = performance.now();
@@ -700,6 +707,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       if (await done.isVisible()) await done.click();
     } finally {
       await webBrowser.close();
+      await webHarness.stop(true);
     }
 
     await focusFixtureEditor(owners[1]!, "BOT-B");

@@ -1,61 +1,41 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import type { api as webApi } from "../../apps/web/src/lib/api.ts";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { createMemoryShell, installShell, type LocalSidecarStatus } from "../../apps/web/src/lib/shell.ts";
+import { api } from "../../apps/web/src/lib/api.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-interface SentRequest {
-  body: Record<string, unknown>;
-}
-
-function stubFetch(sent: SentRequest[]): typeof fetch {
-  return (async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    sent.push({ body: init?.body === undefined ? {} : JSON.parse(String(init.body)) as Record<string, unknown> });
-    return new Response(
-      JSON.stringify({ threadId: "thread-1", messageId: "message-1", turnId: "turn-1", action: "sent" }),
-      { status: 202, headers: { "content-type": "application/json" } },
-    );
-  }) as unknown as typeof fetch;
-}
-
-const GLOBAL = "__OMARCHY_BOT_DEVICE_ID__";
 const originalFetch = globalThis.fetch;
-
-/**
- * A fresh module instance per case: the client reads the shell global when the
- * web bundle loads, so each case loads the module with its own specifier.
- */
-function loadApi(caseName: string): Promise<{ api: typeof webApi }> {
-  const specifier = `../../apps/web/src/lib/api.ts?case=${caseName}`;
-  return import(specifier) as Promise<{ api: typeof webApi }>;
-}
-
-async function sentBody(caseName: string, shellValue: unknown): Promise<Record<string, unknown>> {
-  if (shellValue === undefined) Reflect.deleteProperty(globalThis, GLOBAL);
-  else Reflect.set(globalThis, GLOBAL, shellValue);
-  const sent: SentRequest[] = [];
-  globalThis.fetch = stubFetch(sent);
-  const { api } = await loadApi(caseName);
-  await api.sendMessage("thread-1", { text: "hello" });
-  expect(sent).toHaveLength(1);
-  return sent[0]?.body ?? {};
-}
-
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-  Reflect.deleteProperty(globalThis, GLOBAL);
+const originalShell = globalThis.__OMARCHY_BOT_SHELL__;
+const sent: Array<{ url: string; body: Record<string, unknown> }> = [];
+beforeEach(() => {
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    sent.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+    return Response.json({ threadId: "thread-1", messageId: "message-1", turnId: "turn-1", action: "sent" }, { status: 202 });
+  }) as typeof fetch;
 });
 
-describe("web client Local Sidecar bootstrap", () => {
-  test("a browser tab with no shell identity sends no This Device tag", async () => {
-    expect(await sentBody("browser", undefined)).not.toHaveProperty("deviceId");
-  });
+afterEach(() => { globalThis.fetch = originalFetch; globalThis.__OMARCHY_BOT_SHELL__ = originalShell; sent.length = 0; });
 
-  test("a client shell that installed the Sidecar identity tags its sends", async () => {
-    expect((await sentBody("shell", DEVICE_A)).deviceId).toBe(DEVICE_A);
+for (const [label, status, tagged] of [
+  ["absent Sidecar", { running: false }, false],
+  ["running Sidecar", { running: true, deviceId: DEVICE_A }, true],
+  ["stopped Sidecar with identity", { running: false, deviceId: DEVICE_A }, false],
+  ["malformed identity", { running: true, deviceId: "not-a-device" }, false],
+] satisfies Array<[string, LocalSidecarStatus, boolean]>) {
+  test(`the shell's ${label} controls the This Device tag`, async () => {
+    installShell(createMemoryShell({ storage: null, baseUrl: "https://service.example", localSidecar: status }));
+    await api.sendMessage("thread-1", { text: "hello" });
+    expect(sent[0]?.url).toBe("https://service.example/api/threads/thread-1/messages");
+    if (tagged) expect(sent[0]?.body.deviceId).toBe(DEVICE_A);
+    else expect(sent[0]?.body).not.toHaveProperty("deviceId");
   });
+}
 
-  test("a malformed shell identity fails closed and sends no tag", async () => {
-    expect(await sentBody("malformed", "not-a-device")).not.toHaveProperty("deviceId");
-    expect(await sentBody("malformed-number", 42)).not.toHaveProperty("deviceId");
-  });
+test("the same Web UI reads a replacement shell on each send", async () => {
+  installShell(createMemoryShell({ storage: null, baseUrl: "https://first.example", localSidecar: { running: true, deviceId: DEVICE_A } }));
+  await api.sendMessage("thread-1", { text: "first" });
+  installShell(createMemoryShell({ storage: null, baseUrl: "https://second.example" }));
+  await api.sendMessage("thread-1", { text: "second", deviceId: DEVICE_A });
+  expect(sent[0]?.body.deviceId).toBe(DEVICE_A);
+  expect(sent[1]?.body).not.toHaveProperty("deviceId");
+  expect(sent[1]?.url).toBe("https://second.example/api/threads/thread-1/messages");
 });

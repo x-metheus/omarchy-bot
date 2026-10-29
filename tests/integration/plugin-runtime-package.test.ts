@@ -12,6 +12,9 @@ import {
 import os from "node:os";
 import path from "node:path";
 
+import { appSigningKey } from "./helpers/appSignatureFixture.ts";
+
+const releaseKey = appSigningKey().publicKey;
 const projectRoot = path.resolve(import.meta.dir, "../..");
 const packager = path.join(projectRoot, "scripts", "package-plugin-runtime.sh");
 const roots: string[] = [];
@@ -198,7 +201,7 @@ if (process.env.OMARCHY_BOT_SERVE_FIXTURE_MARKER !== undefined) {
 
 test("packages a runnable production dependency tree without mutating the source install", () => {
   const fixture = createFixture();
-  const installEnv = { ...process.env, BUN_INSTALL_CACHE_DIR: fixture.cache };
+  const installEnv = { ...process.env, BUN_INSTALL_CACHE_DIR: fixture.cache, TAURI_UPDATER_PUBKEY: releaseKey };
   const install = run(["bun", "install"], { cwd: fixture.root, env: installEnv });
   assertSucceeded(install, "fixture dependency install");
 
@@ -230,6 +233,8 @@ test("packages a runnable production dependency tree without mutating the source
     cwd: fixture.root,
   });
   assertSucceeded(extract, "runtime extraction");
+  expect(existsSync(path.join(extracted, "apps/web/dist"))).toBe(false);
+  expect(readFileSync(path.join(extracted, "apps/cli/src/release-public-key"), "utf8").trim()).toBe(releaseKey);
 
   expect(readFileSync(path.join(extracted, "sway/.omarchy-bot-runtime"), "utf8"))
     .toBe(`sway-fixture-v1\n${fixture.bundleSha256}\n`);
@@ -281,6 +286,23 @@ test("packages a runnable production dependency tree without mutating the source
   assertSucceeded(sourceAfter, "source fixture consumer after packaging");
 }, 60_000);
 
+test("packages a keyless nonpublication runtime without a Web build or inherited trust key", () => {
+  const fixture = createFixture();
+  rmSync(path.join(fixture.root, "apps/web/dist"), { recursive: true });
+  write(fixture.root, "apps/cli/src/release-public-key", releaseKey);
+  const installEnv = { ...process.env, BUN_INSTALL_CACHE_DIR: fixture.cache, TAURI_UPDATER_PUBKEY: undefined, RELEASE_BUILD: undefined };
+  assertSucceeded(run(["bun", "install"], { cwd: fixture.root, env: installEnv }), "fixture dependency install");
+  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle, fixture.fonts], {
+    cwd: projectRoot,
+    env: { ...installEnv, OMARCHY_BOT_PLUGIN_REVISION: "without-web" },
+  });
+  assertSucceeded(packaged, "keyless runtime packaging without a Web build");
+  const extracted = path.join(fixture.root, "extracted");
+  mkdirSync(extracted);
+  assertSucceeded(run(["tar", "--zstd", "-xf", path.join(fixture.output, "omarchy-bot-runtime-without-web-x86_64.tar.zst"), "-C", extracted], { cwd: fixture.root }), "keyless runtime extraction");
+  expect(existsSync(path.join(extracted, "apps/cli/src/release-public-key"))).toBe(false);
+});
+
 test("refuses a Sway bundle that does not match the pinned checksum without writing an archive", () => {
   const fixture = createFixture();
   const installEnv = { ...process.env, BUN_INSTALL_CACHE_DIR: fixture.cache };
@@ -322,4 +344,28 @@ test("refuses a font that does not match its pin without writing an archive", ()
   expect(packaged.stderr.toString()).toContain(`expected ${expected}`);
   expect(packaged.stderr.toString()).toContain(`received ${received}`);
   expect(existsSync(path.join(fixture.output, `omarchy-bot-runtime-${revision}-x86_64.tar.zst`))).toBe(false);
+});
+
+test.each(["", "true", "1"])("refuses malformed supplied trust keys in packaging mode %s", releaseBuild => {
+  const fixture = createFixture();
+  assertSucceeded(run(["bun", "install"], { cwd: fixture.root }), "fixture dependency install");
+  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle, fixture.fonts], {
+    cwd: projectRoot,
+    env: { ...process.env, OMARCHY_BOT_PLUGIN_REVISION: "bad-key", TAURI_UPDATER_PUBKEY: "not-a-key", RELEASE_BUILD: releaseBuild },
+  });
+  expect(packaged.exitCode).not.toBe(0);
+  expect(packaged.stderr.toString()).toContain("release public key");
+  expect(existsSync(path.join(fixture.output, "omarchy-bot-runtime-bad-key-x86_64.tar.zst"))).toBe(false);
+});
+
+test.each(["true", "1"])("requires a trust key for release packaging (%s)", releaseBuild => {
+  const fixture = createFixture();
+  assertSucceeded(run(["bun", "install"], { cwd: fixture.root }), "fixture dependency install");
+  const packaged = run(["bash", packager, fixture.root, fixture.output, fixture.bundle, fixture.fonts], {
+    cwd: projectRoot,
+    env: { ...process.env, OMARCHY_BOT_PLUGIN_REVISION: "missing-key", TAURI_UPDATER_PUBKEY: undefined, RELEASE_BUILD: releaseBuild },
+  });
+  expect(packaged.exitCode).not.toBe(0);
+  expect(packaged.stderr.toString()).toContain("requires TAURI_UPDATER_PUBKEY");
+  expect(existsSync(path.join(fixture.output, "omarchy-bot-runtime-missing-key-x86_64.tar.zst"))).toBe(false);
 });

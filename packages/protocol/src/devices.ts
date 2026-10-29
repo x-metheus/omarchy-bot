@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isLocalJob, type LocalJob } from "@omarchy-bot/agent-contract";
+import { isLocalJob, LOCAL_DEVICE_OS, LOCAL_DEVICE_SHELLS, type LocalJob } from "@omarchy-bot/agent-contract";
 import { isDeviceId } from "@omarchy-bot/domain";
 
 export { isDeviceId };
@@ -17,6 +17,8 @@ const hostname = z.string().trim().min(1).max(256);
 export const DeviceDto = z.object({
   id: deviceId,
   hostname,
+  os: z.enum(LOCAL_DEVICE_OS),
+  shell: z.enum(LOCAL_DEVICE_SHELLS),
   online: z.literal(true),
   capabilities: z.array(DeviceCapability).min(1),
 });
@@ -27,6 +29,8 @@ export const DeviceRegisterFrame = z.object({
   type: z.literal("register"),
   deviceId,
   hostname,
+  os: z.enum(LOCAL_DEVICE_OS),
+  shell: z.enum(LOCAL_DEVICE_SHELLS),
   capabilities: z.array(DeviceCapability).min(1),
 });
 export type DeviceRegisterFrame = z.infer<typeof DeviceRegisterFrame>;
@@ -48,7 +52,12 @@ export const DeviceLocalResultFrame = z.object({
 });
 export type DeviceLocalResultFrame = z.infer<typeof DeviceLocalResultFrame>;
 
-export type DeviceClientFrame = DeviceRegisterFrame | DeviceHeartbeatFrame | DeviceLocalResultFrame;
+export const DeviceClientFrameSchema = z.union([
+  DeviceRegisterFrame,
+  DeviceHeartbeatFrame,
+  DeviceLocalResultFrame,
+]);
+export type DeviceClientFrame = z.infer<typeof DeviceClientFrameSchema>;
 
 /** Daemon → Sidecar on the dedicated `/api/devices` WebSocket. */
 export const DeviceRegisteredFrame = z.object({

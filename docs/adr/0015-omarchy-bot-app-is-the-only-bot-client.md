@@ -1,0 +1,41 @@
+# Omarchy Bot is the only Bot Client
+
+Status: accepted on 2026-10-28. Amends [ADR 0010](0010-reuse-web-client-in-tauri.md) (Omarchy Bot is now delivered, and the browser stops being a client), [ADR 0011](0011-local-sidecar-only-off-host.md) (the Local Sidecar is a compiled, cross-platform binary inside this repository's client), [ADR 0013](0013-run-a-standalone-linux-service.md) (the installer and Omarchy plugin also install Omarchy Bot on graphical hosts; Service-side dictation is retired), and [ADR 0014](0014-require-paired-device-tokens.md) (pairing ends in a deep link instead of a browser URL). Implementation is tracked by [the Omarchy Bot app specification](../../.scratch/omarchy-bot-app/spec.md).
+
+Amended on 2026-10-29: the Local Sidecar is a standalone Rust program launched as a separate child process; its external behaviour contract is unchanged.
+
+**Omarchy Bot**, a Tauri 2 application for Linux, macOS, and Windows, is the only Bot Client. The browser is no longer a client: the Service serves the HTTP API, WebSockets, the plugin OAuth callback, and the health probe, and no static UI or `/pair` page. The Web UI remains the client's whole user interface, embedded in the application bundle rather than loaded from the Service, so the client talks to the Service cross-origin. The Service therefore allows the client's fixed origins through CORS and checks the Origin of every WebSocket upgrade; the device token travels in a header or `access_token`, never a cookie. Every native capability (token store, Service address and startup status, certificate diagnosis, deep links, system browser, attachment downloads, updater, Local Sidecar control and approvals, Bot Screen key mapping) sits behind one `shell` interface in the Web UI, so a future phone shell (Tauri mobile or Capacitor, chosen when phone work starts) replaces only that interface.
+
+One install pairs with one Service; many installs may be paired with the same Service at once, as ADR 0014 already allows. The client checks the Service's protocol version on connect and names the side to update instead of running against a mismatched contract. Remote Services need a publicly trusted certificate or an SSH tunnel to loopback, because WebViews offer no self-signed certificate exception.
+
+## Local Sidecar
+
+The Local Sidecar ships in the first release as a small standalone Rust program, built per target (`linux-x64`, `darwin-arm64`, `darwin-x64`, `windows-x64`) with the repository's Rust toolchain and bundled as a Tauri external binary. It replaces ADR 0011's plugin-runtime Bun and the interim `bun build --compile` TypeScript Sidecar. The bundled Bun runtime accounts for about 110 MB of the 150 MB AppImage; replacing it removes that runtime and gives the Sidecar direct access to OS process control.
+
+The Sidecar runs only while the application runs, launched as a separate child process, connects outbound to its install's Service URL (not only a loopback port), and is still never started when the Service is on the same machine. Keeping it outside the Tauri process isolates Sidecar panics and runaway execution from the application and WebView, gives it an independently managed process lifetime, and keeps the shipped binary testable through the existing process boundary. Linux and macOS run commands through POSIX `sh` with process-group teardown; Windows runs Windows PowerShell 5.1 with Job Object teardown. The Sidecar declares its operating system and shell at registration so the Agent writes the right syntax, and its secret-directory denylist is defined per operating system.
+
+The behaviour contract is unchanged: `OMARCHY_BOT_SERVICE_URL`, `OMARCHY_BOT_DEVICE_ID`, `OMARCHY_BOT_DEVICE_TOKEN`, `OMARCHY_BOT_SIDECAR_ROOT`, and optional `OMARCHY_BOT_HOSTNAME`; the WebSocket protocol and OS/shell registration; stdin/stdout JSON approval lines; refused paths, compositor access, and screenshots; and command-tree teardown on quit or unpair. The client shell owns the approval prompts and the This Device identity contract of ADR 0011.
+
+The TypeScript schemas remain the source of truth for wire types: `packages/protocol/src/devices.ts` owns the device frames and `packages/agent-contract/src/local-protocol.ts` owns the `LOCAL_SCHEMA` job payload. Cross-language contract tests will consume one checked-in, language-neutral JSON fixture corpus under `packages/protocol/fixtures/sidecar/`, covering every frame variant in both directions, every local action, and optional fields both present and absent. The TypeScript suite must derive coverage requirements from the authoritative frame schemas and `LOCAL_SCHEMA`, and fail if any variant, action, or property lacks a fixture, including both presence and absence for each optional property; a hand-maintained list independent of the schemas is insufficient. Adding an optional field or variant therefore fails coverage until a fixture exercises it. The TypeScript consumer also validates each fixture with those schemas and requires an unchanged JSON round-trip so unknown fields cannot be silently stripped. The Rust consumer deserializes the same fixtures into its serde types with unknown fields rejected and serializes them back to equal JSON values. Protocol changes must update the schemas, fixtures, and both consumers together; both suites run in CI on Linux, macOS, and Windows. The existing black-box process suite selects the shipped binary with `OMARCHY_BOT_TEST_SIDECAR_BINARY` and continues to check observable registration, results, approvals, and teardown. Tickets 21 and 22 implement and ship the Rust replacement; this amendment changes no runtime code.
+
+## Pairing and installation
+
+`omarchy-bot pair` and installation print the Service address and a one-time code; the client's Add Service screen accepts both. On a host with a graphical session the installer, including through the Omarchy plugin, also installs the Omarchy Bot AppImage and finishes by opening `omarchy-bot://pair?service=…&code=…`. Headless hosts receive only the Service. Plugin OAuth opens the provider in the system browser; the callback stays on the Service and completion reaches the client over the event stream, so authorization no longer carries a return URL.
+
+## Considered Options
+
+- **Keep the browser as a supported client**: rejected; two clients would need separate pairing, OAuth return, and origin handling for one bundle, and there are no installed Services to migrate.
+- **Load the UI from the Service URL inside the WebView**: rejected; it couples client and Service releases, restricts native IPC for remote content, and offers no path for a phone.
+- **Proxy all traffic through the Rust shell**: rejected; noVNC and the event stream would need a second transport per shell.
+- **Switch between several Services in one install**: rejected for now; repairing to another Service covers moving, and several installs per Service covers working from several places.
+- **Require WSL or Git Bash on Windows**: rejected; a native PowerShell executor works on every Windows install.
+- **Keep the compiled TypeScript Sidecar**: rejected; bundling Bun accounts for about 110 MB of the 150 MB AppImage, and native process-group and Job Object control belongs directly in the Rust executor.
+- **Run the Sidecar in-process in the Tauri app**: rejected; Sidecar failure and runaway execution would share the application's process lifetime, removing the independently terminable child and the shipped-binary test seam.
+- **Record dictation in the client and transcribe on the Service**: rejected; the Service Host usually has no speech engine, and every client operating system already dictates into a focused text field. Service-side Voxtype dictation is retired.
+
+## Consequences
+
+- There is no client on a platform until its WebView smoke suite passes. Chromium tests remain UI coverage only, as ADR 0010 required.
+- macOS ⌘ sends Ctrl and ⌥ sends Super in Takeover by default, with a per-Paired-Device override.
+- The client ships as an AppImage, a notarized macOS dmg (arm64 and x64), and a signed Windows NSIS installer (a preview until signed), updated through the Tauri updater from GitHub Releases.
+- Notifications, a tray, launch at login, global shortcuts, and certificate-fingerprint pinning are deferred.

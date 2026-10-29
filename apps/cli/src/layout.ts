@@ -12,6 +12,9 @@ export interface Layout {
   runtimeDir: string;
   currentDir: string;
   browserPackDir: string;
+  appImage: string;
+  desktopEntry: string;
+  mimeappsPath: string;
   servePath: string;
   unitDir: string;
   unitPath: string;
@@ -45,6 +48,9 @@ export function layoutFromEnv(env: NodeJS.ProcessEnv = process.env): Layout {
     runtimeDir,
     currentDir,
     browserPackDir: join(runtimeDir, "browser"),
+    appImage: join(dataDir, "app/omarchy-bot.AppImage"),
+    desktopEntry: join(resolve(env.XDG_DATA_HOME || join(home, ".local/share")), "applications/omarchy-bot.desktop"),
+    mimeappsPath: join(resolve(env.XDG_CONFIG_HOME || join(home, ".config")), "mimeapps.list"),
     servePath: join(currentDir, "scripts/serve.sh"),
     unitDir,
     unitPath: join(unitDir, "omarchy-bot.service"),

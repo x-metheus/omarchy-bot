@@ -29,6 +29,8 @@ async function fixture() {
     OMARCHY_BOT_PLUGIN_OS_RELEASE: path.join(home, "os-release"), OMARCHY_BOT_PLUGIN_BUN: path.join(bunDir, "bun"),
     OMARCHY_BOT_PLUGIN_REVISION: "fixture-revision", OMARCHY_BOT_PLUGIN_CURL: path.join(bin, "curl"),
     CALLS: path.join(home, "calls"), CLI_CALLS: path.join(home, "cli-calls"), DOWNLOADS: path.join(home, "downloads"), OMARCHY_BOT_OPEN: "true" };
+  delete env.DISPLAY;
+  delete env.WAYLAND_DISPLAY;
   writeFileSync(env.OMARCHY_BOT_PLUGIN_OS_RELEASE!, 'ID="omarchy"\n');
   const layout = layoutFromEnv(env);
   const manager = path.join(env.XDG_RUNTIME_DIR!, "systemd"); mkdirSync(manager, { recursive: true });
@@ -48,11 +50,11 @@ if(!live){const unit=readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/oma
   cleanups.push(() => { const pid = `${env.CALLS}.pid`; if (existsSync(pid)) { try { process.kill(Number(readFileSync(pid, "utf8")), "SIGKILL"); } catch {} } });
   const reservation = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
   env.OMARCHY_BOT_PORT = String(reservation.port); reservation.stop(true);
-  const serve = `#!/bin/bash\nexec bun run - <<'SERVICE'\nimport {existsSync,mkdirSync,writeFileSync} from 'node:fs';\nmkdirSync(process.env.OMARCHY_BOT_STATE,{recursive:true});const secret=process.env.OMARCHY_BOT_STATE+'/pairing-host-secret';if(!existsSync(secret))writeFileSync(secret,'fixture-secret');\nBun.serve({hostname:'127.0.0.1',port:Number(process.env.OMARCHY_BOT_PORT),fetch(r){return new URL(r.url).pathname==='/api/health'?Response.json({ok:true}):Response.json({code:'ABCD2345',url:'/pair?code=ABCD2345'})}});\nSERVICE\n`;
+  const serve = `#!/bin/bash\nexec bun run - <<'SERVICE'\nimport {existsSync,mkdirSync,writeFileSync} from 'node:fs';\nmkdirSync(process.env.OMARCHY_BOT_STATE,{recursive:true});const secret=process.env.OMARCHY_BOT_STATE+'/pairing-host-secret';if(!existsSync(secret))writeFileSync(secret,'fixture-secret');\nBun.serve({hostname:'127.0.0.1',port:Number(process.env.OMARCHY_BOT_PORT),fetch(r){return new URL(r.url).pathname==='/api/health'?Response.json({ok:true}):Response.json({code:'ABCD2345',url:'omarchy-bot://pair?service='+encodeURIComponent(new URL(r.url).origin)+'&code=ABCD2345'})}});\nSERVICE\n`;
   const archive = path.join(home, "runtime.tar.zst");
   const files: Record<string, string> = { "scripts/serve.sh": serve };
-  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(root, `apps/cli/src/${name}.ts`), "utf8");
-  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(root, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack", "appInstall", "appSignature"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(root, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "desktopEntry"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(root, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
   files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(root, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   writeFileSync(archive, Bun.zstdCompressSync(await new Bun.Archive(files).bytes()));
   writeFileSync(`${archive}.sha256`, `${createHash("sha256").update(readFileSync(archive)).digest("hex")}  runtime.tar.zst\n`);
@@ -143,6 +145,22 @@ test("enable installs using the archive CLI and records the resolved Bun directo
   expect(calls(setup.env.DOWNLOADS!)).toHaveLength(2); expect(calls(setup.env.CALLS!).filter(s => s.includes("enable"))).toHaveLength(1);
   expect(calls(setup.env.CLI_CALLS!).at(-1)).toBe(`${setup.layout.currentDir}/apps/cli/src/main.ts install --archive missing --checksum missing`);
   expect(calls(setup.env.CALLS!).at(-1)).toBe("--user start omarchy-bot.service");
+});
+
+test("graphical plugin enable installs the Service and checksum-verified app through the shared installer", async () => {
+  const setup = await fixture();
+  setup.env.DISPLAY = ":fixture";
+  const image = path.join(setup.home, "fixture.AppImage");
+  writeFileSync(image, "#!/bin/sh\nexit 0\n");
+  writeFileSync(`${image}.sha256`, createHash("sha256").update(readFileSync(image)).digest("hex"));
+  setup.env.OMARCHY_BOT_APP_IMAGE = image;
+  const result = await invoke(setup, "enable");
+  expect(result).toMatchObject({ code: 0, stderr: "" });
+  expect(result.stdout).toContain("pairing: omarchy-bot://pair?");
+  expect(readFileSync(setup.layout.servePath, "utf8")).toBe(setup.serve);
+  expect(readFileSync(setup.layout.appImage)).toEqual(readFileSync(image));
+  expect(readFileSync(setup.layout.desktopEntry, "utf8")).toContain("MimeType=x-scheme-handler/omarchy-bot;");
+  expect(readFileSync(setup.layout.mimeappsPath, "utf8")).toContain("x-scheme-handler/omarchy-bot=omarchy-bot.desktop;");
 });
 
 test("plugin enable repairs the missing pack from the retained runtime release after the plugin revision changes", async () => {

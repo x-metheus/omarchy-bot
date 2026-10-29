@@ -16,13 +16,13 @@ Launchers:             systemd user unit or container entrypoint (scripts/serve.
 Computer backend:      daemon Sway runtime; no computer worker
 Bot Screen runtime:    one on-demand pure-headless Sway Bot Computer; output/workspace per Screen
 Screen Projection:     selected-view PNG preview + Broker control and view-only RFB over separate WebSockets
-Voice input:           Voxtype through the localhost daemon
+Voice input:           client OS dictation into the focused Composer
 Persistence:           SQLite + daemon-managed local media
 ```
 
 ## Runtime boundary
 
-The Service owns product state, SQLite, the REST/WebSocket API, process supervision, dictation, attachments, and Computer coordination. Bot-completion notifications belong to the Bot Client, and startup diagnostics are the Service log plus `status` and `doctor`. Agent workers isolate vendor SDKs, native processes, crashes, and version changes. Workers never open product SQLite or import web code.
+The Service owns product state, SQLite, the REST/WebSocket API, process supervision, attachments, and Computer coordination. Bot-completion notifications belong to the Bot Client, and startup diagnostics are the Service log plus `status` and `doctor`. Agent workers isolate vendor SDKs, native processes, crashes, and version changes. Workers never open product SQLite or import web code.
 
 Workers start on demand by Agent, not by visible Bot. Several user-created Bots may share one Agent worker/runtime while retaining independent native sessions.
 
@@ -40,7 +40,7 @@ Use the richest official interface for each Agent. Every installed version must 
 
 Use React 19 because Astryx and the stable TanStack React adapters cover the required accessible conversation interactions. Streaming updates are buffered, transcript rows subscribe selectively, and long histories may use TanStack Virtual. Computer frames do not flow through ordinary React message state.
 
-The Web frontend is also the foundation of Omarchy Bot, as recorded in [ADR 0010](adr/0010-reuse-web-client-in-tauri.md). Reuse its UI and daemon-facing behavior; keep native shell details out of shared business logic and keep execution in the Service. This is a present architecture constraint, not a requirement to add Tauri dependencies or native scaffolding now; actual WebView codec/input compatibility must be verified when that client is built.
+The Web frontend is embedded in the Linux Tauri application at `apps/omarchy-bot`, as recorded in [ADR 0010](adr/0010-reuse-web-client-in-tauri.md) and [ADR 0015](adr/0015-omarchy-bot-app-is-the-only-bot-client.md). UI and Service-facing HTTP/WebSocket behavior stay shared; native capabilities remain behind `shell` and execution stays in the Service. The packaged AppImage has a dedicated WebKitGTK smoke suite; Chromium tests cover the shared UI only. See the [Linux build and smoke commands](../README.md#linux-application).
 
 ### Astryx policy
 
@@ -75,13 +75,13 @@ Token deltas update the projection directly and do not trigger query refetches.
 
 - SQLite is written only by the daemon.
 - Managed attachments and avatar uploads stay under the local product data directory.
-- Voxtype audio is handled by Voxtype; omarchy-bot retains only the resulting draft text.
+- The client OS dictates into the Composer; the Service never captures audio. Use macOS's Dictation key or configured shortcut (commonly `Fn` / Globe twice), Windows `Win+H`, Omarchy Voxtype `Super+Ctrl+X` or hold `F9`, or a phone keyboard's microphone key.
 - The API binds to `127.0.0.1` by default; a non-loopback bind requires operator TLS or a declared TLS-terminating proxy (`apps/daemon/src/bootstrap/config.ts`).
 - Uploaded images are re-encoded; Agent-generated Avatar Recipes are validated data, never executable SVG.
 
 ## Rejected choices
 
-- Browser speech recognition/audio upload: Voxtype is the local speech-to-text provider.
+- Client-side audio capture or a built-in speech-to-text engine: the client OS already dictates into focused text fields ([ADR 0015](adr/0015-omarchy-bot-app-is-the-only-bot-client.md)).
 - Multiple design systems: Astryx is the sole component system.
 - TanStack Start: the Bun daemon already owns the server/API.
 - Public network listener or desktop runtime inside the browser: a public listener requires pairing plus TLS; the unauthenticated mode is retired ([ADR 0014](adr/0014-require-paired-device-tokens.md)).
@@ -103,5 +103,4 @@ Token deltas update the projection directly and do not trigger query refetches.
 - React: <https://react.dev/>
 - TanStack: <https://tanstack.com/>
 - Bun: <https://bun.sh/docs>
-- Voxtype integration: [`research/voxtype-composer-integration.md`](research/voxtype-composer-integration.md)
 - Computer coordination: [`research/multi-bot-computer-control.md`](research/multi-bot-computer-control.md)

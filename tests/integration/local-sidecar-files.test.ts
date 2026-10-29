@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
@@ -25,11 +25,7 @@ describe("search, read, and write on the Sidecar", () => {
   test("Ask then Allow once writes and reads inside the sandbox, not Shared Workspace", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["search", "files"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Sidecar files Bot");
     const pendingWrite = sendToBot(h, botId, "local.write:notes/doc.txt:hello-from-sidecar", DEVICE_A);
     const job = await sidecar.waitForJob();
@@ -57,11 +53,7 @@ describe("search, read, and write on the Sidecar", () => {
   test("search returns bounded path hits and refuses to scan /", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["search", "files"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Sidecar search Bot");
     const pendingWrite = sendToBot(h, botId, "local.write:notes/doc.txt:hello-from-sidecar", DEVICE_A);
     await sidecar.waitForJob();
@@ -83,14 +75,77 @@ describe("search, read, and write on the Sidecar", () => {
     expect((await messages(h, root.threadId)).some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "error")).toBeTrue();
   });
 
+  test("host OS search excludes credential stores and explicit access is refused", async () => {
+    const os = process.platform === "darwin" ? "macos" : "linux";
+    h = await startDaemon();
+    const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
+    sidecars.push(sidecar);
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "credential-laptop" });
+    const macStores = ["Library/Keychains", "Library/Accounts", "Library/Application Support/com.apple.TCC"];
+    const protectedDirs = [".ssh", ".gnupg", ".aws", ".config", ...(os === "macos" ? macStores : [])];
+    for (const dir of [...new Set([...protectedDirs, ...macStores, "notes", "Library/Keychains-backup", "lIbRaRy/kEyChAiNs", ".SsH"])]) {
+      mkdirSync(sidecar.sandboxPath(dir), { recursive: true });
+      writeFileSync(sidecar.sandboxPath(`${dir}/entry.txt`), "credential-sentinel");
+    }
+    const botId = await makeBot(h, "Credential stores Bot");
+    mkdirSync(h.svc.cfg.sharedWorkspaceDir, { recursive: true });
+    writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "public.txt"), "public-sentinel");
+    const run = async (text: string) => {
+      const pending = sendToBot(h!, botId, text, DEVICE_A);
+      await sidecar.waitForJob();
+      await sidecar.allowOnce();
+      const sent = await pending;
+      await waitThreadIdle(h!, sent.threadId);
+      const transcript = await messages(h!, sent.threadId);
+      return { tool: transcript.find((message) => message.kind === "tool" && message.toolCall?.name === "local"), text: JSON.stringify(transcript) };
+    };
+    const search = await run("local.search:credential-sentinel");
+    expect(search.tool?.toolCall?.status).toBe("completed");
+    expect(search.text).toContain("notes/entry.txt");
+    expect(search.text).toContain("Library/Keychains-backup/entry.txt");
+    for (const dir of ["lIbRaRy/kEyChAiNs", ".SsH"]) {
+      if (os === "linux") expect(search.text).toContain(`${dir}/entry.txt`);
+      else {
+        expect(search.text).not.toContain(`${dir}/entry.txt`);
+        const read = await run(`local.read:${dir}/entry.txt`);
+        expect(read.tool?.toolCall?.status).toBe("error");
+        expect(read.text).toContain("refuses credential directories");
+        expect((await run(`local.write:${dir}/new.txt:must-not-land`)).tool?.toolCall?.status).toBe("error");
+        expect((await run(`local.transfer:to-workspace:${dir}/entry.txt:stolen-mixed.txt`)).tool?.toolCall?.status).toBe("error");
+        expect((await run(`local.transfer:from-workspace:public.txt:${dir}/new.txt`)).tool?.toolCall?.status).toBe("error");
+        expect(existsSync(sidecar.sandboxPath(`${dir}/new.txt`))).toBeFalse();
+      }
+    }
+    for (const dir of protectedDirs) {
+      expect(search.text).not.toContain(`${dir}/entry.txt`);
+      if (os === "macos") expect((await run(`local.read:${dir}/entry.txt`)).tool?.toolCall?.status).toBe("error");
+    }
+    if (os === "linux") {
+      for (const dir of macStores) expect(search.text).toContain(`${dir}/entry.txt`);
+    } else {
+      for (const command of [
+        "local.write:Library/Keychains/new.txt:must-not-land",
+        "local.transfer:to-workspace:Library/Keychains/entry.txt:stolen.txt",
+        "local.transfer:from-workspace:public.txt:Library/Keychains/new.txt",
+      ]) expect((await run(command)).tool?.toolCall?.status).toBe("error");
+      expect(existsSync(sidecar.sandboxPath("Library/Keychains/new.txt"))).toBeFalse();
+      expect(existsSync(path.join(h.svc.cfg.sharedWorkspaceDir, "stolen.txt"))).toBeFalse();
+    }
+    for (const command of ["echo screenshot", "echo pointer", "echo SWAYSOCK", "echo WAYLAND_DISPLAY"]) {
+      expect((await run(`local.run:${command}`)).tool?.toolCall?.status).toBe("error");
+    }
+    if (os === "macos") {
+      sidecar.autoAllow();
+      for (const dir of ["lIbRaRy/kEyChAiNs", ".SsH"]) {
+        await expect(h.svc.devices.execute({ action: "search", query: "credential-sentinel", path: dir }, { botId, turnId: "mixed-search", deviceId: DEVICE_A }, AbortSignal.timeout(5_000))).rejects.toThrow("refuses credential directories");
+      }
+    }
+  }, 20_000);
+
   test("deny does not create the file", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["files"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Denied write Bot");
     const pending = sendToBot(h, botId, "local.write:secret.txt:must-not-land", DEVICE_A);
     await sidecar.waitForJob();

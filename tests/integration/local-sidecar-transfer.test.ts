@@ -5,9 +5,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { LOCAL_RESULT_TEXT_MAX } from "../../packages/protocol/src/index.ts";
 import { makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 import { LocalSidecarFixture } from "./helpers/localSidecar.ts";
+import { sidecarCommand } from "./helpers/sidecarCommand.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const sidecarMain = path.resolve(import.meta.dir, "../../apps/sidecar/src/main.ts");
 
 /** Paired-device token; the Harness field may not be typed yet, so narrow at runtime. */
 const pairedToken = (h: Harness): string => {
@@ -40,11 +40,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
   test("copies a sentinel from the Sidecar into Shared Workspace", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["files", "transfer"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     writeFileSync(sidecar.sandboxPath("from-laptop.txt"), "sidecar-sentinel");
     const botId = await makeBot(h, "Transfer in Bot");
     const pending = sendToBot(h, botId, "local.transfer:to-workspace:from-laptop.txt:inbox/from-laptop.txt", DEVICE_A);
@@ -67,11 +63,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
   test("copies a Shared Workspace file onto the Sidecar only with an explicit destination", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["files", "transfer"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     mkdirSync(h.svc.cfg.sharedWorkspaceDir, { recursive: true });
     writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "plugin-note.txt"), "workspace-sentinel");
     const botId = await makeBot(h, "Transfer out Bot");
@@ -95,11 +87,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
   test("deny does not copy bytes", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["transfer"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     writeFileSync(sidecar.sandboxPath("from-laptop.txt"), "sidecar-sentinel");
     const botId = await makeBot(h, "Denied transfer Bot");
     const pending = sendToBot(h, botId, "local.transfer:to-workspace:from-laptop.txt:inbox/denied.txt", DEVICE_A);
@@ -117,14 +105,14 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
     writeFileSync(path.join(root, "big.txt"), "x".repeat(LOCAL_RESULT_TEXT_MAX + 1));
     let stdout = "";
     child = Bun.spawn({
-      cmd: [process.execPath, sidecarMain],
+      cmd: sidecarCommand,
       cwd: path.resolve(import.meta.dir, "../.."),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
       env: {
         ...process.env,
-        OMARCHY_BOT_DAEMON_PORT: String(h.port),
+        OMARCHY_BOT_SERVICE_URL: `ws://127.0.0.1:${h.port}`,
         OMARCHY_BOT_DEVICE_ID: DEVICE_A,
         OMARCHY_BOT_DEVICE_TOKEN: pairedToken(h),
         OMARCHY_BOT_HOSTNAME: "laptop",

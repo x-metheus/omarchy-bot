@@ -1,0 +1,96 @@
+name: sidecar-conformance
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sidecar:
+    name: Local Sidecar (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: linux-x64
+            binary: omarchy-bot-sidecar
+          - runner: macos-15
+            target: darwin-arm64
+            binary: omarchy-bot-sidecar
+          - runner: macos-15-intel
+            target: darwin-x64
+            binary: omarchy-bot-sidecar
+          - runner: windows-latest
+            target: windows-x64
+            binary: omarchy-bot-sidecar.exe
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.lane/sidecar-rust/cargo
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.lane/sidecar-rust/target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - run: bun install --frozen-lockfile
+      - name: Validate canonical protocol fixtures with TypeScript
+        run: bun test packages/protocol/src/sidecar-fixtures.test.ts
+      - name: Build Linux repository image
+        if: runner.os == 'Linux'
+        run: docker build -t omarchy-bot-linux-app -f scripts/linux-app/Dockerfile scripts/linux-app
+      - name: Validate Rust fixtures and build Linux release in repository image
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p .lane/sidecar-rust/{home,cargo,target}
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/src" -w /src \
+            -e HOME=/src/.lane/sidecar-rust/home \
+            -e CARGO_HOME=/src/.lane/sidecar-rust/cargo \
+            -e CARGO_TARGET_DIR=/src/.lane/sidecar-rust/target \
+            omarchy-bot-linux-app bash -c 'cargo test --locked --manifest-path apps/sidecar-rust/Cargo.toml && cargo build --release --locked --manifest-path apps/sidecar-rust/Cargo.toml'
+      - name: Validate native Rust fixtures
+        if: runner.os != 'Linux'
+        run: cargo test --locked --manifest-path apps/sidecar-rust/Cargo.toml
+      - name: Build native Rust release
+        if: runner.os != 'Linux'
+        run: cargo build --release --locked --manifest-path apps/sidecar-rust/Cargo.toml
+      - name: Exercise Rust registration, per-OS policy, tree cancellation and TLS
+        if: runner.os != 'Linux'
+        env:
+          OMARCHY_BOT_TEST_SIDECAR_BINARY: .lane/sidecar-rust/target/release/${{ matrix.binary }}
+        run: bun test tests/integration/local-sidecar-process.test.ts
+      - name: Exercise Linux Rust process, daemon lifecycle and transfer boundaries in repository image
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/src" -w /src \
+            -e HOME=/src/.lane/sidecar-rust/home \
+            -e OMARCHY_BOT_TEST_SIDECAR_BINARY=/src/.lane/sidecar-rust/target/release/${{ matrix.binary }} \
+            omarchy-bot-linux-app bun test packages/protocol/src/sidecar-fixtures.test.ts \
+              tests/integration/local-sidecar-process.test.ts \
+              tests/integration/local-sidecar-runtime.test.ts \
+              tests/integration/local-sidecar.test.ts \
+              tests/integration/local-sidecar-dispatch.test.ts \
+              tests/integration/local-sidecar-fail-closed.test.ts \
+              tests/integration/local-sidecar-files.test.ts \
+              tests/integration/local-sidecar-policy.test.ts \
+              tests/integration/local-sidecar-same-host.test.ts \
+              tests/integration/local-sidecar-transfer.test.ts \
+              tests/integration/client-device-tag.test.ts
+      - name: Report per-target release sizes
+        shell: bash
+        env:
+          SIDECAR_SIZE_TARGET: ${{ matrix.target }}
+          SIDECAR_RUST_BINARY: .lane/sidecar-rust/target/release/${{ matrix.binary }}
+        run: |
+          bun -e 'import { statSync, writeFileSync, appendFileSync } from "node:fs"; const result = { target: process.env.SIDECAR_SIZE_TARGET, rustBytes: statSync(process.env.SIDECAR_RUST_BINARY).size }; writeFileSync(".lane/sidecar-sizes.json", JSON.stringify(result, null, 2) + "\n"); const report = `| Target | Rust release bytes |\n| --- | ---: |\n| ${result.target} | ${result.rustBytes} |\n`; console.log(report); appendFileSync(process.env.GITHUB_STEP_SUMMARY, report);'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidecar-sizes-${{ matrix.target }}
+          path: .lane/sidecar-sizes.json
+          if-no-files-found: error

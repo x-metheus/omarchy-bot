@@ -1,10 +1,11 @@
 import { defineConfig } from "@playwright/test";
 import os from "node:os";
 import path from "node:path";
+import { WEB_ORIGIN } from "./fixtures.ts";
 
 /**
- * One daemon (workers: 1) booted in-process by globalSetup from the repo's
- * fake workers; the daemon serves the built web app itself.
+ * One Service (workers: 1) booted by globalSetup with fake workers and isolated
+ * storage; Vite serves the web bundle from a separate origin.
  */
 export default defineConfig({
   testDir: "./specs",
@@ -15,12 +16,18 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 10_000 },
   use: {
-    baseURL: process.env.OMARCHY_BOT_E2E_BASE_URL ?? "http://127.0.0.1:7399",
+    baseURL: WEB_ORIGIN,
     headless: true,
     actionTimeout: 10_000,
   },
   globalSetup: "./global-setup.ts",
   globalTeardown: "./global-teardown.ts",
+  webServer: {
+    command: `bun run --filter=@omarchy-bot/web dev -- --host 127.0.0.1 --port ${new URL(WEB_ORIGIN).port || "80"} --strictPort --force`,
+    cwd: path.resolve(import.meta.dirname, "../.."),
+    url: WEB_ORIGIN,
+    timeout: 120_000,
+  },
   reporter: [["list"]],
   projects: [{ name: "chromium", use: { browserName: "chromium" } }],
 });

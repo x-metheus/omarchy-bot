@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
 import type { Config } from "../bootstrap/config.ts";
+import { hostIdentity } from "../bootstrap/hostIdentity.ts";
 import type { EventLog } from "../modules/events/eventLog.ts";
 import type { AgentsRegistry } from "../modules/agents/registry.ts";
 import type { BotsService } from "../modules/bots/bots.ts";
@@ -15,7 +16,6 @@ import type {
   ScreenProjectionService,
 } from "../modules/computer/screenProjection.ts";
 import type { AvatarService } from "../modules/avatars/avatarService.ts";
-import type { DictationService } from "../modules/dictation/dictationService.ts";
 import type { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { handleAvatarRequest } from "./avatarRoutes.ts";
 import { handleThreadFeatureRequest } from "./threadRoutes.ts";
@@ -23,17 +23,14 @@ import { handleBotAttentionRequest } from "./botAttentionRoutes.ts";
 import { handleBotDeletionRequest } from "./botDeletionRoutes.ts";
 import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleProjectionRequest } from "./projectionRoutes.ts";
-import { handleDictationRequest } from "./dictationRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import { handlePluginRequest } from "./pluginRoutes.ts";
 import type { PluginsService } from "../modules/plugins/plugins.ts";
 import type { DevicePort, SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import type { PairingService } from "../modules/pairing/pairing.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
-import { existsSync } from "node:fs";
-import path from "node:path";
 import { isIPv4 } from "node:net";
-import { CreateBotBody, PatchBotBody, SendMessageBody } from "@omarchy-bot/protocol";
+import { CreateBotBody, PatchBotBody, SendMessageBody, PROTOCOL_VERSION } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
 import { AGENT_IDS, type AgentId } from "@omarchy-bot/domain";
 import daemonPackage from "../../package.json" with { type: "json" };
@@ -52,7 +49,6 @@ export interface DaemonServices {
   turns: TurnService;
   avatars: AvatarService;
   attachments: AttachmentsService;
-  dictation: DictationService;
   plugins: PluginsService;
   computer: ComputerBroker;
   screens: BotScreenManager;
@@ -130,6 +126,19 @@ export function publicOrigin(cfg: Config, peerAddress: string | undefined, heade
   try { return new URL(`${scheme}://${host}`).origin; } catch { return listenerUrl.origin; }
 }
 
+const APP_ORIGINS: Record<string, true> = {
+  "tauri://localhost": true,
+  "http://tauri.localhost": true,
+  "https://tauri.localhost": true,
+};
+
+function allowedOrigin(cfg: Config, origin: string | null): boolean {
+  if (origin === null) return false;
+  if (Object.hasOwn(APP_ORIGINS, origin)) return true;
+  if (!cfg.development || !/^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?$/.test(origin)) return false;
+  try { new URL(origin); return true; } catch { return false; }
+}
+
 const PairingCodeBody = z.object({ name: z.string().trim().min(1).max(80) });
 const PairingExchangeBody = z.object({
   code: z.string().trim().min(1),
@@ -156,6 +165,20 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     const url = new URL(req.url);
     const pathname = url.pathname;
 
+    const origin = req.headers.get("origin");
+    if (req.headers.get("upgrade")?.toLowerCase() === "websocket" && origin !== null && !allowedOrigin(svc.cfg, origin)) {
+      return json({ error: "origin not allowed" }, 403);
+    }
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: allowedOrigin(svc.cfg, origin) ? {
+          "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+          "access-control-allow-headers": "authorization, content-type, x-command-id, x-bot-id, x-attachment-draft-token",
+        } : {},
+      });
+    }
+
     // Gate first: no Bot, Thread, or host data, and no upgrade, before a token is proven.
     // Public: health, the pairing exchange, and the provider's browser redirect (its state is single-use).
     // Code issue and paired-device management need the host secret or an already-paired device.
@@ -179,7 +202,9 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       const hostAuthorized = fromServiceHost(req) && svc.pairing.hostSecretMatches(presentedToken(req, url), svc.pairingHostSecret);
       if (pairedDeviceId === undefined && !hostAuthorized) return json({ error: "unauthorized" }, 401);
       const body = await parseBody(req, PairingCodeBody);
-      return json(svc.pairing.issueCode(body.name));
+      const issued = svc.pairing.issueCode(body.name);
+      const origin = publicOrigin(svc.cfg, server.requestIP(req)?.address, req.headers, url);
+      return json({ ...issued, url: `omarchy-bot://pair?service=${encodeURIComponent(origin)}&code=${issued.code}` });
     }
 
     if (pathname === "/api/pairing/exchange" && req.method === "POST") {
@@ -247,7 +272,11 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       return json({ error: "expected websocket upgrade" }, 426);
     }
 
-    if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION });
+    if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION, protocol: PROTOCOL_VERSION });
+    if (pathname === "/api/host-identity" && req.method === "GET") {
+      const identity = hostIdentity(svc.cfg.stateDir);
+      return identity ? json(identity) : json({ error: "Service host identity is unavailable" }, 503);
+    }
     const pluginResponse = await handlePluginRequest(req, svc.plugins, pathname, publicOrigin(svc.cfg, server.requestIP(req)?.address, req.headers, url));
     if (pluginResponse !== undefined) return pluginResponse;
 
@@ -333,34 +362,30 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     }
 
 
-    const dictationResponse = await handleDictationRequest(req, svc.dictation, pathname);
-    if (dictationResponse) return dictationResponse;
-
     const projectionResponse = await handleProjectionRequest(req, svc.computer, svc.projections);
     if (projectionResponse) return projectionResponse;
 
     const computerResponse = await handleComputerRequest(req, svc.computer, svc.screens);
     if (computerResponse) return computerResponse;
 
-    // Release: serve the built web UI if present.
-    const dist = path.resolve(import.meta.dir, "../../../web/dist");
-    if (existsSync(dist) && req.method === "GET" && !pathname.startsWith("/api/")) {
-      const file = pathname === "/" ? "/index.html" : pathname;
-      const f = Bun.file(path.join(dist, file));
-      const document = await f.exists() ? f : Bun.file(path.join(dist, "index.html"));
-      return new Response(document, { headers: { "referrer-policy": "no-referrer", ...(document.type.startsWith("text/html") ? { "cache-control": "no-store" } : {}) } });
-    }
-
     return notFound("not found");
   };
 
   const handle = async (req: Request): Promise<Response> => {
+    let response: Response;
     try {
-      return await route(req);
+      response = await route(req);
     } catch (err) {
-      if (err instanceof HttpError) return json({ error: err.message, ...(err.extra ?? {}) }, err.status);
-      return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      response = err instanceof HttpError
+        ? json({ error: err.message, ...(err.extra ?? {}) }, err.status)
+        : json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
+    const origin = req.headers.get("origin");
+    if (response) {
+      response.headers.append("vary", "Origin");
+      if (origin !== null && allowedOrigin(svc.cfg, origin)) response.headers.set("access-control-allow-origin", origin);
+    }
+    return response;
   };
 
   const server = Bun.serve<WsData>({

@@ -183,7 +183,5 @@ export const AuthorizePluginBody = z.object({
   providerId: PluginProviderId,
   accountId: z.string().optional(),
   serviceId: z.string().min(1).optional(),
-  /** Browser origin; the route validates it against the request origin. */
-  returnUrl: z.string().url(),
 }).strict();
 export type AuthorizePluginBody = z.infer<typeof AuthorizePluginBody>;

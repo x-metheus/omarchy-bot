@@ -19,7 +19,7 @@ describe("client-tagged This Device", () => {
     h = await startDaemon();
     const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop-a", capabilities: ["shell"] });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop-a" });
     const botId = await makeBot(h, "Tagged client Bot");
 
     const tagged = new ApiClient({ baseUrl: h.baseUrl, localSidecarDeviceId: DEVICE_A, deviceToken: h.token });

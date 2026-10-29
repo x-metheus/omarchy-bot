@@ -90,9 +90,9 @@ test("fresh TLS container prints one pairing URL, retains paired state and forwa
   const image = path.join(root, "image"), runtime = path.join(image, "runtime");
   mkdirSync(path.join(runtime, "scripts"), { recursive: true });
   mkdirSync(path.join(runtime, "apps/cli/src"), { recursive: true });
-  for (const file of ["main", "layout", "lifecycle", "archive", "browserPack"]) writeFileSync(path.join(runtime, `apps/cli/src/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/cli/src/${file}.ts`)));
+  for (const file of ["main", "layout", "lifecycle", "archive", "browserPack", "appInstall", "appSignature"]) writeFileSync(path.join(runtime, `apps/cli/src/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/cli/src/${file}.ts`)));
   mkdirSync(path.join(runtime, "apps/daemon/src/modules/computer"), { recursive: true });
-  for (const file of ["swayRuntimeSupply", "botComputerAssets", "browserPack"]) writeFileSync(path.join(runtime, `apps/daemon/src/modules/computer/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/daemon/src/modules/computer/${file}.ts`)));
+  for (const file of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "desktopEntry"]) writeFileSync(path.join(runtime, `apps/daemon/src/modules/computer/${file}.ts`), readFileSync(path.resolve(import.meta.dir, `../../apps/daemon/src/modules/computer/${file}.ts`)));
   mkdirSync(path.join(runtime, "apps/daemon/src/bootstrap"), { recursive: true });
   writeFileSync(path.join(runtime, "apps/daemon/src/bootstrap/listenerConfig.ts"), readFileSync(path.resolve(import.meta.dir, "../../apps/daemon/src/bootstrap/listenerConfig.ts")));
   const cert = path.join(root, "cert.pem"), key = path.join(root, "key.pem");
@@ -104,7 +104,7 @@ test("fresh TLS container prints one pairing URL, retains paired state and forwa
     if (route === "/api/health") return Response.json({ ok: true });
     expect(request.headers.get("authorization")).toBe("Bearer container-private-secret");
     if (route === "/api/devices/paired") { listed.resolve(); return Response.json({ devices: paired ? [{ revokedAt: null }] : [] }); }
-    return Response.json({ url: "/pair?code=FRESH234" });
+    return Response.json({ code: "FRESH234", url: `omarchy-bot://pair?service=${encodeURIComponent(new URL(request.url).origin)}&code=FRESH234` });
   } });
   const env = { ...process.env, HOME: path.join(root, "home"), XDG_RUNTIME_DIR: path.join(root, "run"), OMARCHY_BOT_HOME: path.join(root, "data"), OMARCHY_BOT_STATE: path.join(root, "state"), OMARCHY_BOT_HOST: "0.0.0.0", OMARCHY_BOT_PORT: String(server.port), OMARCHY_BOT_TLS_CERT: cert, OMARCHY_BOT_TLS_KEY: key };
   mkdirSync(env.OMARCHY_BOT_STATE, { recursive: true });
@@ -122,11 +122,11 @@ test("fresh TLS container prints one pairing URL, retains paired state and forwa
         if (!paired) {
           // Read the pairing line before signalling the private service.
           const first = await Promise.race([reader.read(), child.exited.then(() => ({ value: undefined }))]);
-          expect(new TextDecoder().decode(first.value)).toBe(`pairing: https://127.0.0.1:${server.port}/pair?code=FRESH234\n`);
+          expect(new TextDecoder().decode(first.value)).toBe(`address: https://127.0.0.1:${server.port}\ncode: FRESH234\npairing: omarchy-bot://pair?service=https%3A%2F%2F127.0.0.1%3A${server.port}&code=FRESH234\n`);
         } else await listed.promise;
         const issued = Bun.spawn([process.execPath, path.join(runtime, "apps/cli/src/main.ts"), "pair"], { env, stdout: "pipe", stderr: "pipe" });
         expect(await issued.exited).toBe(0);
-        expect(await new Response(issued.stdout).text()).toContain("pairing: https://");
+        expect(await new Response(issued.stdout).text()).toContain("pairing: omarchy-bot://pair?service=https%3A%2F%2F");
         child.kill("SIGINT");
         expect(await child.exited).toBe(0);
         const remaining: Uint8Array[] = [];

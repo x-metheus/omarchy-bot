@@ -17,4 +17,5 @@ const { port } = await main({
   botComputerAssetSupply: createFixtureFontSupply(path.join(dataDir, "font-fixture")),
   botScreenRuntimeDir: path.resolve(runtimeRoot),
 });
-console.log(`SERVICE_READY ${port}`);
+// One write deliberately coalesces a diagnostic and readiness, as startup stdout can.
+process.stdout.write(`Service fixture initialized\nSERVICE_READY ${port}\n`);

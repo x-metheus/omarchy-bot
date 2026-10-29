@@ -358,10 +358,11 @@ export class BrowserSurfaceSession {
       viewport: { width: 1920, height: 1080 },
       ignoreHTTPSErrors: true,
     });
-    if (token) {
-      // The web client reads its device token from localStorage; seed it before the app boots.
-      await context.addInitScript((value) => localStorage.setItem("omarchy-bot.device-token", value), token);
-    }
+    // Keep the memory shell on the LAN HTTPS proxy for HTTP and WebSocket traffic.
+    await context.addInitScript(({ serviceUrl, token }) => {
+      localStorage.setItem("omarchy-bot.service-url", serviceUrl);
+      if (token) localStorage.setItem("omarchy-bot.device-token", token);
+    }, { serviceUrl: lanEndpoint, token });
     const page = await context.newPage();
     await page.addInitScript(installBrowserInstrumentation);
     await page.goto(`${lanEndpoint}/?bot=${encodeURIComponent(owner.botId)}`, { waitUntil: "domcontentloaded" });
@@ -624,7 +625,7 @@ interface ProjectionProxyData {
   closed: boolean;
 }
 
-/** The browser harness must relay WebSocket upgrades as well as HTTP assets. */
+/** Development-only Web bundle host and Service proxy for browser conformance. */
 export function startProjectionProxy(
   upstreamBaseUrl: string,
   hostname: string,
@@ -641,6 +642,12 @@ export function startProjectionProxy(
     fetch(request, server) {
       const incoming = new URL(request.url);
       const target = new URL(`${incoming.pathname}${incoming.search}`, upstream);
+      if (!incoming.pathname.startsWith("/api/")) {
+        const dist = path.resolve(import.meta.dir, "../../../apps/web/dist");
+        const asset = path.resolve(dist, `.${decodeURIComponent(incoming.pathname)}`);
+        if (asset !== dist && !asset.startsWith(`${dist}${path.sep}`)) return new Response("not found", { status: 404 });
+        return new Response(Bun.file(existsSync(asset) && !incoming.pathname.endsWith("/") ? asset : path.join(dist, "index.html")));
+      }
       if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
         target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
         if (server.upgrade(request, { data: { target: target.href, upstream: undefined, pending: [], pendingBytes: 0, closed: false } })) return;

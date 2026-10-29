@@ -1,10 +1,10 @@
 import { expect, test } from "../fixtures.ts";
 
 test.describe("single Bot lifecycle", () => {
-  test("shows the startup-recovered Bot and only permanent removal controls", async ({ page }) => {
+  test("shows the startup-recovered Bot and only permanent removal controls", async ({ page, request }) => {
     await page.goto("/");
 
-    const response = await page.request.get("/api/bots");
+    const response = await request.get("/api/bots");
     expect(response.ok()).toBeTruthy();
     const bots = await response.json() as Array<Record<string, unknown>>;
     const recovered = bots.find((bot) => bot.id === "bot_legacy_archived");
@@ -38,7 +38,7 @@ test.describe("single Bot lifecycle", () => {
     await expect(settings.getByRole("button", { name: "Restore Restored legacy bot", exact: true })).toHaveCount(0);
     await expect(settings.getByRole("heading", { name: /Active bots|Archived bots/i })).toHaveCount(0);
 
-    expect((await page.request.post("/api/bots/bot_legacy_archived/archive", { data: {} })).status()).toBe(404);
-    expect((await page.request.post("/api/bots/bot_legacy_archived/restore", { data: {} })).status()).toBe(404);
+    expect((await request.post("/api/bots/bot_legacy_archived/archive", { data: {} })).status()).toBe(404);
+    expect((await request.post("/api/bots/bot_legacy_archived/restore", { data: {} })).status()).toBe(404);
   });
 });

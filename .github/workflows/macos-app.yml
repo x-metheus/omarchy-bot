@@ -1,0 +1,147 @@
+name: macos-app
+on:
+  pull_request:
+    paths:
+      - "apps/omarchy-bot/**"
+      - "apps/web/**"
+      - "apps/sidecar-rust/**"
+      - "packages/**"
+      - "tests/integration/local-sidecar-process.test.ts"
+      - "tests/integration/native-shell.test.ts"
+      - "scripts/build-macos-app.sh"
+      - "scripts/build-sidecar.ts"
+      - "scripts/macos-app/**"
+      - "bun.lock"
+      - ".github/workflows/macos-app.yml"
+  workflow_dispatch:
+    inputs:
+      signed:
+        description: Require Developer ID signing and notarization
+        type: boolean
+        default: false
+      updater:
+        description: Also require signed updater archives
+        type: boolean
+        default: false
+      updater-public-key:
+        description: Public key matching the updater signing secret
+        type: string
+        default: ""
+      version:
+        description: Stable X.Y.Z required for updater builds
+        type: string
+        default: ""
+      environment:
+        description: Protected signing environment (app-release for distribution)
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      signed:
+        type: boolean
+        default: true
+      updater:
+        type: boolean
+        default: true
+      updater-public-key:
+        type: string
+        default: ""
+      version:
+        type: string
+        default: ""
+      environment:
+        type: string
+        default: ""
+    secrets:
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: macos-app-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  dmg:
+    name: macOS dmg (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    environment: ${{ inputs.environment || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: aarch64
+          - runner: macos-15-intel
+            arch: x64
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.lane/macos-app/cargo
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.lane/macos-app/target
+      CARGO_INSTALL_ROOT: ${{ github.workspace }}/.lane/macos-app/tools
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.1
+      - name: Install pinned Tauri CLI in the worktree
+        run: |
+          cargo install tauri-cli --version 2.12.4 --locked
+          echo "$CARGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
+      - run: bun install --frozen-lockfile
+      - name: Exercise native shell interface
+        run: bun test tests/integration/native-shell.test.ts
+      - name: Build and verify native package
+        env:
+          SIGNED: ${{ github.event_name != 'pull_request' && inputs.signed }}
+          UPDATER: ${{ github.event_name != 'pull_request' && inputs.updater }}
+          APP_VERSION: ${{ inputs.version }}
+          TAURI_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/download/app-latest/latest.json
+          APPLE_CERTIFICATE: ${{ github.event_name != 'pull_request' && inputs.signed && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ github.event_name != 'pull_request' && inputs.signed && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ github.event_name != 'pull_request' && inputs.signed && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ github.event_name != 'pull_request' && inputs.signed && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ github.event_name != 'pull_request' && inputs.signed && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ github.event_name != 'pull_request' && inputs.signed && secrets.APPLE_TEAM_ID || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && inputs.updater && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && inputs.updater && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          TAURI_SIGNING_PUBLIC_KEY: ${{ inputs.updater-public-key || vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          if [[ $UPDATER == true ]]; then
+            [[ $SIGNED == true && -n $APP_VERSION && -n $TAURI_SIGNING_PRIVATE_KEY && -n $TAURI_SIGNING_PUBLIC_KEY ]] || { echo 'Updater publication requires signing, version, TAURI_SIGNING_PRIVATE_KEY and updater-public-key' >&2; exit 1; }
+          fi
+          if [[ $SIGNED == true ]]; then
+            bash scripts/build-macos-app.sh --signed
+          else
+            bash scripts/build-macos-app.sh --unsigned
+          fi
+      - name: Check native certificate diagnostics
+        working-directory: apps/omarchy-bot
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app-${{ matrix.arch }}
+          path: .lane/dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-app-evidence-${{ matrix.arch }}
+          path: .lane/macos-app/evidence/
+          if-no-files-found: warn

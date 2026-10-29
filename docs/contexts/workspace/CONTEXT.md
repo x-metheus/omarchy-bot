@@ -4,7 +4,7 @@ The end-user context for creating AI teammates, working with them through conver
 
 ## Language
 
-Definitions only. Rules and acceptance live in [the product boundary](../../workspace-redesign.md#shared-workspace-and-plugin-boundary), [ADR 0011](../../adr/0011-local-sidecar-only-off-host.md), [ADR 0013](../../adr/0013-run-a-standalone-linux-service.md), [ADR 0014](../../adr/0014-require-paired-device-tokens.md), and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Host Session](../computer-control/CONTEXT.md), [Bot Computer](../computer-control/CONTEXT.md), [Bot Screen](../computer-control/CONTEXT.md), [Screen Projection](../computer-control/CONTEXT.md).
+Definitions only. Rules and acceptance live in [the product boundary](../../workspace-redesign.md#shared-workspace-and-plugin-boundary), [ADR 0011](../../adr/0011-local-sidecar-only-off-host.md), [ADR 0013](../../adr/0013-run-a-standalone-linux-service.md), [ADR 0014](../../adr/0014-require-paired-device-tokens.md), [ADR 0015](../../adr/0015-omarchy-bot-app-is-the-only-bot-client.md), and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Host Session](../computer-control/CONTEXT.md), [Bot Computer](../computer-control/CONTEXT.md), [Bot Screen](../computer-control/CONTEXT.md), [Screen Projection](../computer-control/CONTEXT.md).
 
 **Bot**:
 A persistent assistant created and named by the user, with its own job instructions, configuration, and identity. Each Bot uses one Agent; multiple Bots may use the same Agent, and Agent inventory is not itself a Bot.
@@ -15,12 +15,12 @@ The user-facing application for conversations with Bots and observation or human
 _Avoid_: Bot Desktop, Agent runtime, Host Session, Desktop Client
 
 **Omarchy Bot**:
-The named Bot Client. It is the Tauri application people install; the Service is not this application. Use on the Service Host is a viewer only.
-_Avoid_: Desktop, Desktop Client, Omarchy Bot Desktop, Bot Desktop, daemon, second plugin
+The named and only Bot Client: the Tauri application for Linux, macOS, and Windows that embeds the Web UI. The Service is not this application, and a browser is not a Bot Client. Use on the Service Host is a viewer only.
+_Avoid_: Desktop, Desktop Client, Omarchy Bot Desktop, Bot Desktop, daemon, second plugin, web client
 
 **Local Sidecar**:
-A Bun process started by Omarchy Bot only when it is not connected to a Service on the same machine. It registers outbound and runs host OS command, search, and file tools for the remote Agent. It is not an Agent, a daemon, or a Bot Screen.
-_Avoid_: Agent worker, Bot Computer, Host Session, compiled sidecar as the v1 form
+A compiled process bundled in Omarchy Bot and run only while the application runs and is not connected to a Service on the same machine. It registers outbound with its operating system and shell, and runs that machine's command, search, and file tools for the remote Agent. It is not an Agent, a daemon, or a Bot Screen.
+_Avoid_: Agent worker, Bot Computer, Host Session, background agent
 
 **Service**:
 The headless Omarchy Bot daemon that owns Bots, Threads, Agent workers, the Shared Workspace, and the Bot Computer on one Linux host. Bot Clients connect to it; it needs no graphical desktop.
@@ -35,11 +35,11 @@ What starts, stops, and reports on the Service: a systemd unit or a container en
 _Avoid_: Service, Omarchy plugin, second daemon
 
 **Paired Device**:
-A Bot Client install that exchanged a one-time pairing code for a revocable device token. Every request to the Service comes from a Paired Device.
+An Omarchy Bot install that exchanged a one-time pairing code for a revocable device token. Every request to the Service comes from a Paired Device; one install pairs with one Service, and one Service may have many Paired Devices.
 _Avoid_: This Device, user account, trusted network
 
 **This Device**:
-The Local Sidecar of the Omarchy Bot install that sent the user message starting the current Turn. A Turn started from a browser tab, a mobile-class client, or Omarchy Bot on the Service Host has no This Device.
+The Local Sidecar of the Omarchy Bot install that sent the user message starting the current Turn. A Turn started from a future mobile-class client or from Omarchy Bot on the Service Host has no This Device.
 _Avoid_: the only online Sidecar, default device, any laptop
 
 **Shared Workspace**:

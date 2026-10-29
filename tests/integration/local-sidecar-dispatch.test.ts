@@ -18,11 +18,7 @@ describe("local dispatch once per tool call", () => {
     h = await startDaemon();
     const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["shell"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Dispatch once Bot");
     const pending = sendToBot(h, botId, "local.run:echo once", DEVICE_A);
     const first = await sidecar.waitForJob();
@@ -79,11 +75,7 @@ describe("local dispatch Turn identity", () => {
     h = await startDaemon();
     const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["shell"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Turn identity Bot");
     const pending = sendToBot(h, botId, "local.run:echo once", DEVICE_A);
     const first = await sidecar.waitForJob();

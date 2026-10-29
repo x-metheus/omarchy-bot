@@ -66,7 +66,7 @@ export class PairingService {
     this.db.query("DELETE FROM pairing_codes WHERE expires_at <= ?").run(now.toISOString());
   }
 
-  issueCode(name: string, now: Date = new Date()): { code: string; url: string; expiresAt: string } {
+  issueCode(name: string, now: Date = new Date()): { code: string; expiresAt: string } {
     // 32 symbols divide 256 evenly, so the byte map carries no modulo bias.
     const code = Array.from(
       randomBytes(CODE_LENGTH),
@@ -77,7 +77,7 @@ export class PairingService {
     this.db
       .query("INSERT INTO pairing_codes (code_hash, name, expires_at) VALUES (?, ?, ?)")
       .run(sha256(code), name, expiresAt);
-    return { code, url: `/pair?code=${code}`, expiresAt };
+    return { code, expiresAt };
   }
 
   exchange(

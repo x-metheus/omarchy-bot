@@ -16,7 +16,6 @@ import { PortableSwayRuntimeSupply } from "../modules/computer/swayRuntimeSupply
 import type { BotComputerAssetSupply } from "../modules/computer/botComputerAssets.ts";
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
-import { DictationService } from "../modules/dictation/dictationService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { PluginsService } from "../modules/plugins/plugins.ts";
@@ -61,9 +60,14 @@ export async function main(options: MainOptions = {}): Promise<{
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
   let mailbox!: MailboxService;
+  let plugins!: PluginsService;
   const supervisor: Supervisor = new Supervisor(
     {
       onAgentEvent: (agentId, event) => {
+        if (agentId === "pi" && event.type === "native" && event.capability === "mcp.authorization") {
+          plugins.handleNativeAuthorization(event.payload);
+          return;
+        }
         if (!avatars.onAgentEvent(agentId, event)) turns.onAgentEvent(agentId, event);
       },
       onWorkerCrash: (agentId, err) => {
@@ -133,14 +137,13 @@ export async function main(options: MainOptions = {}): Promise<{
   );
 
   const events = new EventLog(db);
-  const dictation = new DictationService(cfg.dictationDir, cfg.voxtypeBin ?? "voxtype", events);
   const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
   const threads: ThreadsService = new ThreadsService(db, events, agents);
   const bots = new BotsService(db, events, agents, threads);
   const attachments = new AttachmentsService(db, cfg.attachmentsDir, agents);
   attachments.gcStaged();
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
-  const plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
+  plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
     const worker = await supervisor.agentWorker("pi");
     return worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
   }, async (input) => {
@@ -152,7 +155,7 @@ export async function main(options: MainOptions = {}): Promise<{
     if (origin.hostname === "0.0.0.0") origin.hostname = "127.0.0.1";
     if (origin.hostname === "[::]") origin.hostname = "[::1]";
     return origin.origin;
-  });
+  }, (event) => { events.append("plugin", event.accountId ?? event.mcpId ?? event.providerId ?? "plugins", `plugin.authorization_${event.status}`, event); });
   const devices = new SidecarBroker(cfg.sharedWorkspaceDir);
   const pairing = new PairingService(db);
   const pairingHostSecret = pairing.ensureHostSecret(cfg.stateDir);
@@ -254,7 +257,6 @@ export async function main(options: MainOptions = {}): Promise<{
     turns,
     avatars,
     attachments,
-    dictation,
     plugins,
     computer,
     screens,
@@ -307,7 +309,6 @@ export async function main(options: MainOptions = {}): Promise<{
     clearInterval(statusTimer);
     clearInterval(deviceLiveness);
     devices.close();
-    await dictation.shutdown().catch(reportStopFailure("dictation"));
     mailbox.pauseDispatch();
     await turns.shutdown().catch(reportStopFailure("turns"));
     computer.shutdown();
@@ -327,7 +328,6 @@ export async function main(options: MainOptions = {}): Promise<{
     clearInterval(statusTimer);
     clearInterval(deviceLiveness);
     devices.close();
-    await dictation.shutdown();
     mailbox.pauseDispatch();
     await turns.shutdown();
     computer.shutdown();

@@ -1,33 +1,36 @@
+import { queryOptions } from "@tanstack/react-query";
+import { PROTOCOL_VERSION } from "@omarchy-bot/protocol";
 import { ApiClient, randomUuid } from "@omarchy-bot/api-client";
 import { isDeviceId } from "@omarchy-bot/domain";
-import { deviceToken } from "./deviceToken.ts";
+import { getShell } from "./shell.ts";
+import { deviceRevoked } from "./pairing.ts";
+import { serviceFetch } from "./serviceFetch.ts";
 export { randomUuid };
 
-/**
- * The client shell that started a Local Sidecar installs this global before the
- * web bundle loads. Its value is that Sidecar's `OMARCHY_BOT_DEVICE_ID`, so
- * the daemon can resolve This Device for Turns this client starts.
- * A browser tab, a mobile-class client, and Omarchy Bot on the plugin host
- * never install it: they have no This Device and send no tag.
- */
-const LOCAL_SIDECAR_DEVICE_ID_GLOBAL = "__OMARCHY_BOT_DEVICE_ID__";
+export const api = new ApiClient({
+  fetch: serviceFetch,
+  baseUrl: () => getShell().service.baseUrl(),
+  deviceToken: () => getShell().service.deviceToken(),
+  onUnauthorized: deviceRevoked,
+  localSidecarDeviceId: () => {
+    const status = getShell().localSidecar.status();
+    return status.running && status.deviceId !== undefined && isDeviceId(status.deviceId)
+      ? status.deviceId : undefined;
+  },
+});
 
-/** Malformed or absent shell input fails closed: no tag, no This Device. */
-function localSidecarDeviceId(): string | undefined {
-  const value = (globalThis as Record<string, unknown>)[LOCAL_SIDECAR_DEVICE_ID_GLOBAL];
-  return typeof value === "string" && isDeviceId(value) ? value : undefined;
+export function serviceHealthQuery() {
+  return queryOptions({
+    queryKey: ["health", getShell().service.baseUrl()],
+    queryFn: () => api.health(),
+    staleTime: 0,
+  });
 }
 
-/**
- * The browser talks to the daemon it was served from — no hardcoded origin.
- * In dev the Vite proxy forwards /api to 127.0.0.1:7321.
- */
-export const api = new ApiClient({
-  baseUrl: "",
-  localSidecarDeviceId: localSidecarDeviceId(),
-  // Read at request time: pairing happens after this module is loaded.
-  deviceToken: deviceToken,
-});
+export function isSupportedServiceProtocol(protocol: unknown): boolean {
+  return typeof protocol === "number" && Number.isInteger(protocol)
+    && protocol >= 1 && protocol <= PROTOCOL_VERSION;
+}
 
 export function trimSendText(text: string): string {
   return text.replace(/\s+$/, "");

@@ -51,7 +51,7 @@ function newBroker(now?: () => number): SidecarBroker {
 }
 
 function register(broker: SidecarBroker, port: DevicePort, deviceId = DEVICE_A, capabilities: Array<"shell" | "search" | "files" | "transfer"> = [...ALL_CAPABILITIES]): void {
-  const result = broker.register(port, { type: "register", deviceId, hostname: `host-${deviceId.slice(-1)}`, capabilities: [...capabilities] });
+  const result = broker.register(port, { type: "register", deviceId, hostname: `host-${deviceId.slice(-1)}`, os: "linux", shell: "posix-sh", capabilities: [...capabilities] });
   expect(result.ok).toBeTrue();
 }
 
@@ -69,6 +69,7 @@ describe("SidecarBroker cancel", () => {
       type: "register",
       deviceId: DEVICE_A,
       hostname: "laptop",
+      os: "linux", shell: "posix-sh",
       capabilities: ["shell"],
     }).ok).toBeTrue();
     const controller = new AbortController();
@@ -120,12 +121,12 @@ describe("SidecarBroker roster", () => {
   test("register validates the frame and lists online DTOs", () => {
     const broker = newBroker();
     const port = new RecordingPort();
-    expect(broker.register(port, { type: "register", deviceId: "nope", hostname: "laptop", capabilities: ["shell"] }).ok).toBeFalse();
+    expect(broker.register(port, { type: "register", deviceId: "nope", hostname: "laptop", os: "linux", shell: "posix-sh", capabilities: ["shell"] }).ok).toBeFalse();
     expect(broker.register(port, { type: "heartbeat" }).ok).toBeFalse();
     expect(broker.list()).toEqual([]);
 
     register(broker, port);
-    expect(broker.list()).toEqual([{ id: DEVICE_A, hostname: "host-a", online: true, capabilities: [...ALL_CAPABILITIES] }]);
+    expect(broker.list()).toEqual([{ id: DEVICE_A, hostname: "host-a", os: "linux", shell: "posix-sh", online: true, capabilities: [...ALL_CAPABILITIES] }]);
     expect(broker.get(DEVICE_A)?.online).toBeTrue();
     expect(broker.get(DEVICE_B)).toBeUndefined();
   });

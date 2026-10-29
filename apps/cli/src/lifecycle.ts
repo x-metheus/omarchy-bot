@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { layoutFromEnv, serviceFetch, serviceOrigin, type Layout } from "./layout.ts";
 import { SWAY_RUNTIME_BUNDLE } from "../../daemon/src/modules/computer/swayRuntimeSupply.ts";
 import { FONT_ASSETS, PortableBotComputerAssets } from "../../daemon/src/modules/computer/botComputerAssets.ts";
+import { appDiagnostics, graphicalSession, uninstallApp } from "./appInstall.ts";
 
 function unitValue(value: string): string {
   const escaped = value.replace(/%/g, "%%").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r");
@@ -176,6 +177,7 @@ export async function statusText(layout: Layout, env: NodeJS.ProcessEnv): Promis
 export async function doctorText(env: NodeJS.ProcessEnv): Promise<string> {
   const layout = layoutFromEnv(env);
   const lines: string[] = [];
+  if (graphicalSession(env)) lines.push(...appDiagnostics(layout));
   const probe = async (command: string, args: string[]) => {
     try {
       const result = await runCommand(command, args, env);
@@ -247,4 +249,5 @@ export async function uninstall(layout: Layout, env: NodeJS.ProcessEnv): Promise
   rmSync(layout.runtimeDir, { recursive: true, force: true });
   if (ownsLauncher(layout)) rmSync(layout.launcherPath);
   rmSync(join(layout.dataDir, "service.json"), { force: true });
+  uninstallApp(layout);
 }

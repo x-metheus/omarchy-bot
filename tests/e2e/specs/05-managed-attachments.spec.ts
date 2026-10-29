@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { expect, test, type Locator, type Page } from "../fixtures.ts";
 
 async function createBot(page: Page, name: string): Promise<string> {
@@ -130,7 +131,7 @@ test.describe("managed attachments", () => {
     await expect(page.getByTestId("staged-attachment")).toHaveCount(0);
   });
 
-  test("stages with picker, restores in the same window, and stays bound to its original draft", async ({ page }) => {
+  test("stages with picker, restores in the same window, and stays bound to its original draft", async ({ page, request }) => {
     await page.goto("/");
     await createBot(page, "Attachment Draft Bot");
     await sendAndWait(page, "say: ready");
@@ -167,11 +168,11 @@ test.describe("managed attachments", () => {
       await expect(composerInput(secondPage)).toHaveText("");
       const otherDraftToken = await secondPage.evaluate(() => crypto.randomUUID());
       const headers = { "x-attachment-draft-token": otherDraftToken };
-      expect((await secondPage.request.get(`/api/attachments/staged/${attachmentId}`, { headers })).status()).toBe(404);
-      expect((await secondPage.request.delete(`/api/attachments/staged/${attachmentId}`, { headers })).status()).toBe(404);
+      expect((await request.get(`/api/attachments/staged/${attachmentId}`, { headers })).status()).toBe(404);
+      expect((await request.delete(`/api/attachments/staged/${attachmentId}`, { headers })).status()).toBe(404);
       expect(
         (
-          await secondPage.request.post(`/api/threads/${threadId}/messages`, {
+          await request.post(`/api/threads/${threadId}/messages`, {
             data: {
               text: "attachment-echo",
               attachmentIds: [attachmentId],
@@ -191,6 +192,14 @@ test.describe("managed attachments", () => {
     await composerInput(page).press("Enter");
     await expect(page.getByTestId("assistant-message")).toHaveCount(priorReplies + 1, { timeout: 15_000 });
     await expect(page.getByRole("link", { name: /notes\.txt/ })).toBeVisible();
+    const download = page.waitForEvent("download");
+    await page.getByRole("link", { name: /notes\.txt/ }).click();
+    const saved = await download;
+    expect(saved.suggestedFilename()).toBe("notes.txt");
+    expect(await saved.failure()).toBeNull();
+    const savedPath = await saved.path();
+    expect(await readFile(savedPath!, "utf8")).toBe("window-local notes");
+    await expect(page.getByRole("status").filter({ hasText: "Attachment saved to notes.txt" })).toBeVisible();
   });
 
   test("rejects unsupported attachments without losing the supported draft", async ({ page }) => {
@@ -236,7 +245,7 @@ test.describe("managed attachments", () => {
     await expect(page.getByRole("link", { name: /notes\.txt/ })).toBeVisible();
   });
 
-  test("drops missing staged references on reload with a contextual notice", async ({ page }) => {
+  test("drops missing staged references on reload with a contextual notice", async ({ page, request }) => {
     await page.goto("/");
     const botId = await createBot(page, "Attachment Restore Bot");
     await page.getByLabel("Choose files to attach").setInputFiles({
@@ -254,7 +263,7 @@ test.describe("managed attachments", () => {
       return parsed.attachmentDraftToken;
     }, `draft:v1:${botId}:blank`);
     if (typeof draftToken !== "string") throw new Error("attachment draft token missing");
-    const deleted = await page.request.delete(`/api/attachments/staged/${attachmentId}`, {
+    const deleted = await request.delete(`/api/attachments/staged/${attachmentId}`, {
       headers: { "x-attachment-draft-token": draftToken },
     });
     expect(deleted.status()).toBe(204);

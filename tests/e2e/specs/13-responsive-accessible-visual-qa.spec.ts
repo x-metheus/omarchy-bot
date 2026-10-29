@@ -314,7 +314,6 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
           ],
     );
   });
-  await page.route("**/api/dictation", (route) => fulfillJson(route, { state: "idle" }));
   await page.route("**/api/computer/state**", (route) => {
     const state = options.computerState ?? "ready";
     const url = new URL(route.request().url());
@@ -602,7 +601,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(conversation).toBeVisible();
     await expect(page.getByTestId("composer")).toBeVisible();
     await expect(page.getByRole("button", { name: "Attach files" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Start voice recording" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /voice recording|voice dictation|Transcribing voice/i })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
     const desktopBox = await capabilities.boundingBox();
     expect(desktopBox).not.toBeNull();
@@ -782,6 +781,15 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await page.setViewportSize(desktopViewport);
     await page.emulateMedia({ colorScheme: "dark" });
     await page.addInitScript(() => localStorage.setItem("settings:v1:appearance", "light"));
+    await page.addInitScript(() => {
+      Object.defineProperty(globalThis, "Notification", {
+        configurable: true,
+        value: {
+          permission: "default",
+          requestPermission: async () => "granted",
+        },
+      });
+    });
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
@@ -797,6 +805,15 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(settings.getByText("Follows your current Omarchy and system appearance.", { exact: true })).toBeVisible();
     await expect(settings.getByRole("radio")).toHaveCount(0);
     await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBeNull();
+    await expect(settings.getByTestId("settings-nav-voice")).toHaveCount(0);
+    await expect(settings.getByText("Voice", { exact: true })).toHaveCount(0);
+    await settings.getByTestId("settings-nav-notifications").click();
+    await expect(settings.getByRole("heading", { name: "Notifications", exact: true })).toBeVisible();
+    await expect(settings.getByText("Desktop notifications", { exact: true })).toBeVisible();
+    await expect(settings.getByRole("switch", { name: /voice/i })).toHaveCount(0);
+    await settings.getByRole("button", { name: "Enable desktop notifications" }).click();
+    await expect(settings.getByText("Enabled for background Bot completions and requests for your attention.", { exact: true })).toBeVisible();
+    await expect(settings.getByRole("button", { name: "Enable desktop notifications" })).toHaveCount(0);
   });
 
   test("keeps a long ordered transcript accessible, responsive, focusable, scrollable, and motion-safe", async ({ page }) => {

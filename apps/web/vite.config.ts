@@ -5,6 +5,11 @@ import { tanstackRouter } from "@tanstack/router-plugin/vite";
 
 export default defineConfig(({ command }) => ({
   plugins: [
+    {
+      name: "development-shell",
+      apply: "serve",
+      transformIndexHtml: () => [{ tag: "script", attrs: { type: "module", src: "/src/dev-shell.ts" }, injectTo: "head" }],
+    },
     tanstackRouter({ target: "react", routesDirectory: "src/routes", generatedRouteTree: "src/routeTree.gen.ts" }),
     react(),
     stylex({
@@ -24,11 +29,5 @@ export default defineConfig(({ command }) => ({
   server: {
     host: process.env.OMARCHY_BOT_HOST ?? "127.0.0.1",
     port: 7322,
-    proxy: {
-      "/api": {
-        target: "http://127.0.0.1:7321",
-        ws: true,
-      },
-    },
   },
 }));

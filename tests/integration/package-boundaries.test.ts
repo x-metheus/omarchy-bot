@@ -10,7 +10,7 @@ function sourceFiles(directory: string): string[] {
     if (entry.name === "node_modules" || entry.name === ".git") return [];
     const file = `${directory}/${entry.name}`;
     if (entry.isDirectory()) return sourceFiles(file);
-    return entry.isFile() && /\.(?:[cm]?[jt]sx?|qml|sh)$/.test(file) ? [file] : [];
+    return entry.isFile() && /\.(?:[cm]?[jt]sx?|qml|sh|ps1|json|ya?ml)$/.test(file) ? [file] : [];
   });
 }
 
@@ -61,9 +61,24 @@ test("the Omarchy plugin never imports Service source or the CLI as a module", (
     for (const specifier of moduleImports(file)) {
       const target = repositoryPath(file, specifier);
       if (/^@omarchy-bot\/(?!omarchy-plugin(?:\/|$))/.test(specifier)
-        || /^(?:apps\/(?:daemon|web|site|sidecar|cli)(?:\/|$)|workers(?:\/|$)|packages\/(?!omarchy-plugin(?:\/|$)))/.test(target)) {
+        || /^(?:apps\/(?:daemon|web|site|sidecar-rust|cli)(?:\/|$)|workers(?:\/|$)|packages\/(?!omarchy-plugin(?:\/|$)))/.test(target)) {
         violations.push(`${file} imports ${specifier}`);
       }
+    }
+  }
+  expect(violations).toEqual([]);
+});
+
+test("application packaging uses the Rust Sidecar without a TypeScript runtime", () => {
+  const violations: string[] = [];
+  if (existsSync(path.join(root, "apps/sidecar"))) violations.push("TypeScript Sidecar source remains");
+  const files = ["package.json", "bun.lock", ...["apps", "packages", "workers", "scripts", ".github", "tests"].flatMap(sourceFiles)];
+  for (const file of files) {
+    if (file === "tests/integration/package-boundaries.test.ts") continue;
+    const source = readFileSync(path.join(root, file), "utf8");
+    if (/apps\/sidecar(?:\/|["'])|@omarchy-bot\/sidecar(?:["'@/]|$)/m.test(source)
+      || /bun\s+build[^\n]*--compile[^\n]*sidecar/i.test(source)) {
+      violations.push(`${file} references the TypeScript Sidecar`);
     }
   }
   expect(violations).toEqual([]);

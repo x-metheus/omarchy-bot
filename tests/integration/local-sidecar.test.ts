@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { DeviceDto } from "../../packages/protocol/src/index.ts";
 import { api, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
-import { LocalSidecarFixture } from "./helpers/localSidecar.ts";
+import { DeviceChannel, LocalSidecarFixture } from "./helpers/localSidecar.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DEVICE_B = "dev_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 describe("outbound Local Sidecar device roster", () => {
   let h: Harness | undefined;
-  const sidecars: LocalSidecarFixture[] = [];
+  const sidecars: DeviceChannel[] = [];
 
   afterEach(async () => {
     await Promise.all(sidecars.splice(0).map((sidecar) => sidecar.close().catch(() => undefined)));
@@ -21,8 +21,8 @@ describe("outbound Local Sidecar device roster", () => {
     return h;
   }
 
-  async function connect(): Promise<LocalSidecarFixture> {
-    const sidecar = await LocalSidecarFixture.connect(h!.port, h!.token);
+  async function connect(): Promise<DeviceChannel> {
+    const sidecar = await DeviceChannel.connect(h!.port, h!.token);
     sidecars.push(sidecar);
     return sidecar;
   }
@@ -32,12 +32,17 @@ describe("outbound Local Sidecar device roster", () => {
     expect(await api<DeviceDto[]>(harness, "GET", "/api/devices")).toEqual([]);
   });
 
-  test("registers hostname and OS capabilities on the public roster", async () => {
+  test.each([
+    { os: "linux", shell: "posix-sh" },
+    { os: "macos", shell: "posix-sh" },
+    { os: "windows", shell: "powershell-5.1" },
+  ] as const)("registers hostname, OS, shell, and capabilities: %s", async (identity) => {
     const harness = await boot();
     const sidecar = await connect();
     const registered = await sidecar.register({
       deviceId: DEVICE_A,
       hostname: "laptop",
+      ...identity,
       capabilities: ["shell", "search", "files", "transfer"],
     });
     expect(registered).toEqual({ type: "registered", deviceId: DEVICE_A });
@@ -46,9 +51,21 @@ describe("outbound Local Sidecar device roster", () => {
         id: DEVICE_A,
         hostname: "laptop",
         online: true,
+        ...identity,
         capabilities: ["shell", "search", "files", "transfer"],
       },
     ]);
+  });
+
+  test("rejects missing or invalid OS and shell before listing a device", async () => {
+    const harness = await boot();
+    for (const identity of [{}, { os: "linux" }, { shell: "posix-sh" }, { os: "other", shell: "posix-sh" }, { os: "macos", shell: "bash" }]) {
+      const sidecar = await connect();
+      sidecar.send({ type: "register", deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"], ...identity });
+      expect((await sidecar.waitForFrame((frame) => frame.type === "registered" || frame.type === "error")).type).toBe("error");
+      expect(await api<DeviceDto[]>(harness, "GET", "/api/devices")).toEqual([]);
+      await sidecar.close();
+    }
   });
 
   test("rejects screenshot and Takeover capabilities without listing the device", async () => {
@@ -99,6 +116,7 @@ describe("outbound Local Sidecar device roster", () => {
         id: DEVICE_A,
         hostname: "laptop-2",
         online: true,
+        os: "linux", shell: "posix-sh",
         capabilities: ["shell", "files"],
       },
     ]);
@@ -160,8 +178,15 @@ describe("approved local.run on this-device", () => {
     await sidecar.register({
       deviceId: DEVICE_A,
       hostname: "laptop",
-      capabilities: ["shell"],
     });
+    expect(await api<DeviceDto[]>(h, "GET", "/api/devices")).toEqual([{
+      id: DEVICE_A,
+      hostname: "laptop",
+      online: true,
+      os: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux",
+      shell: process.platform === "win32" ? "powershell-5.1" : "posix-sh",
+      capabilities: ["shell", "search", "files", "transfer"],
+    }]);
     const botId = await makeBot(h, "Local run Bot");
     const pending = sendToBot(h, botId, "local.run:echo sidecar-sentinel; pwd", DEVICE_A);
     const job = await sidecar.waitForJob();
@@ -190,7 +215,6 @@ describe("approved local.run on this-device", () => {
     await sidecar.register({
       deviceId: DEVICE_A,
       hostname: "laptop",
-      capabilities: ["shell"],
     });
     const botId = await makeBot(h, "Native vs local Bot");
     const native = await sendToBot(h, botId, "tool");
@@ -223,7 +247,6 @@ describe("approved local.run on this-device", () => {
     await sidecar.register({
       deviceId: DEVICE_A,
       hostname: "laptop",
-      capabilities: ["shell"],
     });
     const botId = await makeBot(h, "Redacted local Bot");
     const pending = sendToBot(h, botId, "local.run:echo token=supersecret", DEVICE_A);

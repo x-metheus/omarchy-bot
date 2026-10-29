@@ -63,6 +63,8 @@ jobs:
         id: package
         env:
           SWAY_BUNDLE: ${{ steps.sway.outputs.bundle }}
+          TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+          RELEASE_BUILD: ${{ github.ref == 'refs/heads/main' }}
         run: |
           archive=$(bash scripts/package-plugin-runtime.sh . dist-runtime "$SWAY_BUNDLE" .lane/fonts)
           echo "archive=$archive" >> "$GITHUB_OUTPUT"

@@ -34,6 +34,9 @@ import {
   type ToolChannelFrame,
 } from "../../../../../packages/agent-contract/src/tool-channel.ts";
 import { readJsonl } from "../../../../../packages/agent-contract/src/framing.ts";
+import type { NativeMcpStatus } from "../../../../../packages/agent-contract/src/plugin-protocol.ts";
+import { nativeMcpRevision } from "../../../../../packages/agent-contract/src/native-mcp-revision.ts";
+import { nativeMcpConfigFile, nativeMcpPrivateDir } from "../../../../../packages/agent-contract/src/native-mcp-config.ts";
 
 const write = (msg: unknown): void => {
   process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -131,6 +134,7 @@ interface FakeProbeControl {
   };
   fakeAbortBehavior?: "fail_once" | "ignore_once";
   fakeAbortReleaseFile?: string;
+  fakeMcpAuthorization?: { authenticated?: boolean; error?: string; authorizationUrl?: string; notify?: "completed" | "failed"; delayMs?: number; staleNotify?: boolean };
 }
 
 function dataDir(): string | undefined {
@@ -220,6 +224,9 @@ interface FakeSession {
 const sessions = new Map<string, FakeSession>();
 const failedOnce = new Set<string>();
 const failedAbortOnce = new Set<string>();
+const mcpStatuses = new Map<string, NativeMcpStatus>();
+const mcpAttempts = new Map<string, string>();
+const cancelledMcpAttempts = new Map<string, string>();
 const ignoredAbortOnce = new Set<string>();
 
 const respond = (requestId: string, payload: unknown): void => {
@@ -412,6 +419,35 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         agentVersion: AGENT_VERSION,
         capabilities: currentCapabilities,
       } satisfies ProbePayload);
+      break;
+    }
+    case "resources.list":
+      respond(msg.requestId!, { skills: [], mcp: [...mcpStatuses.values()] });
+      break;
+    case "mcp.control": {
+      const authorization = probeControl().fakeMcpAuthorization ?? {};
+      const name = String(msg.server);
+      if (msg.action === "auth-cancel") {
+        if (mcpAttempts.get(name) === msg.authorizationId) {
+          cancelledMcpAttempts.set(name, String(msg.authorizationId));
+          mcpAttempts.delete(name);
+        }
+        respond(msg.requestId!, { servers: [...mcpStatuses.values()], result: {} });
+        break;
+      }
+      if (msg.action === "auth-start") {
+        mcpAttempts.set(name, String(msg.authorizationId));
+        if (authorization.staleNotify) write({ type: "event", event: { type: "native", agentId: AGENT_ID, capability: "mcp.authorization", payload: { server: name, authorizationId: cancelledMcpAttempts.get(name), status: "completed" }, sensitivity: "public" } });
+      }
+      const revision = nativeMcpRevision(String(msg.cwd), nativeMcpConfigFile(nativeMcpPrivateDir()));
+      const authenticated = authorization.authenticated || mcpStatuses.get(name)?.status === "connected";
+      mcpStatuses.set(name, { name, configurationRevision: revision, status: authenticated ? "connected" : "needs-auth", toolCount: authenticated ? 1 : 0, disabled: false });
+      respond(msg.requestId!, { servers: [...mcpStatuses.values()], result: { ...authorization, authenticated } });
+      if (msg.action === "auth-start" && authorization.notify) setTimeout(() => {
+        if (mcpAttempts.get(name) !== msg.authorizationId) return;
+        if (authorization.notify === "completed") mcpStatuses.set(name, { name, configurationRevision: revision, status: "connected", toolCount: 1, disabled: false });
+        write({ type: "event", event: { type: "native", agentId: AGENT_ID, capability: "mcp.authorization", payload: { server: name, authorizationId: msg.authorizationId, status: authorization.notify, reason: "auth_failed" }, sensitivity: "public" } });
+      }, authorization.delayMs ?? 100);
       break;
     }
     case "session.open": {
@@ -755,11 +791,13 @@ readJsonl(Bun.stdin.stream(), (raw) => {
                   ? { name: "type", args: { text: parts.slice(2).join(":") } }
                   : parts[1] === "open_url"
                     ? { name: "open_url", args: { url: parts.slice(2).join(":") } }
-                    : parts[1] === "list_windows"
-                      ? { name: "list_windows", args: {} }
-                      : parts[1] === "screenshot"
-                        ? { name: "screenshot", args: {} }
-                        : { name: "observe", args: {} };
+                    : parts[1] === "open_app"
+                      ? { name: "open_app", args: { app: parts.slice(2).join(":") } }
+                      : parts[1] === "list_windows"
+                        ? { name: "list_windows", args: {} }
+                        : parts[1] === "screenshot"
+                          ? { name: "screenshot", args: {} }
+                          : { name: "observe", args: {} };
             s.streaming = true;
             const result = await (toolName === "browser" ? requestBrowser : requestComputer)(
               context,

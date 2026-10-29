@@ -1,6 +1,13 @@
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 
+export const LOCAL_DEVICE_OS = ["linux", "macos", "windows"] as const;
+export const LOCAL_DEVICE_SHELLS = ["posix-sh", "powershell-5.1"] as const;
+export interface LocalDeviceIdentity {
+  os: (typeof LOCAL_DEVICE_OS)[number];
+  shell: (typeof LOCAL_DEVICE_SHELLS)[number];
+}
+
 export const LOCAL_ACTIONS = ["run", "search", "read", "write", "transfer"] as const;
 export type LocalActionName = (typeof LOCAL_ACTIONS)[number];
 

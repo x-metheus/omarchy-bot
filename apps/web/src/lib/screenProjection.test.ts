@@ -5,6 +5,7 @@ import {
   type ScreenExpandedView,
   type ScreenProjectionState,
 } from "./screenProjection.ts";
+import { createMemoryShell, installShell } from "./shell.ts";
 
 const SURFACE_ID = "surf_0123456789abcdef0123456789abcdef";
 const SESSION_ID = "projection-session";
@@ -75,6 +76,7 @@ function sessionDescriptor(overrides: Partial<Record<string, unknown>> = {}): ob
 }
 
 function installBrowser(descriptor: unknown = sessionDescriptor()): ProjectionRequest[] {
+  installShell(createMemoryShell({ storage: null, baseUrl: "https://client.example" }));
   const requests: ProjectionRequest[] = [];
   Object.assign(globalThis, {
     RTCPeerConnection: undefined,
@@ -82,7 +84,6 @@ function installBrowser(descriptor: unknown = sessionDescriptor()): ProjectionRe
     window: {
       setTimeout,
       clearTimeout,
-      location: new URL("https://client.example/thread"),
     },
     fetch: async (input: string | URL | Request, init?: RequestInit) => {
       requests.push({
@@ -108,7 +109,7 @@ function connection(callbacks: {
   errors?: string[];
 } = {}): ScreenProjectionConnection {
   return new ScreenProjectionConnection(
-    "/api/computer/projection",
+    "https://client.example/api/computer/projection",
     { botId: "bot", surfaceId: SURFACE_ID },
     {
       onState: (state) => callbacks.states?.push(state),

@@ -451,7 +451,7 @@ test.describe("Bot profiles and avatars", () => {
     const [persistedThread] = await response.json() as Array<Record<string, unknown>>;
     if (persistedThread === undefined || typeof persistedThread.id !== "string") throw new Error("missing persisted Thread");
     let status: "waiting_for_input" | "waiting_for_computer" | "completed" | "cancelled" | "failed" = "waiting_for_input";
-    await page.route(`/api/bots/${botId}/threads`, async (route) => {
+    await page.route(`**/api/bots/${botId}/threads`, async (route) => {
       const turn = {
         id: "turn_avatar_state",
         threadId: persistedThread.id,

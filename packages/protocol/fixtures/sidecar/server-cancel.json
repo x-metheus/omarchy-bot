@@ -1,0 +1,7 @@
+{
+  "direction": "server",
+  "frame": {
+    "type": "local.cancel",
+    "jobId": "job-cancel"
+  }
+}

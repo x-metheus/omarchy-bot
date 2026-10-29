@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { listenerConfig } from "../../daemon/src/bootstrap/listenerConfig.ts";
 import { assertNotRoot, extractRuntimeArchive, verifyChecksum } from "./archive.ts";
+import { graphicalSession, installApp } from "./appInstall.ts";
 import { layoutFromEnv, serviceFetch, serviceOrigin, type Layout } from "./layout.ts";
 import { checkConfigurationOverrides, checkLauncher, doctorText, installLauncher, installUnit, reconfigureUnit, startUnit, statusText, stopUnit, uninstall, userManagerAvailable } from "./lifecycle.ts";
 
@@ -30,10 +31,15 @@ async function hostRequest(layout: Layout, route: string, method: string, body?:
 async function pairingUrl(layout: Layout) {
   const response = await hostRequest(layout, "/api/pairing/codes", "POST", { name: "installer" });
   const pairing = await response.json() as { code: string; url: string };
-  if (typeof pairing.url !== "string" || !pairing.url.startsWith("/pair?code=")) {
+  let url: URL;
+  try { url = new URL(pairing.url); } catch { throw new Error("Service returned an invalid pairing URL"); }
+  const address = url.searchParams.get("service");
+  if (url.protocol !== "omarchy-bot:" || url.hostname !== "pair" || url.pathname !== "" || typeof pairing.code !== "string" || !pairing.code || url.searchParams.get("code") !== pairing.code || !address) {
     throw new Error("Service returned an invalid pairing URL");
   }
-  return `${serviceOrigin(layout)}${pairing.url}`;
+  const origin = new URL(address);
+  if (!["http:", "https:"].includes(origin.protocol) || origin.origin !== address) throw new Error("Service returned an invalid pairing URL");
+  return { address, code: pairing.code, url: pairing.url };
 }
 
 async function waitForHealth(layout: Layout): Promise<void> {
@@ -204,9 +210,22 @@ export async function run(
         } else if (env.OMARCHY_BOT_BROWSER !== undefined || Object.values(tlsFlags).some(key => env[key] !== undefined) || args.some(arg => Boolean(tlsFlags[arg]))) await reconfigureUnit(layout, env, () => waitForHealth(layout));
         else await startUnit(layout, env);
         await waitForHealth(layout);
-        const url = await pairingUrl(layout);
-        io.log(`pairing: ${url}`);
-        try {
+        let appFailure: unknown;
+        let appSkipped = false;
+        if (command === "install" && graphicalSession(env)) {
+          try {
+            appSkipped = !await installApp(layout, env);
+            if (appSkipped) io.error("Skipping Omarchy Bot app installation: this build has no release signing key. Use a release runtime to install the app. The Service is installed and running; pair using the address and code below.");
+          } catch (error) { appFailure = error; }
+        }
+        const pairing = await pairingUrl(layout).catch(error => {
+          if (appFailure) throw new Error(`${appFailure instanceof Error ? appFailure.message : String(appFailure)}; could not issue pairing: ${error instanceof Error ? error.message : String(error)}`);
+          throw error;
+        });
+        const { url } = pairing;
+        io.log(`address: ${pairing.address}\ncode: ${pairing.code}\npairing: ${url}`);
+        if (appFailure) throw appFailure;
+        if (graphicalSession(env) && !appSkipped) try {
           const opener = env.OMARCHY_BOT_OPEN || "xdg-open";
           const executable = Bun.which(opener, { PATH: env.PATH || "" });
           if (!executable) throw new Error("opener is missing from PATH");
@@ -232,9 +251,11 @@ export async function run(
         io.log(diagnosis);
         return diagnosis.includes("All required checks passed.") ? 0 : 1;
       }
-      case "pair":
-        io.log(`pairing: ${await pairingUrl(layout)}`);
+      case "pair": {
+        const pairing = await pairingUrl(layout);
+        io.log(`address: ${pairing.address}\ncode: ${pairing.code}\npairing: ${pairing.url}`);
         break;
+      }
       case "devices": {
         const response = await hostRequest(layout, "/api/devices/paired", "GET");
         const { devices } = await response.json() as { devices: Array<{ id: string; name: string }> };

@@ -1,0 +1,51 @@
+name: windows-app
+on:
+  pull_request:
+    paths:
+      - 'apps/omarchy-bot/**'
+      - 'apps/web/**'
+      - 'apps/sidecar-rust/**'
+      - 'packages/**'
+      - 'scripts/windows-app/**'
+      - 'scripts/build-sidecar.ts'
+      - 'scripts/app-release.ts'
+      - 'tests/integration/app-release.test.ts'
+      - 'bun.lock'
+      - '.github/workflows/windows-*.yml'
+permissions:
+  contents: read
+jobs:
+  nsis-install:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.lane/windows-app/cargo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/integration/app-release.test.ts
+      - name: Install private Tauri CLI
+        shell: pwsh
+        run: |
+          cargo install tauri-cli --version 2.12.4 --locked --root "$pwd/.lane/windows-app/tools"
+          if ($LASTEXITCODE) { throw 'tauri-cli installation failed' }
+          "$pwd/.lane/windows-app/tools/bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Build NSIS unsigned preview with Rust Sidecar
+        shell: pwsh
+        run: ./scripts/windows-app/build.ps1
+      - name: Install, inspect registered deep-link handler, uninstall
+        shell: pwsh
+        run: ./scripts/windows-app/smoke.ps1 -InstallOnly
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-x64-unsigned-preview-install-evidence
+          path: |
+            .lane/dist/*
+            .lane/windows-app/build-result.json
+            .lane/windows-app/evidence/
+          if-no-files-found: error

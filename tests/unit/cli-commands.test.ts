@@ -183,7 +183,7 @@ test("pair, devices, and revoke authenticate with the host secret without exposi
       const pathname = new URL(request.url).pathname;
       requests.push({ method: request.method, path: pathname, body: await request.json().catch(() => null) });
       if (request.method === "POST" && pathname === "/api/pairing/codes") {
-        return Response.json({ code: "ABCD2345", url: "/pair?code=ABCD2345" });
+        return Response.json({ code: "ABCD2345", url: `omarchy-bot://pair?service=${encodeURIComponent(new URL(request.url).origin)}&code=ABCD2345` });
       }
       if (request.method === "GET" && pathname === "/api/devices/paired") {
         return Response.json({ devices: [{ id: "paired_123", name: "My laptop", token: "never-print-token", revokedAt: null }] });
@@ -195,7 +195,7 @@ test("pair, devices, and revoke authenticate with the host secret without exposi
   cleanups.push(() => server.stop(true));
   setup.env.OMARCHY_BOT_PORT = String(server.port);
   expect(await run(["pair"], setup.env, setup.io)).toBe(0);
-  expect(setup.log).toEqual([`pairing: http://127.0.0.1:${server.port}/pair?code=ABCD2345`]);
+  expect(setup.log).toEqual([`address: http://127.0.0.1:${server.port}\ncode: ABCD2345\npairing: omarchy-bot://pair?service=http%3A%2F%2F127.0.0.1%3A${server.port}&code=ABCD2345`]);
   expect(existsSync(setup.env.CALLS!)).toBe(false);
   setup.log.length = 0;
   expect(await run(["devices"], setup.env, setup.io)).toBe(0);
@@ -223,14 +223,14 @@ test("TLS commands accept self-signed certificates only on the local loopback Se
   const server = Bun.serve({ hostname: "0.0.0.0", port: 0, tls: { cert: Bun.file(cert), key: Bun.file(key) }, fetch(request) {
     expect(request.headers.get("authorization")).toBe("Bearer tls-private-secret");
     const route = new URL(request.url).pathname;
-    if (route === "/api/pairing/codes") return Response.json({ url: "/pair?code=TLS23456" });
+    if (route === "/api/pairing/codes") return Response.json({ code: "TLS23456", url: `omarchy-bot://pair?service=${encodeURIComponent(new URL(request.url).origin)}&code=TLS23456` });
     if (route === "/api/devices/paired") return Response.json({ devices: [{ id: "tls-device", name: "TLS browser" }] });
     return Response.json({ ok: true });
   } });
   cleanups.push(() => server.stop(true));
   setup.env.OMARCHY_BOT_PORT = String(server.port);
   for (const args of [["pair"], ["devices"], ["revoke", "tls-device"], ["status"]]) expect(await run(args, setup.env, setup.io)).toBe(0);
-  expect(setup.log).toContain(`pairing: https://127.0.0.1:${server.port}/pair?code=TLS23456`);
+  expect(setup.log).toContain(`address: https://127.0.0.1:${server.port}\ncode: TLS23456\npairing: omarchy-bot://pair?service=https%3A%2F%2F127.0.0.1%3A${server.port}&code=TLS23456`);
   expect(setup.log).toContain(`state: active\naddress: https://127.0.0.1:${server.port}`);
   for (const host of ["127.0.1.0", "::ffff:127.0.0.1", "::ffff:7f00:1"]) {
     expect(await run(["pair"], { ...setup.env, OMARCHY_BOT_HOST: host }, setup.io)).toBe(0);
@@ -238,7 +238,7 @@ test("TLS commands accept self-signed certificates only on the local loopback Se
   expect(await run(["pair"], { ...setup.env, OMARCHY_BOT_HOST: "127.0.0.256" }, setup.io)).toBe(1);
   const child = Bun.spawn([process.execPath, join(import.meta.dir, "../../apps/cli/src/main.ts"), "pair"], { env: setup.env, stdout: "pipe", stderr: "pipe" });
   expect(await child.exited).toBe(0);
-  expect(await new Response(child.stdout).text()).toContain("pairing: https://");
+  expect(await new Response(child.stdout).text()).toContain("pairing: omarchy-bot://pair?service=https%3A%2F%2F");
   expect(await new Response(child.stderr).text()).toBe("");
   const address = Object.values(networkInterfaces()).flat().find(address => address?.family === "IPv4" && !address.internal)?.address;
   if (!address) throw new Error("A local non-loopback IPv4 interface is required for the TLS trust regression");

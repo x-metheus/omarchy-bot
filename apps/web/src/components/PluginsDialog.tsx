@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type JSX, type RefObject } from "react";
+import { useEffect, useRef, useState, type FormEvent, type JSX, type RefObject } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
 import { Banner } from "@astryxdesign/core/Banner";
@@ -17,6 +17,9 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import { SKILL_CATALOG_PAGE_SIZE, type BotViewDto, type InstalledSkillDto, type McpConnectionDto, type PluginAccountDto, type PluginStateDto, type SaveMcpBody } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
+import { getShell } from "../lib/shell.ts";
+import { ExternalLink, ExternalMarkdownLink } from "./ExternalLink.tsx";
+import { onPluginAuthorization } from "../lib/events.ts";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 import { ServicesBrowser } from "./ServicesBrowser.tsx";
 import { SkillCreationForm } from "./SkillCreationForm.tsx";
@@ -119,24 +122,29 @@ function McpAuthorization({ connectionId, busy, execute }: {
 }): JSX.Element {
   const [redirectUrl, setRedirectUrl] = useState("");
   const [notice, setNotice] = useState("");
+  const outcome = useRef(0);
+  useEffect(() => onPluginAuthorization((event) => {
+    const payload = event.payload as { mcpId?: string; reason?: string };
+    if (payload.mcpId !== connectionId) return;
+    outcome.current++;
+    setNotice(event.type === "plugin.authorization_completed" ? "Authorization completed."
+      : payload.reason === "expired" ? "Authorization expired. Try again." : "Authorization failed. Try again.");
+  }), [connectionId]);
   const authorize = (redirect?: string): void => {
-    const popup = redirect ? null : window.open("about:blank", "_blank");
-    if (popup) popup.opener = null;
     setNotice("");
+    const started = outcome.current;
     execute(async () => {
-      try {
-        const result = await api.authorizeMcp(connectionId, redirect);
-        if (result.error) throw new Error(result.error);
-        if (result.authorizationUrl) {
-          if (popup) popup.location.replace(result.authorizationUrl);
-          else window.location.assign(result.authorizationUrl);
-          setNotice("Complete consent with the provider, then return here. Authorization is not complete yet.");
-        } else {
-          popup?.close();
-          setNotice(result.authenticated ? "Authorization completed. Check the connection to discover its tools." : "Authorization is not complete. Follow the provider’s consent instructions.");
-        }
-        setRedirectUrl("");
-      } catch (error) { popup?.close(); throw error; }
+      const result = await api.authorizeMcp(connectionId, redirect);
+      if (result.error) throw new Error(result.error);
+      if (result.authorizationUrl) {
+        await getShell().browser.open(result.authorizationUrl);
+        if (outcome.current !== started) return;
+        setNotice("Complete consent in your system browser, then return to Omarchy Bot. Authorization is not complete yet.");
+      } else {
+        if (outcome.current !== started) return;
+        setNotice(result.authenticated ? "Authorization completed." : "Authorization is not complete. Follow the provider’s consent instructions.");
+      }
+      setRedirectUrl("");
     }, "");
   };
   return <VStack gap={2}>
@@ -235,6 +243,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
   const [editing, setEditing] = useState<McpConnectionDto | "new">();
   const [confirm, setConfirm] = useState<{ kind: "mcp" | "skill" | "account"; id: string; name: string } | { kind: "service"; accountId: string; serviceId: string; name: string }>();
   const [notice, setNotice] = useState("");
+  const [authorizationNotice, setAuthorizationNotice] = useState("");
   const change = useMutation({
     mutationFn: async (action: () => Promise<unknown>) => {
       await action();
@@ -243,6 +252,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
   });
   const run = async (action: () => Promise<unknown>, message = "Saved. File resources are updated immediately; active native sessions may need to reload configuration."): Promise<void> => {
     setNotice("");
+    setAuthorizationNotice("");
     await change.mutateAsync(action);
     setNotice(message);
   };
@@ -251,19 +261,19 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
   const service = provider?.services.find((entry) => entry.id === selectedService);
   const busy = change.isPending;
 
-  useEffect(() => { setConfirm(undefined); setNotice(""); change.reset(); }, [section]);
+  useEffect(() => { setConfirm(undefined); setNotice(""); setAuthorizationNotice(""); change.reset(); }, [section]);
+  useEffect(() => onPluginAuthorization((event) => {
+    const payload = event.payload as { accountId?: string; reason?: string };
+    setAuthorizationNotice(event.type === "plugin.authorization_completed"
+      ? payload.accountId ? "Account connected." : "Authorization completed."
+      : payload.reason === "expired" ? "Authorization expired. Try again." : "Authorization failed. Try Add account or Reconnect again.");
+  }), []);
 
   const authorize = (providerId: PluginAccountDto["providerId"], accountId?: string): void => {
-    // Open synchronously so browser popup protection does not discard the consent tab.
-    const popup = window.open("about:blank", "_blank");
-    if (popup) popup.opener = null;
     execute(async () => {
-      try {
-        const result = await api.authorizePlugin({ providerId, returnUrl: window.location.origin, ...(accountId === undefined ? {} : { accountId }), ...(selectedService === undefined ? {} : { serviceId: selectedService }) });
-        if (popup) popup.location.replace(result.url);
-        else window.location.assign(result.url);
-      } catch (error) { popup?.close(); throw error; }
-    }, "Complete authorization in the provider tab, then return here.");
+      const result = await api.authorizePlugin({ providerId, ...(accountId === undefined ? {} : { accountId }), ...(selectedService === undefined ? {} : { serviceId: selectedService }) });
+      if (result.url) await getShell().browser.open(result.url);
+    }, "Check the account status below. If prompted, complete consent in your system browser, then return to Omarchy Bot.");
   };
 
   if (state.isPending) return <Text>Loading global plugins…</Text>;
@@ -278,7 +288,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
     </div>
     {state.isError ? <Banner status="warning" title="Plugin state could not be refreshed" description={apiErrorMessage(state.error, "Showing previously loaded state.")} /> : null}
     {change.isError ? <Banner status="error" title="Change not completed" description={apiErrorMessage(change.error, "Plugin operation failed.")} /> : null}
-    {busy ? <Text role="status">Applying change…</Text> : notice ? <Text role="status">{notice}</Text> : null}
+    {authorizationNotice ? <Text role="status">{authorizationNotice}</Text> : busy ? <Text role="status">Applying change…</Text> : notice ? <Text role="status">{notice}</Text> : null}
     {data.cloudError ? <Banner status="warning" title="Catalog or publisher unavailable" description={`${data.cloudError} Native connections and local Skills remain available.`} /> : null}
     {confirm ? <VStack gap={2} {...stylex.props(styles.card)}>
       <Heading level={2}>{confirm.kind === "account" ? "Disconnect" : "Remove"} {confirm.name}?</Heading>
@@ -300,7 +310,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
         <Text>{service.description}</Text>
         <Text color="secondary">Each connection is bound to its own native MCP server. The Agent sees its label and identity-verification status; it must not assume an account identity that the provider has not exposed.</Text>
         {provider.registrationNote ? <Text color="secondary">{provider.registrationNote}</Text> : null}
-        <a {...stylex.props(styles.link)} href={provider.documentationUrl} target="_blank" rel="noreferrer">Official setup and permissions</a>
+        <ExternalLink {...stylex.props(styles.link)} href={provider.documentationUrl}>Official setup and permissions</ExternalLink>
         {provider.setupReason ? <Banner status="warning" title="Connection prerequisite" description={provider.setupReason} /> : null}
         <VStack gap={2} {...stylex.props(styles.card)}>
           <Heading level={3}>Official companion Skills</Heading>
@@ -528,12 +538,12 @@ function SkillsPanel({ data, bots, selectedBotId, onCreateSkill, busy, execute, 
         <Card padding={4}><VStack gap={3}>
           <Heading level={3}>{detail.data.name}</Heading><Text>{detail.data.description}</Text><Text color="secondary">{detail.data.source}</Text>
           <div {...stylex.props(styles.pager)}>
-            <a href={detail.data.url} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.link)}>View on skills.sh</a>
+            <ExternalLink href={detail.data.url} {...stylex.props(styles.link)}>View on skills.sh</ExternalLink>
             <Button label={selectedInstalled ? "Installed" : "Install"} isDisabled={busy || Boolean(selectedInstalled)} onClick={() => execute(() => api.installSkill(detailId), "Skill installed. Use / in the composer, or let the Agent discover it on the next turn.")} />
           </div>
         </VStack></Card>
         <Text color="secondary">Review third-party instructions before installing. The complete Skill folder is saved, but its scripts do not run during installation.</Text>
-        {detail.data.content ? <div {...stylex.props(styles.document)}><Markdown>{detail.data.content}</Markdown></div> : <Text color="secondary">No text preview is available. Installation checks the original source.</Text>}
+        {detail.data.content ? <div {...stylex.props(styles.document)}><Markdown components={{ link: ExternalMarkdownLink }}>{detail.data.content}</Markdown></div> : <Text color="secondary">No text preview is available. Installation checks the original source.</Text>}
       </> : null}
     </VStack> : <VStack gap={3}>
       <Text color="secondary">Find new capabilities for your Bots in the skills.sh catalog.</Text>

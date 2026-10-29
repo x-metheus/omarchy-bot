@@ -1,8 +1,7 @@
 import type { JSX, RefObject } from "react";
 import { useEffect, useState } from "react";
-import { Bot, Mic, Palette } from "lucide-react";
+import { Bell, Bot, Keyboard, Palette } from "lucide-react";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
-import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -11,12 +10,13 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Item } from "@astryxdesign/core/Item";
 import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
+import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
-import type { BotViewDto, DictationDto } from "@omarchy-bot/protocol";
+import type { BotViewDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
-import { VoiceSettingsControl } from "./VoiceSettingsControl.tsx";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
+import { getShell } from "../lib/shell.ts";
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -28,19 +28,17 @@ export interface SettingsDialogProps {
   botsLoading?: boolean;
   botsError?: string;
   onRetryBots?: () => void;
-  dictation: DictationDto;
-  autoSendVoice: boolean;
-  onAutoSendVoiceChange: (enabled: boolean) => void;
   notificationPermission: NotificationPermission | "unsupported";
   onRequestNotifications: () => void;
 }
 
-type SettingsSectionId = "appearance" | "voice" | "bots";
+type SettingsSectionId = "appearance" | "notifications" | "bots" | "keyboard";
 
 const SETTINGS_SECTIONS = [
   { id: "appearance", label: "Appearance", icon: Palette },
-  { id: "voice", label: "Voice", icon: Mic },
+  { id: "notifications", label: "Notifications", icon: Bell },
   { id: "bots", label: "Bots", icon: Bot },
+  { id: "keyboard", label: "Keyboard", icon: Keyboard },
 ] as const satisfies ReadonlyArray<{
   id: SettingsSectionId;
   label: string;
@@ -55,9 +53,6 @@ interface SettingsContentProps extends Pick<
   | "botsLoading"
   | "botsError"
   | "onRetryBots"
-  | "dictation"
-  | "autoSendVoice"
-  | "onAutoSendVoiceChange"
   | "notificationPermission"
   | "onRequestNotifications"
 > {
@@ -83,15 +78,12 @@ function AppearanceSection(): JSX.Element {
   );
 }
 
-function VoiceSection({
-  autoSendVoice,
-  onAutoSendVoiceChange,
-  dictation,
+function NotificationsSection({
   notificationPermission,
   onRequestNotifications,
 }: Pick<
   SettingsContentProps,
-  "autoSendVoice" | "onAutoSendVoiceChange" | "dictation" | "notificationPermission" | "onRequestNotifications"
+  "notificationPermission" | "onRequestNotifications"
 >): JSX.Element {
   const notificationsDescription =
     notificationPermission === "unsupported"
@@ -104,20 +96,9 @@ function VoiceSection({
   return (
     <VStack gap={2}>
       <VStack gap={0.5}>
-        <Heading level={3}>Voice and notifications</Heading>
-        <Text color="secondary">Control browser-local input and attention preferences.</Text>
+        <Heading level={3}>Notifications</Heading>
+        <Text color="secondary">Control alerts for background Bot activity.</Text>
       </VStack>
-      {dictation.state === "unavailable" ? (
-        <Banner
-          status="warning"
-          title="Voice dictation unavailable"
-          description={
-            dictation.error
-            ?? "Voxtype is unavailable. Install or start Voxtype, then reopen Settings to check again."
-          }
-        />
-      ) : null}
-      <VoiceSettingsControl value={autoSendVoice} onChange={onAutoSendVoiceChange} />
       <Item label="Desktop notifications" description={notificationsDescription} align="start" />
       {notificationPermission === "default" ? (
         <Button
@@ -127,6 +108,41 @@ function VoiceSection({
           data-testid="enable-notifications"
         />
       ) : null}
+    </VStack>
+  );
+}
+
+function KeyboardSection(): JSX.Element {
+  const mapping = getShell().keyMapping;
+  const [metaSendsSuper, setMetaSendsSuper] = useState(mapping.metaSendsSuper());
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+  const save = async (value: boolean): Promise<void> => {
+    setSaving(true);
+    setError(undefined);
+    try {
+      await mapping.setMetaSendsSuper(value);
+      setMetaSendsSuper(value);
+    } catch {
+      setError("Couldn’t save the keyboard preference. Try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <VStack gap={2}>
+      <Heading level={3}>Keyboard</Heading>
+      <Text color="secondary">Bot Screen shortcuts during Web Control, saved for this device.</Text>
+      <Switch
+        label="Send ⌘ as Super"
+        description={metaSendsSuper ? "⌘ and ⌥ send Super." : "⌘ sends Ctrl and ⌥ sends Super."}
+        value={metaSendsSuper}
+        isLoading={saving}
+        isDisabled={saving}
+        onChange={(value) => { void save(value); }}
+        {...(error === undefined ? {} : { status: { type: "error" as const, message: error } })}
+      />
+      <Text color="secondary">⌘V keeps pasting text from this device.</Text>
     </VStack>
   );
 }
@@ -210,9 +226,6 @@ function SettingsContent({
   botsLoading = false,
   botsError,
   onRetryBots,
-  dictation,
-  autoSendVoice,
-  onAutoSendVoiceChange,
   notificationPermission,
   onRequestNotifications,
   compactNav,
@@ -222,12 +235,13 @@ function SettingsContent({
 }: SettingsContentProps): JSX.Element {
   const [section, setSection] = useState<SettingsSectionId>("appearance");
   const operationPending = deletingBotId !== undefined;
+  const sections = SETTINGS_SECTIONS.filter((entry) => entry.id !== "keyboard" || getShell().keyMapping.platform() === "macos");
 
   useEffect(() => {
     if (open) setSection("appearance");
   }, [open]);
 
-  const selected = SETTINGS_SECTIONS.find((entry) => entry.id === section) ?? SETTINGS_SECTIONS[0];
+  const selected = sections.find((entry) => entry.id === section) ?? sections[0]!;
 
   return (
     <Layout
@@ -246,7 +260,7 @@ function SettingsContent({
         <LayoutPanel width={compactNav ? 148 : 220} hasDivider isScrollable>
           <nav aria-label="Settings sections">
             <VStack gap={0.5}>
-              {SETTINGS_SECTIONS.map((entry) => (
+              {sections.map((entry) => (
                 <Item
                   key={entry.id}
                   startContent={<Icon icon={entry.icon} size="sm" />}
@@ -269,11 +283,9 @@ function SettingsContent({
           aria-busy={botsLoading || operationPending || undefined}
         >
           {selected.id === "appearance" ? <AppearanceSection /> : null}
-          {selected.id === "voice" ? (
-            <VoiceSection
-              autoSendVoice={autoSendVoice}
-              onAutoSendVoiceChange={onAutoSendVoiceChange}
-              dictation={dictation}
+          {selected.id === "keyboard" ? <KeyboardSection /> : null}
+          {selected.id === "notifications" ? (
+            <NotificationsSection
               notificationPermission={notificationPermission}
               onRequestNotifications={onRequestNotifications}
             />
@@ -304,9 +316,6 @@ export function SettingsDialog({
   botsLoading = false,
   botsError,
   onRetryBots,
-  dictation,
-  autoSendVoice,
-  onAutoSendVoiceChange,
   mobileReturnFocusRef,
   notificationPermission,
   onRequestNotifications,
@@ -319,9 +328,6 @@ export function SettingsDialog({
       botsLoading={botsLoading}
       {...(botsError !== undefined ? { botsError } : {})}
       {...(onRetryBots !== undefined ? { onRetryBots } : {})}
-      dictation={dictation}
-      autoSendVoice={autoSendVoice}
-      onAutoSendVoiceChange={onAutoSendVoiceChange}
       notificationPermission={notificationPermission}
       onRequestNotifications={onRequestNotifications}
       compactNav={isMobile}

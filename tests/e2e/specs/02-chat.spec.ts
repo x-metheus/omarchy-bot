@@ -83,6 +83,23 @@ async function expectCardAboveComposer(page: Page): Promise<void> {
 }
 
 test.describe("chat through a bot", () => {
+  test("conversation links open through the shell without navigating the app", async ({ page }) => {
+    await page.goto("/");
+    await createBot(page, "External Links Bot");
+    await page.evaluate(() => {
+      Reflect.set(window, "openedUrls", []);
+      const shell = globalThis.__OMARCHY_BOT_MEMORY_SHELL__!;
+      globalThis.__OMARCHY_BOT_SHELL__ = { ...shell, browser: { async open(url: string) { Reflect.get(window, "openedUrls").push(url); } } };
+    });
+    await send(page, "say: [Read documentation](https://example.com/docs)");
+    const link = page.getByRole("link", { name: "Read documentation" });
+    await expect(link).toBeVisible();
+    const conversation = page.url();
+    await link.click();
+    expect(await page.evaluate(() => Reflect.get(window, "openedUrls"))).toEqual(["https://example.com/docs"]);
+    expect(page.url()).toBe(conversation);
+  });
+
   test("owns the Skill commands popup and sends a multiword draft across input roles", async ({ page }) => {
     await page.goto("/");
     await createBot(page, "Composer Roles Bot");
@@ -134,11 +151,11 @@ test.describe("chat through a bot", () => {
     const composer = page.getByTestId("composer");
     const input = composerInput(page);
     const attach = composer.getByRole("button", { name: "Attach files" });
-    const microphone = composer.getByRole("button", { name: "Start voice recording" });
+    const microphone = composer.getByRole("button", { name: /voice recording|voice dictation|Transcribing voice/i });
     const sendButton = composer.getByRole("button", { name: "Send", exact: true });
     await expect(composer).toHaveAttribute("data-density", "compact");
     await expect(attach).toHaveAttribute("data-size", "md");
-    await expect(microphone).toHaveAttribute("data-size", "md");
+    await expect(microphone).toHaveCount(0);
     await expect(sendButton).toHaveAttribute("data-size", "md");
 
     const dockPresentation = async (): Promise<{
@@ -154,7 +171,7 @@ test.describe("chat through a bot", () => {
       borderWidth: string;
       boxShadow: string;
     }> => {
-      const actions = await Promise.all([attach, microphone, sendButton].map((action) => action.elementHandle()));
+      const actions = await Promise.all([attach, sendButton].map((action) => action.elementHandle()));
       return input.evaluate((editable, actions) => {
         if (actions.some((action) => action === null)) {
           throw new Error("Composer controls are incomplete");
@@ -194,9 +211,7 @@ test.describe("chat through a bot", () => {
       expect(action.radius).toBeGreaterThanOrEqual(action.height / 2);
     }
     expect(lightDock.actionBoxes[0]!.centerY).toBeCloseTo(lightDock.actionBoxes[1]!.centerY, 0);
-    expect(lightDock.actionBoxes[1]!.centerY).toBeCloseTo(lightDock.actionBoxes[2]!.centerY, 0);
     expect(lightDock.actionBoxes[0]!.x).toBeLessThan(lightDock.actionBoxes[1]!.x);
-    expect(lightDock.actionBoxes[1]!.x).toBeLessThan(lightDock.actionBoxes[2]!.x);
 
     const fileChooserPromise = page.waitForEvent("filechooser");
     await attach.click();
@@ -212,8 +227,6 @@ test.describe("chat through a bot", () => {
     });
     expect(attachFocusStyle.outlineStyle).not.toBe("none");
     expect(attachFocusStyle.outlineWidth).not.toBe("0px");
-    await page.keyboard.press("Tab");
-    await expect(microphone).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(sendButton).toBeFocused();
 

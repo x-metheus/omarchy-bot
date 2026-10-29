@@ -43,6 +43,8 @@ function redactLocalOutput(text: string): string {
 interface OnlineDevice {
   id: string;
   hostname: string;
+  os: DeviceDto["os"];
+  shell: DeviceDto["shell"];
   capabilities: DeviceCapability[];
   port: DevicePort;
   lastHeartbeat: number;
@@ -70,6 +72,8 @@ export class SidecarBroker {
     return [...this.#devices.values()].map((device) => ({
       id: device.id,
       hostname: device.hostname,
+      os: device.os,
+      shell: device.shell,
       online: true as const,
       capabilities: device.capabilities,
     }));
@@ -81,6 +85,8 @@ export class SidecarBroker {
     return {
       id: device.id,
       hostname: device.hostname,
+      os: device.os,
+      shell: device.shell,
       online: true,
       capabilities: device.capabilities,
     };
@@ -103,6 +109,8 @@ export class SidecarBroker {
     const device: DeviceDto = {
       id: frame.deviceId,
       hostname: frame.hostname,
+      os: frame.os,
+      shell: frame.shell,
       online: true,
       capabilities: frame.capabilities,
     };

@@ -35,8 +35,6 @@ import type {
   AgentDto,
   AttachmentDto,
   BotViewDto,
-  DictationDto,
-  DictationResultDto,
   MessageDto,
   ThreadDto,
   ToolCallSummaryDto,
@@ -44,8 +42,9 @@ import type {
 import { isTerminalTurn } from "@omarchy-bot/domain";
 import { api, apiErrorMessage, randomUuid, trimSendText } from "../lib/api.ts";
 import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
-import { withDeviceToken } from "../lib/deviceToken.ts";
-import { insertDictationTranscript } from "../lib/dictation.ts";
+import { withDeviceToken } from "../lib/urls.ts";
+import { getShell } from "../lib/shell.ts";
+import { ExternalMarkdownLink } from "./ExternalLink.tsx";
 import {
   thinkingBoundaryAnnouncements,
   toolCallBoundaryAnnouncements,
@@ -54,18 +53,6 @@ import {
 import { WorkingAvatarView } from "./AvatarView.tsx";
 import { useTranscriptAttentionSurface } from "./TranscriptAttention.tsx";
 import styles from "../lib/styles.ts";
-
-export interface VoiceDraftTarget {
-  botId: string;
-  threadId?: string;
-}
-
-export interface DictationController {
-  state: DictationDto;
-  start: () => Promise<DictationDto>;
-  stop: () => Promise<DictationResultDto>;
-  cancel: () => Promise<DictationDto>;
-}
 
 interface ChatPanelProps {
   bot?: BotViewDto;
@@ -76,9 +63,6 @@ interface ChatPanelProps {
   supportsSteering: boolean;
   agentReadiness?: AgentDto;
   onRetryAgentReadiness?: () => Promise<void>;
-  dictation: DictationController;
-  autoSendVoice: boolean;
-  onVoiceAutoSend: (target: VoiceDraftTarget, text: string) => Promise<void>;
   messagesLoading?: boolean;
   messagesError?: string;
   onRetryMessages?: () => void;
@@ -97,22 +81,6 @@ type Row =
   | { kind: "responses"; key: string; items: MessageDto[] }
   | { kind: "tools"; key: string; items: MessageDto[] };
 
-function ExternalMarkdownLink({ href, children }: { href: string; children: ReactNode }): JSX.Element {
-  let protocol: string;
-  try {
-    protocol = new URL(href).protocol.toLowerCase();
-  } catch {
-    return <>{children}</>;
-  }
-  if (protocol !== "http:" && protocol !== "https:" && protocol !== "mailto:") {
-    return <>{children}</>;
-  }
-  return (
-    <a href={href} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.markdownLink)}>
-      {children}
-    </a>
-  );
-}
 
 function DirectMarkdownImage({ src, alt }: { src: string; alt: string }): JSX.Element {
   let protocol: string;
@@ -292,6 +260,7 @@ function attachmentErrorMessage(error: unknown, fileName: string): string {
 }
 
 function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentDto; previewUrl?: string }): JSX.Element {
+  const [notice, setNotice] = useState<string>();
   // The daemon route needs the token; object URLs used for staged previews do not.
   const downloadUrl = attachment.url === undefined ? undefined : withDeviceToken(attachment.url);
   const imageUrl = attachment.mediaType.startsWith("image/")
@@ -311,15 +280,25 @@ function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentD
       </AspectRatio>
     );
   }
-  return (
+  return <VStack gap={0}>
     <Item
       label={attachment.name}
       description={metadata}
       density="compact"
-      {...(downloadUrl !== undefined ? { href: downloadUrl } : {})}
+      onClickCapture={event => {
+        if (attachment.url === undefined || attachment.kind !== "managed") return;
+        event.preventDefault();
+        void getShell().attachments.save(attachment.url, attachment.name).then(
+          path => setNotice(`Attachment saved to ${path}`),
+          error => setNotice(error instanceof Error ? error.message : String(error)),
+        );
+      }}
+      {...(downloadUrl !== undefined ? { href: new URL(attachment.url!, getShell().service.baseUrl()).href } : {})}
       data-testid={downloadUrl !== undefined ? "message-file-attachment" : "staged-file-row"}
+      data-attachment-name={attachment.name}
     />
-  );
+    {notice === undefined ? null : <Text role="status">{notice}</Text>}
+  </VStack>;
 }
 
 function StagedAttachment({
@@ -458,10 +437,6 @@ function AttachmentDrawer({
     </ChatComposerDrawer>
   );
 }
-interface DictationOrigin {
-  target: VoiceDraftTarget;
-  anchor: number;
-}
 interface AttachmentRestoreResult {
   id: string;
   attachment?: AttachmentDto;
@@ -490,9 +465,6 @@ export function ChatPanel({
   supportsSteering,
   agentReadiness,
   onRetryAgentReadiness,
-  dictation,
-  autoSendVoice,
-  onVoiceAutoSend,
   messagesLoading = false,
   messagesError,
   onRetryMessages,
@@ -508,15 +480,12 @@ export function ChatPanel({
       return next;
     });
   }, []);
-  const [voiceStatus, setVoiceStatus] = useState<string | undefined>(undefined);
-  const [voiceState, setVoiceState] = useState<DictationDto>(dictation.state);
   const [stagedAttachments, setStagedAttachments] = useState<AttachmentDto[]>([]);
   const [restoringAttachments, setRestoringAttachments] = useState(false);
   const composerInputRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const previewUrlsRef = useRef(new Map<string, string>());
   const restoreGenerationRef = useRef(0);
-  const dictationOriginRef = useRef<DictationOrigin | undefined>(undefined);
   const [workingAnnouncement, setWorkingAnnouncement] = useState("");
   const workingStateRef = useRef<{ selectionKey: string; active: boolean; name: string } | undefined>(undefined);
   const [toolCallAnnouncement, setToolCallAnnouncement] = useState("");
@@ -597,10 +566,6 @@ export function ChatPanel({
     for (const previewUrl of previewUrlsRef.current.values()) URL.revokeObjectURL(previewUrl);
     previewUrlsRef.current.clear();
   }, []);
-
-  useEffect(() => {
-    setVoiceState(dictation.state);
-  }, [dictation.state]);
 
   const onDraftChange = useCallback(
     (value: string) => {
@@ -722,140 +687,6 @@ export function ChatPanel({
       return next;
     });
   }, [draftBotId, draftThreadId]);
-
-  const saveOriginDraft = useCallback((origin: DictationOrigin, next: ConversationDraft): void => {
-    saveDraft(origin.target.botId, origin.target.threadId, next);
-    const selected = selectedDraftRef.current;
-    if (selected.botId === origin.target.botId && selected.threadId === origin.target.threadId) setDraft(next);
-  }, []);
-
-  const clearOriginAnchor = useCallback(
-    (origin: DictationOrigin): void => {
-      const stored = loadDraft(origin.target.botId, origin.target.threadId);
-      saveOriginDraft(origin, {
-        text: stored.text,
-        cursor: stored.cursor,
-        stagedIds: stored.stagedIds,
-        ...(stored.attachmentDraftToken !== undefined
-          ? { attachmentDraftToken: stored.attachmentDraftToken }
-          : {}),
-      });
-    },
-    [saveOriginDraft],
-  );
-
-  const startDictation = useCallback(async (): Promise<void> => {
-    if (bot === undefined || voiceState.state !== "idle") return;
-    const anchor = Math.max(0, Math.min(composerCursor(composerInputRef.current, draft.cursor), draft.text.length));
-    const target: VoiceDraftTarget = {
-      botId: bot.id,
-      ...(thread !== undefined ? { threadId: thread.id } : {}),
-    };
-    const origin: DictationOrigin = { target, anchor };
-    dictationOriginRef.current = origin;
-    const anchoredDraft = { ...draft, cursor: anchor, dictationAnchor: anchor };
-    saveDraft(target.botId, target.threadId, anchoredDraft);
-    setDraft(anchoredDraft);
-    setVoiceStatus(undefined);
-
-    try {
-      const state = await dictation.start();
-      setVoiceState(state);
-      if (state.state !== "recording") {
-        clearOriginAnchor(origin);
-        dictationOriginRef.current = undefined;
-        setVoiceStatus(state.error ?? "Voice dictation is unavailable.");
-      }
-    } catch (error) {
-      clearOriginAnchor(origin);
-      dictationOriginRef.current = undefined;
-      setVoiceStatus(apiErrorMessage(error, "Voice dictation could not start."));
-    }
-  }, [bot, thread, voiceState.state, draft, dictation, clearOriginAnchor]);
-
-  const stopDictation = useCallback(async (): Promise<void> => {
-    const origin = dictationOriginRef.current;
-    if (origin === undefined || voiceState.state !== "recording") return;
-    setVoiceState({
-      state: "transcribing",
-      ...(voiceState.recordingId !== undefined ? { recordingId: voiceState.recordingId } : {}),
-    });
-    setVoiceStatus(undefined);
-
-    try {
-      const result = await dictation.stop();
-      setVoiceState({ state: "idle" });
-      if (result.outcome !== "success" || result.text === undefined) {
-        clearOriginAnchor(origin);
-        setVoiceStatus(
-          result.outcome === "empty"
-            ? "No speech detected."
-            : result.outcome === "timeout"
-              ? "Voice transcription timed out."
-              : result.outcome === "cancelled"
-                ? undefined
-                : result.outcome === "unavailable"
-                  ? "Voice dictation is unavailable."
-                  : "Voice transcription failed.",
-        );
-        return;
-      }
-
-      const latest = loadDraft(origin.target.botId, origin.target.threadId);
-      const inserted: ConversationDraft = {
-        ...insertDictationTranscript(latest, result.text, origin.anchor),
-        ...(latest.attachmentDraftToken !== undefined
-          ? { attachmentDraftToken: latest.attachmentDraftToken }
-          : {}),
-      };
-      saveOriginDraft(origin, inserted);
-      if (autoSendVoice) {
-        try {
-          await onVoiceAutoSend(origin.target, inserted.text);
-          saveOriginDraft(origin, {
-            ...EMPTY_DRAFT,
-            stagedIds: inserted.stagedIds,
-            ...(inserted.attachmentDraftToken !== undefined
-              ? { attachmentDraftToken: inserted.attachmentDraftToken }
-              : {}),
-          });
-        } catch (error) {
-          setSubmitError(apiErrorMessage(error, "Voice transcription was inserted but could not be sent."));
-        }
-      }
-    } catch (error) {
-      clearOriginAnchor(origin);
-      setVoiceState({ state: "idle" });
-      setVoiceStatus(apiErrorMessage(error, "Voice transcription failed."));
-    } finally {
-      dictationOriginRef.current = undefined;
-    }
-  }, [voiceState, dictation, clearOriginAnchor, saveOriginDraft, autoSendVoice, onVoiceAutoSend]);
-
-  const cancelDictation = useCallback(async (): Promise<void> => {
-    const origin = dictationOriginRef.current;
-    if (origin === undefined) return;
-    clearOriginAnchor(origin);
-    dictationOriginRef.current = undefined;
-    setVoiceStatus(undefined);
-    try {
-      setVoiceState(await dictation.cancel());
-    } catch (error) {
-      setVoiceState({ state: "idle" });
-      setVoiceStatus(apiErrorMessage(error, "Voice dictation could not be cancelled."));
-    }
-  }, [clearOriginAnchor, dictation]);
-
-  useEffect(() => {
-    if (voiceState.state !== "recording") return;
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      void cancelDictation();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [voiceState.state, cancelDictation]);
 
   const selectedThreadIsActive =
     thread?.latestTurn !== undefined && !isTerminalTurn(thread.latestTurn.status);
@@ -1131,47 +962,11 @@ export function ChatPanel({
       error !== undefined && !dismissedErrorKeys.has(error.key),
   );
 
-  const voiceMessage =
-    voiceState.state === "recording"
-      ? "Listening… Press Escape to cancel."
-      : voiceState.state === "transcribing"
-        ? "Transcribing voice…"
-        : voiceStatus;
-  const composerStatus =
-    voiceMessage !== undefined
-      ? {
-          type: voiceState.state === "recording" || voiceState.state === "transcribing" ? ("warning" as const) : ("error" as const),
-          message: voiceMessage,
-        }
-      : voiceState.state === "unavailable"
-        ? { type: "warning" as const, message: voiceState.error ?? "Voice dictation isn’t available right now." }
-        : restoringAttachments
-          ? { type: "warning" as const, message: "Checking draft attachments…" }
-          : activeTurnCannotSteer
-            ? { type: "warning" as const, message: "This agent does not support steering an active turn." }
-            : undefined;
-  const dictationLabel =
-    voiceState.state === "recording"
-      ? "Stop voice recording"
-      : voiceState.state === "transcribing"
-        ? "Transcribing voice"
-        : voiceState.state === "unavailable"
-          ? "Voice dictation unavailable"
-          : "Start voice recording";
-  const dictationButton = (
-    <Button
-      label={dictationLabel}
-      aria-label={dictationLabel}
-      icon={<Icon icon="microphone" size="md" />}
-      variant="ghost"
-      size="md"
-      isIconOnly
-      isDisabled={bot === undefined || isAgentNotReady || activeTurnCannotSteer || voiceState.state === "transcribing" || voiceState.state === "unavailable"}
-      onClick={() => void (voiceState.state === "recording" ? stopDictation() : startDictation())}
-      data-testid="dictation-button"
-      data-state={voiceState.state}
-    />
-  );
+  const composerStatus = restoringAttachments
+    ? { type: "warning" as const, message: "Checking draft attachments…" }
+    : activeTurnCannotSteer
+      ? { type: "warning" as const, message: "This agent does not support steering an active turn." }
+      : undefined;
 
   const attachmentDrawer = (
     <AttachmentDrawer
@@ -1302,7 +1097,6 @@ export function ChatPanel({
               data-testid="attachment-picker"
             />
           }
-          sendActions={dictationButton}
           density="compact"
           elevation="low"
           placeholder={

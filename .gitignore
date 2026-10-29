@@ -36,3 +36,9 @@ test-results/
 playwright-report/
 blob-report/
 coverage/
+
+# Native builds, container caches, and private smoke evidence
+.lane/
+apps/omarchy-bot/src-tauri/target/
+apps/omarchy-bot/src-tauri/binaries/
+apps/sidecar-rust/target/

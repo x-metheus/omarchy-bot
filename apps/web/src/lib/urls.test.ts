@@ -1,0 +1,15 @@
+import { afterEach, expect, test } from "bun:test";
+import { createMemoryShell, installShell } from "./shell.ts";
+import { withDeviceToken } from "./urls.ts";
+
+const originalShell = globalThis.__OMARCHY_BOT_SHELL__;
+afterEach(() => { globalThis.__OMARCHY_BOT_SHELL__ = originalShell; });
+
+test("browser-loaded paths resolve against the paired Service and retain query and fragment", async () => {
+  const shell = createMemoryShell({ storage: null });
+  installShell(shell);
+  await shell.service.store("https://service.example", "paired-token");
+  expect(withDeviceToken("/api/attachments/one?download=1#preview")).toBe("https://service.example/api/attachments/one?download=1&access_token=paired-token#preview");
+  await shell.service.clear();
+  expect(withDeviceToken("/api/bots/one/avatar")).toBe("http://127.0.0.1:7321/api/bots/one/avatar");
+});

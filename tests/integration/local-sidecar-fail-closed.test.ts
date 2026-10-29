@@ -7,6 +7,7 @@ import {
   makeBot,
   messages,
   sendToBot,
+  sendToThread,
   startDaemon,
   waitThreadIdle,
   type Harness,
@@ -20,7 +21,7 @@ interface SessionObservation {
   type: string;
   botId?: string;
   threadId?: string;
-  options?: { cwd?: string };
+  options?: { cwd?: string; local?: { os: string; shell: string } };
 }
 
 function workerObservations(h: Harness): SessionObservation[] {
@@ -88,9 +89,9 @@ describe("fail closed and keep Sidecars distinct", () => {
   test("This Device is the tagged sender, not whichever Sidecar is online", async () => {
     h = await startDaemon();
     const a = await connect();
-    await a.register({ deviceId: DEVICE_A, hostname: "laptop-a", capabilities: ["shell"] });
+    await a.register({ deviceId: DEVICE_A, hostname: "laptop-a" });
     const b = await connect();
-    await b.register({ deviceId: DEVICE_B, hostname: "laptop-b", capabilities: ["shell"] });
+    await b.register({ deviceId: DEVICE_B, hostname: "laptop-b" });
     const botId = await makeBot(h, "Tagged sender Bot");
 
     const untagged = await sendToBot(h, botId, "local.run:echo untagged");
@@ -121,7 +122,7 @@ describe("fail closed and keep Sidecars distinct", () => {
   test("unknown or disconnected device identities fail without running on another Sidecar", async () => {
     h = await startDaemon();
     const b = await connect();
-    await b.register({ deviceId: DEVICE_B, hostname: "laptop-b", capabilities: ["shell"] });
+    await b.register({ deviceId: DEVICE_B, hostname: "laptop-b" });
     const botId = await makeBot(h, "Unknown device Bot");
 
     const unknown = await sendToBot(h, botId, `local.run@${DEVICE_A}:echo unknown-a`);
@@ -131,7 +132,7 @@ describe("fail closed and keep Sidecars distinct", () => {
     expect(b.executed).toEqual([]);
 
     const a = await connect();
-    await a.register({ deviceId: DEVICE_A, hostname: "laptop-a", capabilities: ["shell"] });
+    await a.register({ deviceId: DEVICE_A, hostname: "laptop-a" });
     await a.close();
     await waitRoster(h, (devices) => devices.every((device) => device.id !== DEVICE_A));
 
@@ -146,7 +147,7 @@ describe("fail closed and keep Sidecars distinct", () => {
   test("disconnect during Ask fails the Tool Call and reconnect does not complete it", async () => {
     h = await startDaemon();
     const first = await connect();
-    await first.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
+    await first.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Drop mid job Bot");
     const pending = sendToBot(h, botId, "local.run:echo mid-job", DEVICE_A);
     await first.waitForJob();
@@ -159,7 +160,7 @@ describe("fail closed and keep Sidecars distinct", () => {
     expect(failedTranscript.some((message) => message.kind === "response" && message.text?.includes("mid-job"))).toBeFalse();
 
     const replacement = await connect();
-    await replacement.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
+    await replacement.register({ deviceId: DEVICE_A, hostname: "laptop" });
     await Bun.sleep(200);
     expect(replacement.jobs()).toEqual([]);
     expect(replacement.executed).toEqual([]);
@@ -169,10 +170,35 @@ describe("fail closed and keep Sidecars distinct", () => {
     expect(afterReconnect.some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "completed")).toBeFalse();
   });
 
+  test("session open and resume describe only the sender's online device", async () => {
+    h = await startDaemon();
+    const sidecar = await connect();
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
+    const botId = await makeBot(h, "Device syntax Bot");
+    const first = await sendToBot(h, botId, "hello", DEVICE_A);
+    await waitThreadIdle(h, first.threadId);
+    await sendToThread(h, first.threadId, "hello again", DEVICE_A);
+    await waitThreadIdle(h, first.threadId);
+    await sendToThread(h, first.threadId, "untagged");
+    await waitThreadIdle(h, first.threadId);
+    await sendToThread(h, first.threadId, "unknown", DEVICE_B);
+    await waitThreadIdle(h, first.threadId);
+    await sidecar.close();
+    await waitRoster(h, (devices) => devices.length === 0);
+    await sendToThread(h, first.threadId, "offline", DEVICE_A);
+    await waitThreadIdle(h, first.threadId);
+    const sessions = workerObservations(h).filter((observation) => observation.threadId === first.threadId);
+    expect(sessions.map((session) => session.type)).toEqual(["session.open", "session.resume", "session.resume", "session.resume", "session.resume"]);
+    const identity = { os: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", shell: process.platform === "win32" ? "powershell-5.1" : "posix-sh" };
+    expect(sessions.map((session) => session.options?.local)).toEqual([
+      identity, identity, undefined, undefined, undefined,
+    ]);
+  });
+
   test("native bash with a Sidecar online keeps Shared Workspace cwd and creates no sidecar jobs", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Native cwd Bot");
     const native = await sendToBot(h, botId, "tool");
     await waitThreadIdle(h, native.threadId);
@@ -187,7 +213,7 @@ describe("fail closed and keep Sidecars distinct", () => {
   test("computer screenshot with a Sidecar online still uses Bot Screen and creates no sidecar jobs", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Computer vs local Bot");
     const screen = await sendToBot(h, botId, "computer:screenshot");
     await waitThreadIdle(h, screen.threadId);

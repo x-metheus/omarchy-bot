@@ -39,18 +39,6 @@
         "zod": "^3.24.0",
       },
     },
-    "apps/sidecar": {
-      "name": "@omarchy-bot/sidecar",
-      "version": "0.1.0",
-      "bin": {
-        "omarchy-bot-sidecar": "./src/main.ts",
-      },
-      "dependencies": {
-        "@omarchy-bot/agent-contract": "workspace:*",
-        "@omarchy-bot/domain": "workspace:*",
-        "@omarchy-bot/protocol": "workspace:*",
-      },
-    },
     "apps/site": {
       "name": "@omarchy-bot/site",
       "version": "0.1.0",
@@ -518,8 +506,6 @@
     "@omarchy-bot/omarchy-plugin": ["@omarchy-bot/omarchy-plugin@workspace:packages/omarchy-plugin"],
 
     "@omarchy-bot/protocol": ["@omarchy-bot/protocol@workspace:packages/protocol"],
-
-    "@omarchy-bot/sidecar": ["@omarchy-bot/sidecar@workspace:apps/sidecar"],
 
     "@omarchy-bot/site": ["@omarchy-bot/site@workspace:apps/site"],
 

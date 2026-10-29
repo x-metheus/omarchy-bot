@@ -73,7 +73,7 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
     await docker("volume", "create", volume);
     await launch();
     await docker("exec", name, "sh", "-c", 'mkdir -p "$OMARCHY_BOT_HOME/conformance"; printf %s \'{"ok":true,"image":"verified"}\' > "$OMARCHY_BOT_HOME/conformance/pi-fake-pi-1.json"');
-    expect(await healthy()).toEqual({ ok: true, version: "0.1.0" });
+    expect(await healthy()).toEqual({ ok: true, version: "0.1.0", protocol: 1 });
     expect(Number(await docker("exec", name, "id", "-u"))).toBeGreaterThan(0);
     expect(await docker("exec", name, "bun", "-e", 'console.log(require("node:fs").readFileSync("/proc/1/status", "utf8").match(/^Uid:\\s+(\\d+)/m)[1])')).toBe("1000");
     expect(await docker("inspect", "--format", "{{.HostConfig.NetworkMode}}", name)).toBe("none");
@@ -188,7 +188,9 @@ containerTest("fresh TLS image prints a one-time pairing URL and exec CLI suppor
     }, "TLS first-start pairing URL");
     expect(lines).toHaveLength(1);
     const url = new URL(lines[0]!.slice("pairing: ".length));
-    expect(url.origin).toBe("https://127.0.0.1:7321");
+    expect(url.protocol).toBe("omarchy-bot:");
+    expect(url.hostname).toBe("pair");
+    expect(url.searchParams.get("service")).toBe("https://127.0.0.1:7321");
     const code = url.searchParams.get("code");
     const exchange = await docker("exec", name, "bun", "-e", `
       const response=await fetch("https://127.0.0.1:7321/api/pairing/exchange",{tls:{rejectUnauthorized:false},method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code:process.argv[1],name:"TLS container client"})});
@@ -197,7 +199,7 @@ containerTest("fresh TLS image prints a one-time pairing URL and exec CLI suppor
     expect(paired.status).toBe(201);
     const execCli = (...args: string[]) => docker("exec", name, "bun", `${runtime}/apps/cli/src/main.ts`, ...args);
     expect(await execCli("devices")).toContain(`${paired.id}\tTLS container client`);
-    expect(await execCli("pair")).toMatch(/^pairing: https:\/\/127\.0\.0\.1:7321\/pair\?code=/);
+    expect(await execCli("pair")).toMatch(/^address: https:\/\/127\.0\.0\.1:7321\ncode: [23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}\npairing: omarchy-bot:\/\/pair\?service=https%3A%2F%2F127\.0\.0\.1%3A7321&code=/);
     await until(async () => await docker("inspect", "--format", "{{.State.Health.Status}}", name) === "healthy" ? true : undefined, "TLS Docker health");
     await docker("restart", "--time", "20", name);
     await until(async () => { try { return (await execCli("devices")).includes(paired.id) ? true : undefined; } catch { return undefined; } }, "paired TLS restart");

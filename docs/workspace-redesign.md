@@ -103,11 +103,11 @@ There is no persistent global TopNav.
 - On narrow screens the Sidebar becomes a drawer; the conversation Header supplies its opener.
 - Opening the app selects the most recently active Bot, not the previously viewed Bot. That Bot opens its most recently active Thread.
 
-### Future Omarchy Bot
+### Omarchy Bot application
 
-The current Web frontend will be reused for Omarchy Bot, not replaced by an independently implemented interface or a "Desktop" product. Conversation UI, Bot selection, Computer Surface behavior, and daemon-facing HTTP/WebSocket contracts stay shared; Agents, Native Sessions, the Bot Computer, routed Screens, and capture/input execution remain in the Service. A Local Sidecar starts only when Omarchy Bot is not connected to the Service on the same machine; on the Service Host it is a viewer.
+The Linux Omarchy Bot application embeds the current Web frontend. Conversation UI, Bot selection, Computer Surface behavior, and Service-facing HTTP/WebSocket contracts stay shared; Agents, Native Sessions, the Bot Computer, routed Screens, and capture/input execution remain in the Service. The application supplies keychain storage, pairing links, and system-browser access through `shell`.
 
-[ADR 0010](adr/0010-reuse-web-client-in-tauri.md) and [ADR 0011](adr/0011-local-sidecar-only-off-host.md) record this accepted evolution contract. Preserve the client/execution separation now without adding unused native scaffolding. Tauri packaging remains future work; the Service already ships paired device tokens with TLS, SSH-tunnel, and private-network remote access ([ADR 0014](adr/0014-require-paired-device-tokens.md)). The Local Sidecar daemon contract is TypeScript run by the plugin-runtime Bun. Actual WebView media/input support must be tested then rather than inferred from Chromium tests. Application-state ownership is unchanged; the Service's lifecycle belongs to its systemd user unit ([ADR 0013](adr/0013-run-a-standalone-linux-service.md)), not to the Omarchy plugin.
+[ADR 0010](adr/0010-reuse-web-client-in-tauri.md), [ADR 0011](adr/0011-local-sidecar-only-off-host.md), and [ADR 0015](adr/0015-omarchy-bot-app-is-the-only-bot-client.md) define the client/execution boundary. The Linux AppImage and its WebKitGTK smoke suite live in this repository; platform support requires that platform's real WebView checks, independently of Chromium results. The Service provides paired device tokens with TLS or loopback SSH-tunnel access ([ADR 0014](adr/0014-require-paired-device-tokens.md)). Bundled Local Sidecar delivery belongs to ticket 09; until then the Linux shell truthfully reports no running Sidecar and sends no This Device claim. Application-state ownership is unchanged; the Service's lifecycle belongs to its Launcher ([ADR 0013](adr/0013-run-a-standalone-linux-service.md)), not to the Omarchy plugin or the app.
 
 ## 3. Sidebar
 
@@ -191,8 +191,7 @@ The Composer supports:
 
 - text;
 - local files;
-- images;
-- Voxtype dictation.
+- images.
 
 Enter sends; Shift+Enter inserts a newline. Sending while the Bot is working uses native steering rather than aborting and restarting the turn. The redirected instruction is applied after the Agent reaches a safe boundary following its current atomic action. There is no permanent Stop button in the Composer.
 
@@ -215,29 +214,14 @@ Enter sends; Shift+Enter inserts a newline. Sending while the Bot is working use
 
 ## 8. Voice input
 
-Voice is an input method, not an audio-message transport.
+Focus the Composer and use the client operating system's dictation. It types text into the focused draft on the user's own device. Review or edit the text and send normally; the Service never captures audio and the Composer has no microphone or voice auto-send setting.
 
-### Default behavior
+- **macOS Dictation:** press the Dictation key or the shortcut configured in System Settings → Keyboard → Dictation (commonly `Fn` / Globe twice).
+- **Windows:** `Win+H` opens voice typing.
+- **Omarchy Voxtype:** `Super+Ctrl+X` toggles dictation; hold `F9` to talk and release to finish.
+- **Phone keyboards:** tap the keyboard's microphone key.
 
-1. Clicking the microphone starts Voxtype recording.
-2. Clicking again stops recording and enters a transcribing state.
-3. The resulting text is inserted into the originating Composer draft at its insertion point.
-4. Existing text is preserved.
-5. The user may review or edit the transcript and presses Send explicitly, matching the observed Grok Bot behavior.
-Escape cancels recording. Empty speech or failure leaves the draft unchanged. Raw audio is not uploaded, attached, or retained by Omarchy Bot.
-
-### Optional auto-send
-
-Settings → Voice includes **Auto-send voice transcriptions**, off by default. When enabled, a successful transcript is inserted and then sent through the originating Thread's normal command path. During active work it becomes steering. Empty or failed transcription is never sent.
-
-The microphone integration uses Voxtype's stable file-output contract through the localhost daemon:
-
-```text
-record start --file=<runtime-file> --no-auto-submit --no-smart-auto-submit
-record stop --wait --json --wait-file <runtime-file>
-```
-
-The app does not depend on Voxtype's synthetic Return because file output bypasses the typing/paste auto-submit chain and synthetic input could target the wrong conversation. Omarchy's normal Voxtype shortcuts remain untouched and continue typing into the focused control.
+Dictated text follows the same window-local draft, attachment, and steering behavior as typed text.
 
 ## 9. Ordered rich transcript
 
