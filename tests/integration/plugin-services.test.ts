@@ -162,17 +162,32 @@ async function authorizationEvent(h: Harness, type: string) {
   const socket = new WebSocket(`${h.baseUrl.replace(/^http/, "ws")}/api/events?access_token=${encodeURIComponent(h.token)}`);
   const ready = Promise.withResolvers<void>();
   const event = Promise.withResolvers<EventEnvelope>();
+  let live = false;
   socket.onopen = () => socket.send(JSON.stringify({ type: "hello" }));
   socket.onmessage = (message) => {
     const frame = JSON.parse(String(message.data)) as { type: string; envelope?: EventEnvelope };
-    if (frame.type === "hello") ready.resolve();
-    if (frame.type === "event" && frame.envelope?.type === type) event.resolve(frame.envelope);
+    if (frame.type === "hello") { live = true; ready.resolve(); }
+    if (frame.type === "event" && frame.envelope?.type === type && live) event.resolve(frame.envelope);
   };
   await ready.promise;
   return async () => {
     try { return await event.promise; }
     finally { socket.close(); }
   };
+}
+
+async function authorizationHistory(h: Harness): Promise<EventEnvelope[]> {
+  const socket = new WebSocket(`${h.baseUrl.replace(/^http/, "ws")}/api/events?access_token=${encodeURIComponent(h.token)}`);
+  const events: EventEnvelope[] = [];
+  const result = Promise.withResolvers<EventEnvelope[]>();
+  socket.onopen = () => socket.send(JSON.stringify({ type: "hello" }));
+  socket.onerror = result.reject;
+  socket.onmessage = message => {
+    const frame = JSON.parse(String(message.data)) as { type: string; envelope?: EventEnvelope };
+    if (frame.envelope?.type.startsWith("plugin.authorization_")) events.push(frame.envelope);
+    if (frame.type === "hello") { socket.close(); result.resolve(events); }
+  };
+  return result.promise;
 }
 
 test("a Paired Device authorizes from a remote client origin with a Service callback and app return link", async () => {
@@ -234,13 +249,13 @@ test.each(["cancelled", "invalid-code", "wrong-transaction"])("OAuth %s publishe
   const response = await fetch(callback);
   expect(response.ok).toBe(false);
   expect(await response.text()).toContain('<a href="omarchy-bot://">Return to Omarchy Bot</a>');
-  expect(await receive()).toMatchObject({ aggregateType: "plugin", aggregateId: "google", payload: { providerId: "google", status: "failed" } });
+  expect(await receive()).toMatchObject({ aggregateType: "plugin", aggregateId: "google", payload: { providerId: "google", status: "failed", reason: expect.any(String) } });
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts).toEqual([]);
   expect((await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "google" })).status).toBe(200);
   expect(oauthStarts()).toBe(2);
 }, 40_000);
 
-test("an expired reconnect publishes its known account failure and consumes the state", async () => {
+test("an abandoned publisher reconnect expires without a callback and refuses late completion", async () => {
   const { h, authorize, pendingAuthorization } = await startServices();
   const account = await authorize("fixture-expired");
   await api(h, "POST", "/api/plugins/authorize", { providerId: "google", accountId: account.id });
@@ -250,14 +265,208 @@ test("an expired reconnect publishes its known account failure and consumes the 
   callback.searchParams.set("state", transaction.localState);
   let response: Response;
   setSystemTime(Date.now() + 16 * 60_000);
-  try { response = await fetch(callback); }
-  finally { setSystemTime(); }
+  try {
+    expect(await receive()).toMatchObject({ aggregateType: "plugin", aggregateId: account.id, payload: { providerId: "google", accountId: account.id, status: "failed", reason: "expired" } });
+    response = await fetch(callback);
+  } finally { setSystemTime(); }
   expect(response.status).toBe(400);
   expect(await response.text()).toContain("expired");
-  expect(await receive()).toMatchObject({ aggregateType: "plugin", aggregateId: account.id, payload: { providerId: "google", accountId: account.id, status: "failed" } });
   expect((await fetch(callback)).status).toBe(400);
   expect((await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "google", accountId: account.id })).status).toBe(200);
 }, 10_000);
+
+test.each(["provider", "standalone"])("native %s consent completes over the event stream without checking by hand", async (kind) => {
+  const { h } = await startServices();
+  await writeFile(path.join(h.home, "conformance", "pi-fake-pi-1.json"), JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: { authorizationUrl: "https://native.example/consent", notify: "completed" } }));
+  const connection = kind === "standalone" ? await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "custom-consent", enabled: true, transport: { type: "http", url: "https://native.example/mcp" } }) : undefined;
+  const receive = await authorizationEvent(h, "plugin.authorization_completed");
+  expect((await apiStatus(h, "POST", connection ? `/api/plugins/mcp/${connection.id}/authorize` : "/api/plugins/authorize", connection ? {} : { providerId: "intercom", serviceId: "intercom" })).status).toBe(200);
+  const event = await receive();
+  const state = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  const account = state.accounts.find(entry => entry.providerId === "intercom");
+  expect(event).toMatchObject({ aggregateId: account?.id ?? connection!.id, payload: { mcpId: account?.nativeConnectionId ?? connection!.id, status: "completed", ...(account ? { providerId: "intercom", accountId: account.id } : {}) } });
+  expect(account?.status ?? state.mcp.find(entry => entry.id === connection!.id)?.status).toBe("connected");
+}, 10_000);
+
+test.each(["provider", "standalone"])("native %s failure and abandoned consent expire with one outcome and allow retry", async (kind) => {
+  const { h } = await startServices();
+  const control = path.join(h.home, "conformance", "pi-fake-pi-1.json");
+  const configure = (authorization: Record<string, unknown>) => writeFile(control, JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: authorization }));
+  const connection = kind === "standalone" ? await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "custom-consent", enabled: true, transport: { type: "http", url: "https://native.example/mcp" } }) : undefined;
+  await configure({ authorizationUrl: "https://native.example/consent", notify: "failed" });
+  const failed = await authorizationEvent(h, "plugin.authorization_failed");
+  await api(h, "POST", connection ? `/api/plugins/mcp/${connection.id}/authorize` : "/api/plugins/authorize", connection ? {} : { providerId: "intercom", serviceId: "intercom" });
+  const account = (await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts.find(entry => entry.providerId === "intercom");
+  const id = connection?.id ?? account!.nativeConnectionId!;
+  expect(await failed()).toMatchObject({ aggregateId: account?.id ?? id, payload: { mcpId: id, status: "failed", reason: "auth_failed", ...(account ? { providerId: "intercom", accountId: account.id } : {}) } });
+  await configure({ authorizationUrl: "https://native.example/consent" });
+  const expired = await authorizationEvent(h, "plugin.authorization_failed");
+  await api(h, "POST", `/api/plugins/mcp/${id}/authorize`, {});
+  setSystemTime(Date.now() + 16 * 60_000);
+  try { expect(await expired()).toMatchObject({ payload: { mcpId: id, status: "failed", reason: "expired" } }); }
+  finally { setSystemTime(); }
+  expect((await apiStatus(h, "POST", `/api/plugins/mcp/${id}/authorize`, { redirectUrl: "https://native.example/callback?code=late" })).status).toBe(400);
+  // A late old attempt must not finish a new consent attempt.
+  await configure({ authorizationUrl: "https://native.example/retry", staleNotify: true });
+  expect((await apiStatus(h, "POST", `/api/plugins/mcp/${id}/authorize`, {})).status).toBe(200);
+  const retried = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect(retried.accounts.find(entry => entry.id === account?.id)?.status ?? retried.mcp.find(entry => entry.id === id)?.status).not.toBe("connected");
+  await configure({ authenticated: true });
+  const completed = await authorizationEvent(h, "plugin.authorization_completed");
+  expect((await apiStatus(h, "POST", `/api/plugins/mcp/${id}/authorize`, { redirectUrl: "https://native.example/callback?code=retry" })).status).toBe(200);
+  expect(await completed()).toMatchObject({ payload: { mcpId: id, status: "completed" } });
+}, 15_000);
+
+test("real native MCP callbacks report completion and cancellation, and expiry refuses browser and manual callbacks", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-oauth-service-"));
+  const workerDir = path.join(home, "workers/pi/src");
+  await mkdir(workerDir, { recursive: true });
+  const bin = path.join(home, "bin");
+  await mkdir(bin);
+  await writeFile(path.join(bin, "xdg-open"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await writeFile(path.join(workerDir, "worker.ts"), `
+import os from "node:os";
+import { mock, setSystemTime } from "bun:test";
+import { writeFileSync } from "node:fs";
+const home = process.env.HOME!;
+const userInfo = os.userInfo;
+const privateUserInfo = () => ({ ...userInfo(), homedir: home });
+mock.module("node:os", () => ({ ...os, userInfo: privateUserInfo, default: { ...os, userInfo: privateUserInfo } }));
+process.env.PATH = home + "/bin:" + process.env.PATH;
+process.env.PI_CODING_AGENT_DIR = home + "/.pi/agent";
+process.env.PI_MCP_ADAPTER_TEST_AUTH_STORE = home + "/oauth.json";
+const stdoutWrite = process.stdout.write.bind(process.stdout);
+let holdStatus = false;
+const heldStatus = [];
+let observedStatus = Promise.withResolvers();
+process.stdout.write = (chunk, ...args) => {
+  if (holdStatus && String(chunk).includes('"capability":"mcp.authorization"') && String(chunk).includes('"status":"completed"')) { heldStatus.push(chunk); observedStatus.resolve(); return true; }
+  return stdoutWrite(chunk, ...args);
+};
+// Advance only adapter consent timeouts; worker heartbeat and HTTP keep real time.
+const originalTimeout = globalThis.setTimeout;
+const consentTimers = new Map();
+globalThis.setTimeout = (callback, delay, ...args) => {
+  const timer = originalTimeout(callback, delay, ...args);
+  if (delay === 5 * 60_000) consentTimers.set(timer, () => callback(...args));
+  return timer;
+};
+const clock = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+  const value = await request.json();
+  if (value?.holdStatus) { holdStatus = true; observedStatus = Promise.withResolvers(); }
+  else if (value?.releaseStatus) { holdStatus = false; for (const chunk of heldStatus.splice(0)) stdoutWrite(chunk); }
+  else if (value?.waitStatus) {
+    const deadline = Promise.withResolvers();
+    const timeout = originalTimeout(() => deadline.reject(new Error("Native completion status was not emitted")), 5000);
+    try { await Promise.race([observedStatus.promise, deadline.promise]); }
+    finally { clearTimeout(timeout); }
+  }
+  else if (value && typeof value === "object") {
+    for (const [timer, callback] of consentTimers) { clearTimeout(timer); callback(); }
+    consentTimers.clear();
+  } else setSystemTime(value);
+  return new Response("ok");
+} });
+writeFileSync(home + "/clock-port", String(clock.port));
+// Load the real worker only after installing process-private keychain and clock boundaries.
+await import(${JSON.stringify(path.resolve("workers/pi/src/worker.ts"))});
+`);
+  const originalIntercom = PLUGIN_PROVIDERS.intercom.services;
+  let exchanges = 0;
+  let unrelatedConnections = 0;
+  const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/unrelated") { unrelatedConnections++; return new Response(null, { status: 503 }); }
+    if (url.pathname.startsWith("/.well-known/oauth-protected-resource")) return Response.json({ resource: `${url.origin}/mcp`, authorization_servers: [url.origin] });
+    if (url.pathname === "/.well-known/oauth-authorization-server") return Response.json({ issuer: url.origin, authorization_endpoint: `${url.origin}/authorize`, token_endpoint: `${url.origin}/token`, registration_endpoint: `${url.origin}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] });
+    if (url.pathname === "/register") return Response.json({ ...await request.json(), client_id: "native-fixture", token_endpoint_auth_method: "none" }, { status: 201 });
+    if (url.pathname === "/token") { exchanges++; return Response.json({ access_token: "native-fixture-token", token_type: "Bearer", expires_in: 3600 }); }
+    if (request.headers.get("authorization") !== "Bearer native-fixture-token") return new Response(null, { status: 401, headers: { "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource/mcp"` } });
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const rpc = await request.json() as { id?: number; method: string };
+    if (rpc.id === undefined) return new Response(null, { status: 202 });
+    return Response.json({ jsonrpc: "2.0", id: rpc.id, result: rpc.method === "initialize" ? { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "consent", version: "1" } } : { tools: [] } });
+  } });
+  try {
+    PLUGIN_PROVIDERS.intercom.services = originalIntercom.map(service => ({ ...service, mcpUrl: `http://127.0.0.1:${provider.port}/mcp` }));
+    globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(input instanceof Request ? input.url : String(input)).origin === "https://native-catalog.invalid") return Response.json([]);
+      return originalFetch(input, init);
+    }, { preconnect: originalFetch.preconnect });
+    const h = harness = await startDaemon(home, { workersDir: path.join(home, "workers"), waitForAgentReady: false });
+    await apiStatus(h, "PUT", "/api/plugins/settings", { cloudUrl: "https://native-catalog.invalid" });
+    const connection = await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "real-consent", enabled: true, transport: { type: "http", url: `http://127.0.0.1:${provider.port}/mcp` } });
+    const plugin = path.join(home, "unrelated-plugin");
+    await mkdir(path.join(plugin, "skills/kept"), { recursive: true });
+    await writeFile(path.join(plugin, "skills/kept/SKILL.md"), "---\nname: kept\ndescription: Preserve plugin Skill discovery\n---\nKeep this skill.\n");
+    await writeFile(path.join(plugin, ".mcp.json"), JSON.stringify({ mcpServers: { unrelated: { url: `http://127.0.0.1:${provider.port}/unrelated`, lifecycle: "eager" } } }));
+    await mkdir(path.join(home, ".omarchy-bot/workspace/.pi"), { recursive: true });
+    await writeFile(path.join(home, ".omarchy-bot/workspace/.pi/mcp.json"), JSON.stringify({ claudePlugins: [{ path: plugin, mcp: true, skills: true }] }));
+    for (const kind of ["standalone", "provider"]) {
+      const start = async (accountId?: string) => {
+        const response = await api<{ authorizationUrl?: string; url?: string }>(h, "POST", kind === "standalone" ? `/api/plugins/mcp/${connection.id}/authorize` : "/api/plugins/authorize", kind === "standalone" ? {} : { providerId: "intercom", serviceId: "intercom", ...(accountId ? { accountId } : {}) });
+        const url = new URL(response.authorizationUrl ?? response.url!);
+        const callback = new URL(url.searchParams.get("redirect_uri")!);
+        callback.searchParams.set("state", url.searchParams.get("state")!);
+        return callback;
+      };
+      const failed = await authorizationEvent(h, "plugin.authorization_failed");
+      const cancelled = await start();
+      cancelled.searchParams.set("error", "access_denied");
+      expect(await (await fetch(cancelled)).text()).toContain("access_denied");
+      expect(await failed()).toMatchObject({ payload: { status: "failed", reason: "auth_failed" } });
+      const account = (await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts.find(entry => entry.providerId === "intercom");
+      expect(unrelatedConnections).toBe(0);
+      const id = kind === "standalone" ? connection.id : account!.nativeConnectionId!;
+      for (const redirectUrl of ["http://localhost/callback?code=bad", "http://localhost/callback?code=bad&state=wrong"]) {
+        const beforeManual = (await authorizationHistory(h)).length;
+        const manualFailed = await authorizationEvent(h, "plugin.authorization_failed");
+        const invalid = await start(account?.id);
+        const beforeInvalid = exchanges;
+        expect((await api<{ error?: string }>(h, "POST", `/api/plugins/mcp/${id}/authorize`, { redirectUrl })).error).toBe("auth_complete_failed");
+        expect(await manualFailed()).toMatchObject({ payload: { status: "failed", reason: "auth_complete_failed" } });
+        invalid.searchParams.set("code", "must-not-exchange");
+        expect(await fetch(invalid).then(response => response.status !== 200, () => true)).toBe(true);
+        expect(exchanges).toBe(beforeInvalid);
+        expect((await authorizationHistory(h)).slice(beforeManual).map(event => event.type)).toEqual(["plugin.authorization_failed"]);
+      }
+      const clock = `http://127.0.0.1:${await readFile(path.join(home, "clock-port"), "utf8")}`;
+      const timedOut = await authorizationEvent(h, "plugin.authorization_failed");
+      await start(account?.id);
+      expect((await fetch(clock, { method: "POST", body: JSON.stringify({ advance: 5 * 60_000 + 1000 }) })).ok).toBe(true);
+      try { expect(await timedOut()).toMatchObject({ payload: { status: "failed", reason: "expired" } }); }
+      finally { await fetch(clock, { method: "POST", body: "null" }); }
+      const expired = await authorizationEvent(h, "plugin.authorization_failed");
+      const late = await start(account?.id);
+      const future = Date.now() + 16 * 60_000;
+      expect((await fetch(clock, { method: "POST", body: JSON.stringify(future) })).ok).toBe(true);
+      setSystemTime(future);
+      try { expect(await expired()).toMatchObject({ payload: { status: "failed", reason: "expired" } }); }
+      finally { setSystemTime(); await fetch(clock, { method: "POST", body: "null" }); }
+      const beforeLate = exchanges;
+      late.searchParams.set("code", "late-code");
+      expect(await fetch(late).then(response => response.status !== 200, () => true)).toBe(true);
+      expect(exchanges).toBe(beforeLate);
+      expect((await apiStatus(h, "POST", `/api/plugins/mcp/${kind === "standalone" ? connection.id : account!.nativeConnectionId}/authorize`, { redirectUrl: late.href })).status).toBe(400);
+      const completed = await authorizationEvent(h, "plugin.authorization_completed");
+      const beforeSuccess = (await authorizationHistory(h)).length;
+      expect((await fetch(clock, { method: "POST", body: JSON.stringify({ holdStatus: true }) })).ok).toBe(true);
+      const success = await start(account?.id);
+      expect((await api<{ status: string }>(h, "POST", `/api/plugins/mcp/${id}/check`, {})).status).toBe("needs-auth");
+      success.searchParams.set("code", "valid-code");
+      expect((await fetch(success)).status).toBe(200);
+      expect((await fetch(clock, { method: "POST", body: JSON.stringify({ waitStatus: true }) })).ok).toBe(true);
+      expect((await api<{ authenticated?: boolean; error?: string }>(h, "POST", `/api/plugins/mcp/${id}/authorize`, { redirectUrl: success.href })).error).toBeUndefined();
+      await fetch(clock, { method: "POST", body: JSON.stringify({ releaseStatus: true }) });
+      expect(await completed()).toMatchObject({ payload: { status: "completed", mcpId: kind === "standalone" ? connection.id : account!.nativeConnectionId } });
+      expect(exchanges).toBe(beforeLate + 1);
+      expect((await authorizationHistory(h)).slice(beforeSuccess).map(event => event.type)).toEqual(["plugin.authorization_completed"]);
+    }
+  } finally {
+    PLUGIN_PROVIDERS.intercom.services = originalIntercom;
+    await provider.stop(true);
+  }
+}, 90_000);
 
 test.each(["authenticated", "pending", "error"])("native authorization without a browser URL preserves %s state and retry", async (outcome) => {
   const { h } = await startServices();

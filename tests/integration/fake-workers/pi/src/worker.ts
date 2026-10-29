@@ -134,7 +134,7 @@ interface FakeProbeControl {
   };
   fakeAbortBehavior?: "fail_once" | "ignore_once";
   fakeAbortReleaseFile?: string;
-  fakeMcpAuthorization?: { authenticated?: boolean; error?: string };
+  fakeMcpAuthorization?: { authenticated?: boolean; error?: string; authorizationUrl?: string; notify?: "completed" | "failed"; delayMs?: number; staleNotify?: boolean };
 }
 
 function dataDir(): string | undefined {
@@ -225,6 +225,8 @@ const sessions = new Map<string, FakeSession>();
 const failedOnce = new Set<string>();
 const failedAbortOnce = new Set<string>();
 const mcpStatuses = new Map<string, NativeMcpStatus>();
+const mcpAttempts = new Map<string, string>();
+const cancelledMcpAttempts = new Map<string, string>();
 const ignoredAbortOnce = new Set<string>();
 
 const respond = (requestId: string, payload: unknown): void => {
@@ -425,8 +427,27 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     case "mcp.control": {
       const authorization = probeControl().fakeMcpAuthorization ?? {};
       const name = String(msg.server);
-      mcpStatuses.set(name, { name, configurationRevision: nativeMcpRevision(String(msg.cwd), nativeMcpConfigFile(nativeMcpPrivateDir())), status: authorization.authenticated ? "connected" : "needs-auth", toolCount: authorization.authenticated ? 1 : 0, disabled: false });
-      respond(msg.requestId!, { servers: [...mcpStatuses.values()], result: authorization });
+      if (msg.action === "auth-cancel") {
+        if (mcpAttempts.get(name) === msg.authorizationId) {
+          cancelledMcpAttempts.set(name, String(msg.authorizationId));
+          mcpAttempts.delete(name);
+        }
+        respond(msg.requestId!, { servers: [...mcpStatuses.values()], result: {} });
+        break;
+      }
+      if (msg.action === "auth-start") {
+        mcpAttempts.set(name, String(msg.authorizationId));
+        if (authorization.staleNotify) write({ type: "event", event: { type: "native", agentId: AGENT_ID, capability: "mcp.authorization", payload: { server: name, authorizationId: cancelledMcpAttempts.get(name), status: "completed" }, sensitivity: "public" } });
+      }
+      const revision = nativeMcpRevision(String(msg.cwd), nativeMcpConfigFile(nativeMcpPrivateDir()));
+      const authenticated = authorization.authenticated || mcpStatuses.get(name)?.status === "connected";
+      mcpStatuses.set(name, { name, configurationRevision: revision, status: authenticated ? "connected" : "needs-auth", toolCount: authenticated ? 1 : 0, disabled: false });
+      respond(msg.requestId!, { servers: [...mcpStatuses.values()], result: { ...authorization, authenticated } });
+      if (msg.action === "auth-start" && authorization.notify) setTimeout(() => {
+        if (mcpAttempts.get(name) !== msg.authorizationId) return;
+        if (authorization.notify === "completed") mcpStatuses.set(name, { name, configurationRevision: revision, status: "connected", toolCount: 1, disabled: false });
+        write({ type: "event", event: { type: "native", agentId: AGENT_ID, capability: "mcp.authorization", payload: { server: name, authorizationId: msg.authorizationId, status: authorization.notify, reason: "auth_failed" }, sensitivity: "public" } });
+      }, authorization.delayMs ?? 100);
       break;
     }
     case "session.open": {

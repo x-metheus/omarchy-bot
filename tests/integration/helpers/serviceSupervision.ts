@@ -283,15 +283,24 @@ export async function startManagedService(input: {
     }
     ready.reject(new Error(`managed Service closed stdout before readiness: ${buffer.slice(-500)}`));
   })();
-  const line = await Promise.race([
-    ready.promise,
-    proc.exited.then(async (code) => {
-      throw new Error(`managed Service exited with ${code}: ${(await stderr).slice(-2_000)}`);
-    }),
-    Bun.sleep(30_000).then(() => {
-      throw new Error("managed Service did not become ready");
-    }),
-  ]);
+  let line: string;
+  try {
+    line = await Promise.race([
+      ready.promise,
+      proc.exited.then(async (code) => {
+        throw new Error(`managed Service exited with ${code}: ${(await stderr).slice(-2_000)}`);
+      }),
+      Bun.sleep(30_000).then(() => {
+        throw new Error("managed Service did not become ready");
+      }),
+    ]);
+  } catch (error) {
+    proc.kill("SIGINT");
+    await Promise.race([proc.exited, Bun.sleep(10_000)]);
+    if (proc.exitCode === null) proc.kill("SIGKILL");
+    await proc.exited;
+    throw error;
+  }
   const port = /SERVICE_READY (\d+)/.exec(line)?.[1];
   if (port === undefined) throw new Error(`managed Service did not report a port: ${line}`);
   return {
