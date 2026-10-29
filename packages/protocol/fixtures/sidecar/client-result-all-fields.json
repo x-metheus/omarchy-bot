@@ -1,0 +1,11 @@
+{
+  "direction": "client",
+  "frame": {
+    "type": "local.result",
+    "jobId": "job-all-fields",
+    "ok": false,
+    "text": "",
+    "error": "fixture error",
+    "exitCode": 0
+  }
+}

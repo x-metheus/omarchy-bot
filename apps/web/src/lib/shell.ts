@@ -196,6 +196,8 @@ export interface MemoryShell extends Shell {
   receiveApprovalDismiss(jobId: string): void;
 }
 export function getShell(): Shell {
-  return globalThis.__OMARCHY_BOT_SHELL__ ?? (globalThis.__OMARCHY_BOT_MEMORY_SHELL__ ??= createMemoryShell());
+  const shell = globalThis.__OMARCHY_BOT_SHELL__;
+  if (!shell) throw new Error("The native shell is unavailable.");
+  return shell;
 }
 export function installShell(next: Shell): void { globalThis.__OMARCHY_BOT_SHELL__ = next; }

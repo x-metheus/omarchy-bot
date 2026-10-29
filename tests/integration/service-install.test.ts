@@ -3,9 +3,11 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { extractRuntimeArchive } from "../../apps/cli/src/archive.ts";
 import { layoutFromEnv } from "../../apps/cli/src/layout.ts";
 import { BROWSER_ASSETS_RELEASE } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 import { interpreterPath, runnableBrowserFiles } from "./helpers/browserPackFixture.ts";
+import { appSigningKey } from "./helpers/appSignatureFixture.ts";
 
 const projectRoot = path.resolve(import.meta.dir, "../..");
 const cleanups: Array<() => void> = [];
@@ -19,7 +21,7 @@ function shim(bin: string, name: string, script: string) {
   chmodSync(file, 0o755);
 }
 
-async function fixture(options: { manager?: boolean; opener?: string; browser?: "native" | "snap" | "absent"; tls?: boolean; requireBun?: boolean; pin?: string; revision?: string; priorInstaller?: boolean } = {}) {
+async function fixture(options: { manager?: boolean; opener?: string; browser?: "native" | "snap" | "absent"; tls?: boolean; requireBun?: boolean; pin?: string; revision?: string; priorInstaller?: boolean; appPublicKey?: string; packageRuntime?: boolean } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "ob-install-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, "bin");
@@ -101,15 +103,54 @@ return new Response("not found",{status:404});}});
 SERVICE
 `;
   const files: Record<string, string> = { "scripts/serve.sh": serve };
-  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack", "appInstall"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
-  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "hostBrowser"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack", "appInstall", "appSignature"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "hostBrowser", "desktopEntry"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
   files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(projectRoot, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   if (options.pin) files["apps/daemon/src/modules/computer/botComputerAssets.ts"] = files["apps/daemon/src/modules/computer/botComputerAssets.ts"]!.replace(`BROWSER_ASSETS_RELEASE = "${BROWSER_ASSETS_RELEASE}"`, `BROWSER_ASSETS_RELEASE = "${options.pin}"`);
+  if (options.appPublicKey) files["apps/cli/src/release-public-key"] = options.appPublicKey;
   // Frozen from 23c944b74457df7755acab944db54c80db689858, before the installer gained a third argument.
   if (options.priorInstaller) files["apps/cli/src/browserPack.ts"] = readFileSync(path.join(import.meta.dir, "helpers/priorBrowserPack.ts.fixture"), "utf8");
   const packed = await new Bun.Archive(files).bytes();
   writeFileSync(archive, Bun.zstdCompressSync(packed));
   writeFileSync(checksum, `${createHash("sha256").update(readFileSync(archive)).digest("hex")}  runtime.tar.zst\n`);
+  if (options.packageRuntime) {
+    const source = path.join(root, "source");
+    const put = (name: string, contents: string) => {
+      const file = path.join(source, name);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, contents);
+      return file;
+    };
+    for (const [name, contents] of Object.entries(files)) put(name, contents);
+    put("package.json", '{"name":"installer-archive-fixture","private":true,"dependencies":{"fixture":"file:packages/fixture"}}');
+    put("packages/fixture/package.json", '{"name":"fixture","version":"1.0.0"}');
+    mkdirSync(path.join(source, "node_modules"));
+    const run = (args: string[], extra: NodeJS.ProcessEnv = {}) => {
+      const result = Bun.spawnSync(args, { cwd: source, env: { ...process.env, ...extra } });
+      expect(result.exitCode, result.stderr.toString()).toBe(0);
+    };
+    run([process.execPath, "install"]);
+    for (const helper of ["pointer/omarchy-bot-wayland-input", "capture/omarchy-bot-wayland-capture", "bot-desktop/omarchy-bot-desktop"]) {
+      chmodSync(put(`apps/daemon/dist/native-${helper}`, "#!/bin/sh\nexit 0\n"), 0o755);
+    }
+    const sway = path.join(root, "sway.tar.gz");
+    const swayRoot = path.join(root, "sway");
+    mkdirSync(swayRoot);
+    writeFileSync(path.join(swayRoot, "fixture"), "sway fixture");
+    run(["tar", "-czf", sway, "-C", swayRoot, "."]);
+    const swayHash = createHash("sha256").update(readFileSync(sway)).digest("hex");
+    put("apps/daemon/src/modules/computer/swayRuntimeSupply.ts", files["apps/daemon/src/modules/computer/swayRuntimeSupply.ts"]!.replace(/sha256: "[a-f0-9]{64}"/, `sha256: "${swayHash}"`));
+    const fonts = path.join(root, "fonts");
+    mkdirSync(fonts);
+    writeFileSync(path.join(fonts, "Fixture.ttf"), "font fixture");
+    const fontHash = createHash("sha256").update("font fixture").digest("hex");
+    put("apps/daemon/src/modules/computer/botComputerAssets.ts", files["apps/daemon/src/modules/computer/botComputerAssets.ts"]!.replace(/export const FONT_ASSETS[^]*?\]\);/, `export const FONT_ASSETS: readonly FontAsset[] = Object.freeze([\n{ name: "fixture", file: "Fixture.ttf", url: "https://assets.invalid/font", sha256: "${fontHash}" },\n]);`));
+    run(["bash", path.join(projectRoot, "scripts/package-plugin-runtime.sh"), source, root, sway, fonts], {
+      OMARCHY_BOT_PLUGIN_REVISION: options.revision ?? "fixture",
+      TAURI_UPDATER_PUBKEY: options.appPublicKey,
+      RELEASE_BUILD: options.appPublicKey ? "true" : undefined,
+    });
+  }
   const pack = path.join(root, "browser.tar.zst");
   writeFileSync(pack, Bun.zstdCompressSync(await new Bun.Archive({
     ".omarchy-bot-browser-pack": `${options.pin ?? BROWSER_ASSETS_RELEASE}\n`,
@@ -242,6 +283,84 @@ test("bad AppImage checksum leaves the Service healthy and existing app data unt
   expect(recorded(setup.env.OPEN_CALLS!)).toEqual([]);
 });
 
+test.each([undefined, "https://downloads.invalid/app.AppImage"])("keyless packaged installer skips remote app %s and preserves a healthy Service and user data", async source => {
+  const setup = await fixture({ packageRuntime: true });
+  const extracted = path.join(setup.root, "archived-installer");
+  extractRuntimeArchive(setup.archiveArgs[1]!, extracted);
+  expect(existsSync(path.join(extracted, "apps/cli/src/release-public-key"))).toBe(false);
+  setup.env.DISPLAY = ":fixture";
+  if (source) setup.env.OMARCHY_BOT_APP_IMAGE = source;
+  else delete setup.env.OMARCHY_BOT_APP_IMAGE;
+  const networkGuard = path.join(setup.root, "no-app-network.ts");
+  const downloads = path.join(setup.root, "app-downloads");
+  writeFileSync(networkGuard, `const original=globalThis.fetch;globalThis.fetch=async(input,init)=>{if(!String(input).startsWith("http://127.0.0.1:")){require("node:fs").appendFileSync(${JSON.stringify(downloads)},String(input)+"\\n");throw new Error("unexpected app network request")}return original(input,init)};`);
+  mkdirSync(path.dirname(setup.layout.appImage), { recursive: true });
+  writeFileSync(setup.layout.appImage, "previous incomplete app", { mode: 0o644 });
+  writeFileSync(`${setup.layout.appImage}.installed`, "Omarchy Bot installed AppImage\n");
+  writeFileSync(setup.layout.dbPath, "user data");
+  const result = await cli({ ...setup, hook: networkGuard, cliPath: path.join(extracted, "apps/cli/src/main.ts") }, ["install", ...setup.archiveArgs, "--no-browser-pack"]);
+  expect(result.code).toBe(0);
+  expect(result.stderr).toContain("this build has no release signing key");
+  expect(result.stdout).toContain(`pairing: ${setup.pairingUrl}`);
+  expect((await fetch(`http://127.0.0.1:${setup.env.OMARCHY_BOT_PORT}/api/health`)).status).toBe(200);
+  expect(existsSync(downloads)).toBe(false);
+  expect(readFileSync(setup.layout.appImage, "utf8")).toBe("previous incomplete app");
+  expect(readFileSync(setup.layout.dbPath, "utf8")).toBe("user data");
+  expect(existsSync(setup.layout.desktopEntry)).toBe(false);
+  expect(recorded(setup.env.OPEN_CALLS!)).toEqual([]);
+});
+
+test.each(["valid", "missing", "malformed", "tampered", "tampered-payload", "tampered-comment", "wrong-key"])("remote AppImage %s signature preserves the Service and app data", async failure => {
+  const key = appSigningKey();
+  const setup = await fixture({ appPublicKey: key.publicKey, packageRuntime: failure === "valid" });
+  expect((await cli(setup, ["install", ...setup.archiveArgs, "--no-browser-pack"])).code).toBe(0);
+  if (failure === "valid") expect(readFileSync(path.join(setup.layout.currentDir, "apps/cli/src/release-public-key"), "utf8").trim()).toBe(key.publicKey);
+  setup.env.DISPLAY = ":fixture";
+  const cert = path.join(setup.root, "download-cert.pem");
+  const privateKey = path.join(setup.root, "download-key.pem");
+  expect(Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", privateKey, "-out", cert, "-days", "1", "-nodes", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"]).exitCode).toBe(0);
+  setup.env.NODE_EXTRA_CA_CERTS = cert;
+  const image = "untrusted remote app";
+  let signature = failure === "wrong-key" ? appSigningKey().signature(image) : key.signature(`${image}${failure === "tampered-payload" ? " changed" : ""}`);
+  if (failure === "malformed") signature = "invalid signature";
+  if (failure === "tampered" || failure === "tampered-comment") {
+    const lines = Buffer.from(signature, "base64").toString().split("\n");
+    if (failure === "tampered") {
+      const packet = Buffer.from(lines[1]!, "base64");
+      packet[10] = packet[10]! ^ 1;
+      lines[1] = packet.toString("base64");
+    } else lines[2] = lines[2]!.replace("version:1.2.3", "version:9.9.9");
+    signature = Buffer.from(lines.join("\n")).toString("base64");
+  }
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, tls: { cert: Bun.file(cert), key: Bun.file(privateKey) }, fetch(request) {
+    const pathname = new URL(request.url).pathname;
+    return pathname.endsWith(".sig") ? new Response(signature, { status: failure === "missing" ? 404 : 200 }) : new Response(pathname.endsWith(".sha256") ? createHash("sha256").update(image).digest("hex") : image);
+  } });
+  cleanups.push(() => server.stop(true));
+  setup.env.OMARCHY_BOT_APP_IMAGE = `https://127.0.0.1:${server.port}/app.AppImage`;
+  mkdirSync(path.dirname(setup.layout.appImage), { recursive: true });
+  writeFileSync(setup.layout.appImage, "previous incomplete app", { mode: 0o644 });
+  writeFileSync(`${setup.layout.appImage}.installed`, "Omarchy Bot installed AppImage\n");
+  writeFileSync(setup.layout.dbPath, "user data");
+  const result = await cli({ ...setup, cliPath: path.join(setup.layout.currentDir, "apps/cli/src/main.ts") }, ["install", ...setup.archiveArgs, "--no-browser-pack"]);
+  if (failure === "valid") {
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    expect(readFileSync(setup.layout.appImage, "utf8")).toBe(image);
+    expect(readFileSync(setup.layout.dbPath, "utf8")).toBe("user data");
+    expect((await fetch(`http://127.0.0.1:${setup.env.OMARCHY_BOT_PORT}/api/health`)).status).toBe(200);
+    expect(recorded(setup.env.OPEN_CALLS!)).toEqual([setup.pairingUrl]);
+    return;
+  }
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("AppImage verification failed");
+  expect(result.stderr).toContain(failure === "missing" ? "HTTP 404" : "signature");
+  expect((await fetch(`http://127.0.0.1:${setup.env.OMARCHY_BOT_PORT}/api/health`)).status).toBe(200);
+  expect(readFileSync(setup.layout.appImage, "utf8")).toBe("previous incomplete app");
+  expect(readFileSync(setup.layout.dbPath, "utf8")).toBe("user data");
+  expect(existsSync(setup.layout.desktopEntry)).toBe(false);
+  expect(recorded(setup.env.OPEN_CALLS!)).toEqual([]);
+});
+
 test("AppImage verification error remains visible when fresh pairing also fails", async () => {
   const setup = await fixture();
   setup.env.DISPLAY = ":fixture";
@@ -330,25 +449,29 @@ test("uninstall preserves a foreign desktop entry and its scheme association", a
 });
 
 test("graphical default release manifest downloads and verifies the immutable AppImage", async () => {
-  const setup = await fixture();
+  const key = appSigningKey();
+  const setup = await fixture({ appPublicKey: key.publicKey });
+  expect((await cli(setup, ["install", ...setup.archiveArgs, "--no-browser-pack"])).code).toBe(0);
+  const cliPath = path.join(setup.layout.currentDir, "apps/cli/src/main.ts");
   setup.env.DISPLAY = ":fixture";
   delete setup.env.OMARCHY_BOT_APP_IMAGE;
   const image = "#!/bin/sh\nexit 0\n";
+  const signature = key.signature(image);
   const url = "https://github.com/XMethues/omarchy-bot/releases/download/app-v1.2.3/omarchy-bot_1.2.3_amd64.AppImage";
   const manifest = "https://github.com/XMethues/omarchy-bot/releases/download/app-latest/latest.json";
   const hook = path.join(setup.root, "app-fetch.ts");
   const downloads = path.join(setup.root, "app-downloads");
-  writeFileSync(hook, `const original=fetch;globalThis.fetch=async(input,init)=>{const url=String(input);if(!url.startsWith("https://github.com/"))return original(input,init);require("node:fs").appendFileSync(${JSON.stringify(downloads)},url+"\\n");const responses=${JSON.stringify({ [manifest]: JSON.stringify({ platforms: { "linux-x86_64": { url } } }), [url]: image, [`${url}.sha256`]: createHash("sha256").update(image).digest("hex") })};if(!(url in responses))throw new Error("unexpected URL "+url);const response=new Response(responses[url]);Object.defineProperty(response,"url",{value:url});return response;};`);
-  const result = await cli({ ...setup, hook }, ["install", ...setup.archiveArgs, "--no-browser-pack"]);
+  writeFileSync(hook, `const original=fetch;globalThis.fetch=async(input,init)=>{const url=String(input);if(!url.startsWith("https://github.com/"))return original(input,init);require("node:fs").appendFileSync(${JSON.stringify(downloads)},url+"\\n");const responses=${JSON.stringify({ [manifest]: JSON.stringify({ platforms: { "linux-x86_64": { url } } }), [url]: image, [`${url}.sha256`]: createHash("sha256").update(image).digest("hex"), [`${url}.sig`]: signature })};if(!(url in responses))throw new Error("unexpected URL "+url);const response=new Response(responses[url]);Object.defineProperty(response,"url",{value:url});return response;};`);
+  const result = await cli({ ...setup, hook, cliPath }, ["install", ...setup.archiveArgs, "--no-browser-pack"]);
   expect(result).toMatchObject({ code: 0, stderr: "" });
-  expect(recorded(downloads)).toEqual([manifest, url, `${url}.sha256`]);
+  expect(recorded(downloads)).toEqual([manifest, url, `${url}.sha256`, `${url}.sig`]);
   expect(readFileSync(setup.layout.appImage, "utf8")).toBe(image);
   setup.env.PAIRING_READY = path.join(setup.root, "download-finished");
   rmSync(setup.layout.appImage);
-  writeFileSync(hook, `const original=fetch;globalThis.fetch=async(input,init)=>{const url=String(input);if(!url.startsWith("https://github.com/"))return original(input,init);const responses=${JSON.stringify({ [manifest]: JSON.stringify({ platforms: { "linux-x86_64": { url } } }), [url]: image, [`${url}.sha256`]: createHash("sha256").update(image).digest("hex") })};if(url.endsWith(".sha256"))require("node:fs").writeFileSync(${JSON.stringify(setup.env.PAIRING_READY)},"prior codes expired during download");const response=new Response(responses[url]);Object.defineProperty(response,"url",{value:url});return response;};`);
+  writeFileSync(hook, `const original=fetch;globalThis.fetch=async(input,init)=>{const url=String(input);if(!url.startsWith("https://github.com/"))return original(input,init);const responses=${JSON.stringify({ [manifest]: JSON.stringify({ platforms: { "linux-x86_64": { url } } }), [url]: image, [`${url}.sha256`]: createHash("sha256").update(image).digest("hex"), [`${url}.sig`]: signature })};if(url.endsWith(".sha256"))require("node:fs").writeFileSync(${JSON.stringify(setup.env.PAIRING_READY)},"prior codes expired during download");const response=new Response(responses[url]);Object.defineProperty(response,"url",{value:url});return response;};`);
   // Restart the Service with the expiry fixture enabled before the next install.
   await cli(setup, ["stop"]);
-  const slow = await cli({ ...setup, hook }, ["install", ...setup.archiveArgs, "--no-browser-pack"]);
+  const slow = await cli({ ...setup, hook, cliPath }, ["install", ...setup.archiveArgs, "--no-browser-pack"]);
   expect(slow.code).toBe(0);
   expect(slow.stdout).toContain("code: FRESH2345");
   expect(recorded(setup.env.OPEN_CALLS!).at(-1)).toContain("code=FRESH2345");

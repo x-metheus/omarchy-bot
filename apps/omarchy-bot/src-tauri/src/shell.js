@@ -1,4 +1,5 @@
 function installNativeShell(initial) {
+  if (typeof window.__TAURI_INTERNALS__?.invoke !== "function") return;
   const invoke = (command, args) => window.__TAURI_INTERNALS__.invoke(command, args);
   let connection = initial.connection;
   let metaSendsSuper = false;

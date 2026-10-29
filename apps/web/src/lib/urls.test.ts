@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { createMemoryShell, getShell, installShell } from "./shell.ts";
+import { createMemoryShell, installShell } from "./shell.ts";
 import { withDeviceToken } from "./urls.ts";
 
-const originalShell = getShell();
-afterEach(() => installShell(originalShell));
+const originalShell = globalThis.__OMARCHY_BOT_SHELL__;
+afterEach(() => { globalThis.__OMARCHY_BOT_SHELL__ = originalShell; });
 
 test("browser-loaded paths resolve against the paired Service and retain query and fragment", async () => {
   const shell = createMemoryShell({ storage: null });

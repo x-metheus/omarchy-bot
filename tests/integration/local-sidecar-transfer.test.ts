@@ -5,9 +5,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { LOCAL_RESULT_TEXT_MAX } from "../../packages/protocol/src/index.ts";
 import { makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 import { LocalSidecarFixture } from "./helpers/localSidecar.ts";
+import { sidecarCommand } from "./helpers/sidecarCommand.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const sidecarMain = path.resolve(import.meta.dir, "../../apps/sidecar/src/main.ts");
 
 /** Paired-device token; the Harness field may not be typed yet, so narrow at runtime. */
 const pairedToken = (h: Harness): string => {
@@ -117,7 +117,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
     writeFileSync(path.join(root, "big.txt"), "x".repeat(LOCAL_RESULT_TEXT_MAX + 1));
     let stdout = "";
     child = Bun.spawn({
-      cmd: [process.execPath, sidecarMain],
+      cmd: sidecarCommand,
       cwd: path.resolve(import.meta.dir, "../.."),
       stdin: "pipe",
       stdout: "pipe",

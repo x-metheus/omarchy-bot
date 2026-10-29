@@ -1,0 +1,13 @@
+{
+  "direction": "server",
+  "frame": {
+    "type": "local.job",
+    "jobId": "job-search-path",
+    "hostname": "fixture-laptop",
+    "botId": "bot-fixture",
+    "turnId": "turn-fixture",
+    "action": "search",
+    "path": "notes",
+    "query": "fixture"
+  }
+}

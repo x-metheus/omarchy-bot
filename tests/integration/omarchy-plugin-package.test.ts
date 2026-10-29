@@ -53,8 +53,8 @@ if(!live){const unit=readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/oma
   const serve = `#!/bin/bash\nexec bun run - <<'SERVICE'\nimport {existsSync,mkdirSync,writeFileSync} from 'node:fs';\nmkdirSync(process.env.OMARCHY_BOT_STATE,{recursive:true});const secret=process.env.OMARCHY_BOT_STATE+'/pairing-host-secret';if(!existsSync(secret))writeFileSync(secret,'fixture-secret');\nBun.serve({hostname:'127.0.0.1',port:Number(process.env.OMARCHY_BOT_PORT),fetch(r){return new URL(r.url).pathname==='/api/health'?Response.json({ok:true}):Response.json({code:'ABCD2345',url:'omarchy-bot://pair?service='+encodeURIComponent(new URL(r.url).origin)+'&code=ABCD2345'})}});\nSERVICE\n`;
   const archive = path.join(home, "runtime.tar.zst");
   const files: Record<string, string> = { "scripts/serve.sh": serve };
-  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack", "appInstall"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(root, `apps/cli/src/${name}.ts`), "utf8");
-  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(root, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack", "appInstall", "appSignature"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(root, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "desktopEntry"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(root, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
   files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(root, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   writeFileSync(archive, Bun.zstdCompressSync(await new Bun.Archive(files).bytes()));
   writeFileSync(`${archive}.sha256`, `${createHash("sha256").update(readFileSync(archive)).digest("hex")}  runtime.tar.zst\n`);

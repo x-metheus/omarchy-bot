@@ -4,12 +4,10 @@ import path from "node:path";
 import type { Subprocess } from "bun";
 import { expect, test } from "bun:test";
 import type { DeviceClientFrame, DeviceServerFrame } from "../../packages/protocol/src/index.ts";
+import { sidecarCommand as command } from "./helpers/sidecarCommand.ts";
 
 const DEVICE = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const source = path.resolve(import.meta.dir, "../../apps/sidecar/src/main.ts");
 const windows = process.platform === "win32";
-const command = process.env.OMARCHY_BOT_TEST_SIDECAR_BINARY
-  ? [path.resolve(process.env.OMARCHY_BOT_TEST_SIDECAR_BINARY)] : [process.execPath, source];
 
 // Real Sidecar processes and filesystem readiness cannot advance with fake timers.
 async function until(probe: () => boolean, message: string): Promise<void> {

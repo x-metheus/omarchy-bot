@@ -8,16 +8,20 @@ interface ConnectionState {
   message?: string;
 }
 
-const startupStatus = getShell().service.status();
-const startupMessage = startupStatus.error ?? (startupStatus.revoked ? "This device was revoked. Pair again with a new code from the Service Host." : undefined);
-let state: ConnectionState = {
-  paired: Boolean(getShell().service.deviceToken()),
-  pending: false,
-  serviceUrl: getShell().service.baseUrl(),
-  ...(startupMessage === undefined ? {} : { message: startupMessage }),
-};
+let state: ConnectionState | undefined;
 const listeners = new Set<() => void>();
-export const connectionState = (): ConnectionState => state;
+export function connectionState(): ConnectionState {
+  if (state) return state;
+  const service = getShell().service;
+  const startupStatus = service.status();
+  const message = startupStatus.error ?? (startupStatus.revoked ? "This app's pairing was revoked. Pair again with a new code from the Service Host." : undefined);
+  return state = {
+    paired: Boolean(service.deviceToken()),
+    pending: false,
+    serviceUrl: service.baseUrl(),
+    ...(message === undefined ? {} : { message }),
+  };
+}
 export function subscribeConnection(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
@@ -28,7 +32,7 @@ function publish(next: ConnectionState): void {
 }
 
 export async function pairService({ serviceUrl, code }: PairingRequest): Promise<void> {
-  if (state.pending) return;
+  if (connectionState().pending) return;
   publish({ paired: false, pending: true, serviceUrl });
   try {
     const startupError = getShell().service.status().error;
@@ -62,11 +66,11 @@ export async function pairService({ serviceUrl, code }: PairingRequest): Promise
 }
 
 export function deviceRevoked(): void {
-  if (!state.paired) return;
+  if (!connectionState().paired) return;
   const serviceUrl = getShell().service.baseUrl();
-  publish({ paired: false, pending: true, serviceUrl, message: "This device was revoked. Pair again with a new code from the Service Host." });
+  publish({ paired: false, pending: true, serviceUrl, message: "This app's pairing was revoked. Pair again with a new code from the Service Host." });
   void getShell().service.clear().then(
-    () => publish({ ...state, pending: false }),
-    () => publish({ ...state, pending: false, message: "This device was revoked, but its stored token could not be cleared. Close the app and clear its connection before pairing again." }),
+    () => publish({ ...connectionState(), pending: false }),
+    () => publish({ ...connectionState(), pending: false, message: "This app's pairing was revoked, but its stored token could not be cleared. Close the app and clear its connection before pairing again." }),
   );
 }

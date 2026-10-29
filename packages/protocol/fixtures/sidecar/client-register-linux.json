@@ -1,0 +1,16 @@
+{
+  "direction": "client",
+  "frame": {
+    "type": "register",
+    "deviceId": "dev_0123456789abcdef0123456789abcdef",
+    "hostname": "linux-laptop",
+    "os": "linux",
+    "shell": "posix-sh",
+    "capabilities": [
+      "shell",
+      "search",
+      "files",
+      "transfer"
+    ]
+  }
+}

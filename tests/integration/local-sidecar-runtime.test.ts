@@ -4,9 +4,9 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { DeviceDto } from "../../packages/protocol/src/index.ts";
 import { api, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { sidecarCommand } from "./helpers/sidecarCommand.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const sidecarMain = path.resolve(import.meta.dir, "../../apps/sidecar/src/main.ts");
 
 /** A detached descendant that ignores SIGTERM and only writes its marker once released. */
 const DESCENDANT_COMMAND = `sh -c 'trap "" TERM; echo $$ > descendant.pid; while [ ! -f release ]; do sleep 0.05; done; printf survived > marker.txt' & wait`;
@@ -65,7 +65,7 @@ describe("Local Sidecar process", () => {
   });
 
   test.each(["http://127.0.0.1", "https://127.0.0.1", "ws://user:secret@127.0.0.1", "not-a-url"])("rejects invalid Service URL %s", async (service) => {
-    const rejected = Bun.spawn({ cmd: [process.execPath, sidecarMain], stdout: "pipe", stderr: "pipe", env: { ...process.env, OMARCHY_BOT_SERVICE_URL: service } });
+    const rejected = Bun.spawn({ cmd: sidecarCommand, stdout: "pipe", stderr: "pipe", env: { ...process.env, OMARCHY_BOT_SERVICE_URL: service } });
     expect(await rejected.exited).toBe(1);
     expect(await new Response(rejected.stdout).text()).not.toContain('"type":"registered"');
   });
@@ -76,7 +76,7 @@ describe("Local Sidecar process", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sidecar-runtime-"));
     let stdout = "";
     child = Bun.spawn({
-      cmd: [process.execPath, sidecarMain],
+      cmd: sidecarCommand,
       cwd: path.resolve(import.meta.dir, "../.."),
       stdin: "pipe",
       stdout: "pipe",
@@ -166,7 +166,7 @@ describe("Local Sidecar process", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sidecar-heartbeat-"));
     let stdout = "";
     child = Bun.spawn({
-      cmd: [process.execPath, sidecarMain],
+      cmd: sidecarCommand,
       cwd: path.resolve(import.meta.dir, "../.."),
       stdin: "pipe",
       stdout: "pipe",
@@ -222,7 +222,7 @@ describe("Local Sidecar process", () => {
     );
     let stdout = "";
     const sidecar = Bun.spawn({
-      cmd: [process.execPath, sidecarMain],
+      cmd: sidecarCommand,
       cwd: path.resolve(import.meta.dir, "../.."),
       stdin: "pipe",
       stdout: "pipe",

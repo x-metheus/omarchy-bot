@@ -31,6 +31,13 @@ function install(platform: string, initial: Record<string, unknown> = {}, fetche
   return { shell: context.window.__OMARCHY_BOT_SHELL__ as Shell, window: context.window, calls };
 }
 
+test("native adapter leaves the shell unavailable when Tauri IPC is missing", () => {
+  const source = readFileSync(new URL("../../apps/omarchy-bot/src-tauri/src/shell.js", import.meta.url), "utf8");
+  const window = {};
+  vm.runInNewContext(`(${source})({})`, { window });
+  expect(window).toEqual({});
+});
+
 test("native shell reports its OS and retains the device key mapping without replacing fetch", async () => {
   for (const platform of ["linux", "macos", "windows"] as const) {
     const { shell, window } = install(platform);

@@ -128,8 +128,8 @@ process.once("SIGINT",async()=>{await daemon.stop();process.exit(0)});
     "scripts/serve.sh": readFileSync(path.join(projectRoot, "scripts/serve.sh"), "utf8"),
     "apps/daemon/src/bootstrap/main.ts": daemon,
   };
-  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack", "appInstall"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
-  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack", "appInstall", "appSignature"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "desktopEntry"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
   files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(projectRoot, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   writeFileSync(env.ARCHIVE!, Bun.zstdCompressSync(await new Bun.Archive(files).bytes()));
   writeFileSync(`${env.ARCHIVE}.sha256`, `${createHash("sha256").update(readFileSync(env.ARCHIVE!)).digest("hex")}  runtime.tar.zst\n`);

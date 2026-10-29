@@ -1,6 +1,25 @@
 import { expect, test } from "bun:test";
 import { createMemoryShell } from "./shell.ts";
 
+test("pairing imports without a native shell and reads startup revocation only after explicit installation", async () => {
+  const child = Bun.spawn([process.execPath, "--eval", `
+    import { strict as assert } from "node:assert";
+    // Import before shell installation to exercise the production module-loading boundary.
+    const { connectionState } = await import(${JSON.stringify(new URL("./pairing.ts", import.meta.url).href)});
+    const { createMemoryShell, getShell, installShell } = await import(${JSON.stringify(new URL("./shell.ts", import.meta.url).href)});
+    assert.throws(getShell, /The native shell is unavailable/);
+    assert.equal(globalThis.__OMARCHY_BOT_SHELL__, undefined);
+    const shell = createMemoryShell({ storage: null, baseUrl: "https://service.example" });
+    installShell({ ...shell, service: { ...shell.service, status: () => ({ revoked: true }) } });
+    assert.deepEqual(connectionState(), {
+      paired: false, pending: false, serviceUrl: "https://service.example",
+      message: "This app's pairing was revoked. Pair again with a new code from the Service Host.",
+    });
+  `], { stdout: "pipe", stderr: "pipe" });
+  const error = await new Response(child.stderr).text();
+  expect(await child.exited, error).toBe(0);
+});
+
 test("the memory shell stores and clears the Service connection", async () => {
   const shell = createMemoryShell({ storage: null });
   expect(shell.service.baseUrl()).toBe("http://127.0.0.1:7321");

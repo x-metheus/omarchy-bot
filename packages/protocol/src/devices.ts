@@ -52,7 +52,12 @@ export const DeviceLocalResultFrame = z.object({
 });
 export type DeviceLocalResultFrame = z.infer<typeof DeviceLocalResultFrame>;
 
-export type DeviceClientFrame = DeviceRegisterFrame | DeviceHeartbeatFrame | DeviceLocalResultFrame;
+export const DeviceClientFrameSchema = z.union([
+  DeviceRegisterFrame,
+  DeviceHeartbeatFrame,
+  DeviceLocalResultFrame,
+]);
+export type DeviceClientFrame = z.infer<typeof DeviceClientFrameSchema>;
 
 /** Daemon → Sidecar on the dedicated `/api/devices` WebSocket. */
 export const DeviceRegisteredFrame = z.object({
