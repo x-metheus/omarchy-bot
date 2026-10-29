@@ -42,6 +42,9 @@ async function fixture(options: { manager?: boolean; opener?: string; browser?: 
     SYSTEMCTL_CALLS: path.join(root, "systemctl-calls"),
     OPEN_CALLS: path.join(root, "open-calls"),
   };
+  delete env.DISPLAY;
+  delete env.WAYLAND_DISPLAY;
+  delete env.XDG_CURRENT_DESKTOP;
   const launcher = path.join(root, "systemctl.ts");
   for (const name of ["dirname"]) shim(bin, name, `exec /usr/bin/${name} "$@"`);
   if (options.browser !== "absent") shim(bin, "chromium", options.browser === "snap" ? "exec /snap/bin/chromium \"$@\"" : "exit 0");
@@ -84,20 +87,21 @@ const child=Bun.spawn([executable],{env,stdin:"ignore",stdout:"ignore",stderr:"i
   const serve = `#!/bin/bash
 ${options.requireBun ? 'command -v bun >/dev/null || { echo "requires Bun in PATH" >&2; exit 1; }' : ""}
 exec '${process.execPath}' run - <<'SERVICE'
-import {mkdirSync,writeFileSync} from "node:fs";
+import {existsSync,mkdirSync,writeFileSync} from "node:fs";
 mkdirSync(process.env.OMARCHY_BOT_STATE,{recursive:true,mode:0o700});
 writeFileSync(process.env.OMARCHY_BOT_STATE+"/pairing-host-secret",${JSON.stringify(secret)},{mode:0o600});
 Bun.serve({hostname:"127.0.0.1",port:Number(process.env.OMARCHY_BOT_PORT),...(process.env.OMARCHY_BOT_TLS_CERT?{tls:{cert:Bun.file(process.env.OMARCHY_BOT_TLS_CERT),key:Bun.file(process.env.OMARCHY_BOT_TLS_KEY)}}:{}),fetch(request){
 const route=new URL(request.url).pathname;
 if(route==="/api/health" && request.method==="GET")return Response.json({ok:true});
 if(request.headers.get("authorization")!==${JSON.stringify(`Bearer ${secret}`)})return new Response("unauthorized",{status:401});
+if(route==="/api/pairing/codes" && process.env.FAIL_PAIRING)return new Response("pairing unavailable",{status:503});
 if(route==="/api/devices/paired")return Response.json({devices:[]});
-if(route==="/api/pairing/codes" && request.method==="POST")return Response.json({code:"ABCD2345",url:"omarchy-bot://pair?service="+encodeURIComponent(new URL(request.url).origin)+"&code=ABCD2345"});
+if(route==="/api/pairing/codes" && request.method==="POST"){const code=process.env.PAIRING_READY?(existsSync(process.env.PAIRING_READY)?"FRESH2345":"EXPIRED2"):"ABCD2345";return Response.json({code,url:"omarchy-bot://pair?service="+encodeURIComponent(new URL(request.url).origin)+"&code="+code})}
 return new Response("not found",{status:404});}});
 SERVICE
 `;
   const files: Record<string, string> = { "scripts/serve.sh": serve };
-  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
+  for (const name of ["main", "layout", "archive", "lifecycle", "browserPack", "appInstall"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
   for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "hostBrowser"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
   files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(projectRoot, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   if (options.pin) files["apps/daemon/src/modules/computer/botComputerAssets.ts"] = files["apps/daemon/src/modules/computer/botComputerAssets.ts"]!.replace(`BROWSER_ASSETS_RELEASE = "${BROWSER_ASSETS_RELEASE}"`, `BROWSER_ASSETS_RELEASE = "${options.pin}"`);
@@ -144,14 +148,16 @@ test("installs on a non-Omarchy fixture, pairs, reuses the Service, and preserve
   expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual([
     "--user daemon-reload", "--user enable --now omarchy-bot.service",
   ]);
-  expect(recorded(setup.env.OPEN_CALLS!)).toEqual([setup.pairingUrl]);
+  expect(recorded(setup.env.OPEN_CALLS!)).toEqual([]);
+  expect(existsSync(path.join(setup.layout.dataDir, "app"))).toBe(false);
+  expect(existsSync(path.join(setup.env.XDG_DATA_HOME!, "applications/omarchy-bot.desktop"))).toBe(false);
   expect(installed.stdout + installed.stderr).not.toContain(setup.secret);
 
   const second = await cli(setup, ["install", "--archive", "missing", "--checksum", "missing"]);
   expect(second).toEqual({ code: 0, stdout: `reusing installed Service\naddress: ${new URL(setup.pairingUrl).searchParams.get("service")}\ncode: ABCD2345\npairing: ${setup.pairingUrl}\n`, stderr: "" });
   expect(recorded(setup.env.SYSTEMCTL_CALLS!).filter(line => line.includes("enable"))).toHaveLength(1);
   expect(recorded(setup.env.SYSTEMCTL_CALLS!).at(-1)).toBe("--user start omarchy-bot.service");
-  expect(recorded(setup.env.OPEN_CALLS!)).toEqual([setup.pairingUrl, setup.pairingUrl]);
+  expect(recorded(setup.env.OPEN_CALLS!)).toEqual([]);
   expect(readdirSync(setup.layout.unitDir)).toEqual(["omarchy-bot.service"]);
   expect(readdirSync(setup.layout.runtimeDir).sort()).toEqual(["browser", "current"]);
 
@@ -168,6 +174,184 @@ test("installs on a non-Omarchy fixture, pairs, reuses the Service, and preserve
   expect(existsSync(setup.layout.unitPath)).toBe(false);
   expect(existsSync(setup.layout.runtimeDir)).toBe(false);
   for (const [file, contents] of kept) expect(readFileSync(file!, "utf8")).toBe(contents);
+});
+
+test("graphical install verifies the AppImage, registers the scheme, and opens pairing", async () => {
+  const setup = await fixture();
+  setup.env.DISPLAY = ":fixture";
+  const image = path.join(setup.root, "Omarchy Bot.AppImage");
+  writeFileSync(image, "#!/bin/sh\nexit 0\n");
+  writeFileSync(`${image}.sha256`, createHash("sha256").update(readFileSync(image)).digest("hex"));
+  setup.env.OMARCHY_BOT_APP_IMAGE = image;
+  const mimeapps = path.join(setup.env.XDG_CONFIG_HOME!, "mimeapps.list");
+  mkdirSync(path.dirname(mimeapps), { recursive: true });
+  writeFileSync(mimeapps, "[Default Applications]\ntext/plain=editor.desktop;\nx-scheme-handler/omarchy-bot=previous.desktop;\n\n[Added Associations]\ntext/plain=editor.desktop;\n");
+  const installed = await cli(setup, ["install", ...setup.archiveArgs]);
+  expect(installed.code).toBe(0);
+  const app = path.join(setup.layout.dataDir, "app/omarchy-bot.AppImage");
+  expect(readFileSync(app)).toEqual(readFileSync(image));
+  expect(statSync(app).mode & 0o777).toBe(0o755);
+  const desktop = path.join(setup.env.XDG_DATA_HOME!, "applications/omarchy-bot.desktop");
+  expect(readFileSync(desktop, "utf8")).toContain(`Exec="${app}" %u`);
+  expect(readFileSync(desktop, "utf8")).toContain("MimeType=x-scheme-handler/omarchy-bot;");
+  expect(readFileSync(mimeapps, "utf8")).toContain("x-scheme-handler/omarchy-bot=omarchy-bot.desktop;previous.desktop;");
+  expect(recorded(setup.env.OPEN_CALLS!)).toEqual([setup.pairingUrl]);
+  writeFileSync(app, "updated by native updater\n", { mode: 0o755 });
+  rmSync(image);
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  expect(readFileSync(app, "utf8")).toBe("updated by native updater\n");
+  expect((await cli(setup, ["doctor"])).stdout).not.toMatch(/^app(?: desktop| scheme)?:/m);
+  rmSync(desktop);
+  expect((await cli(setup, ["doctor"])).stdout).toContain("app desktop:");
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  writeFileSync(mimeapps, "[Default Applications]\ntext/plain=editor.desktop;\nx-scheme-handler/omarchy-bot=previous.desktop;\n\n[Added Associations]\ntext/plain=editor.desktop;\n");
+  expect((await cli(setup, ["doctor"])).stdout).toContain("app scheme:");
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  expect((await cli(setup, ["update", ...setup.archiveArgs])).code).toBe(0);
+  expect(readFileSync(app, "utf8")).toBe("updated by native updater\n");
+  const kept = path.join(setup.layout.dataDir, "app/user-data");
+  writeFileSync(kept, "keep me");
+  rmSync(desktop);
+  expect((await cli(setup, ["uninstall"])).code).toBe(0);
+  expect(existsSync(app)).toBe(false);
+  expect(existsSync(desktop)).toBe(false);
+  expect(readFileSync(kept, "utf8")).toBe("keep me");
+  expect(readFileSync(mimeapps, "utf8")).toBe("[Default Applications]\ntext/plain=editor.desktop;\nx-scheme-handler/omarchy-bot=previous.desktop;\n\n[Added Associations]\ntext/plain=editor.desktop;\n");
+});
+
+test("bad AppImage checksum leaves the Service healthy and existing app data untouched", async () => {
+  const setup = await fixture();
+  setup.env.WAYLAND_DISPLAY = "wayland-fixture";
+  const image = path.join(setup.root, "app.AppImage");
+  writeFileSync(image, "untrusted image");
+  writeFileSync(`${image}.sha256`, "0".repeat(64));
+  setup.env.OMARCHY_BOT_APP_IMAGE = image;
+  const app = setup.layout.appImage;
+  mkdirSync(path.dirname(app), { recursive: true });
+  writeFileSync(app, "previous incomplete app", { mode: 0o644 });
+  writeFileSync(`${app}.installed`, "Omarchy Bot installed AppImage\n");
+  writeFileSync(path.join(setup.layout.dataDir, "db.sqlite"), "user data");
+  const result = await cli(setup, ["install", ...setup.archiveArgs]);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("AppImage verification failed");
+  expect(result.stdout).toContain(`pairing: ${setup.pairingUrl}`);
+  expect((await fetch(`http://127.0.0.1:${setup.env.OMARCHY_BOT_PORT}/api/health`)).status).toBe(200);
+  expect(readFileSync(app, "utf8")).toBe("previous incomplete app");
+  expect(readFileSync(setup.layout.dbPath, "utf8")).toBe("user data");
+  expect(existsSync(setup.layout.desktopEntry)).toBe(false);
+  expect(recorded(setup.env.OPEN_CALLS!)).toEqual([]);
+});
+
+test("AppImage verification error remains visible when fresh pairing also fails", async () => {
+  const setup = await fixture();
+  setup.env.DISPLAY = ":fixture";
+  setup.env.FAIL_PAIRING = "1";
+  const image = path.join(setup.root, "app.AppImage");
+  writeFileSync(image, "untrusted image");
+  writeFileSync(`${image}.sha256`, "0".repeat(64));
+  setup.env.OMARCHY_BOT_APP_IMAGE = image;
+  const result = await cli(setup, ["install", ...setup.archiveArgs]);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("AppImage verification failed");
+  expect(result.stderr).toContain("pairing");
+  expect(result.stderr).toContain("503");
+  expect(recorded(setup.env.OPEN_CALLS!)).toEqual([]);
+});
+
+test("graphical doctor diagnoses app, desktop, and scheme independently; headless skips them", async () => {
+  const setup = await fixture();
+  expect((await cli(setup, ["doctor"])).stdout).not.toContain("app:");
+  setup.env.DISPLAY = ":fixture";
+  const missing = await cli(setup, ["doctor"]);
+  expect(missing.stdout).toContain("app: Omarchy Bot AppImage is missing");
+  expect(missing.stdout).toContain("app desktop:");
+  expect(missing.stdout).toContain("app scheme:");
+});
+
+test("graphical install replaces effective desktop-specific scheme defaults and uninstall restores them", async () => {
+  const setup = await fixture();
+  setup.env.DISPLAY = ":fixture";
+  setup.env.XDG_CURRENT_DESKTOP = "GNOME:Unity";
+  const mime = path.join(setup.env.XDG_CONFIG_HOME!, "gnome-mimeapps.list");
+  mkdirSync(path.dirname(mime), { recursive: true });
+  const original = "[Default Applications]\ntext/plain=editor.desktop;\nx-scheme-handler/omarchy-bot=foreign.desktop;\n";
+  writeFileSync(mime, original);
+  const foreign = path.join(setup.env.XDG_DATA_HOME!, "applications/foreign.desktop");
+  mkdirSync(path.dirname(foreign), { recursive: true });
+  writeFileSync(foreign, "[Desktop Entry]\nType=Application\nName=Foreign handler\nExec=/bin/true %u\nMimeType=x-scheme-handler/omarchy-bot;\n");
+  const image = path.join(setup.root, "app.AppImage");
+  writeFileSync(image, "#!/bin/sh\nexit 0\n");
+  writeFileSync(`${image}.sha256`, createHash("sha256").update(readFileSync(image)).digest("hex"));
+  setup.env.OMARCHY_BOT_APP_IMAGE = image;
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  expect(readFileSync(mime, "utf8")).toContain("x-scheme-handler/omarchy-bot=omarchy-bot.desktop;foreign.desktop;");
+  writeFileSync(mime, original);
+  expect((await cli(setup, ["doctor"])).stdout).toContain("app scheme:");
+  writeFileSync(mime, "[Default Applications]\nx-scheme-handler/omarchy-bot=omarchy-bot.desktop;\nx-scheme-handler/omarchy-bot = foreign.desktop;\n");
+  expect((await cli(setup, ["doctor"])).stdout).toContain("app scheme:");
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  expect(readFileSync(mime, "utf8")).not.toContain("= foreign.desktop;");
+  rmSync(foreign);
+  expect((await cli(setup, ["doctor"])).stdout).not.toContain("app scheme:");
+  writeFileSync(mime, "[Default Applications]\nx-scheme-handler/omarchy-bot=missing.desktop;omarchy-bot.desktop;\n");
+  expect((await cli(setup, ["doctor"])).stdout).not.toContain("app scheme:");
+  const nested = path.join(setup.env.XDG_DATA_HOME!, "applications/vendor/foreign.desktop");
+  mkdirSync(path.dirname(nested), { recursive: true });
+  writeFileSync(nested, "[Desktop Entry]\nType=Application\nName=Nested foreign\nExec=/bin/true %u\n");
+  writeFileSync(mime, "[Default Applications]\nx-scheme-handler/omarchy-bot=vendor-foreign.desktop;\n");
+  expect((await cli(setup, ["doctor"])).stdout).toContain("app scheme:");
+  symlinkSync(nested, foreign);
+  writeFileSync(mime, original);
+  expect((await cli(setup, ["doctor"])).stdout).toContain("app scheme:");
+  writeFileSync(nested, "[Desktop Entry]\nType=Application\nName=Masked foreign\nExec=/bin/true %u\nHidden=true\n");
+  expect((await cli(setup, ["doctor"])).stdout).not.toContain("app scheme:");
+  writeFileSync(mime, original);
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  for (const name of ["gnome-mimeapps.list", "unity-mimeapps.list", "mimeapps.list"]) rmSync(path.join(setup.env.XDG_CONFIG_HOME!, name));
+  const fallbackMime = path.join(setup.env.XDG_DATA_HOME!, "applications/mimeapps.list");
+  writeFileSync(fallbackMime, "[Default Applications]\nx-scheme-handler/omarchy-bot=omarchy-bot.desktop;\n");
+  expect((await cli(setup, ["doctor"])).stdout).not.toContain("app scheme:");
+  writeFileSync(mime, original);
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  expect((await cli(setup, ["uninstall"])).code).toBe(0);
+  expect(readFileSync(mime, "utf8")).toBe(original);
+});
+
+test("uninstall preserves a foreign desktop entry and its scheme association", async () => {
+  const setup = await fixture();
+  mkdirSync(path.dirname(setup.layout.desktopEntry), { recursive: true });
+  mkdirSync(path.dirname(setup.layout.mimeappsPath), { recursive: true });
+  writeFileSync(setup.layout.desktopEntry, "[Desktop Entry]\nName=Custom\n");
+  const associations = "[Default Applications]\nx-scheme-handler/omarchy-bot=omarchy-bot.desktop;\n";
+  writeFileSync(setup.layout.mimeappsPath, associations);
+  expect((await cli(setup, ["uninstall"])).code).toBe(0);
+  expect(readFileSync(setup.layout.desktopEntry, "utf8")).toContain("Name=Custom");
+  expect(readFileSync(setup.layout.mimeappsPath, "utf8")).toBe(associations);
+});
+
+test("graphical default release manifest downloads and verifies the immutable AppImage", async () => {
+  const setup = await fixture();
+  setup.env.DISPLAY = ":fixture";
+  delete setup.env.OMARCHY_BOT_APP_IMAGE;
+  const image = "#!/bin/sh\nexit 0\n";
+  const url = "https://github.com/XMethues/omarchy-bot/releases/download/app-v1.2.3/omarchy-bot_1.2.3_amd64.AppImage";
+  const manifest = "https://github.com/XMethues/omarchy-bot/releases/download/app-latest/latest.json";
+  const hook = path.join(setup.root, "app-fetch.ts");
+  const downloads = path.join(setup.root, "app-downloads");
+  writeFileSync(hook, `const original=fetch;globalThis.fetch=async(input,init)=>{const url=String(input);if(!url.startsWith("https://github.com/"))return original(input,init);require("node:fs").appendFileSync(${JSON.stringify(downloads)},url+"\\n");const responses=${JSON.stringify({ [manifest]: JSON.stringify({ platforms: { "linux-x86_64": { url } } }), [url]: image, [`${url}.sha256`]: createHash("sha256").update(image).digest("hex") })};if(!(url in responses))throw new Error("unexpected URL "+url);const response=new Response(responses[url]);Object.defineProperty(response,"url",{value:url});return response;};`);
+  const result = await cli({ ...setup, hook }, ["install", ...setup.archiveArgs, "--no-browser-pack"]);
+  expect(result).toMatchObject({ code: 0, stderr: "" });
+  expect(recorded(downloads)).toEqual([manifest, url, `${url}.sha256`]);
+  expect(readFileSync(setup.layout.appImage, "utf8")).toBe(image);
+  setup.env.PAIRING_READY = path.join(setup.root, "download-finished");
+  rmSync(setup.layout.appImage);
+  writeFileSync(hook, `const original=fetch;globalThis.fetch=async(input,init)=>{const url=String(input);if(!url.startsWith("https://github.com/"))return original(input,init);const responses=${JSON.stringify({ [manifest]: JSON.stringify({ platforms: { "linux-x86_64": { url } } }), [url]: image, [`${url}.sha256`]: createHash("sha256").update(image).digest("hex") })};if(url.endsWith(".sha256"))require("node:fs").writeFileSync(${JSON.stringify(setup.env.PAIRING_READY)},"prior codes expired during download");const response=new Response(responses[url]);Object.defineProperty(response,"url",{value:url});return response;};`);
+  // Restart the Service with the expiry fixture enabled before the next install.
+  await cli(setup, ["stop"]);
+  const slow = await cli({ ...setup, hook }, ["install", ...setup.archiveArgs, "--no-browser-pack"]);
+  expect(slow.code).toBe(0);
+  expect(slow.stdout).toContain("code: FRESH2345");
+  expect(recorded(setup.env.OPEN_CALLS!).at(-1)).toContain("code=FRESH2345");
 });
 
 test("default listener settings survive install reuse, update, and reconfigure", async () => {
@@ -327,6 +511,10 @@ test("install reports a missing user manager without invoking host systemctl", a
 
 test("a failing custom opener is reported after successful install without failing the command", async () => {
   const setup = await fixture({ opener: "fixture-open" });
+  setup.env.DISPLAY = ":fixture";
+  setup.env.OMARCHY_BOT_APP_IMAGE = path.join(setup.root, "app.AppImage");
+  writeFileSync(setup.env.OMARCHY_BOT_APP_IMAGE, "#!/bin/sh\nexit 0\n");
+  writeFileSync(`${setup.env.OMARCHY_BOT_APP_IMAGE}.sha256`, createHash("sha256").update(readFileSync(setup.env.OMARCHY_BOT_APP_IMAGE)).digest("hex"));
   setup.env.OPEN_EXIT = "7";
   const result = await cli(setup, ["install", ...setup.archiveArgs]);
   expect(result.code).toBe(0);

@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { listenerConfig } from "../../daemon/src/bootstrap/listenerConfig.ts";
 import { assertNotRoot, extractRuntimeArchive, verifyChecksum } from "./archive.ts";
+import { graphicalSession, installApp } from "./appInstall.ts";
 import { layoutFromEnv, serviceFetch, serviceOrigin, type Layout } from "./layout.ts";
 import { checkConfigurationOverrides, checkLauncher, doctorText, installLauncher, installUnit, reconfigureUnit, startUnit, statusText, stopUnit, uninstall, userManagerAvailable } from "./lifecycle.ts";
 
@@ -209,10 +210,18 @@ export async function run(
         } else if (env.OMARCHY_BOT_BROWSER !== undefined || Object.values(tlsFlags).some(key => env[key] !== undefined) || args.some(arg => Boolean(tlsFlags[arg]))) await reconfigureUnit(layout, env, () => waitForHealth(layout));
         else await startUnit(layout, env);
         await waitForHealth(layout);
-        const pairing = await pairingUrl(layout);
+        let appFailure: unknown;
+        if (command === "install" && graphicalSession(env)) {
+          try { await installApp(layout, env); } catch (error) { appFailure = error; }
+        }
+        const pairing = await pairingUrl(layout).catch(error => {
+          if (appFailure) throw new Error(`${appFailure instanceof Error ? appFailure.message : String(appFailure)}; could not issue pairing: ${error instanceof Error ? error.message : String(error)}`);
+          throw error;
+        });
         const { url } = pairing;
         io.log(`address: ${pairing.address}\ncode: ${pairing.code}\npairing: ${url}`);
-        try {
+        if (appFailure) throw appFailure;
+        if (graphicalSession(env)) try {
           const opener = env.OMARCHY_BOT_OPEN || "xdg-open";
           const executable = Bun.which(opener, { PATH: env.PATH || "" });
           if (!executable) throw new Error("opener is missing from PATH");
