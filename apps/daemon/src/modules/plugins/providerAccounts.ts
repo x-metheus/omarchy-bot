@@ -34,15 +34,19 @@ export interface ProviderAccount {
   nativeManaged: boolean;
 }
 
+export const AUTHORIZATION_TTL_MS = 15 * 60_000;
+
 interface OAuthPending {
   providerId: PluginProviderId; accountId?: string; verifier: string; cloudUrl: string; expiresAt: number;
   brokerState: string;
 }
 
 export interface PluginAuthorizationEvent {
-  providerId: PluginProviderId;
+  providerId?: PluginProviderId;
   accountId?: string;
+  mcpId?: string;
   status: "completed" | "failed";
+  reason?: string;
 }
 
 /** Host services the authorization flow needs. Provisioning arrives as callbacks so this module never imports PluginsService. */
@@ -192,18 +196,23 @@ export class ProviderAccounts {
     if (body.accountId !== undefined && (!account || account.providerId !== body.providerId)) throw new HttpError(404, "Provider account not found");
     await this.host.ready();
     if (PLUGIN_PROVIDERS[body.providerId].nativeOAuth && (!account?.grant || !PLUGIN_PROVIDERS[body.providerId].publisherOAuth)) return this.authorizeNative(body, account);
-    for (const [state, entry] of this.#oauth) if (entry.expiresAt < Date.now()) this.#oauth.delete(state);
+    this.expirePending();
     const localState = randomBytes(32).toString("base64url");
     const verifier = randomBytes(32).toString("base64url");
     const callback = new URL("/api/plugins/oauth/callback", callbackOrigin);
-    const result = OAuthStartResponse.parse(await this.host.publisher.request("oauth/start", { providerId: body.providerId, callbackUrl: callback.href,
-      localState, challenge: createHash("sha256").update(verifier).digest("base64url") }));
-    if (new URL(result.url).origin !== new URL(PLUGIN_PROVIDERS[body.providerId].authorizeUrl).origin) throw new HttpError(502, "Publisher returned an unexpected authorization origin");
-    const brokerState = new URL(result.url).searchParams.get("state");
-    if (!brokerState) throw new HttpError(502, "Publisher authorization did not include its transaction binding");
-    this.#oauth.set(localState, { providerId: body.providerId, verifier, brokerState, cloudUrl, expiresAt: Date.now() + 15 * 60_000,
-      ...(body.accountId === undefined ? {} : { accountId: body.accountId }) });
-    return result;
+    try {
+      const result = OAuthStartResponse.parse(await this.host.publisher.request("oauth/start", { providerId: body.providerId, callbackUrl: callback.href,
+        localState, challenge: createHash("sha256").update(verifier).digest("base64url") }));
+      if (new URL(result.url).origin !== new URL(PLUGIN_PROVIDERS[body.providerId].authorizeUrl).origin) throw new HttpError(502, "Publisher returned an unexpected authorization origin");
+      const brokerState = new URL(result.url).searchParams.get("state");
+      if (!brokerState) throw new HttpError(502, "Publisher authorization did not include its transaction binding");
+      this.#oauth.set(localState, { providerId: body.providerId, verifier, brokerState, cloudUrl, expiresAt: Date.now() + AUTHORIZATION_TTL_MS,
+        ...(body.accountId === undefined ? {} : { accountId: body.accountId }) });
+      return result;
+    } catch (error) {
+      this.host.authorizationEvent?.({ providerId: body.providerId, ...(body.accountId ? { accountId: body.accountId } : {}), status: "failed", reason: redactToolErrorSummary(error instanceof Error ? error.message : error) });
+      throw error;
+    }
   }
 
   /** Native MCP authorization provisions the Service first, then hands the connection's own OAuth flow back to the caller. */
@@ -225,15 +234,17 @@ export class ProviderAccounts {
     if (!previous) this.host.accounts().push(account);
     this.host.change(account, service.id);
     this.host.persist(true);
+    let started = false;
     try {
       await this.host.provision(account, service, account.enabledServices.includes(service.id));
       const connection = this.host.mcp.serviceConnections(account.id).find((entry) => entry.name === account.native!.name)!;
+      started = true;
       const result = await this.host.authorizeMcp(connection.id);
       if (result.error) throw new HttpError(502, result.error);
-      if (result.authenticated) await this.host.checkMcp(connection.id);
       return result.authorizationUrl ? { url: result.authorizationUrl } : {};
     } catch (error) {
       account.error = redactToolErrorSummary(error instanceof Error ? error.message : error);
+      if (!started) this.host.authorizationEvent?.({ providerId: body.providerId, accountId: account.id, status: "failed", reason: account.error });
       this.host.persist();
       throw error;
     }
@@ -245,7 +256,7 @@ export class ProviderAccounts {
     if (!pending) throw new HttpError(400, "Authorization state is missing, expired, or already used. Start again from Plugins.");
     this.#oauth.delete(state);
     try {
-      if (pending.expiresAt < Date.now()) throw new HttpError(400, "Authorization state expired. Start again from Plugins.");
+      if (pending.expiresAt <= Date.now()) throw new HttpError(400, "expired");
       const code = url.searchParams.get("code");
       const brokerState = url.searchParams.get("brokerState");
       if (url.searchParams.has("error") || !code || !brokerState) throw new HttpError(400, "Authorization was not granted");
@@ -287,8 +298,15 @@ export class ProviderAccounts {
       this.host.authorizationEvent?.({ providerId: account.providerId, accountId: account.id, status: "completed" });
       return { label: account.label };
     } catch (error) {
-      this.host.authorizationEvent?.({ providerId: pending.providerId, ...(pending.accountId === undefined ? {} : { accountId: pending.accountId }), status: "failed" });
+      this.host.authorizationEvent?.({ providerId: pending.providerId, ...(pending.accountId === undefined ? {} : { accountId: pending.accountId }), status: "failed", reason: redactToolErrorSummary(error instanceof Error ? error.message : error) });
       throw error;
+    }
+  }
+
+  expirePending(): void {
+    for (const [state, pending] of this.#oauth) if (pending.expiresAt <= Date.now()) {
+      this.#oauth.delete(state);
+      this.host.authorizationEvent?.({ providerId: pending.providerId, ...(pending.accountId ? { accountId: pending.accountId } : {}), status: "failed", reason: "expired" });
     }
   }
 

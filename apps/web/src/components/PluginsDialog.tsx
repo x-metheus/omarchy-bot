@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type JSX, type RefObject } from "react";
+import { useEffect, useRef, useState, type FormEvent, type JSX, type RefObject } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
 import { Banner } from "@astryxdesign/core/Banner";
@@ -122,16 +122,27 @@ function McpAuthorization({ connectionId, busy, execute }: {
 }): JSX.Element {
   const [redirectUrl, setRedirectUrl] = useState("");
   const [notice, setNotice] = useState("");
+  const outcome = useRef(0);
+  useEffect(() => onPluginAuthorization((event) => {
+    const payload = event.payload as { mcpId?: string; reason?: string };
+    if (payload.mcpId !== connectionId) return;
+    outcome.current++;
+    setNotice(event.type === "plugin.authorization_completed" ? "Authorization completed."
+      : payload.reason === "expired" ? "Authorization expired. Try again." : "Authorization failed. Try again.");
+  }), [connectionId]);
   const authorize = (redirect?: string): void => {
     setNotice("");
+    const started = outcome.current;
     execute(async () => {
       const result = await api.authorizeMcp(connectionId, redirect);
       if (result.error) throw new Error(result.error);
       if (result.authorizationUrl) {
         await getShell().browser.open(result.authorizationUrl);
+        if (outcome.current !== started) return;
         setNotice("Complete consent in your system browser, then return to Omarchy Bot. Authorization is not complete yet.");
       } else {
-        setNotice(result.authenticated ? "Authorization completed. Check the connection to discover its tools." : "Authorization is not complete. Follow the provider’s consent instructions.");
+        if (outcome.current !== started) return;
+        setNotice(result.authenticated ? "Authorization completed." : "Authorization is not complete. Follow the provider’s consent instructions.");
       }
       setRedirectUrl("");
     }, "");
@@ -252,9 +263,10 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
 
   useEffect(() => { setConfirm(undefined); setNotice(""); setAuthorizationNotice(""); change.reset(); }, [section]);
   useEffect(() => onPluginAuthorization((event) => {
+    const payload = event.payload as { accountId?: string; reason?: string };
     setAuthorizationNotice(event.type === "plugin.authorization_completed"
-      ? "Account connected."
-      : "Authorization failed. Try Add account or Reconnect again.");
+      ? payload.accountId ? "Account connected." : "Authorization completed."
+      : payload.reason === "expired" ? "Authorization expired. Try again." : "Authorization failed. Try Add account or Reconnect again.");
   }), []);
 
   const authorize = (providerId: PluginAccountDto["providerId"], accountId?: string): void => {

@@ -161,8 +161,11 @@ type ControlCommand = Extract<AgentCommand, { type: "mcp.control" }>;
 interface ControlSession {
   session: AgentSession;
   native: NativeMcp;
-  pendingAuth: Set<string>;
+  pendingAuth: Map<string, { id: string; expiresAt: number }>;
+  completedAuth: Set<string>;
   unsubscribe: () => void;
+  cwd: string;
+  server: string | undefined;
 }
 
 // Only structured, known error codes cross this boundary. Native exception text
@@ -192,21 +195,45 @@ export class NativeMcpControls {
   private readonly reconciliationTimer: NodeJS.Timeout;
   private closed = false;
 
-  constructor(private readonly modelRuntime: () => Promise<ModelRuntime>) {
+  constructor(private readonly modelRuntime: () => Promise<ModelRuntime>,
+    private readonly onAuthorization: (server: string, authorizationId: string, status: "completed" | "failed", reason?: string) => void = () => {}) {
     this.reconciliationTimer = setInterval(() => {
       if (this.closed) return;
-      for (const cwd of this.sessions.keys()) {
-        if (!this.queues.has(cwd)) void this.execute({ type: "mcp.control", requestId: crypto.randomUUID(), cwd, action: "status" });
+      for (const [key, entry] of this.sessions) {
+        for (const [server, pending] of entry.pendingAuth) if (pending.expiresAt <= Date.now()) {
+          this.cancel(key, pending.id);
+          this.onAuthorization(server, pending.id, "failed", "expired");
+        }
+        if (!this.queues.has(key)) void this.execute({ type: "mcp.control", requestId: crypto.randomUUID(), cwd: entry.cwd, action: "status", ...(entry.server ? { server: entry.server } : {}) });
       }
     }, 2_000);
     this.reconciliationTimer.unref();
   }
 
+  private cancel(key: string, authorizationId?: string): void {
+    const entry = this.sessions.get(key);
+    if (!entry || (authorizationId && ![...entry.pendingAuth.values()].some(pending => pending.id === authorizationId))) return;
+    this.sessions.delete(key);
+    entry.pendingAuth.clear();
+    entry.unsubscribe();
+    // Session shutdown aborts the adapter OAuth runtime before awaiting cleanup.
+    void entry.native.dispose(entry.session).catch(() => undefined);
+  }
+
   async execute(cmd: ControlCommand): Promise<{ servers: NativeMcpStatus[]; result?: Record<string, unknown> }> {
     const cwd = path.resolve(cmd.cwd);
-    const operation = (this.queues.get(cwd) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    const key = cmd.server ? `${cwd}\0${cmd.server}` : cwd;
+    if (cmd.action === "auth-cancel") {
+      this.cancel(key, cmd.authorizationId);
+      return { servers: nativeMcpStatus(cwd) };
+    }
+    const operation = (this.queues.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
       if (this.closed) throw new Error("Native MCP controls are closed");
-      let entry = this.sessions.get(cwd);
+      let entry = this.sessions.get(key);
+      if (cmd.action === "auth-start" && entry) {
+        this.cancel(key);
+        entry = undefined;
+      }
       if (cmd.action === "status" && (!entry || entry.pendingAuth.size > 0)) return { servers: nativeMcpStatus(cwd) };
       if (cmd.action === "auth-complete" && !entry) return { servers: nativeMcpStatus(cwd), result: { error: "no_pending_auth" } };
       let bundle: NativeConfig;
@@ -214,9 +241,12 @@ export class NativeMcpControls {
         bundle = cmd.action === "auth-complete" && entry
           ? { config: entry.native.config, revision: entry.native.configurationRevision }
           : nativeConfig(cwd);
+        if (cmd.server) bundle = { ...bundle, config: { ...bundle.config,
+          mcpServers: Object.fromEntries(Object.entries(bundle.config.mcpServers).filter(([name]) => name === cmd.server)),
+          ...(bundle.config.claudePlugins ? { claudePlugins: bundle.config.claudePlugins.map(plugin => ({ ...plugin, mcp: false })) } : {}) } };
       } catch {
         if (entry && entry.pendingAuth.size === 0) {
-          this.sessions.delete(cwd);
+          this.sessions.delete(key);
           entry.unsubscribe();
           await entry.native.dispose(entry.session);
         }
@@ -225,7 +255,7 @@ export class NativeMcpControls {
       if (entry && cmd.action !== "auth-complete"
         && (entry.native.configurationRevision !== bundle.revision || !isDeepStrictEqual(entry.native.config, bundle.config))) {
         if (entry.pendingAuth.size > 0) return { servers: nativeMcpStatus(cwd), result: { error: "configuration_changed_pending_auth" } };
-        this.sessions.delete(cwd);
+        this.sessions.delete(key);
         entry.unsubscribe();
         await entry.native.dispose(entry.session);
         entry = undefined;
@@ -240,44 +270,66 @@ export class NativeMcpControls {
           ({ session } = await createAgentSession({ cwd, agentDir: getAgentDir(), resourceLoader: native.loader,
             sessionManager: SessionManager.inMemory(cwd), modelRuntime: await this.modelRuntime() }));
           await native.bind(session);
-          const pendingAuth = new Set<string>();
+          const pendingAuth: ControlSession["pendingAuth"] = new Map();
+          const completedAuth = new Set<string>();
           const unsubscribe = session.subscribe((event) => {
             if (event.type !== "message_end" || event.message.role !== "custom"
               || event.message.customType !== "mcp-oauth-status" || !record(event.message.details)) return;
             const details = event.message.details;
             if (typeof details.server === "string" && (details.status === "authenticated" || details.status === "failed")) {
+              const pending = pendingAuth.get(details.server);
+              if (!pending) return;
+              if (pending.expiresAt <= Date.now()) {
+                this.cancel(key, pending.id);
+                this.onAuthorization(details.server, pending.id, "failed", "expired");
+                return;
+              }
+              if (details.status === "authenticated") completedAuth.add(pending.id);
               pendingAuth.delete(details.server);
+              this.onAuthorization(details.server, pending.id, details.status === "authenticated" ? "completed" : "failed", details.status === "failed" ? details.reason === "expired" ? "expired" : "auth_failed" : undefined);
             }
           });
-          entry = { session, native, pendingAuth, unsubscribe };
-          this.sessions.set(cwd, entry);
+          entry = { session, native, pendingAuth, completedAuth, unsubscribe, cwd, server: cmd.server };
+          this.sessions.set(key, entry);
         } catch {
           await native.dispose(session);
           throw new Error("Native MCP control session failed to initialize");
         }
       }
+      if ((cmd.action === "auth-start" || cmd.action === "auth-complete") && cmd.expiresAt !== undefined && cmd.expiresAt <= Date.now()) {
+        this.cancel(key);
+        return { servers: nativeMcpStatus(cwd), result: { error: "expired" } };
+      }
+      if (cmd.action === "auth-complete" && cmd.authorizationId && entry.completedAuth.has(cmd.authorizationId)) return { servers: nativeMcpStatus(cwd), result: { authenticated: true } };
+      if (cmd.action === "auth-complete" && (!cmd.authorizationId || entry.pendingAuth.get(cmd.server!)?.id !== cmd.authorizationId)) return { servers: nativeMcpStatus(cwd), result: { error: "no_pending_auth" } };
       const tool = entry.session.getToolDefinition("mcp");
       const adapterTool = entry.native.loader.getExtensions().extensions.find((extension) => extension.path === inlinePath)?.tools.get("mcp")?.definition;
       if (!tool || tool !== adapterTool) throw new Error("Native MCP gateway unavailable or shadowed by another native extension");
       const params = cmd.action === "connect" ? { connect: cmd.server }
         : cmd.action === "auth-start" ? { action: "auth-start", server: cmd.server }
         : { action: "auth-complete", server: cmd.server, args: { redirectUrl: cmd.redirectUrl } };
-      if (cmd.action === "auth-start") entry.pendingAuth.add(cmd.server);
+      if (cmd.action === "auth-start") entry.pendingAuth.set(cmd.server, { id: cmd.authorizationId ?? cmd.requestId, expiresAt: cmd.expiresAt ?? Date.now() + 15 * 60_000 });
       try {
         const output = await tool.execute(`mcp-control-${crypto.randomUUID()}`, params, this.abort.signal, undefined, entry.session.extensionRunner.createContext());
         const result = controlDetails(output.details);
-        if (cmd.action === "auth-start" && typeof result.authorizationUrl !== "string") entry.pendingAuth.delete(cmd.server);
-        if (result.authenticated === true) entry.pendingAuth.delete(cmd.server);
+        if (result.error !== undefined) {
+          if (cmd.action === "auth-start" || cmd.action === "auth-complete") this.cancel(key);
+        }
+        if (result.authenticated === true) {
+          const pending = entry.pendingAuth.get(cmd.server);
+          if (pending) entry.completedAuth.add(pending.id);
+          entry.pendingAuth.delete(cmd.server);
+        }
         return { servers: nativeMcpStatus(cwd), result };
       } catch {
-        if (cmd.action === "auth-start") entry.pendingAuth.delete(cmd.server);
+        if (cmd.action === "auth-start" || cmd.action === "auth-complete") this.cancel(key);
         throw new Error("Native MCP control operation failed");
       }
     });
-    this.queues.set(cwd, operation);
+    this.queues.set(key, operation);
     try { return await operation; } catch {
       return { servers: nativeMcpStatus(cwd), result: { error: "native_mcp_failed" } };
-    } finally { if (this.queues.get(cwd) === operation) this.queues.delete(cwd); }
+    } finally { if (this.queues.get(key) === operation) this.queues.delete(key); }
   }
 
   async dispose(): Promise<void> {

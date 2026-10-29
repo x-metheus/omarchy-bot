@@ -1,10 +1,37 @@
-diff --git a/node_modules/pi-mcp-adapter/.bun-tag-83b1df48863ec897 b/.bun-tag-83b1df48863ec897
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/pi-mcp-adapter/.bun-tag-fab1e7a1e727130c b/.bun-tag-fab1e7a1e727130c
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/pi-mcp-adapter/mcp-refresh-lock-helper.cjs b/mcp-refresh-lock-helper.cjs
+diff --git a/mcp-auth-flow.ts b/mcp-auth-flow.ts
+index 1f1e1bedf9d0232ec3fffaa7cae4adf2bc826b1c..007e5b3a163ac3e1587a67d6d8428200aeae1c9e 100644
+--- a/mcp-auth-flow.ts
++++ b/mcp-auth-flow.ts
+@@ -616,7 +616,7 @@ async function clearPendingAuth(
+   state.pendingAuthStates.delete(key)
+   const stateToRelease = pendingState ?? oauthState
+   if (stateToRelease) {
+-    cancelPendingCallback(stateToRelease)
++    cancelPendingCallback(stateToRelease, reason)
+     // Flow state is local. Legacy persistent state cleanup is best-effort on
+     // cancellation, but must still own the account before reading or mutating it.
+     if (signal?.aborted) return
+diff --git a/mcp-callback-server.ts b/mcp-callback-server.ts
+index 91b73cf0ebffa07cb7ea9a3fcd08e7c0fb3ec5c6..7cb1851c8ac8db59ced6dbfc2259ece183a42c99 100644
+--- a/mcp-callback-server.ts
++++ b/mcp-callback-server.ts
+@@ -448,13 +448,13 @@ export function waitForCallback(oauthState: string): Promise<OAuthCallbackResult
+ /**
+  * Cancel a pending authorization by state.
+  */
+-export function cancelPendingCallback(oauthState: string): void {
++export function cancelPendingCallback(oauthState: string, reason = new Error("Authorization cancelled")): void {
+   reservedAuthStates.delete(oauthState)
+   const pending = pendingAuths.get(oauthState)
+   if (pending) {
+     clearTimeout(pending.timeout)
+     pendingAuths.delete(oauthState)
+-    pending.reject(new Error("Authorization cancelled"))
++    pending.reject(reason)
+   }
+ }
+ 
+diff --git a/mcp-refresh-lock-helper.cjs b/mcp-refresh-lock-helper.cjs
 new file mode 100644
 index 0000000000000000000000000000000000000000..60bb56ab82f83ac5e8c26fcf8348e996f6583690
 --- /dev/null
@@ -73,10 +100,35 @@ index b07b0a37a7c095424851e7348e830d245a1bbe8c..2ee2d234f913f157a321e1fa195e08de
      signal?.throwIfAborted();
      return { release };
 diff --git a/proxy-modes.ts b/proxy-modes.ts
-index 49f1b4eccfbee9a14ef6e71db8d8392dcba6ed23..701f41f33524c8a6a91f1d957e853ac9905bd50c 100644
+index 49f1b4eccfbee9a14ef6e71db8d8392dcba6ed23..fa1183e82efb48b27bb9d65e16b55fd9e2ea8e46 100644
 --- a/proxy-modes.ts
 +++ b/proxy-modes.ts
-@@ -951,6 +951,7 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
+@@ -130,7 +130,7 @@ function disabledResult(mode: string, serverName: string): ProxyToolResult {
+   };
+ }
+ 
+-function emitAuthStatus(state: McpExtensionState, serverName: string, status: "authenticated" | "failed", message: string): void {
++function emitAuthStatus(state: McpExtensionState, serverName: string, status: "authenticated" | "failed", message: string, reason?: "expired"): void {
+   state.ui?.notify(message, status === "authenticated" ? "info" : "error");
+   state.sendMessage?.(
+     {
+@@ -140,6 +140,7 @@ function emitAuthStatus(state: McpExtensionState, serverName: string, status: "a
+       details: {
+         server: serverName,
+         status,
++        ...(reason ? { reason } : {}),
+         ...(status === "authenticated" ? { nextAction: { connect: serverName } } : {}),
+       },
+     },
+@@ -194,6 +195,7 @@ function ensureBackgroundAuthWatcher(
+       serverName,
+       "failed",
+       `OAuth authentication failed for MCP server "${serverName}". Start authorization again or inspect trusted logs.`,
++      error instanceof Error && /^OAuth (?:authorization|callback) timeout\b/.test(error.message) ? "expired" : undefined,
+     );
+   }).finally(() => {
+     if (watchers?.get(serverName) === watcher) watchers.delete(serverName);
+@@ -951,6 +953,7 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
        ? await state.manager.reconnect(serverName, definition, currentConnection, ownedSignal)
        : await state.manager.connect(serverName, definition, ownedSignal);
      if (connection.status === "needs-auth") {
