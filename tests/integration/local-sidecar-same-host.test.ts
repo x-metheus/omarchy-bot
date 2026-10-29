@@ -28,7 +28,7 @@ describe("same-host viewers have no This Device", () => {
     h = await startDaemon();
     const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "other-laptop", capabilities: ["shell"] });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "other-laptop" });
     expect(await api<DeviceDto[]>(h, "GET", "/api/devices")).toHaveLength(1);
 
     const botId = await makeBot(h, "Viewer Bot");
@@ -59,17 +59,14 @@ describe("same-host viewers have no This Device", () => {
     expect(identity.digest).not.toBe(createHash("sha256").update(`${identity.salt}:${clientMachineId}`).digest("hex"));
     const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "off-host-laptop",
-      capabilities: ["shell"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "off-host-laptop" });
     expect(await api<DeviceDto[]>(h, "GET", "/api/devices")).toEqual([{
       id: DEVICE_A,
       hostname: "off-host-laptop",
       online: true,
-      os: "linux", shell: "posix-sh",
-      capabilities: ["shell"],
+      os: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux",
+      shell: process.platform === "win32" ? "powershell-5.1" : "posix-sh",
+      capabilities: ["shell", "search", "files", "transfer"],
     }]);
 
     const botId = await makeBot(h, "Off-host Bot");

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
@@ -16,8 +16,8 @@ describe("Always/Never per Omarchy Bot install", () => {
     h = undefined;
   });
 
-  async function connect(): Promise<LocalSidecarFixture> {
-    const sidecar = await LocalSidecarFixture.connect(h!.port, h!.token);
+  async function connect(policy?: { always?: string[]; never?: string[] }): Promise<LocalSidecarFixture> {
+    const sidecar = await LocalSidecarFixture.connect(h!.port, h!.token, policy);
     sidecars.push(sidecar);
     return sidecar;
   }
@@ -25,12 +25,15 @@ describe("Always/Never per Omarchy Bot install", () => {
   test("Always skips a later matching Ask for that install", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
-    await sidecar.alwaysAllow("run:echo remembered-ok");
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Always Bot");
+    const initial = sendToBot(h, botId, "local.run:echo remembered-ok", DEVICE_A);
+    const ask = await sidecar.waitForJob();
+    await sidecar.remember(ask.jobId, "always");
+    await waitThreadIdle(h, (await initial).threadId);
     const sent = await sendToBot(h, botId, "local.run:echo remembered-ok", DEVICE_A);
     await waitThreadIdle(h, sent.threadId);
-    expect(sidecar.executed).toEqual(["echo remembered-ok"]);
+    expect(sidecar.executed).toEqual(["echo remembered-ok", "echo remembered-ok"]);
     expect((await messages(h, sent.threadId)).some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "completed")).toBeTrue();
     expect(existsSync(path.join(sidecar.sandbox, ".omarchy-bot-local-policy.json"))).toBeTrue();
     expect(JSON.stringify(h.svc.devices.list())).not.toContain("remembered-ok");
@@ -39,9 +42,12 @@ describe("Always/Never per Omarchy Bot install", () => {
   test("Never fails the Tool Call without running and still permits Bot Computer and native tools", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
-    await sidecar.neverAllow("run:echo blocked");
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Never Bot");
+    const initial = sendToBot(h, botId, "local.run:echo blocked", DEVICE_A);
+    const ask = await sidecar.waitForJob();
+    await sidecar.remember(ask.jobId, "never");
+    await waitThreadIdle(h, (await initial).threadId);
     const blocked = await sendToBot(h, botId, "local.run:echo blocked", DEVICE_A);
     await waitThreadIdle(h, blocked.threadId);
     expect(sidecar.executed).toEqual([]);
@@ -57,10 +63,25 @@ describe("Always/Never per Omarchy Bot install", () => {
     expect((await messages(h, screen.threadId)).some((message) => message.kind === "tool" && message.toolCall?.name === "computer")).toBeTrue();
   });
 
+  test("loads Always and Never install policy before registration", async () => {
+    h = await startDaemon();
+    const sidecar = await connect({ always: ["run:echo restored"], never: ["run:echo refused"] });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
+    const botId = await makeBot(h, "Restored policy Bot");
+    const allowed = await sendToBot(h, botId, "local.run:echo restored", DEVICE_A);
+    await waitThreadIdle(h, allowed.threadId);
+    const blocked = await sendToBot(h, botId, "local.run:echo refused", DEVICE_A);
+    await waitThreadIdle(h, blocked.threadId);
+    expect(sidecar.executed).toEqual(["echo restored"]);
+    expect(sidecar.denied).toEqual(["run:echo refused"]);
+    expect((await messages(h, allowed.threadId)).find((message) => message.toolCall?.name === "local")?.toolCall?.status).toBe("completed");
+    expect((await messages(h, blocked.threadId)).find((message) => message.toolCall?.name === "local")?.toolCall?.status).toBe("error");
+  });
+
   test("Allow once does not persist as Always", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Once Bot");
     const first = sendToBot(h, botId, "local.run:echo once-only", DEVICE_A);
     await sidecar.waitForJob();
@@ -80,7 +101,7 @@ describe("Always/Never per Omarchy Bot install", () => {
   test("denyOnce fails without a process", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Deny Bot");
     const pending = sendToBot(h, botId, "local.run:echo denied-now", DEVICE_A);
     await sidecar.waitForJob();
@@ -95,7 +116,7 @@ describe("Always/Never per Omarchy Bot install", () => {
   test("cancelling the Turn during Ask dismisses the card and a late Allow does not run", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop", capabilities: ["shell"] });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Cancel Ask Bot");
     const pending = sendToBot(h, botId, "local.run:echo cancelled-ask", DEVICE_A);
     const job = await sidecar.waitForJob();

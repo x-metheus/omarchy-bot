@@ -37,7 +37,7 @@ export interface Shell {
     status(): LocalSidecarStatus;
     onApproval(listener: (approval: LocalApproval) => void): () => void;
     onApprovalDismiss(listener: (jobId: string) => void): () => void;
-    decide(approvalId: string, decision: LocalApprovalDecision): Promise<void>;
+    decide(jobId: string, decision: LocalApprovalDecision): Promise<void>;
   };
   readonly keyMapping: {
     platform(): ShellPlatform;
@@ -151,10 +151,10 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
         approvalDismissListeners.add(listener);
         return () => { approvalDismissListeners.delete(listener); };
       },
-      async decide(approvalId: string, decision: LocalApprovalDecision) {
-        const resolve = decisions.get(approvalId);
+      async decide(jobId: string, decision: LocalApprovalDecision) {
+        const resolve = decisions.get(jobId);
         if (resolve === undefined) throw new Error("Unknown Local Sidecar approval.");
-        decisions.delete(approvalId);
+        decisions.delete(jobId);
         resolve(decision);
       },
     },

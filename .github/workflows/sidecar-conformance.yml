@@ -19,19 +19,15 @@ jobs:
           - runner: ubuntu-22.04
             target: linux-x64
             binary: omarchy-bot-sidecar
-            bun-binary: sidecar-bun
           - runner: macos-15
             target: darwin-arm64
             binary: omarchy-bot-sidecar
-            bun-binary: sidecar-bun
           - runner: macos-15-intel
             target: darwin-x64
             binary: omarchy-bot-sidecar
-            bun-binary: sidecar-bun
           - runner: windows-latest
             target: windows-x64
             binary: omarchy-bot-sidecar.exe
-            bun-binary: sidecar-bun.exe
     env:
       CARGO_HOME: ${{ github.workspace }}/.lane/sidecar-rust/cargo
       CARGO_TARGET_DIR: ${{ github.workspace }}/.lane/sidecar-rust/target
@@ -42,8 +38,6 @@ jobs:
           bun-version: 1.4.4
       - uses: dtolnay/rust-toolchain@1.93.1
       - run: bun install --frozen-lockfile
-      - name: Retain TypeScript executor and policy coverage
-        run: bun test apps/sidecar
       - name: Validate canonical protocol fixtures with TypeScript
         run: bun test packages/protocol/src/sidecar-fixtures.test.ts
       - name: Build Linux repository image
@@ -77,21 +71,24 @@ jobs:
           docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/src" -w /src \
             -e HOME=/src/.lane/sidecar-rust/home \
             -e OMARCHY_BOT_TEST_SIDECAR_BINARY=/src/.lane/sidecar-rust/target/release/${{ matrix.binary }} \
-            omarchy-bot-linux-app bun test packages/protocol/src/sidecar-fixtures.test.ts tests/integration/local-sidecar-process.test.ts tests/integration/local-sidecar-runtime.test.ts tests/integration/local-sidecar-transfer.test.ts
-      - name: Compile TypeScript release for comparison
-        run: bun build --compile --target=bun-${{ matrix.target }} apps/sidecar/src/main.ts --outfile .lane/${{ matrix.bun-binary }}
-      - name: Retain compiled TypeScript process coverage
-        env:
-          OMARCHY_BOT_TEST_SIDECAR_BINARY: .lane/${{ matrix.bun-binary }}
-        run: bun test tests/integration/local-sidecar-process.test.ts
+            omarchy-bot-linux-app bun test packages/protocol/src/sidecar-fixtures.test.ts \
+              tests/integration/local-sidecar-process.test.ts \
+              tests/integration/local-sidecar-runtime.test.ts \
+              tests/integration/local-sidecar.test.ts \
+              tests/integration/local-sidecar-dispatch.test.ts \
+              tests/integration/local-sidecar-fail-closed.test.ts \
+              tests/integration/local-sidecar-files.test.ts \
+              tests/integration/local-sidecar-policy.test.ts \
+              tests/integration/local-sidecar-same-host.test.ts \
+              tests/integration/local-sidecar-transfer.test.ts \
+              tests/integration/client-device-tag.test.ts
       - name: Report per-target release sizes
         shell: bash
         env:
           SIDECAR_SIZE_TARGET: ${{ matrix.target }}
           SIDECAR_RUST_BINARY: .lane/sidecar-rust/target/release/${{ matrix.binary }}
-          SIDECAR_BUN_BINARY: .lane/${{ matrix.bun-binary }}
         run: |
-          bun -e 'import { statSync, writeFileSync, appendFileSync } from "node:fs"; const result = { target: process.env.SIDECAR_SIZE_TARGET, rustBytes: statSync(process.env.SIDECAR_RUST_BINARY).size, bunBytes: statSync(process.env.SIDECAR_BUN_BINARY).size }; writeFileSync(".lane/sidecar-sizes.json", JSON.stringify(result, null, 2) + "\n"); const report = `| Target | Rust release bytes | Bun release bytes |\n| --- | ---: | ---: |\n| ${result.target} | ${result.rustBytes} | ${result.bunBytes} |\n`; console.log(report); appendFileSync(process.env.GITHUB_STEP_SUMMARY, report);'
+          bun -e 'import { statSync, writeFileSync, appendFileSync } from "node:fs"; const result = { target: process.env.SIDECAR_SIZE_TARGET, rustBytes: statSync(process.env.SIDECAR_RUST_BINARY).size }; writeFileSync(".lane/sidecar-sizes.json", JSON.stringify(result, null, 2) + "\n"); const report = `| Target | Rust release bytes |\n| --- | ---: |\n| ${result.target} | ${result.rustBytes} |\n`; console.log(report); appendFileSync(process.env.GITHUB_STEP_SUMMARY, report);'
       - uses: actions/upload-artifact@v4
         with:
           name: sidecar-sizes-${{ matrix.target }}

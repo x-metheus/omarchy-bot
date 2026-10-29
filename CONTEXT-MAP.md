@@ -12,7 +12,7 @@ Read every context whose concepts or code paths intersect the work. Cross-contex
 
 These paths are hints, not ownership walls. Follow the concepts when a change crosses paths.
 
-- `apps/web/`, `apps/omarchy-bot/`, `apps/sidecar/`, Bot/Thread/attachment modules in `apps/daemon/`, and product DTOs usually require **Workspace**.
+- `apps/web/`, `apps/omarchy-bot/`, `apps/sidecar-rust/`, Bot/Thread/attachment modules in `apps/daemon/`, and product DTOs usually require **Workspace**.
 - `workers/*`, Agent supervision, Agent contracts, readiness, and conformance require **Agent Integration**.
 - The daemon Computer Broker and Computer domain/protocol types require **Computer Control**.
 - `packages/domain/`, `packages/protocol/`, `packages/api-client/`, daemon bootstrap, persistence, and integration tests often cross two or three contexts.

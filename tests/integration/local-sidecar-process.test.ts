@@ -25,6 +25,13 @@ async function until(probe: () => boolean, message: string): Promise<void> {
   }
 }
 
+interface SidecarProcess {
+  child: Subprocess<"pipe", "pipe", "pipe">;
+  frames: DeviceClientFrame[];
+  send: (frame: DeviceServerFrame) => void;
+  stdout: () => string;
+}
+
 async function startSidecar(always: string[] = []) {
   const root = mkdtempSync(path.join(os.tmpdir(), "sidecar-process-"));
   writeFileSync(path.join(root, ".omarchy-bot-local-policy.json"), JSON.stringify({ always, never: [] }));
@@ -80,6 +87,16 @@ async function startSidecar(always: string[] = []) {
   return { root, child, frames, send, stdout: () => stdout, close };
 }
 
+async function runApprovedCommand(sidecar: SidecarProcess, jobId: string, script: string) {
+  sidecar.send({ type: "local.job", jobId, action: "run", hostname: "paired", botId: "bot", turnId: "turn", command: script });
+  await until(() => sidecar.stdout().includes(JSON.stringify(jobId)), "PowerShell command approval never arrived");
+  sidecar.child.stdin.write(`${JSON.stringify({ type: "allow-once", jobId })}\n`);
+  await until(() => sidecar.frames.some(frame => frame.type === "local.result" && frame.jobId === jobId), "PowerShell command result never arrived");
+  const result = sidecar.frames.find(frame => frame.type === "local.result" && frame.jobId === jobId);
+  if (result?.type !== "local.result") throw new Error("PowerShell command returned no result");
+  return result;
+}
+
 test("production Sidecar authenticates, registers its shell, asks and returns output and exit code", async () => {
   const sidecar = await startSidecar();
   try {
@@ -121,10 +138,77 @@ test.skipIf(!windows)("production Sidecar returns readable PowerShell warning an
   }
 }, 40_000);
 
-test.skipIf(!windows)("production Sidecar returns clean remembered output and leaves a successfully launched application alive", async () => {
+test.skipIf(!windows)("production Sidecar preserves PowerShell failure, return and explicit exit statuses", async () => {
+  const sidecar = await startSidecar();
+  try {
+    for (const [index, [script, exitCode]] of ([
+      ["Get-SidecarMissingSentinelCommand", 1],
+      ["cmd.exe /c exit 0; Write-Error 'native-success-then-error'", 1],
+      ["throw 'terminating-sentinel'", 1],
+      ["cmd.exe /c exit 9; Write-Error 'native-error-then-error'", 9],
+      ["cmd.exe /c exit 9; return", 9],
+      ["cmd.exe /c exit 9; exit 7", 7],
+      ["Write-Error 'recovered'; Write-Output 'success'", 0],
+    ] satisfies [string, number][]).entries()) {
+      const result = await runApprovedCommand(sidecar, `status-${index}`, script);
+      expect(result).toMatchObject({ ok: true, exitCode });
+    }
+  } finally {
+    await sidecar.close();
+  }
+}, 90_000);
+
+test.skipIf(!windows)("production Sidecar cannot overwrite an existing file through a user completion variable", async () => {
+  const sidecar = await startSidecar();
+  const report = path.join(sidecar.root, "report.txt");
+  writeFileSync(report, "existing report must survive\n");
+  try {
+    const result = await runApprovedCommand(sidecar, "completion", "$completion = Join-Path (Get-Location).Path 'report.txt'; Write-Output done");
+    expect(result).toMatchObject({ ok: true, exitCode: 0 });
+    if (!result.ok) throw new Error(result.error);
+    expect(result.text?.trim()).toBe("done");
+    expect(readFileSync(report, "utf8")).toBe("existing report must survive\n");
+  } finally {
+    await sidecar.close();
+  }
+}, 30_000);
+
+test.skipIf(!windows)("production Sidecar preserves named PowerShell blocks, early returns and final statuses", async () => {
+  const sidecar = await startSidecar();
+  try {
+    for (const [index, [script, text, exitCode]] of ([
+      ["end { Write-Output 'done' }", "done", 0],
+      ["begin { Write-Output 'begin' } process { Write-Output 'process' } end { Write-Output 'end' }", "begin\r\nprocess\r\nend", 0],
+      ["begin { Write-Output 'begin-only' }", "begin-only", 0],
+      ["process { Write-Output 'process-only' }", "process-only", 0],
+      ["dynamicparam { }", "", 0],
+      ["#requires -Version 5.1\nparam([string]$name = 'λ')\nend { Write-Output $name # a closing brace } in a comment\n} # trailing comment", "λ", 0],
+      ["end { Write-Error 'named-error' }", "named-error", 1],
+      ["begin { cmd.exe /c exit 0 } process { Write-Error 'named-after-native-success' }", "named-after-native-success", 1],
+      ["process { cmd.exe /c exit 9; Write-Error 'named-native-nine' }", "named-native-nine", 9],
+      ["end { Write-Output 'early'; return; Write-Output 'unreachable' }", "early", 0],
+      ["end { Write-Output 'explicit'; exit 7 }", "explicit", 7],
+    ] satisfies [string, string, number][]).entries()) {
+      const result = await runApprovedCommand(sidecar, `named-${index}`, script);
+      expect(result).toMatchObject({ ok: true, exitCode });
+      if (!result.ok) throw new Error(result.error);
+      if (script.includes("Write-Error")) expect(result.text).toContain(text);
+      else expect(result.text?.trim()).toBe(text);
+    }
+  } finally {
+    await sidecar.close();
+  }
+}, 120_000);
+
+test.skipIf(!windows).each(["ordinary", "shadowed-completion", "named-end", "early-return"] as const)("production Sidecar returns clean remembered output and leaves a launched application alive after %s completion", async (form) => {
   const encoded = Buffer.from("$PID | Set-Content descendant.pid; while (!(Test-Path release)) { Start-Sleep -Milliseconds 20 }; Set-Content marker.txt survived", "utf16le").toString("base64");
-  const script = `$PID | Set-Content root.pid; $p = Start-Process -FilePath "$PSHOME\\powershell.exe" -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','${encoded}' -WorkingDirectory (Get-Location).Path -RedirectStandardOutput child.out -RedirectStandardError child.err -PassThru; $p.Id | Set-Content launched.pid; Write-Output 'remembered-launch'`;
+  const launch = `$PID | Set-Content root.pid; $p = Start-Process -FilePath "$PSHOME\\powershell.exe" -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','${encoded}' -WorkingDirectory (Get-Location).Path -RedirectStandardOutput child.out -RedirectStandardError child.err -PassThru; $p.Id | Set-Content launched.pid; Write-Output 'remembered-launch'`;
+  const script = form === "named-end" ? `end { ${launch} }`
+    : form === "shadowed-completion" ? `$completion = Join-Path (Get-Location).Path 'report.txt'; ${launch}`
+    : form === "early-return" ? `${launch}; return` : launch;
   const sidecar = await startSidecar([`run:${script}`]);
+  const report = path.join(sidecar.root, "report.txt");
+  writeFileSync(report, "existing report must survive\n");
   const files = ["root.pid", "descendant.pid", "launched.pid"];
   const alive = (pid: number): boolean => {
     try { process.kill(pid, 0); return true; } catch { return false; }
@@ -145,6 +229,7 @@ test.skipIf(!windows)("production Sidecar returns clean remembered output and le
     expect(result.text?.trim()).toBe("remembered-launch");
     expect(sidecar.stdout()).not.toContain('"type":"ask"');
     expect(alive(descendantPid)).toBeTrue();
+    expect(readFileSync(report, "utf8")).toBe("existing report must survive\n");
     expect(existsSync(path.join(sidecar.root, "marker.txt"))).toBeFalse();
     writeFileSync(path.join(sidecar.root, "release"), "");
     await until(() => existsSync(path.join(sidecar.root, "marker.txt")) && readFileSync(path.join(sidecar.root, "marker.txt"), "utf8").trim() === "survived", "launched application did not survive normal command completion");
@@ -203,6 +288,49 @@ test("production Sidecar refuses this OS's credential stores for every file acti
       }
       expect(readFileSync(path.join(sidecar.root, file), "utf8")).toBe("needle-secret");
       expect(existsSync(path.join(sidecar.root, store, "missing"))).toBeFalse();
+    }
+  } finally {
+    await sidecar.close();
+  }
+}, 30_000);
+
+test.skipIf(process.platform !== "darwin")("production macOS Sidecar excludes mixed-case credential stores without hiding similarly named public paths", async () => {
+  const sidecar = await startSidecar();
+  const protectedDirs = ["Library/Keychains", "Library/Accounts", "Library/Application Support/com.apple.TCC", "lIbRaRy/kEyChAiNs", ".SsH"];
+  const publicDirs = ["notes", "Library/Keychains-backup"];
+  let sequence = 0;
+  const run = async (fields: Partial<Extract<DeviceServerFrame, { type: "local.job" }>>) => {
+    const jobId = `mac-path-${sequence++}`;
+    sidecar.send({ type: "local.job", jobId, hostname: "Mac", botId: "bot", turnId: "turn", action: "search", ...fields });
+    await until(() => sidecar.stdout().includes(JSON.stringify(jobId)), "macOS credential Ask never arrived");
+    sidecar.child.stdin.write(`${JSON.stringify({ type: "allow-once", jobId })}\n`);
+    await until(() => sidecar.frames.some((frame) => frame.type === "local.result" && frame.jobId === jobId), "macOS credential result never arrived");
+    return sidecar.frames.find((frame) => frame.type === "local.result" && frame.jobId === jobId);
+  };
+  try {
+    for (const dir of [...protectedDirs, ...publicDirs]) {
+      mkdirSync(path.join(sidecar.root, dir), { recursive: true });
+      writeFileSync(path.join(sidecar.root, dir, "entry.txt"), "credential-sentinel");
+    }
+    const search = await run({ action: "search", query: "credential-sentinel" });
+    expect(search).toMatchObject({ ok: true });
+    const text = JSON.stringify(search);
+    for (const dir of publicDirs) expect(text).toContain(`${dir}/entry.txt`);
+    for (const dir of protectedDirs) {
+      expect(text).not.toContain(`${dir}/entry.txt`);
+      expect(await run({ action: "read", path: `${dir}/entry.txt` })).toMatchObject({ ok: false, error: "Local Sidecar refuses credential directories" });
+    }
+    for (const dir of ["lIbRaRy/kEyChAiNs", ".SsH"]) {
+      for (const fields of [
+        { action: "search", query: "credential-sentinel", path: dir },
+        { action: "write", path: `${dir}/new.txt`, contents: "must-not-land" },
+        { action: "transfer", direction: "to-workspace", path: `${dir}/entry.txt`, destination: "stolen.txt" },
+        { action: "transfer", direction: "from-workspace", path: "public.txt", destination: `${dir}/new.txt`, contents: "must-not-land" },
+      ] as const) expect(await run(fields)).toMatchObject({ ok: false, error: "Local Sidecar refuses credential directories" });
+      expect(existsSync(path.join(sidecar.root, dir, "new.txt"))).toBeFalse();
+    }
+    for (const command of ["echo screenshot", "echo pointer", "echo SWAYSOCK", "echo WAYLAND_DISPLAY"]) {
+      expect(await run({ action: "run", command })).toMatchObject({ ok: false, error: "Local Sidecar rejects screenshot, pointer, and Host compositor actions" });
     }
   } finally {
     await sidecar.close();

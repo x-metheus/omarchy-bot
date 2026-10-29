@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { DeviceDto } from "../../packages/protocol/src/index.ts";
 import { api, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
-import { LocalSidecarFixture } from "./helpers/localSidecar.ts";
+import { DeviceChannel, LocalSidecarFixture } from "./helpers/localSidecar.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DEVICE_B = "dev_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 describe("outbound Local Sidecar device roster", () => {
   let h: Harness | undefined;
-  const sidecars: LocalSidecarFixture[] = [];
+  const sidecars: DeviceChannel[] = [];
 
   afterEach(async () => {
     await Promise.all(sidecars.splice(0).map((sidecar) => sidecar.close().catch(() => undefined)));
@@ -21,8 +21,8 @@ describe("outbound Local Sidecar device roster", () => {
     return h;
   }
 
-  async function connect(): Promise<LocalSidecarFixture> {
-    const sidecar = await LocalSidecarFixture.connect(h!.port, h!.token);
+  async function connect(): Promise<DeviceChannel> {
+    const sidecar = await DeviceChannel.connect(h!.port, h!.token);
     sidecars.push(sidecar);
     return sidecar;
   }
@@ -178,8 +178,15 @@ describe("approved local.run on this-device", () => {
     await sidecar.register({
       deviceId: DEVICE_A,
       hostname: "laptop",
-      capabilities: ["shell"],
     });
+    expect(await api<DeviceDto[]>(h, "GET", "/api/devices")).toEqual([{
+      id: DEVICE_A,
+      hostname: "laptop",
+      online: true,
+      os: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux",
+      shell: process.platform === "win32" ? "powershell-5.1" : "posix-sh",
+      capabilities: ["shell", "search", "files", "transfer"],
+    }]);
     const botId = await makeBot(h, "Local run Bot");
     const pending = sendToBot(h, botId, "local.run:echo sidecar-sentinel; pwd", DEVICE_A);
     const job = await sidecar.waitForJob();
@@ -208,7 +215,6 @@ describe("approved local.run on this-device", () => {
     await sidecar.register({
       deviceId: DEVICE_A,
       hostname: "laptop",
-      capabilities: ["shell"],
     });
     const botId = await makeBot(h, "Native vs local Bot");
     const native = await sendToBot(h, botId, "tool");
@@ -241,7 +247,6 @@ describe("approved local.run on this-device", () => {
     await sidecar.register({
       deviceId: DEVICE_A,
       hostname: "laptop",
-      capabilities: ["shell"],
     });
     const botId = await makeBot(h, "Redacted local Bot");
     const pending = sendToBot(h, botId, "local.run:echo token=supersecret", DEVICE_A);

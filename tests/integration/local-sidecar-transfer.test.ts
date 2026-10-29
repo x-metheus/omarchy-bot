@@ -40,11 +40,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
   test("copies a sentinel from the Sidecar into Shared Workspace", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["files", "transfer"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     writeFileSync(sidecar.sandboxPath("from-laptop.txt"), "sidecar-sentinel");
     const botId = await makeBot(h, "Transfer in Bot");
     const pending = sendToBot(h, botId, "local.transfer:to-workspace:from-laptop.txt:inbox/from-laptop.txt", DEVICE_A);
@@ -67,11 +63,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
   test("copies a Shared Workspace file onto the Sidecar only with an explicit destination", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["files", "transfer"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     mkdirSync(h.svc.cfg.sharedWorkspaceDir, { recursive: true });
     writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "plugin-note.txt"), "workspace-sentinel");
     const botId = await makeBot(h, "Transfer out Bot");
@@ -95,11 +87,7 @@ describe("transfer files between Sidecar and Shared Workspace", () => {
   test("deny does not copy bytes", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["transfer"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     writeFileSync(sidecar.sandboxPath("from-laptop.txt"), "sidecar-sentinel");
     const botId = await makeBot(h, "Denied transfer Bot");
     const pending = sendToBot(h, botId, "local.transfer:to-workspace:from-laptop.txt:inbox/denied.txt", DEVICE_A);

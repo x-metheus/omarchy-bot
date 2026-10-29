@@ -20,7 +20,7 @@ use url::Url;
 
 const KEYCHAIN_SERVICE: &str = "com.omarchy.bot";
 const KEYCHAIN_USER: &str = "service-connection";
-const RESTART: i32 = 75;
+const RESTART_EXIT_CODE: i32 = 75;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,12 +36,66 @@ struct PairingRequest {
     code: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum Decision { AllowOnce, Deny, Always, Never }
+
+#[derive(Serialize)]
+struct DecisionLine<'a> {
+    #[serde(rename = "type")]
+    decision: Decision,
+    #[serde(rename = "jobId")]
+    job_id: &'a str,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum Approval {
+    #[serde(rename = "ask", rename_all = "camelCase")]
+    Ask {
+        job_id: String,
+        hostname: String,
+        action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+    },
+    #[serde(rename = "ask.dismiss", rename_all = "camelCase")]
+    Dismiss { job_id: String },
+}
+
+impl Approval {
+    fn job_id(&self) -> &str {
+        match self { Self::Ask { job_id, .. } | Self::Dismiss { job_id } => job_id }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SidecarFrame {
+    Registered {
+        #[serde(rename = "type")]
+        _kind: Registered,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+    },
+    Approval(Approval),
+}
+
+#[derive(Deserialize)]
+enum Registered { #[serde(rename = "registered")] Registered }
+
 struct Sidecar {
     child: Child,
     stdin: ChildStdin,
     device_id: String,
     registered: bool,
-    approvals: Vec<serde_json::Value>,
+    approvals: Vec<Approval>,
     pending: HashSet<String>,
 }
 
@@ -157,23 +211,19 @@ fn start_sidecar(app: &tauri::AppHandle, connection: &Connection) -> Result<(), 
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break; };
-            let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line) else { continue; };
+            let Ok(frame) = serde_json::from_str::<SidecarFrame>(&line) else { continue; };
             let state = handle.state::<ShellState>();
             let Ok(mut guard) = state.sidecar.lock() else { break; };
             let Some(sidecar) = guard.as_mut() else { break; };
-            match frame["type"].as_str() {
-                Some("registered") if frame["deviceId"].as_str() == Some(&sidecar.device_id) => sidecar.registered = true,
-                Some("ask") => {
-                    if let Some(job) = frame["jobId"].as_str() {
-                        if sidecar.pending.insert(job.to_owned()) { sidecar.approvals.push(frame); }
-                    }
+            match frame {
+                SidecarFrame::Registered { device_id, .. } if device_id == sidecar.device_id => sidecar.registered = true,
+                SidecarFrame::Approval(approval @ Approval::Ask { .. }) => {
+                    if sidecar.pending.insert(approval.job_id().to_owned()) { sidecar.approvals.push(approval); }
                 },
-                Some("ask.dismiss") => {
-                    if let Some(job) = frame["jobId"].as_str() {
-                        sidecar.pending.remove(job);
-                        sidecar.approvals.retain(|ask| ask["jobId"].as_str() != Some(job));
-                        sidecar.approvals.push(frame.clone());
-                    }
+                SidecarFrame::Approval(approval @ Approval::Dismiss { .. }) => {
+                    sidecar.pending.remove(approval.job_id());
+                    sidecar.approvals.retain(|ask| ask.job_id() != approval.job_id());
+                    sidecar.approvals.push(approval);
                 },
                 _ => {},
             }
@@ -214,12 +264,11 @@ fn sidecar_events(state: tauri::State<ShellState>) -> Result<serde_json::Value, 
 }
 
 #[tauri::command]
-fn sidecar_decide(state: tauri::State<ShellState>, job_id: String, decision: String) -> Result<(), String> {
-    if !matches!(decision.as_str(), "allow-once" | "deny" | "always" | "never") { return Err("Invalid Local Sidecar decision.".into()); }
+fn sidecar_decide(state: tauri::State<ShellState>, job_id: String, decision: Decision) -> Result<(), String> {
     let mut guard = state.sidecar.lock().map_err(|_| "Local Sidecar is busy.")?;
     let sidecar = guard.as_mut().ok_or("No Local Sidecar is running.")?;
     if !sidecar.pending.contains(&job_id) { return Err("This local approval is no longer pending.".into()); }
-    let frame = serde_json::json!({ "type": decision, "jobId": job_id });
+    let frame = serde_json::to_string(&DecisionLine { decision, job_id: &job_id }).map_err(|_| "Could not encode Local Sidecar decision.")?;
     writeln!(sidecar.stdin, "{frame}").and_then(|_| sidecar.stdin.flush()).map_err(|_| "Could not deliver Local Sidecar decision.")?;
     sidecar.pending.remove(&job_id);
     Ok(())
@@ -283,7 +332,7 @@ fn store_connection(app: tauri::AppHandle, state: tauri::State<ShellState>, base
     keychain()?.set_password(&secret).map_err(keychain_error)?;
     if let Ok(directory) = app.path().app_config_dir() { let _ = std::fs::remove_file(directory.join("revoked-service")); }
     stop_sidecar(&state);
-    app.exit(RESTART);
+    app.exit(RESTART_EXIT_CODE);
     Ok(())
 }
 
@@ -300,7 +349,7 @@ fn clear_connection(app: tauri::AppHandle, state: tauri::State<ShellState>) -> R
         if notice.is_err() { eprintln!("The revoked credential was cleared, but its Service address could not be retained."); }
     }
     stop_sidecar(&state);
-    app.exit(RESTART);
+    app.exit(RESTART_EXIT_CODE);
     Ok(())
 }
 
@@ -396,7 +445,7 @@ fn save_attachment(app: tauri::AppHandle, filename: String, bytes: Vec<u8>) -> R
 }
 
 #[tauri::command]
-fn restart_app(app: tauri::AppHandle) { app.exit(RESTART); }
+fn restart_app(app: tauri::AppHandle) { app.exit(RESTART_EXIT_CODE); }
 
 #[cfg(desktop)]
 async fn available_update(app: &tauri::AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
@@ -429,7 +478,7 @@ fn receive_link(app: &tauri::AppHandle, link: &str) {
     let state = app.state::<ShellState>();
     if state.origin.as_ref().is_some_and(|origin| origin != &request.service_url) {
         if let Ok(mut next) = state.restart_link.lock() { *next = Some(link.to_string()); }
-        app.exit(RESTART);
+        app.exit(RESTART_EXIT_CODE);
         return;
     }
     if let Ok(mut pending) = state.pending_pairing.lock() { *pending = Some(request); }
@@ -503,13 +552,54 @@ fn main() {
         }
         if matches!(event, tauri::RunEvent::Exit) { stop_sidecar(&app.state::<ShellState>()); }
     });
-    if exit == RESTART {
+    if exit == RESTART_EXIT_CODE {
         if let Ok(mut link) = handle.state::<ShellState>().restart_link.lock() {
             if let Some(link) = link.take() { environment.args_os.push(link.into()); }
         }
         tauri::process::restart(&environment);
     }
     std::process::exit(exit);
+}
+
+#[cfg(test)]
+mod sidecar_wire_tests {
+    use super::*;
+
+    #[test]
+    fn decisions_use_the_existing_wire_values() {
+        for (wire, decision) in [("allow-once", Decision::AllowOnce), ("deny", Decision::Deny), ("always", Decision::Always), ("never", Decision::Never)] {
+            let parsed: Decision = serde_json::from_value(serde_json::json!(wire)).unwrap();
+            assert_eq!(parsed, decision);
+            assert_eq!(serde_json::to_value(DecisionLine { decision, job_id: "job-1" }).unwrap(), serde_json::json!({"type": wire, "jobId": "job-1"}));
+        }
+        for invalid in [serde_json::json!("AllowOnce"), serde_json::json!("allow"), serde_json::Value::Null, serde_json::json!(42)] {
+            assert!(serde_json::from_value::<Decision>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn approvals_keep_camel_case_fields_and_ignore_malformed_frames() {
+        for wire in [
+            serde_json::json!({"type":"ask", "jobId":"job-1", "hostname":"laptop", "action":"run"}),
+            serde_json::json!({"type":"ask", "jobId":"job-1", "hostname":"laptop", "action":"transfer", "command":"echo ok", "path":"file", "destination":"target", "query":"needle"}),
+            serde_json::json!({"type":"ask.dismiss", "jobId":"job-1"}),
+        ] {
+            let SidecarFrame::Approval(approval) = serde_json::from_value(wire.clone()).unwrap() else { panic!("expected approval") };
+            assert_eq!(approval.job_id(), "job-1");
+            assert_eq!(serde_json::to_value(approval).unwrap(), wire);
+        }
+        assert!(matches!(serde_json::from_str::<SidecarFrame>(r#"{"type":"registered","deviceId":"dev_1"}"#).unwrap(), SidecarFrame::Registered { device_id, .. } if device_id == "dev_1"));
+        for invalid in [
+            r#"{"type":"unknown","jobId":"job-1"}"#,
+            r#"{"type":"ask","jobId":42,"hostname":"laptop","action":"run"}"#,
+            r#"{"type":"ask","jobId":"job-1"}"#,
+            r#"{"type":"ask.dismiss"}"#,
+            r#"{"type":"registered","deviceId":null}"#,
+            "not json",
+        ] {
+            assert!(serde_json::from_str::<SidecarFrame>(invalid).is_err(), "{invalid}");
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

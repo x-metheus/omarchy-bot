@@ -10,9 +10,9 @@ export PATH="$CARGO_INSTALL_ROOT/bin:$PATH"
 bash scripts/build-macos-app.sh --unsigned
 ```
 
-The minimum macOS version is 13.0, matching the `LC_BUILD_VERSION` in both shipped Bun 1.4.4 darwin Sidecars; the shell must not advertise an older version than its bundled executable supports.
+The minimum macOS version is 13.0 for both the app and its bundled Rust Sidecar.
 
-The script compiles and exercises the native bundled Sidecar, embeds the production Web UI, and builds the host architecture only. PR builds use ad-hoc signing for Apple Silicon execution; they are validation artifacts and cannot establish Gatekeeper acceptance. Output is `.lane/dist/omarchy-bot_<version>_<aarch64|x64>.dmg` and `.dmg.sha256`. Cargo and Bun caches, target output and evidence stay in `.lane/macos-app`. The app uses the macOS Keychain and system certificate trust; untrusted TLS has no exception. The bundle's entitlements enable Bun's JavaScriptCore JIT in the signed Sidecar.
+The script builds and exercises the native Rust Sidecar, embeds the production Web UI, and builds the host architecture only. PR builds use ad-hoc signing for Apple Silicon execution; they are validation artifacts and cannot establish Gatekeeper acceptance. Output is `.lane/dist/omarchy-bot_<version>_<aarch64|x64>.dmg` and `.dmg.sha256`. Cargo and Bun caches, target output and evidence stay in `.lane/macos-app`. The app uses the macOS Keychain and system certificate trust; untrusted TLS has no exception.
 
 The merged `src-tauri/Info.plist` permits HTTP only for `localhost`, IPv4 loopback `127.0.0.0/8` and IPv6 `::1` in App Transport Security, matching the Service-origin validator and SSH-tunnel path. It adds no arbitrary-load or broad local-network exception. Verify all three forms on the native checklist, particularly macOS 14+ numeric-IP ATS behavior.
 

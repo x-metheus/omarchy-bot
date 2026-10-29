@@ -4,7 +4,7 @@ on:
     paths:
       - 'apps/omarchy-bot/**'
       - 'apps/web/**'
-      - 'apps/sidecar/**'
+      - 'apps/sidecar-rust/**'
       - 'packages/**'
       - 'scripts/windows-app/**'
       - 'scripts/build-sidecar.ts'
@@ -34,7 +34,7 @@ jobs:
           cargo install tauri-cli --version 2.12.4 --locked --root "$pwd/.lane/windows-app/tools"
           if ($LASTEXITCODE) { throw 'tauri-cli installation failed' }
           "$pwd/.lane/windows-app/tools/bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
-      - name: Build NSIS unsigned preview with compiled Sidecar
+      - name: Build NSIS unsigned preview with Rust Sidecar
         shell: pwsh
         run: ./scripts/windows-app/build.ps1
       - name: Install, inspect registered deep-link handler, uninstall

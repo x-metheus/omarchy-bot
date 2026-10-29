@@ -25,11 +25,7 @@ describe("search, read, and write on the Sidecar", () => {
   test("Ask then Allow once writes and reads inside the sandbox, not Shared Workspace", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["search", "files"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Sidecar files Bot");
     const pendingWrite = sendToBot(h, botId, "local.write:notes/doc.txt:hello-from-sidecar", DEVICE_A);
     const job = await sidecar.waitForJob();
@@ -57,11 +53,7 @@ describe("search, read, and write on the Sidecar", () => {
   test("search returns bounded path hits and refuses to scan /", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["search", "files"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Sidecar search Bot");
     const pendingWrite = sendToBot(h, botId, "local.write:notes/doc.txt:hello-from-sidecar", DEVICE_A);
     await sidecar.waitForJob();
@@ -83,11 +75,12 @@ describe("search, read, and write on the Sidecar", () => {
     expect((await messages(h, root.threadId)).some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "error")).toBeTrue();
   });
 
-  test.each(["linux", "macos"] as const)("%s search excludes credential stores and explicit access is refused", async (os) => {
+  test("host OS search excludes credential stores and explicit access is refused", async () => {
+    const os = process.platform === "darwin" ? "macos" : "linux";
     h = await startDaemon();
-    const sidecar = await LocalSidecarFixture.connect(h.port, h.token, os);
+    const sidecar = await LocalSidecarFixture.connect(h.port, h.token);
     sidecars.push(sidecar);
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "credential-laptop", os, shell: "posix-sh", capabilities: ["shell", "search", "files", "transfer"] });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "credential-laptop" });
     const macStores = ["Library/Keychains", "Library/Accounts", "Library/Application Support/com.apple.TCC"];
     const protectedDirs = [".ssh", ".gnupg", ".aws", ".config", ...(os === "macos" ? macStores : [])];
     for (const dir of [...new Set([...protectedDirs, ...macStores, "notes", "Library/Keychains-backup", "lIbRaRy/kEyChAiNs", ".SsH"])]) {
@@ -152,11 +145,7 @@ describe("search, read, and write on the Sidecar", () => {
   test("deny does not create the file", async () => {
     h = await startDaemon();
     const sidecar = await connect();
-    await sidecar.register({
-      deviceId: DEVICE_A,
-      hostname: "laptop",
-      capabilities: ["files"],
-    });
+    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
     const botId = await makeBot(h, "Denied write Bot");
     const pending = sendToBot(h, botId, "local.write:secret.txt:must-not-land", DEVICE_A);
     await sidecar.waitForJob();

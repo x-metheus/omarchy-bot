@@ -4,7 +4,7 @@ on:
     paths:
       - "apps/omarchy-bot/**"
       - "apps/web/**"
-      - "apps/sidecar/**"
+      - "apps/sidecar-rust/**"
       - "packages/**"
       - "tests/integration/local-sidecar-process.test.ts"
       - "tests/integration/native-shell.test.ts"
@@ -105,8 +105,8 @@ jobs:
           cargo install tauri-cli --version 2.12.4 --locked
           echo "$CARGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
       - run: bun install --frozen-lockfile
-      - name: Exercise executor, policy and native shell interface
-        run: bun test apps/sidecar tests/integration/native-shell.test.ts
+      - name: Exercise native shell interface
+        run: bun test tests/integration/native-shell.test.ts
       - name: Build and verify native package
         env:
           SIGNED: ${{ github.event_name != 'pull_request' && inputs.signed }}

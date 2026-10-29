@@ -4,7 +4,7 @@ on:
     paths:
       - "apps/omarchy-bot/**"
       - "apps/web/**"
-      - "apps/sidecar/**"
+      - "apps/sidecar-rust/**"
       - "apps/daemon/**"
       - "packages/**"
       - "scripts/linux-app/**"
