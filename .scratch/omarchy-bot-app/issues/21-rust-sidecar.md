@@ -12,14 +12,14 @@ The existing black-box Sidecar integration and compiled-binary suites run agains
 
 **Blocked by:** 20 (Record the decision to build the Local Sidecar in Rust)
 
-**Status:** needs-info
+**Status:** resolved
 
 Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
 - [x] The Local Sidecar integration suites pass against the Rust binary on Linux x64 (locally, in the container)
-- [ ] The same suites pass on the macOS (arm64, x64) and Windows x64 CI runners
+- [x] The same suites pass on the macOS (arm64, x64) and Windows x64 CI runners
 - [x] The protocol message types are checked against the TypeScript protocol package by the mechanism ADR 0015 names
-- [ ] The release binary is reported in the ticket Comments, with a size comparison to the Bun build per target
+- [x] The release binary is reported in the ticket Comments, with a size comparison to the Bun build per target
 
 ## Comments
 
@@ -42,11 +42,11 @@ Measured Linux x64 release and Bun 1.4.4 comparison, with the macOS figures adde
 | linux-x64 | 7,827,896 B | 109,594,800 B |
 | darwin-arm64 | 1,621,088 B | 89,622,242 B |
 | darwin-x64 | 1,818,896 B | 98,627,040 B |
-| windows-x64 | pending | 115,744,256 B (historical local cross-build) |
+| windows-x64 | 1,826,816 B | 115,744,256 B |
 
-Provenance: linux-x64 7,827,896 B was measured in the local container release at `30e8019` and reproduced unchanged by the repaired matrix run https://github.com/x-metheus/omarchy-bot/actions/runs/40879296537 at source `ea5acc006c4994f57383f3d1d8b0e623daf5b455`; the darwin-arm64 and darwin-x64 Rust figures are that run's measured `sidecar-sizes-darwin-arm64`/`sidecar-sizes-darwin-x64` artifacts. The Linux and macOS Bun figures were measured in that run from the runner-built Bun binaries and match the earlier local cross-builds byte for byte; the windows-x64 Bun figure was not measured by that run and is retained only as a historical baseline. windows-x64 Rust remains pending because that job failed before its size step and produced no size artifact; it is not estimated, so the per-target comparison checkbox stays open.
+Provenance: linux-x64 7,827,896 B was measured in the local container release at `30e8019` and reproduced unchanged by the repaired matrix run https://github.com/x-metheus/omarchy-bot/actions/runs/40879296537 at source `ea5acc006c4994f57383f3d1d8b0e623daf5b455`; the darwin-arm64 and darwin-x64 Rust figures are that run's measured `sidecar-sizes-darwin-arm64`/`sidecar-sizes-darwin-x64` artifacts. The Linux and macOS Bun figures were measured in that run from the runner-built Bun binaries and match the earlier local cross-builds byte for byte; the windows-x64 Bun figure was not measured by that run; the later run https://github.com/x-metheus/omarchy-bot/actions/runs/40884070827 at source `ca7ea6108d8fab2700dd32cc361127fccfa07317` measured it as 115,744,256 B, identical to the earlier local cross-build. That run's `sidecar-sizes-windows-x64` artifact measured Rust at 1,826,816 B, and its `sidecar-sizes-darwin-arm64`/`sidecar-sizes-darwin-x64` artifacts reproduced both darwin rows byte for byte. Its Linux job was still running when this was recorded, so linux-x64 keeps the 40879296537 measurement. All four rows are measured artifacts.
 
-Needs-info blocker as first recorded on 2026-10-29 (superseded by the CI follow-up comment below; kept as history): the branch was then unpublished — the remote `app/21-rust-sidecar` ref returned 404 and GitHub showed 0 self-hosted runners, while this work must not push or dispatch. The existing hosted macOS arm64/x64 and Windows x64 run (https://github.com/x-metheus/omarchy-bot/actions/runs/40867789160) exercised only the prior TypeScript implementation at `208a9db`, so it is not evidence for the Rust binary. Consequently the macOS/Windows acceptance could not then be observed and the non-Linux Rust sizes could not be measured, and the stale code was not pushed or dispatched. The prerequisite named at that point was authorized publication of the current branch; it has since been met by the user, as the follow-up below records. The two OS CI checkboxes and the per-target size comparison still remain unchecked.
+Needs-info blocker as first recorded on 2026-10-29 (superseded by the CI follow-up comment below; kept as history): the branch was then unpublished — the remote `app/21-rust-sidecar` ref returned 404 and GitHub showed 0 self-hosted runners, while this work must not push or dispatch. The existing hosted macOS arm64/x64 and Windows x64 run (https://github.com/x-metheus/omarchy-bot/actions/runs/40867789160) exercised only the prior TypeScript implementation at `208a9db`, so it is not evidence for the Rust binary. Consequently the macOS/Windows acceptance could not then be observed and the non-Linux Rust sizes could not be measured, and the stale code was not pushed or dispatched. The prerequisite named at that point was authorized publication of the current branch; it has since been met by the user, as the follow-up below records. The two OS CI checkboxes and the per-target size comparison still remained unchecked at that point.
 
 2026-10-29 CI follow-up on the published branch: first macOS/Windows results, their two defects, and the repairs (unverified on Apple/Windows):
 
@@ -75,3 +75,11 @@ Repair: only `tests/integration/local-sidecar-process.test.ts` changed, in the s
 Executor/handle comparison before deciding on a product fix: both executors capture the same READ/WRITE/DELETE share modes (Rust has no default whitelist) and inherit stdio, and neither opens the PID files — the test payload writes them with `Set-Content` — so the exact external lock holder is not proven from this evidence. The only material difference is an incidental Bun `SW_HIDE` startup value that Rust does not set; the supported app already passes an explicit `CREATE_NO_WINDOW` at `apps/omarchy-bot/src-tauri/src/main.rs:138-147`, and no user impact is demonstrated. Product and executor code were therefore left unchanged; the retry is confined to the test harness. Independent review of the final diff was clean with no material executor issue.
 
 Working tree scope: `git status` shows only `tests/integration/local-sidecar-process.test.ts` modified (8 insertions, 1 deletion), with no untracked, product, Rust, workflow, fixture, lockfile or credential changes; `.lane` downloads are ignored. Nothing was pushed or dispatched. The Status remains needs-info. The next requirement, for the integrator, is a Windows CI run of this retry patch; once it passes, the combined macOS/Windows checkbox and the per-target size comparison can be evaluated, and windows-x64 Rust remains pending until then.
+
+2026-10-29 Resolved: Windows retry is green and windows-x64 sizes are measured.
+
+Run https://github.com/x-metheus/omarchy-bot/actions/runs/40884070827 (source `ca7ea6108d8fab2700dd32cc361127fccfa07317`, the `EBUSY` polling-retry patch) executed the matrix with every native job green: macOS arm64 (`macos-15`, job 123482962837), macOS x64 (`macos-15-intel`, job 123482962394) and Windows x64 (`windows-latest`, job 123482962724) each passed all of their steps, including native Rust fixtures, the release build, the Rust process suite via `OMARCHY_BOT_TEST_SIDECAR_BINARY`, the trusted/paired TLS case, compiled-Bun process coverage and the size step. On Windows the previously failing shared suite `tests/integration/local-sidecar-process.test.ts` passed unchanged against the retry patch; no product code changed for it.
+
+The Windows job's `sidecar-sizes-windows-x64` artifact records `{"target":"windows-x64","rustBytes":1826816,"bunBytes":115744256}`, so the Rust release is 1,826,816 B against Bun's 115,744,256 B (1.6% of the Bun size). That run's `sidecar-sizes-darwin-arm64` (1,621,088 B / 89,622,242 B) and `sidecar-sizes-darwin-x64` (1,818,896 B / 98,627,040 B) artifacts matched the previously reported rows byte for byte, so the whole table now comes from measured artifacts; only linux-x64 keeps its earlier provenance because this run's Ubuntu job was still in progress when this was recorded, and Linux was already green at run 40879296537.
+
+All four acceptance boxes are now checked and Status is resolved. Ticket-file change only; no code, tests, build or push.
