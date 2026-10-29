@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +18,73 @@ async function until(probe: () => boolean): Promise<void> {
     if (Date.now() >= deadline) throw new Error("Windows process condition never became true");
     await Bun.sleep(20);
   }
+}
+
+async function removeLaunchFixture(root: string, snapshot: (phase: string) => Promise<void>, io = {
+  remove: () => rmSync(root, { recursive: true, force: true }),
+  now: () => performance.now(),
+  // Real Windows file locks must clear on the OS clock; fake timers cannot release them.
+  sleep: (ms: number) => Bun.sleep(ms),
+  report: (line: string) => console.error(line),
+}): Promise<void> {
+  const started = io.now();
+  let attempts = 0;
+  let delay = 100;
+  let original: unknown;
+  const lockError = (error: unknown) => `${String(error)} code=${error instanceof Error && "code" in error ? String(error.code) : "unknown"}`;
+  const diagnose = async (phase: string) => {
+    try { await snapshot(phase); }
+    catch (error) { io.report(`[windows-launch-cleanup] diagnostic-error phase=${phase} error=${String(error)}`); }
+  };
+  for (;;) {
+    attempts++;
+    try {
+      io.remove();
+      if (attempts > 1) io.report(`[windows-launch-cleanup] success root=${JSON.stringify(root)} attempts=${attempts} elapsedMs=${Math.round(io.now() - started)} budgetMs=10000`);
+      return;
+    } catch (error) {
+      if (attempts === 1) {
+        original = error;
+        io.report(`[windows-launch-cleanup] first-failure root=${JSON.stringify(root)} attempts=1 elapsedMs=${Math.round(io.now() - started)} error=${lockError(error)}`);
+        await diagnose("first-rm-failure");
+      }
+      const remaining = 10_000 - (io.now() - started);
+      if (remaining <= 0) {
+        await diagnose("terminal-rm-failure");
+        io.report(`[windows-launch-cleanup] terminal-failure root=${JSON.stringify(root)} attempts=${attempts} elapsedMs=${Math.round(io.now() - started)} budgetMs=10000 lastError=${lockError(error)}`);
+        throw original;
+      }
+      const sleepMs = Math.min(delay, remaining);
+      io.report(`[windows-launch-cleanup] retry attempts=${attempts} elapsedMs=${Math.round(io.now() - started)} delayMs=${Math.round(sleepMs)} error=${lockError(error)}`);
+      await io.sleep(sleepMs);
+      delay = Math.min(delay * 2, 1_000);
+    }
+  }
+}
+
+function launchProcessSnapshot(root: string, seeds: number[]) {
+  const observed = new Set(seeds.filter(pid => Number.isSafeInteger(pid) && pid > 0));
+  return async (phase: string): Promise<void> => {
+    // Retain witnessed descendants so a vanished intermediate parent cannot hide them later.
+    const script = [
+      "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'",
+      "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false",
+      `$seeds = @(${[...observed].join(",")})`,
+      "$all = @(Get-CimInstance Win32_Process -OperationTimeoutSec 1 | Select-Object ProcessId,ParentProcessId,Name,CommandLine)",
+      "$seen = @{}; foreach ($seed in $seeds) { $seen[[string]$seed] = $true }",
+      "do { $changed = $false; foreach ($item in $all) { if ($seen.ContainsKey([string]$item.ParentProcessId) -and !$seen.ContainsKey([string]$item.ProcessId)) { $seen[[string]$item.ProcessId] = $true; $changed = $true } } } while ($changed)",
+      "$matched = @($all | Where-Object { $seen.ContainsKey([string]$_.ProcessId) })",
+      "ConvertTo-Json -InputObject $matched -Compress -Depth 3",
+    ].join("\n");
+    const result = spawnSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+      cwd: os.tmpdir(), encoding: "utf8", timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 256 * 1024, windowsHide: true,
+    });
+    const label = `[windows-launch-cleanup] snapshot phase=${phase} root=${JSON.stringify(root)} rootPid=${seeds[0] ?? "unknown"} childPid=${seeds[1] ?? "unknown"} chainSeeds=${JSON.stringify([...observed])}`;
+    if (result.error || result.status !== 0) throw new Error(`${label} queryTimeoutMs=2000 error=${String(result.error ?? result.status)} stderr=${result.stderr}`);
+    const processes: { ProcessId: number; ParentProcessId: number; Name: string; CommandLine: string | null }[] = JSON.parse(result.stdout);
+    for (const item of processes) observed.add(item.ProcessId);
+    console.error(`${label} processes=${JSON.stringify(processes)} note=${phase === "before-command-completion" ? "launched child expected alive; root may already have exited" : phase === "before-pid-kill" ? "before test cleanup kills known PIDs" : "after known PID exit waits; remaining descendants are unexpected; ancestry is not proof of an open file handle"}`);
+  };
 }
 
 describe.skipIf(process.platform !== "win32")("Windows LocalExecutor", () => {
@@ -124,6 +192,7 @@ describe.skipIf(process.platform !== "win32")("Windows LocalExecutor", () => {
     const controller = new AbortController();
     let rootPid: number | undefined;
     let pid: number | undefined;
+    let snapshot: ((phase: string) => Promise<void>) | undefined;
     let completed = false;
     const launch = `$PID | Set-Content root.pid; $p = Start-Process -FilePath "$PSHOME\\powershell.exe" -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','${encoded}' -WorkingDirectory '${root.replaceAll("'", "''")}' -RedirectStandardOutput child.out -RedirectStandardError child.err -PassThru; $p.Id | Set-Content descendant.pid; Write-Output launch-complete`;
     const command = form === "named-end" ? `end { ${launch} }`
@@ -136,6 +205,9 @@ describe.skipIf(process.platform !== "win32")("Windows LocalExecutor", () => {
       pid = Number(readFileSync(path.join(root, "descendant.pid"), "utf8").trim());
       expect(Number.isSafeInteger(rootPid)).toBeTrue();
       expect(Number.isSafeInteger(pid)).toBeTrue();
+      snapshot = launchProcessSnapshot(root, [rootPid, pid]);
+      try { await snapshot("before-command-completion"); }
+      catch (error) { console.error(`[windows-launch-cleanup] diagnostic-error ${String(error)}`); }
       try {
         await until(() => !alive(rootPid!) && completed);
       } catch {
@@ -151,10 +223,14 @@ describe.skipIf(process.platform !== "win32")("Windows LocalExecutor", () => {
       await until(() => existsSync(path.join(root, "marker.txt")));
       expect(readFileSync(path.join(root, "marker.txt"), "utf8").trim()).toBe("survived");
     } finally {
+      const knownPids = ["root.pid", "descendant.pid", "child-ready.pid"].map(file => existsSync(path.join(root, file)) ? Number(readFileSync(path.join(root, file), "utf8").trim()) : 0);
+      rootPid ??= knownPids[0];
+      pid ??= knownPids[1];
+      snapshot ??= launchProcessSnapshot(root, [rootPid ?? 0, pid ?? 0, ...knownPids]);
+      try { await snapshot("before-pid-kill"); }
+      catch (error) { console.error(`[windows-launch-cleanup] diagnostic-error ${String(error)}`); }
       controller.abort();
-      for (const file of ["root.pid", "descendant.pid", "child-ready.pid"]) {
-        if (!existsSync(path.join(root, file))) continue;
-        const knownPid = Number(readFileSync(path.join(root, file), "utf8").trim());
+      for (const knownPid of new Set(knownPids)) {
         if (!Number.isSafeInteger(knownPid) || knownPid <= 0) continue;
         if (alive(knownPid)) {
           try { process.kill(knownPid, "SIGKILL"); } catch { /* already gone */ }
@@ -162,9 +238,9 @@ describe.skipIf(process.platform !== "win32")("Windows LocalExecutor", () => {
         await until(() => !alive(knownPid));
       }
       await pending;
-      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      await removeLaunchFixture(root, snapshot);
     }
-  }, 25_000);
+  }, 60_000);
 
   for (const trigger of ["cancel", "timeout", "shell-exits-first"] as const) {
     test(`${trigger} kills the root and detached descendants`, async () => {
