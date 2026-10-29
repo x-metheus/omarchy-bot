@@ -125,18 +125,15 @@ test("an unavailable health probe keeps the workspace closed and can be retried"
 });
 
 test("an untrusted paired Service certificate explains TLS recovery", async ({ page }) => {
-  await page.addInitScript(() => {
-    const fetch = window.fetch.bind(window);
-    window.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (new URL(String(input), location.href).pathname === "/api/health") {
-        const error = new Error("The Service TLS certificate is not trusted. Install a publicly trusted certificate, or connect through an SSH tunnel to loopback.");
-        error.name = "TlsCertificateError";
-        throw error;
-      }
-      return fetch(input, init);
-    }, fetch);
-  });
+  const release = Promise.withResolvers<void>();
+  await page.addInitScript(() => localStorage.setItem("omarchy-bot.service-url", "https://untrusted.example"));
+  await page.route("https://untrusted.example/api/health", async route => { await release.promise; await route.abort("failed"); });
   await page.goto("/");
+  await page.evaluate(() => {
+    const shell = globalThis.__OMARCHY_BOT_MEMORY_SHELL__!;
+    globalThis.__OMARCHY_BOT_SHELL__ = { ...shell, service: { ...shell.service, async certificateUntrusted() { return true; } } };
+  });
+  release.resolve();
   await expect(page.getByRole("alert")).toContainText("TLS certificate is not trusted");
   await expect(page.getByRole("alert")).toContainText("SSH tunnel");
   await expect(page.getByRole("navigation", { name: "Bot navigation" })).toHaveCount(0);

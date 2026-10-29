@@ -4,9 +4,11 @@ import { ApiClient, randomUuid } from "@omarchy-bot/api-client";
 import { isDeviceId } from "@omarchy-bot/domain";
 import { getShell } from "./shell.ts";
 import { deviceRevoked } from "./pairing.ts";
+import { serviceFetch } from "./serviceFetch.ts";
 export { randomUuid };
 
 export const api = new ApiClient({
+  fetch: serviceFetch,
   baseUrl: () => getShell().service.baseUrl(),
   deviceToken: () => getShell().service.deviceToken(),
   onUnauthorized: deviceRevoked,

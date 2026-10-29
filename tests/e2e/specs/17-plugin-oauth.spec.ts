@@ -4,6 +4,26 @@ import { expect, test } from "../fixtures.ts";
 
 const providerUrl = "https://accounts.google.com/o/oauth2/v2/auth?state=fixture";
 
+test("Skill instruction links open through the shell", async ({ page }) => {
+  const skill = { id: "example/docs/guide", name: "Documentation guide", sourceType: "github", installUrl: "https://github.com/example/docs", description: "Read documentation", source: "example/docs" };
+  await page.route("**/api/plugins", route => route.fulfill({ json: { revision: 0, cloudUrl: "https://publisher.example", providers: [], accounts: [], mcp: [], skills: [], nativeSkills: [] } }));
+  await page.route("**/api/plugins/catalog?*", route => route.fulfill({ json: { skills: [skill], total: 1, pageSize: 12 } }));
+  await page.route("**/api/plugins/catalog/detail?*", route => route.fulfill({ json: { ...skill, content: "Read [Documentation](https://example.com/docs) before continuing.", url: "https://skills.sh/example/docs/guide" } }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Plugins", exact: true }).click();
+  await page.evaluate(() => {
+    Reflect.set(window, "skillOpened", []);
+    globalThis.__OMARCHY_BOT_MEMORY_SHELL__!.browser.open = async (url: string) => { Reflect.get(window, "skillOpened").push(url); };
+  });
+  await page.getByRole("button", { name: "Skills", exact: true }).click();
+  await page.getByRole("button", { name: `View ${skill.name}`, exact: true }).click();
+  const conversation = page.url();
+  await page.getByRole("link", { name: "Documentation", exact: true }).click();
+  expect(await page.evaluate(() => Reflect.get(window, "skillOpened"))).toEqual(["https://example.com/docs"]);
+  expect(page.url()).toBe(conversation);
+});
+
+
 test("plugin consent uses the shell and events refresh connected accounts and allow retry", async ({ page }) => {
   const state: PluginStateDto = {
     revision: 0, cloudUrl: "https://publisher.example", mcp: [], skills: [], nativeSkills: [],

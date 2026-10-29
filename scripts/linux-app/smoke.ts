@@ -307,6 +307,11 @@ try {
   await wd("POST", `/session/${session}/element/${attachment}/click`, {});
   const downloaded = path.join(process.env.HOME!, "Downloads", attachmentName);
   await until("managed text attachment saved with actual authenticated contents", async () => existsSync(downloaded) && readFileSync(downloaded, "utf8") === attachmentContent || undefined, 10_000);
+  await wd("POST", `/session/${session}/element/${attachment}/click`, {});
+  const collision = path.join(process.env.HOME!, "Downloads", `1-${attachmentName}`);
+  await until("repeated attachment preserves filename with collision prefix", async () => existsSync(collision) && readFileSync(collision, "utf8") === attachmentContent || undefined, 10_000);
+  assert.equal(readFileSync(downloaded, "utf8"), attachmentContent, "original attachment is not overwritten");
+  await visible(`Attachment saved to ${collision}`);
   const openedUrls = readFileSync(path.join(run!, "opened-urls"), "utf8").trim().split("\n");
   assert.deepEqual(openedUrls, [browserUrl], "attachment URL/token never leaves through system browser");
   writeFileSync(path.join(evidence, "opened-urls.txt"), `${openedUrls.join("\n")}\n`);

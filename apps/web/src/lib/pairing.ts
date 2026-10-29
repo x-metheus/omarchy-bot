@@ -1,4 +1,5 @@
 import { getShell, type PairingRequest } from "./shell.ts";
+import { serviceFetch } from "./serviceFetch.ts";
 
 interface ConnectionState {
   paired: boolean;
@@ -7,10 +8,13 @@ interface ConnectionState {
   message?: string;
 }
 
+const startupStatus = getShell().service.status();
+const startupMessage = startupStatus.error ?? (startupStatus.revoked ? "This device was revoked. Pair again with a new code from the Service Host." : undefined);
 let state: ConnectionState = {
   paired: Boolean(getShell().service.deviceToken()),
   pending: false,
   serviceUrl: getShell().service.baseUrl(),
+  ...(startupMessage === undefined ? {} : { message: startupMessage }),
 };
 const listeners = new Set<() => void>();
 export const connectionState = (): ConnectionState => state;
@@ -27,6 +31,8 @@ export async function pairService({ serviceUrl, code }: PairingRequest): Promise
   if (state.pending) return;
   publish({ paired: false, pending: true, serviceUrl });
   try {
+    const startupError = getShell().service.status().error;
+    if (startupError) throw new Error(startupError);
     let address: URL;
     try { address = new URL(serviceUrl.trim()); } catch { throw new Error("Enter a valid HTTP or HTTPS Service address."); }
     if (!/^https?:$/.test(address.protocol) || address.username || address.password || address.pathname !== "/" || address.search || address.hash) {
@@ -34,7 +40,7 @@ export async function pairService({ serviceUrl, code }: PairingRequest): Promise
     }
     const loopback = address.hostname === "localhost" || address.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(address.hostname);
     if (address.protocol === "http:" && !loopback) throw new Error("Use HTTPS or a loopback HTTP address through an SSH tunnel.");
-    const response = await fetch(`${address.origin}/api/pairing/exchange`, {
+    const response = await serviceFetch(`${address.origin}/api/pairing/exchange`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ code: code.trim() }),

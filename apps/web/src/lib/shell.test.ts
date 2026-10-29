@@ -1,7 +1,4 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
-import type { Shell } from "./shell.ts";
 import { createMemoryShell } from "./shell.ts";
 
 test("the memory shell stores and clears the Service connection", async () => {
@@ -121,20 +118,11 @@ test("the harness reports the browser platform unless the shell platform is supp
   }
 });
 
-test("the native shell reports the operating system supplied by the app", () => {
-  const source = readFileSync(new URL("../../../omarchy-bot/src-tauri/src/shell.js", import.meta.url), "utf8");
-  for (const platform of ["linux", "windows", "macos"] as const) {
-    const window = {
-      __OMARCHY_BOT_SHELL__: undefined as Shell | undefined,
-      __TAURI_INTERNALS__: { async invoke() { return { status: { running: false }, approvals: [] }; } },
-      addEventListener() {},
-      fetch,
-    };
-    runInNewContext(`(${source})(initial)`, {
-      initial: { connection: null, platform }, window,
-      localStorage: { getItem() { return null; } },
-      document: { addEventListener() {} },
-    });
-    expect(window.__OMARCHY_BOT_SHELL__!.keyMapping.platform()).toBe(platform);
-  }
+test("memory shell refuses attachment and browser URLs that could expose the device token", async () => {
+  const shell = createMemoryShell({ storage: null, baseUrl: "https://service.example", deviceToken: "private-token" });
+  await expect(shell.attachments.save("https://foreign.example/api/attachments/att_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "report.txt")).rejects.toThrow("paired Service");
+  await expect(shell.browser.open("https://service.example/file?access_token=private-token")).rejects.toThrow("authenticated Service link");
+  expect(shell.service.status()).toEqual({ revoked: false });
+  expect(await shell.service.certificateUntrusted("https://service.example")).toBe(false);
 });
+

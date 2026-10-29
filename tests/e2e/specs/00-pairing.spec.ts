@@ -78,6 +78,43 @@ test("native keychain failures explain recovery after the code is exchanged", as
   expect(await page.evaluate(() => globalThis.__OMARCHY_BOT_SHELL__!.service.deviceToken())).toBeUndefined();
 });
 
+test("startup keychain failure blocks exchange without consuming the pairing code", async ({ page }) => {
+  const issued = await issueCode();
+  const exchanges: string[] = [];
+  page.on("request", request => { if (request.url().includes("/api/pairing/exchange")) exchanges.push(request.url()); });
+  await page.goto("/");
+  await page.getByRole("heading", { name: "Add Service" }).waitFor();
+  await page.evaluate(() => {
+    const shell = globalThis.__OMARCHY_BOT_MEMORY_SHELL__!;
+    globalThis.__OMARCHY_BOT_SHELL__ = { ...shell, service: { ...shell.service, status: () => ({ error: "Unlock your OS keychain and reopen Omarchy Bot.", revoked: false }) } };
+  });
+  await page.getByLabel("Service address").fill(SERVICE_ORIGIN);
+  await page.getByLabel("Pairing code").fill(issued.code);
+  await page.getByRole("button", { name: "Pair", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Unlock your OS keychain");
+  expect(exchanges).toEqual([]);
+  await page.reload();
+  await page.getByLabel("Service address").fill(SERVICE_ORIGIN);
+  await page.getByLabel("Pairing code").fill(issued.code);
+  await page.getByRole("button", { name: "Pair", exact: true }).click();
+  await expect(page.getByRole("button", { name: "New bot", exact: true }).first()).toBeVisible();
+});
+
+test("pairing diagnoses an untrusted certificate through the shell", async ({ page }) => {
+  await page.route("https://untrusted.example/**", route => route.abort("failed"));
+  await page.goto("/");
+  await page.getByRole("heading", { name: "Add Service" }).waitFor();
+  await page.evaluate(() => {
+    const shell = globalThis.__OMARCHY_BOT_MEMORY_SHELL__!;
+    globalThis.__OMARCHY_BOT_SHELL__ = { ...shell, service: { ...shell.service, async certificateUntrusted() { return true; } } };
+  });
+  await page.getByLabel("Service address").fill("https://untrusted.example");
+  await page.getByLabel("Pairing code").fill("TLSCODE1");
+  await page.getByRole("button", { name: "Pair", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("TLS certificate is not trusted");
+  await expect(page.getByRole("alert")).toContainText("SSH tunnel");
+});
+
 test("shell pairing intake pairs without entering an address or code", async ({ page }) => {
   const issued = await issueCode();
   await page.goto("/");

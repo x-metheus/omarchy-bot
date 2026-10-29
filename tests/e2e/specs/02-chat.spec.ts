@@ -83,6 +83,23 @@ async function expectCardAboveComposer(page: Page): Promise<void> {
 }
 
 test.describe("chat through a bot", () => {
+  test("conversation links open through the shell without navigating the app", async ({ page }) => {
+    await page.goto("/");
+    await createBot(page, "External Links Bot");
+    await page.evaluate(() => {
+      Reflect.set(window, "openedUrls", []);
+      const shell = globalThis.__OMARCHY_BOT_MEMORY_SHELL__!;
+      globalThis.__OMARCHY_BOT_SHELL__ = { ...shell, browser: { async open(url: string) { Reflect.get(window, "openedUrls").push(url); } } };
+    });
+    await send(page, "say: [Read documentation](https://example.com/docs)");
+    const link = page.getByRole("link", { name: "Read documentation" });
+    await expect(link).toBeVisible();
+    const conversation = page.url();
+    await link.click();
+    expect(await page.evaluate(() => Reflect.get(window, "openedUrls"))).toEqual(["https://example.com/docs"]);
+    expect(page.url()).toBe(conversation);
+  });
+
   test("owns the Skill commands popup and sends a multiword draft across input roles", async ({ page }) => {
     await page.goto("/");
     await createBot(page, "Composer Roles Bot");
