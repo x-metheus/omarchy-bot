@@ -12,7 +12,14 @@ const windows = process.platform === "win32";
 // Real Sidecar processes and filesystem readiness cannot advance with fake timers.
 async function until(probe: () => boolean, message: string): Promise<void> {
   const deadline = Date.now() + 15_000;
-  while (!probe()) {
+  for (;;) {
+    try {
+      if (probe()) return;
+    } catch (error) {
+      // Windows can briefly deny reads while PowerShell finishes writing a readiness file.
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      if (code !== "EBUSY" && code !== "EPERM") throw error;
+    }
     if (Date.now() >= deadline) throw new Error(message);
     await Bun.sleep(20);
   }
