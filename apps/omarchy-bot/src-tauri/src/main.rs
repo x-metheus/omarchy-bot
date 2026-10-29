@@ -1,7 +1,12 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+#[cfg(target_os = "linux")]
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -89,7 +94,10 @@ fn start_sidecar(app: &tauri::AppHandle, connection: &Connection) -> Result<(), 
     service.set_scheme(if service.scheme() == "https" { "wss" } else { "ws" }).map_err(|_| "Invalid Sidecar Service URL.")?;
     let executable = std::env::current_exe().map_err(|_| "Could not locate bundled Local Sidecar.")?;
     let binary = executable.with_file_name(if cfg!(windows) { "omarchy-bot-sidecar.exe" } else { "omarchy-bot-sidecar" });
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW: the Sidecar communicates through pipes.
+    let mut child = command
         .env("OMARCHY_BOT_SERVICE_URL", service.as_str())
         .env("OMARCHY_BOT_DEVICE_ID", &device_id)
         .env("OMARCHY_BOT_DEVICE_TOKEN", &connection.token)
@@ -201,7 +209,8 @@ fn pairing_request(value: &str) -> Option<PairingRequest> {
 }
 
 fn keychain_error(error: keyring::Error) -> String {
-    format!("Could not access the OS keychain: {error}. Unlock your Secret Service keyring and try again; credentials were not discarded.")
+    let recovery = if cfg!(windows) { "Check Windows Credential Manager and try again" } else { "Unlock your Secret Service keyring and try again" };
+    format!("Could not access the OS keychain: {error}. {recovery}; credentials were not discarded.")
 }
 
 fn keychain() -> Result<keyring::Entry, String> {
@@ -263,6 +272,44 @@ fn open_browser(app: tauri::AppHandle, value: String) -> Result<(), String> {
     app.opener().open_url(url.as_str(), None::<&str>).map_err(|error| format!("Could not open the system browser: {error}"))
 }
 
+#[cfg(target_os = "linux")]
+fn probe_certificate(url: &Url) -> Result<bool, String> {
+    let client = gio::SocketClient::new();
+    client.set_tls(true);
+    client.set_timeout(10);
+    Ok(match client.connect_to_uri(url.as_str(), 443, gio::Cancellable::NONE) {
+        Ok(stream) => { let _ = stream.close(gio::Cancellable::NONE); false },
+        Err(error) => error.matches(gio::TlsError::BadCertificate),
+    })
+}
+
+#[cfg(windows)]
+fn probe_certificate(url: &Url) -> Result<bool, String> {
+    use schannel::{schannel_cred::{Direction, SchannelCred}, tls_stream};
+    use std::net::TcpStream;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::time::Duration;
+
+    let timeout = Duration::from_secs(10);
+    let addresses = match url.socket_addrs(|| Some(443)) {
+        Ok(addresses) => addresses,
+        Err(_) => return Ok(false),
+    };
+    let Some(stream) = addresses.iter().find_map(|address| TcpStream::connect_timeout(address, timeout).ok()) else { return Ok(false); };
+    stream.set_read_timeout(Some(timeout)).and_then(|_| stream.set_write_timeout(Some(timeout)))
+        .map_err(|_| "Could not configure the TLS certificate check.")?;
+    let credentials = SchannelCred::builder().acquire(Direction::Outbound)
+        .map_err(|_| "Could not initialize Windows TLS certificate validation.")?;
+    let untrusted = Arc::new(AtomicBool::new(false));
+    let validation_failed = Arc::clone(&untrusted);
+    let host = url.host_str().expect("validated Service host").trim_start_matches('[').trim_end_matches(']');
+    let _ = tls_stream::Builder::new().domain(host).verify_callback(move |validation| {
+        // Observe Windows trust/hostname validation without accepting an invalid certificate.
+        validation.result().inspect_err(|_| validation_failed.store(true, Ordering::Relaxed))
+    }).connect(credentials, stream);
+    Ok(untrusted.load(Ordering::Relaxed))
+}
+
 #[tauri::command]
 async fn certificate_untrusted(state: tauri::State<'_, ShellState>, origin: String) -> Result<bool, String> {
     let url = service_origin(&origin)?;
@@ -270,15 +317,8 @@ async fn certificate_untrusted(state: tauri::State<'_, ShellState>, origin: Stri
     if state.origin.as_ref().is_some_and(|paired| paired != &url.origin().ascii_serialization()) {
         return Err("The certificate probe is restricted to the paired Service.".into());
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        let client = gio::SocketClient::new();
-        client.set_tls(true);
-        client.set_timeout(10);
-        match client.connect_to_uri(url.as_str(), 443, gio::Cancellable::NONE) {
-            Ok(stream) => { let _ = stream.close(gio::Cancellable::NONE); false },
-            Err(error) => error.matches(gio::TlsError::BadCertificate),
-        }
-    }).await.map_err(|_| "The TLS certificate check failed.".into())
+    tauri::async_runtime::spawn_blocking(move || probe_certificate(&url))
+        .await.map_err(|_| "The TLS certificate check failed.")?
 }
 
 #[tauri::command]
@@ -340,6 +380,10 @@ fn main() {
     let connection = if incoming.is_some() { None } else { stored };
     let origin = connection.as_ref().map(|connection| connection.base_url.clone());
     let mut context = tauri::generate_context!();
+    #[cfg(windows)]
+    if let Some(directory) = std::env::var_os("OMARCHY_BOT_SMOKE_DIR") {
+        context.config_mut().app.app_directories_override = Some(tauri::utils::config::AppDirectoriesOverride::Root(directory.into()));
+    }
     let mut policy = context.config().app.security.csp.clone().expect("CSP configured").to_string();
     let network = if let Some(origin) = &origin {
         let mut socket = Url::parse(origin).expect("validated Service origin");
@@ -367,12 +411,13 @@ fn main() {
             if let Some(connection) = &connection {
                 if let Err(error) = start_sidecar(app.handle(), connection) { eprintln!("{error}"); }
             }
-            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked });
+            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "platform": std::env::consts::OS });
             let script = format!("({})({});", include_str!("shell.js"), initial);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Omarchy Bot").inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)
                 .initialization_script(script)
-                .on_navigation(|url| matches!(url.scheme(), "tauri") && url.host_str() == Some("localhost"))
+                .on_navigation(|url| url.username().is_empty() && url.password().is_none() && url.port().is_none()
+                    && matches!((url.scheme(), url.host_str()), ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost"))))
                 .build()?;
             Ok(())
         })

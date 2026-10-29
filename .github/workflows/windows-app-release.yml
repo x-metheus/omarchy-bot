@@ -1,0 +1,83 @@
+name: windows-app-release
+# Ticket 11 owns app-v*/app-latest. Run after its Linux release exists, on that tag.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing app-vX.Y.Z version (select that tag as the workflow ref)'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: app-release
+  cancel-in-progress: false
+jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    environment: app-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require same-tag updater integration and existing Linux release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$APP_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$GITHUB_REF_NAME" == "app-v$APP_VERSION" ]]
+          test -f scripts/linux-app/build-config.ts
+          grep -q '^tauri-plugin-updater *=' apps/omarchy-bot/src-tauri/Cargo.toml
+          gh release download "$GITHUB_REF_NAME" --pattern latest.json --dir .lane/release-preflight
+          jq --exit-status --arg version "$APP_VERSION" '.version == $version and .platforms["linux-x86_64"] != null and .platforms["windows-x86_64"] == null' .lane/release-preflight/latest.json
+  smoke:
+    needs: preflight
+    uses: ./.github/workflows/windows-webview-smoke.yml
+    with:
+      release: true
+      version: ${{ inputs.version }}
+    secrets: inherit
+  publish:
+    needs: smoke
+    runs-on: ubuntu-22.04
+    environment: app-release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      APP_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-webview2-artifacts-and-evidence
+          path: .lane/windows-release
+      - name: Merge Windows updater entry and preserve Linux release notes
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --pattern latest.json --dir .lane/linux-release
+          gh release download app-latest --pattern latest.json --dir .lane/current-release
+          # Do not overwrite a newer rolling manifest or mix app versions.
+          jq --exit-status --arg version "$APP_VERSION" '.version == $version' .lane/current-release/latest.json
+          artifact=$(find .lane/windows-release -name '*-setup.exe' -type f)
+          [[ -n "$artifact" && $(printf '%s\n' "$artifact" | wc -l) == 1 ]]
+          # This workflow produces unsigned previews; Authenticode can be added independently.
+          bun scripts/windows-app/release.ts .lane/linux-release/latest.json "$artifact" .lane/publish
+          gh release view "$GITHUB_REF_NAME" --json body --jq .body > .lane/publish/combined-notes.txt
+          printf '\n\n' >> .lane/publish/combined-notes.txt
+          cat .lane/publish/release-notes.txt >> .lane/publish/combined-notes.txt
+          gh release upload "$GITHUB_REF_NAME" .lane/publish/*-setup.exe .lane/publish/*.sig .lane/publish/*.sha256
+          gh release upload "$GITHUB_REF_NAME" .lane/publish/latest.json --clobber
+          gh release edit "$GITHUB_REF_NAME" --prerelease --notes-file .lane/publish/combined-notes.txt
+          gh release upload app-latest .lane/publish/latest.json --clobber
+      - name: Verify published Windows updater entry and bytes
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --pattern '*-setup.exe*' --pattern latest.json --dir .lane/published
+          (cd .lane/published && sha256sum --check ./*.sha256)
+          cmp .lane/publish/latest.json .lane/published/latest.json
+          gh release download app-latest --pattern latest.json --dir .lane/promoted
+          cmp .lane/publish/latest.json .lane/promoted/latest.json
