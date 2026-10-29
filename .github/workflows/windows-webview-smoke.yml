@@ -1,0 +1,141 @@
+name: windows-webview-smoke
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+      version:
+        type: string
+        default: ''
+    secrets:
+      WINDOWS_SMOKE_HOST_SECRET:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: windows-real-service-smoke
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: windows-2022
+    environment: ${{ inputs.release && 'app-release' || 'windows-smoke' }}
+    timeout-minutes: 90
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.lane/windows-app/cargo
+      APP_VERSION: ${{ inputs.version }}
+      TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+      TAURI_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/download/app-latest/latest.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - run: bun install --frozen-lockfile
+      - name: Install private Tauri CLI
+        shell: pwsh
+        run: |
+          cargo install tauri-cli --version 2.12.4 --locked --root "$pwd/.lane/windows-app/tools"
+          if ($LASTEXITCODE) { throw 'tauri-cli installation failed' }
+          "$pwd/.lane/windows-app/tools/bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Build packaged Windows application
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          RELEASE_BUILD: ${{ inputs.release }}
+        run: ./scripts/windows-app/build.ps1 -Release:($env:RELEASE_BUILD -eq 'true')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-app-build
+          path: |
+            .lane/dist/*
+            .lane/windows-app/build-result.json
+          if-no-files-found: error
+  service:
+    # Dedicated disposable runner; never run untrusted PR code here.
+    runs-on: [self-hosted, linux, x64, windows-smoke-service]
+    environment: windows-smoke
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Start real disposable Service and Sway fixture
+        env:
+          WINDOWS_SMOKE_HOST_SECRET: ${{ secrets.WINDOWS_SMOKE_HOST_SECRET }}
+        run: bash scripts/windows-app/linux-service.sh
+  webview2:
+    needs: [service, build]
+    runs-on: windows-2022
+    environment: windows-smoke
+    timeout-minutes: 90
+    env:
+      WINDOWS_SMOKE_SERVICE_ORIGIN: ${{ vars.WINDOWS_SMOKE_SERVICE_ORIGIN }}
+      WINDOWS_SMOKE_UNTRUSTED_ORIGIN: ${{ vars.WINDOWS_SMOKE_UNTRUSTED_ORIGIN }}
+      WINDOWS_SMOKE_X11_FIXTURE: /src/.lane/windows-app/x11-fixture
+      WINDOWS_SMOKE_HOST_SECRET: ${{ secrets.WINDOWS_SMOKE_HOST_SECRET }}
+      CARGO_HOME: ${{ github.workspace }}/.lane/windows-app/cargo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-app-build
+          path: .lane
+      - name: Locate downloaded installer on this runner
+        shell: pwsh
+        run: |
+          $file = '.lane/windows-app/build-result.json'
+          $build = Get-Content $file -Raw | ConvertFrom-Json
+          $build.artifact = (Resolve-Path (Join-Path '.lane/dist' ([IO.Path]::GetFileName($build.artifact)))).Path
+          $build | ConvertTo-Json | Set-Content $file
+      - name: Install private Tauri tools and matching Edge WebDriver
+        shell: pwsh
+        run: |
+          cargo install tauri-driver --version 2.1.0 --locked --root "$pwd/.lane/windows-app/tools"
+          if ($LASTEXITCODE) { throw 'tauri-driver installation failed' }
+          $edge = "${env:ProgramFiles(x86)}/Microsoft/Edge/Application/msedge.exe"
+          $version = (Get-Item $edge).VersionInfo.ProductVersion
+          Invoke-WebRequest "https://msedgedriver.microsoft.com/$version/edgedriver_win64.zip" -OutFile .lane/windows-app/edgedriver.zip
+          Expand-Archive .lane/windows-app/edgedriver.zip .lane/windows-app/tools/bin -Force
+          "$pwd/.lane/windows-app/tools/bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Run complete installed WebView2 suite
+        shell: pwsh
+        run: ./scripts/windows-app/smoke.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-webview2-artifacts-and-evidence
+          path: |
+            .lane/dist/*
+            .lane/windows-app/build-result.json
+            .lane/windows-app/evidence/
+          if-no-files-found: error
+  cleanup:
+    needs: [service, webview2]
+    if: always()
+    runs-on: [self-hosted, linux, x64, windows-smoke-service]
+    environment: windows-smoke
+    timeout-minutes: 10
+    steps:
+      - name: Stop only this run's disposable Service
+        run: bash scripts/windows-app/linux-service.sh stop
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-linux-service-evidence
+          path: .lane/windows-app/evidence/
+          if-no-files-found: error

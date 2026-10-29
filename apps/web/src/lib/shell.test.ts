@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import type { Shell } from "./shell.ts";
 import { createMemoryShell } from "./shell.ts";
 
 test("the memory shell stores and clears the Service connection", async () => {
@@ -33,6 +36,20 @@ test("memory pairing intake and approvals unsubscribe and exchange decisions", a
   expect(await second).toBe("allow-once");
   expect(approvals).toEqual(["pwd"]);
   await expect(shell.localSidecar.decide("unknown", "always")).rejects.toThrow("Unknown");
+});
+
+test("dismissed memory approvals fail closed and dismissal listeners unsubscribe", async () => {
+  const shell = createMemoryShell({ storage: null });
+  const dismissed: string[] = [];
+  const stop = shell.localSidecar.onApprovalDismiss(jobId => dismissed.push(jobId));
+  const decision = shell.receiveApproval({ jobId: "cancelled", hostname: "laptop", action: "run", command: "pwd" });
+  shell.receiveApprovalDismiss("cancelled");
+  expect(await decision).toBe("deny");
+  expect(dismissed).toEqual(["cancelled"]);
+  await expect(shell.localSidecar.decide("cancelled", "always")).rejects.toThrow("Unknown");
+  stop();
+  shell.receiveApprovalDismiss("other");
+  expect(dismissed).toEqual(["cancelled"]);
 });
 
 test("memory shell reports Sidecar and platform state and remembers key mapping", async () => {
@@ -101,5 +118,23 @@ test("the harness reports the browser platform unless the shell platform is supp
   } finally {
     if (original === undefined) Reflect.deleteProperty(globalThis, "navigator");
     else Object.defineProperty(globalThis, "navigator", original);
+  }
+});
+
+test("the native shell reports the operating system supplied by the app", () => {
+  const source = readFileSync(new URL("../../../omarchy-bot/src-tauri/src/shell.js", import.meta.url), "utf8");
+  for (const platform of ["linux", "windows", "macos"] as const) {
+    const window = {
+      __OMARCHY_BOT_SHELL__: undefined as Shell | undefined,
+      __TAURI_INTERNALS__: { async invoke() { return { status: { running: false }, approvals: [] }; } },
+      addEventListener() {},
+      fetch,
+    };
+    runInNewContext(`(${source})(initial)`, {
+      initial: { connection: null, platform }, window,
+      localStorage: { getItem() { return null; } },
+      document: { addEventListener() {} },
+    });
+    expect(window.__OMARCHY_BOT_SHELL__!.keyMapping.platform()).toBe(platform);
   }
 });

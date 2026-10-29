@@ -4,10 +4,12 @@ on:
     paths:
       - "apps/omarchy-bot/**"
       - "apps/web/**"
+      - "apps/sidecar/**"
       - "apps/daemon/**"
       - "packages/**"
       - "scripts/linux-app/**"
       - "scripts/build-linux-app.sh"
+      - "scripts/build-sidecar.ts"
       - "scripts/smoke-linux-app.sh"
       - "scripts/sway-runtime/**"
       - "scripts/build-sway-runtime.sh"

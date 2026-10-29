@@ -1,0 +1,40 @@
+name: windows-app-release
+# Builds and exercises Windows; app-release owns complete publication and promotion.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Stable X.Y.Z (select the matching app-vX.Y.Z tag)'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: windows-app-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require same-tag updater integration
+        env:
+          APP_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$APP_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$GITHUB_REF_NAME" == "app-v$APP_VERSION" ]]
+          test -f scripts/linux-app/build-config.ts
+          grep -q '^tauri-plugin-updater *=' apps/omarchy-bot/src-tauri/Cargo.toml
+  smoke:
+    needs: preflight
+    uses: ./.github/workflows/windows-webview-smoke.yml
+    with:
+      release: true
+      version: ${{ inputs.version }}
+    secrets: inherit

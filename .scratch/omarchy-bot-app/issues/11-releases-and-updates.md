@@ -29,3 +29,19 @@ Verification in this worktree:
 External limits: real GitHub publication, protection/promotion, an ordinary FUSE-mounted AppImage update, and macOS/Windows behavior were not exercised here; packaged macOS/Windows support belongs to tickets 14/15. The user accepted these as documented external verification for resolving this ticket.
 
 Repeatability: the Pi environment was fixed without host changes by provisioning the browser under the worktree's private `.lane/browser` (the container-pack interpreter path is unusable on the host) and using a private `PI_CODING_AGENT_DIR` with `kimi-k2.7-code`; no host settings were modified.
+
+### Integration follow-up (merge of local `linux-service` 575f5ce1)
+
+Merged the latest local `linux-service` branch into this app-release branch and retained the bundled Sidecar and native platform behavior (Sidecar process ownership/launch, Windows executor/output handling, native shell seams). `app-release.yml` now drives one immutable `app-vX.Y.Z` release covering all four updater platforms — Linux AppImage plus macOS arm64/x64 DMGs and `.app.tar.gz` plus Windows NSIS — under one version, one shared `app-release` signing environment, and four platform map entries from the same signed version. Fixed version propagation from the tag to every job, secret/variable placement, release concurrency, and draft publishing: publish bytes are verified against the draft release assets, the release is completed only after verification, and `app-latest` is promoted only to a strictly newer version. `Cargo.lock` was regenerated in the pinned container (`CARGO_HOME=/src/.lane/linux-app/cargo`); Windows updater schema and Windows icons/config are included.
+
+Local verification after the merge:
+- `bun run typecheck`: exit 0 in 6.37s.
+- Targeted native-shell, release CLI, Sidecar, shell, and boundaries tests: 17 pass, 2 Windows-only skips, 0 fail, 122 assertions.
+- Protocol-mismatch suite: 18 pass in 20.6s.
+- Linux container release build: exit 0 in 70.94s with the bundled Sidecar.
+- General packaged WebKit smoke: 26 pass in 46.13s.
+- Signed updater smoke: 6 pass in 139.83s.
+- Checksum-verified portable `actionlint` 1.7.12 over all workflows: exit 0.
+- Six build-config guard checks and Bash syntax checks passed.
+
+Independent review returned CLEAN (confidence 0.88) with no source changes required. Real macOS/Windows execution and real GitHub publication remain external, and tickets 14/15 evidence stays pending; their criteria are untouched. The full Bun/Pi suite was not requested or run for this merge. Ticket remains resolved; the historical evidence above is preserved unchanged.
