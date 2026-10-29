@@ -18,6 +18,8 @@ export HOME=$session/home XDG_RUNTIME_DIR=$session/run TMPDIR=$session/tmp
 export XDG_CONFIG_HOME=$HOME/.config XDG_DATA_HOME=$HOME/.local/share XDG_CACHE_HOME=$HOME/.cache
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 printf 'XDG_DOWNLOAD_DIR="$HOME/Downloads"\n' > "$XDG_CONFIG_HOME/user-dirs.dirs"
+printf '0123456789abcdef0123456789abcdef\n' > "$session/app-machine-id"
+export OMARCHY_BOT_MACHINE_ID_FILE=$session/app-machine-id
 mkdir -p "$session/bin"
 cat > "$session/bin/xdg-open" <<'EOF'
 #!/bin/sh
