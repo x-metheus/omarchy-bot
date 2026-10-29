@@ -16,3 +16,4 @@ RUN cargo install tauri-driver --version 2.1.0 --locked \
 ARG linux_app_uid=1000
 RUN getent passwd "$linux_app_uid" >/dev/null || useradd --uid "$linux_app_uid" --no-create-home --shell /bin/bash omarchy
 WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends fuse && rm -rf /var/lib/apt/lists/*
