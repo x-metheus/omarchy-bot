@@ -9,7 +9,7 @@
 Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
 - [ ] Notarized dmgs for arm64 and x64 open without Gatekeeper warnings
-- [ ] darwin Sidecar binaries pass the Local Sidecar suite on a macOS CI runner
+- [x] darwin Sidecar binaries pass the Local Sidecar suite on a macOS CI runner
 - [ ] Keychain storage and deep links work on macOS
 - [ ] The WKWebView checklist exists and its run is recorded under this ticket's Comments
 - [ ] macOS builds are published with updater entries
@@ -37,3 +37,5 @@ Independent review corrections: the builder now requests **`app,dmg`** so pinned
 Post-review targeted checks: final locked Linux release compile passed (11.68s); `bash -n` and actionlint accepted the corrected script/workflow; final Tauri schema accepted the complete updater public-key overlay; plist parsing/assertions confirmed exactly the three loopback HTTP exception entries, and the actual build entrypoint rejected updater signing with no public key. These changes affect macOS-only paths and packaging; the earlier Linux WebKitGTK smoke and complete Bun results are retained without a broad rerun.
 
 Final disposition: implementation and clean review are complete, and all evidence above is retained. This ticket stays **needs-info** pending native macOS runner/signing/notarization evidence and ticket 11's publication and runtime-updater work, neither of which is available in this session. The Pi-only model failure is explicitly non-blocking. All five acceptance checkboxes remain unchecked until their native criteria are observed.
+
+Integrator CI evidence (2026-10-29, draft PR #10 at 0e90a17): `sidecar-conformance` run 40807022457 passed Local Sidecar on `macos-15` (arm64) and `macos-15-intel` (x64); `macos-app` run 40807022506 built unsigned ad-hoc dmgs for aarch64 and x64. Still open: notarized/signed dmgs and Gatekeeper first-open (need Apple Developer ID and notarization secrets), Keychain and deep links on a real Mac, the WKWebView checklist run, and publication with updater entries (ticket 11).
