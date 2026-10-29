@@ -243,11 +243,34 @@ test("production Sidecar cancels a remembered job and its descendant on this OS"
 test("production Sidecar enforces TLS trust and pairing before an approved wss command", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "sidecar-process-tls-"));
   try {
+    const ca = path.join(root, "ca.pem");
+    const caKey = path.join(root, "ca-key.pem");
     const cert = path.join(root, "cert.pem");
     const key = path.join(root, "key.pem");
+    const csr = path.join(root, "server.csr");
+    const extensions = path.join(root, "extensions.cnf");
+    writeFileSync(extensions, `[req]
+distinguished_name = dn
+[dn]
+CN = localhost
+[ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+[server]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = IP:127.0.0.1,DNS:localhost
+`);
     const openssl = Bun.which("openssl") ?? (windows ? path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "usr", "bin", "openssl.exe") : "openssl");
-    const generated = Bun.spawnSync([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1"]);
-    if (generated.exitCode !== 0) throw new Error(`TLS fixture generation failed: ${generated.stderr.toString()}`);
+    for (const args of [
+      ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-keyout", caKey, "-out", ca, "-days", "1", "-subj", "/CN=Sidecar test CA", "-config", extensions, "-extensions", "ca"],
+      ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", csr, "-subj", "/CN=localhost", "-config", extensions],
+      ["x509", "-req", "-in", csr, "-CA", ca, "-CAkey", caKey, "-set_serial", "2", "-sha256", "-days", "1", "-out", cert, "-extfile", extensions, "-extensions", "server"],
+    ]) {
+      const generated = Bun.spawnSync([openssl, ...args]);
+      if (generated.exitCode !== 0) throw new Error(`TLS fixture generation failed: ${generated.stderr.toString()}`);
+    }
     const token = "tls+paired/token?secret";
     const frames: DeviceClientFrame[] = [];
     const server = Bun.serve({
@@ -272,7 +295,7 @@ test("production Sidecar enforces TLS trust and pairing before an approved wss c
     });
     const env = { ...process.env, OMARCHY_BOT_SERVICE_URL: `wss://127.0.0.1:${server.port}`, OMARCHY_BOT_DEVICE_ID: DEVICE, OMARCHY_BOT_DEVICE_TOKEN: token, OMARCHY_BOT_SIDECAR_ROOT: root };
     try {
-      for (const credentials of [{ NODE_EXTRA_CA_CERTS: "", OMARCHY_BOT_DEVICE_TOKEN: token }, { NODE_EXTRA_CA_CERTS: cert, OMARCHY_BOT_DEVICE_TOKEN: "unpaired" }]) {
+      for (const credentials of [{ NODE_EXTRA_CA_CERTS: "", OMARCHY_BOT_DEVICE_TOKEN: token }, { NODE_EXTRA_CA_CERTS: ca, OMARCHY_BOT_DEVICE_TOKEN: "unpaired" }]) {
         const rejected = Bun.spawn(command, { stdout: "pipe", stderr: "pipe", env: { ...env, ...credentials } });
         const output = Promise.all([new Response(rejected.stdout).text(), new Response(rejected.stderr).text()]);
         try {
@@ -286,13 +309,13 @@ test("production Sidecar enforces TLS trust and pairing before an approved wss c
           await output;
         }
       }
-      const child = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...env, NODE_EXTRA_CA_CERTS: cert } });
+      const child = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...env, NODE_EXTRA_CA_CERTS: ca } });
       let stdout = "";
       const output = (async () => { for await (const chunk of child.stdout) stdout += new TextDecoder().decode(chunk); })();
       const errors = new Response(child.stderr).text();
       try {
         await until(() => stdout.includes('"type":"ask"') || child.exitCode !== null, "TLS Sidecar never asked");
-        expect(child.exitCode).toBeNull();
+        if (child.exitCode !== null) throw new Error(`Trusted TLS Sidecar exited ${child.exitCode} before approval: ${(await errors).replaceAll(token, "<REDACTED>").replaceAll(encodeURIComponent(token), "<REDACTED>")}`);
         expect(frames[0]).toMatchObject({ type: "register", os: windows ? "windows" : process.platform === "darwin" ? "macos" : "linux", shell: windows ? "powershell-5.1" : "posix-sh" });
         child.stdin.write(`${JSON.stringify({ type: "allow-once", jobId: "tls-smoke" })}\n`);
         await until(() => frames.some((frame) => frame.type === "local.result"), "TLS command never returned");

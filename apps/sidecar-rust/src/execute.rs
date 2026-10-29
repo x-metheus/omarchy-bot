@@ -195,6 +195,8 @@ pub async fn execute(job: Job, root: PathBuf, os: Os, cancel: watch::Receiver<bo
             let start = confined(job.path.as_deref().unwrap_or("."), &root)?;
             #[cfg(windows)]
             let start = crate::windows::long_path(&start)?;
+            #[cfg(windows)]
+            let root = crate::windows::long_path(&root)?;
             search(query, &root, &start, os)?
         }
         Action::Read => truncate(

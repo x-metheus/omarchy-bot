@@ -6,7 +6,7 @@ The runtime accepts `OMARCHY_BOT_SERVICE_URL` (`ws` or `wss`, without URL creden
 
 Linux/macOS execute `/bin/sh` in a private process group with an stdin anchor, TERM grace, and KILL escalation. Windows executes Windows PowerShell 5.1 inside a kill-on-close Job Object; user code is gated until assignment. Normal PowerShell completion releases successfully launched applications, while explicit exit keeps descendants cancellable. File actions retain the TypeScript lexical confinement, per-OS credential denylists (including expanded Windows short paths), compositor refusals, and UTF-16 character result limits. This is the same approval boundary as the TypeScript runtime; the shell command itself is not an OS sandbox.
 
-TLS uses native platform trust on Windows/macOS and statically linked vendored OpenSSL on Linux. `NODE_EXTRA_CA_CERTS` adds PEM roots for the existing private-CA contract. No dynamic OpenSSL library is required on Linux. Certificate validation and hostname verification remain enabled.
+TLS uses native platform trust on Windows/macOS and statically linked vendored OpenSSL on Linux. `NODE_EXTRA_CA_CERTS` adds PEM roots for the existing private-CA contract. Server certificates must satisfy the platform's TLS policy; Apple's policy requires subject alternative names and the `serverAuth` extended key usage. The process fixture serves a CA-issued leaf with both extensions and trusts its temporary CA. No dynamic OpenSSL library is required on Linux. Certificate validation and hostname verification remain enabled.
 
 Build Linux in the repository image with private caches:
 
