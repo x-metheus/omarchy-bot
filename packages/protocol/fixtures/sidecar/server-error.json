@@ -1,0 +1,7 @@
+{
+  "direction": "server",
+  "frame": {
+    "type": "error",
+    "error": "invalid Local Sidecar registration"
+  }
+}

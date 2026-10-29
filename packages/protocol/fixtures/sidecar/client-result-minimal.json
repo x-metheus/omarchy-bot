@@ -1,0 +1,8 @@
+{
+  "direction": "client",
+  "frame": {
+    "type": "local.result",
+    "jobId": "job-minimal",
+    "ok": true
+  }
+}

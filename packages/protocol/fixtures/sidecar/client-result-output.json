@@ -1,0 +1,10 @@
+{
+  "direction": "client",
+  "frame": {
+    "type": "local.result",
+    "jobId": "job-output",
+    "ok": true,
+    "text": "fixture output λ\n",
+    "exitCode": 7
+  }
+}

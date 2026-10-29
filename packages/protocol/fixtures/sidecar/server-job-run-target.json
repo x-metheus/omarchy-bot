@@ -1,0 +1,13 @@
+{
+  "direction": "server",
+  "frame": {
+    "type": "local.job",
+    "jobId": "job-run-target",
+    "hostname": "fixture-laptop",
+    "botId": "bot-fixture",
+    "turnId": "turn-fixture",
+    "action": "run",
+    "target": "fixture-laptop",
+    "command": "printf fixture"
+  }
+}

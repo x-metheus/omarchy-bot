@@ -1,0 +1,15 @@
+{
+  "direction": "server",
+  "frame": {
+    "type": "local.job",
+    "jobId": "job-transfer-from-workspace",
+    "hostname": "fixture-laptop",
+    "botId": "bot-fixture",
+    "turnId": "turn-fixture",
+    "action": "transfer",
+    "path": "inbox/fixture.txt",
+    "destination": "downloads/fixture.txt",
+    "direction": "from-workspace",
+    "contents": "fixture contents λ\n"
+  }
+}
