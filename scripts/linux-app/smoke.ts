@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { Database } from "bun:sqlite";
 
 // The spec's WebView seam: drive the packaged application, never a browser harness.
 const artifact = path.resolve(process.argv[2] ?? ".lane/dist/omarchy-bot_0.1.0_amd64.AppImage");
@@ -121,7 +122,7 @@ async function bootService(port: number, tls: false | "trusted" | "untrusted" = 
       OMARCHY_BOT_WORKERS_DIR: path.resolve("tests/integration/fake-workers"),
       ...(tls ? { OMARCHY_BOT_TLS_CERT: tls === "trusted" ? path.join(process.env.OMARCHY_BOT_SMOKE_TRUST!, "cert.pem") : path.join(run!, "tls.pem"),
         OMARCHY_BOT_TLS_KEY: tls === "trusted" ? path.join(process.env.OMARCHY_BOT_SMOKE_TRUST!, "key.pem") : path.join(run!, "tls.key") } : {}),
-    }, stdout: log, stderr: log,
+    }, stdout: log, stderr: Bun.file(path.join(evidence, `service-${port}${port === 7435 ? `-${tls}` : ""}-stderr.log`)),
   });
   children.push(child);
   services.set(port, child);
@@ -152,6 +153,7 @@ async function send(message: string): Promise<void> {
 }
 
 mkdirSync(evidence, { recursive: true });
+rmSync(path.join(evidence, "lifecycle-failure.json"), { force: true });
 try {
   await until("tauri-driver ready", async () => (await fetch(`${driver}/status`)).ok || undefined);
   const state = await bootService(7431);
@@ -535,6 +537,24 @@ try {
   assert.deepEqual(sidecarPids(), []);
   pass("unpair terminates Sidecar, fails pending local job and restarts at Add Service");
 } catch (error) {
+  // Keep lifecycle facts before private session teardown; never copy the credential-bearing database.
+  const lifecycle = [...services.keys()].map(port => {
+    const database = path.join(run!, `service-${port}/data/db.sqlite`);
+    if (!existsSync(database)) return { port, unavailable: "Service database was not created" };
+    try {
+      const db = new Database(database, { readonly: true });
+      try {
+        return { port,
+          surfaces: db.query("SELECT surface_id, lifecycle_state, runtime_generation, last_failure, transitioned_at FROM bot_surfaces").all(),
+          coordination: db.query("SELECT surface_id, authority_kind, updated_at FROM computer_surface_coordination").all(),
+          transitions: db.query(`SELECT occurred_at, aggregate_id AS surface_id, json_extract(payload, '$.lifecycle') AS lifecycle
+            FROM events WHERE aggregate_type = 'computer' AND type = 'computer.state.changed'
+              AND json_extract(payload, '$.lifecycle') IN ('stopped', 'starting', 'ready', 'failed') ORDER BY cursor`).all(),
+        };
+      } finally { db.close(); }
+    } catch { return { port, unavailable: "Service lifecycle could not be read" }; }
+  });
+  writeFileSync(path.join(evidence, "lifecycle-failure.json"), JSON.stringify(lifecycle, null, 2));
   const downloads = path.join(process.env.HOME!, "Downloads");
   console.error("Private Downloads on failure:", existsSync(downloads) ? readdirSync(downloads).map(name => ({ name, bytes: Bun.file(path.join(downloads, name)).size })) : "missing");
   if (session) {
