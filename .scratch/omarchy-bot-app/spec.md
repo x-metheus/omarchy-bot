@@ -88,6 +88,7 @@ Every native capability sits behind one `shell` interface, so a phone shell can 
 - Pairing code issuance returns the code and a deep link (`omarchy-bot://pair?service=<origin>&code=<code>`) instead of a `/pair?code=` URL. The pairing exchange contract is unchanged.
 - Plugin authorization no longer accepts or validates a return URL. The OAuth callback page tells the user to return to Omarchy Bot and offers an `omarchy-bot://` link. Completion or failure of an authorization is published as an event on the existing event stream, scoped to the plugin and account, so every connected app refreshes plugin state.
 - Service-side dictation is removed: the dictation module, its routes, its configuration, its DTOs and events, and its Voxtype detection in `doctor`.
+- The Service exposes a non-secret host identity only to Paired Devices: a persisted random salt and SHA-256 of `${salt}:${trimmedMachineId}`. The Linux app compares the digest with its own machine ID before starting local actions; addresses do not decide host identity. An unavailable check starts no Sidecar and shows a notice with recovery instructions. macOS and Windows are always different machines because neither is a Service Host.
 
 ### Local Sidecar
 
@@ -96,7 +97,7 @@ Every native capability sits behind one `shell` interface, so a phone shell can 
 - Command execution is split behind one executor interface with two implementations: POSIX (current process-group leader and SIGTERM/SIGKILL escalation, used on Linux and macOS) and Windows (Windows PowerShell 5.1, the job assigned to a Job Object that is closed with kill-on-close on cancel or timeout). The rest of the job handler (approval, confinement, search, read, write, transfer, result truncation) is shared.
 - The secret-directory denylist is defined per operating system: the current POSIX list on Linux, plus `Library/Keychains` and other credential stores on macOS, plus `AppData` credential and key stores on Windows.
 - The compositor and screenshot refusal applies on every operating system.
-- The Sidecar is compiled with `bun build --compile` for each target (linux-x64, darwin-arm64, darwin-x64, windows-x64) and bundled in the app as a Tauri external binary. It no longer depends on the plugin runtime.
+- The Sidecar is a small standalone Rust program built for each target (`linux-x64`, `darwin-arm64`, `darwin-x64`, `windows-x64`) and bundled in the app as a Tauri external binary. It replaces the `bun build --compile` TypeScript Sidecar and no longer carries a Bun runtime. It remains a separate child process, isolating its lifetime and failures from the Tauri app and preserving the shipped-binary test boundary (ADR 0015).
 - The app starts the Sidecar as a child when it connects to a Service not on the same machine (the existing same-host check is unchanged), and terminates it on quit or unpair. Ask, Always, and Never decisions keep the existing stdin/stdout JSON line contract; the app renders the prompts and persists Always/Never per install.
 
 ### Web UI
@@ -107,7 +108,7 @@ Every native capability sits behind one `shell` interface, so a phone shell can 
   - System browser: open an external URL.
   - Attachments: download managed attachment bytes with the paired token and save them to Downloads, preserving the filename with a collision prefix and reporting the saved path. The browser harness downloads the same authenticated bytes through its memory shell.
   - Updates: check, download, and restart.
-  - Local Sidecar: report whether one is running and its device identity, and exchange approval prompts and decisions.
+  - Local Sidecar: start after checking the Service host identity, report whether one is running and its device identity, and exchange approval prompts and decisions. Startup failure rejects through the shell; the shared UI displays the recovery notice.
   - Key mapping: report the platform and the per-device ⌘ mapping preference.
 - The Tauri implementation lives in the app. An in-memory implementation exists for tests and for the browser development harness.
 - `ApiClient` is constructed from the shell's base URL and token getter. Every place that currently derives an address from `window.location` (pairing, projection and RFB endpoints, plugin authorization, browser-loaded attachment URLs) uses the base URL instead.
@@ -145,6 +146,7 @@ Good tests drive external behavior through the highest available seam and never 
   - Pairing codes returned as deep links.
   - Plugin authorization started without a return URL, and its completion and failure arriving as events.
   - Dictation routes gone.
+  - Paired-only, non-leaking salted host identity and a 503 when machine identity is unavailable.
 
   The existing dictation integration test and e2e spec are deleted.
 - **Local Sidecar process boundary.** Uses the existing Local Sidecar helper and the local-sidecar integration tests. It covers:
@@ -152,8 +154,10 @@ Good tests drive external behavior through the highest available seam and never 
   - `os` and `shell` on registration, and their appearance in the `local` tool description.
   - Per-OS denylists.
   - Cancel tearing down a process tree on each operating system.
+  - Protocol wire types stay aligned through the shared canonical JSON fixtures in `packages/protocol/fixtures/sidecar/` defined by ADR 0015. TypeScript derives coverage requirements from the authoritative device-frame schemas and `LOCAL_SCHEMA`, failing if a frame variant, action, or property lacks a fixture, including both presence and absence for every optional property. It validates each fixture against those schemas with an unchanged JSON round-trip; Rust deserializes the same fixtures with unknown fields rejected and re-serializes equal JSON values. Adding an optional field or variant must fail coverage until the corpus and both consumers are updated.
+  - Distinct machine identities over loopback transport and approved `local.run` output on the client machine.
 
-  The suite runs against the compiled binary in CI on Linux, macOS, and Windows runners. Windows-only cases (PowerShell syntax, Job Object teardown) run only there.
+  The suite selects the compiled Rust binary through `OMARCHY_BOT_TEST_SIDECAR_BINARY` in CI on Linux, macOS, and Windows runners; both protocol-fixture consumers also run there. Windows-only cases (PowerShell syntax, Job Object teardown) run only there.
 - **The `shell` interface.** The existing Chromium Playwright suite moves from the Service-served UI to the Vite-served bundle with the in-memory shell, pointed at the harness Service. New specs cover:
   - Add Service.
   - Deep-link pairing intake.
@@ -167,6 +171,7 @@ Good tests drive external behavior through the highest available seam and never 
 
   Prior art is the existing e2e fixtures and specs.
   Native adapter tests exercise the injected shell at its JavaScript IPC boundary, including authenticated attachment requests and refusal to send device-token URLs to the system browser. Isolated Rust attachment-writing tests cover exact bytes, safe filenames and collision prefixes.
+  The existing native-shell VM integration seam also exercises the real injected adapter: same identity over loopback and LAN HTTPS suppresses Sidecar startup, a distinct identity over loopback starts it, and failed checks show recovery instructions without starting local actions.
 - **WebView smoke suite.** The packaged app under `tauri-driver` on Linux (WebKitGTK) and Windows (WebView2), and a written checklist run on macOS (WKWebView) before each release. Each run covers:
   - Pairing by deep link.
   - The event stream delivering a Bot reply.
@@ -174,6 +179,7 @@ Good tests drive external behavior through the highest available seam and never 
   - Takeover keyboard and pointer input reaching the Bot Screen.
   - One approved `local.run`.
   - Managed attachments save authenticated bytes to Downloads, preserve an existing filename with a collision prefix, and never reach the system browser.
+  - Equal machine identities over loopback and LAN HTTPS, unavailable identity recovery, and distinct identities over loopback with the bundled Sidecar.
 
   A platform is supported only after this suite passes there. Chromium results never stand in for it.
 - **CLI and installer.** Extends the existing CLI lifecycle tests. They cover:

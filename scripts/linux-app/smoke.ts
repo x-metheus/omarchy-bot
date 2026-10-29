@@ -106,7 +106,7 @@ async function stop(): Promise<void> {
   });
 }
 async function restart(): Promise<void> { await stop(); await start(); }
-async function bootService(port: number, tls: false | "trusted" | "untrusted" = false, host = "127.0.0.1"): Promise<string> {
+async function bootService(port: number, tls: false | "trusted" | "untrusted" = false, host = "127.0.0.1", machineIdFile = process.env.OMARCHY_BOT_MACHINE_ID_FILE): Promise<string> {
   const dir = path.join(run!, `service-${port}`);
   mkdirSync(path.join(dir, "data/conformance"), { recursive: true });
   mkdirSync(path.join(dir, "state"), { recursive: true });
@@ -118,6 +118,7 @@ async function bootService(port: number, tls: false | "trusted" | "untrusted" = 
   const child = Bun.spawn(command, {
     env: { ...process.env, OMARCHY_BOT_HOME: path.join(dir, "data"), OMARCHY_BOT_STATE: path.join(dir, "state"),
       OMARCHY_BOT_PORT: String(port), OMARCHY_BOT_HOST: host, OMARCHY_BOT_DEV: "0",
+      OMARCHY_BOT_MACHINE_ID_FILE: machineIdFile,
       OMARCHY_BOT_SCREEN_PROFILE: "720p",
       OMARCHY_BOT_WORKERS_DIR: path.resolve("tests/integration/fake-workers"),
       ...(tls ? { OMARCHY_BOT_TLS_CERT: tls === "trusted" ? path.join(process.env.OMARCHY_BOT_SMOKE_TRUST!, "cert.pem") : path.join(run!, "tls.pem"),
@@ -184,8 +185,8 @@ try {
   await restart();
   await element('button[aria-label="New bot"]');
   pass("startup deep link exchanges real pairing code and keychain survives process restart");
-  assert.deepEqual(sidecarPids(), [], "loopback Service must not start a Local Sidecar");
-  pass("loopback Service suppresses the bundled Sidecar");
+  assert.deepEqual(sidecarPids(), [], "same host identity over loopback must not start a Local Sidecar");
+  pass("same host identity over loopback suppresses the bundled Sidecar");
   const stored = z.record(z.string(), z.string()).parse(await script("return Object.fromEntries(Object.entries(localStorage))"));
   const credential = Bun.spawnSync(["secret-tool", "lookup", "service", "com.omarchy.bot"]);
   assert.equal(credential.exitCode, 0, "native connection exists in OS Secret Service");
@@ -304,7 +305,8 @@ try {
   const unauthenticated = new URL(attachmentUrl);
   unauthenticated.searchParams.delete("access_token");
   assert.equal((await fetch(unauthenticated)).status, 401, "attachment content requires device authentication");
-  await wd("POST", `/session/${session}/element/${attachment}/click`, {});
+  const attachmentRow = await element('[data-testid="message-file-attachment"]');
+  await wd("POST", `/session/${session}/element/${attachmentRow}/click`, {});
   const downloaded = path.join(process.env.HOME!, "Downloads", attachmentName);
   await until("managed text attachment saved with actual authenticated contents", async () => existsSync(downloaded) && readFileSync(downloaded, "utf8") === attachmentContent || undefined, 10_000);
   await wd("POST", `/session/${session}/element/${attachment}/click`, {});
@@ -417,7 +419,9 @@ try {
   pass("revocation with unwritable notice still deletes secret and permits pairing recovery");
 
   const offhostOrigin = `https://${process.env.OMARCHY_BOT_SMOKE_OFFHOST_IP}:7436`;
-  const offhostState = await bootService(7436, "trusted", "0.0.0.0");
+  const offhostMachineId = path.join(run!, "offhost-machine-id");
+  writeFileSync(offhostMachineId, "0123456789abcdef0123456789abcdef\n");
+  const offhostState = await bootService(7436, "trusted", "0.0.0.0", offhostMachineId);
   const offhost = await issue(offhostState, "https://127.0.0.1:7436");
   await stop();
   await start([`omarchy-bot://pair?service=${encodeURIComponent(offhostOrigin)}&code=${encodeURIComponent(offhost.code)}`]);
@@ -427,13 +431,38 @@ try {
   });
   await restart();
   await element('button[aria-label="New bot"]');
-  await until("offhost app starts one bundled Sidecar", async () => sidecarPids().length === 1 || undefined);
-  pass("offhost Service starts one bundled Sidecar");
+  assert.deepEqual(sidecarPids(), [], "same host identity over LAN HTTPS must not start a Local Sidecar");
+  pass("same host identity over LAN HTTPS suppresses the bundled Sidecar");
+  writeFileSync(process.env.OMARCHY_BOT_MACHINE_ID_FILE!, "uninitialized\n");
+  await restart();
+  await visible("Local actions are unavailable");
+  assert.deepEqual(sidecarPids(), [], "invalid native machine identity must fail closed");
+  writeFileSync(process.env.OMARCHY_BOT_MACHINE_ID_FILE!, "0123456789abcdef0123456789abcdef\n");
+  pass("invalid native machine identity suppresses the Sidecar with recovery instructions");
+  rmSync(offhostMachineId);
+  await restart();
+  await visible("Local actions are unavailable");
+  await visible("reopen Omarchy Bot to retry");
+  assert.deepEqual(sidecarPids(), [], "unavailable host identity must fail closed");
+  pass("unavailable host identity suppresses the Sidecar with recovery instructions");
+  writeFileSync(offhostMachineId, "fedcba9876543210fedcba9876543210\n");
+  const tunnelOrigin = "https://127.0.0.1:7436";
+  const tunneled = await issue(offhostState, tunnelOrigin);
+  await stop();
+  await start([`omarchy-bot://pair?service=${encodeURIComponent(tunnelOrigin)}&code=${encodeURIComponent(tunneled.code)}`]);
+  await until("loopback tunnel pairing persists", async () => {
+    const saved = Bun.spawnSync(["secret-tool", "lookup", "service", "com.omarchy.bot"]);
+    return saved.exitCode === 0 && z.object({ baseUrl: z.string() }).parse(JSON.parse(saved.stdout.toString())).baseUrl === tunnelOrigin || undefined;
+  });
+  await restart();
+  await element('button[aria-label="New bot"]');
+  await until("distinct host over loopback starts one bundled Sidecar", async () => sidecarPids().length === 1 || undefined);
+  pass("distinct host identity over loopback starts one bundled Sidecar");
   const saved = Bun.spawnSync(["secret-tool", "lookup", "service", "com.omarchy.bot"]);
   const remoteConnection = z.object({ token: z.string() }).parse(JSON.parse(saved.stdout.toString()));
   const remoteHeaders = { authorization: `Bearer ${remoteConnection.token}` };
   async function remote(route: string): Promise<unknown> {
-    const response = await fetch(`${offhostOrigin}${route}`, { headers: remoteHeaders });
+    const response = await fetch(`${tunnelOrigin}${route}`, { headers: remoteHeaders });
     assert.ok(response.ok, `remote API ${route}: ${response.status}`);
     return response.json();
   }

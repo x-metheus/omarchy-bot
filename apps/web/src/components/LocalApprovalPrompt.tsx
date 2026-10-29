@@ -14,19 +14,22 @@ const styles = stylex.create({
 
 export function LocalApprovalPrompt(): JSX.Element | null {
   const [queue, setQueue] = useState<(LocalApproval & { busy: boolean; error?: string })[]>([]);
+  const [startupError, setStartupError] = useState<string>();
   useEffect(() => {
     const sidecar = getShell().localSidecar;
+    let active = true;
+    void sidecar.start().catch(error => { if (active) setStartupError(apiErrorMessage(error, "Local actions are unavailable.")); });
     const stopDismiss = sidecar.onApprovalDismiss(jobId => {
       setQueue(pending => pending.filter(approval => approval.jobId !== jobId));
     });
     const stopApproval = sidecar.onApproval(approval => {
       setQueue(pending => [...pending, { ...approval, busy: false }]);
     });
-    return () => { stopApproval(); stopDismiss(); };
+    return () => { active = false; stopApproval(); stopDismiss(); };
   }, []);
 
   const approval = queue[0];
-  if (approval === undefined) return null;
+  if (approval === undefined) return startupError === undefined ? null : <Banner status="error" title={startupError} />;
 
   let detail = approval.path;
   if (approval.action === "run") detail = approval.command;

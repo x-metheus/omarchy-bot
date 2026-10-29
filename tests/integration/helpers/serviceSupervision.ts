@@ -266,14 +266,16 @@ export async function startManagedService(input: {
         const chunk = await reader.read();
         if (chunk.done) break;
         buffer += decoder.decode(chunk.value, { stream: true });
-        const newline = buffer.indexOf("\n");
-        if (newline < 0) continue;
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        if (line.startsWith("SERVICE_READY ")) {
-          ready.resolve(line);
-          void reader.cancel().catch(() => {});
-          return;
+        for (;;) {
+          const newline = buffer.indexOf("\n");
+          if (newline < 0) break;
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (line.startsWith("SERVICE_READY ")) {
+            ready.resolve(line);
+            void reader.cancel().catch(() => {});
+            return;
+          }
         }
       }
     } catch {

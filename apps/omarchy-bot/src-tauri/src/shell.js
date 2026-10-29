@@ -6,6 +6,7 @@ function installNativeShell(initial) {
   let pending = initial.pairing;
   const listeners = new Set();
   let sidecarStatus = { running: false };
+  let sidecarStart;
   const approvalListeners = new Set();
   const approvalDismissListeners = new Set();
   const activeApprovals = new Set();
@@ -43,6 +44,7 @@ function installNativeShell(initial) {
     else for (const listener of listeners) listener(request);
   }
   window.addEventListener("omarchy-pair", () => { void receivePairing(); });
+
   window.__OMARCHY_BOT_SHELL__ = {
     service: {
       baseUrl: () => connection?.baseUrl ?? initial.revoked ?? initial.defaults.serviceUrl,
@@ -93,6 +95,29 @@ function installNativeShell(initial) {
       restart: () => invoke("restart_app"),
     },
     localSidecar: {
+      start: () => sidecarStart ??= (async () => {
+        if (!connection) return;
+        try {
+          // macOS and Windows never run a Service.
+          if (initial.platform === "linux") {
+            const response = await window.fetch(new URL("/api/host-identity", connection.baseUrl), {
+              headers: { authorization: `Bearer ${connection.token}` }, redirect: "error", signal: AbortSignal.timeout(10_000),
+            });
+            if (!response.ok) throw new Error("The Service host identity is unavailable.");
+            const identity = await response.json();
+            if (!identity || typeof identity.salt !== "string" || typeof identity.digest !== "string"
+              || !/^[0-9a-f]{64}$/.test(identity.salt) || !/^[0-9a-f]{64}$/.test(identity.digest)) {
+              throw new Error("The Service returned an invalid host identity.");
+            }
+            const digest = await invoke("host_digest", { salt: identity.salt });
+            if (digest === identity.digest) return;
+          }
+          await invoke("sidecar_start");
+          await receiveSidecar();
+        } catch (error) {
+          throw new Error(`Local actions are unavailable because this machine could not be verified with the Service. ${error instanceof Error ? error.message : String(error)} Check the connection and reopen Omarchy Bot to retry.`);
+        }
+      })(),
       status: () => ({ ...sidecarStatus }),
       onApproval(listener) {
         approvalListeners.add(listener);
@@ -120,4 +145,5 @@ function installNativeShell(initial) {
       },
     },
   };
+
 }

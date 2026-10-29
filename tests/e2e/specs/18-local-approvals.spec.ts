@@ -16,6 +16,20 @@ async function decision(page: Page, jobId: string): Promise<LocalApprovalDecisio
   return page.evaluate(jobId => globalThis.__localApprovalDecisions__[jobId]!, jobId);
 }
 
+test("Sidecar startup failure shows recovery through the shared UI", async ({ page }) => {
+  const release = Promise.withResolvers<void>();
+  await page.route("**/api/health", async route => { await release.promise; await route.continue(); });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const shell = globalThis.__OMARCHY_BOT_MEMORY_SHELL__!;
+    shell.localSidecar.start = async () => { throw new Error("Local actions are unavailable. Check the connection and reopen Omarchy Bot to retry."); };
+  });
+  release.resolve();
+  await expect(page.getByRole("alert")).toContainText("Local actions are unavailable");
+  await expect(page.getByRole("alert")).toContainText("reopen Omarchy Bot to retry");
+  await expect(page.getByRole("button", { name: "New bot", exact: true })).toBeVisible();
+});
+
 for (const [label, expected] of [
   ["Allow once", "allow-once"],
   ["Always allow", "always"],

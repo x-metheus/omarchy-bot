@@ -5,6 +5,7 @@ mod attachments;
 #[cfg(target_os = "linux")]
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 #[cfg(windows)]
@@ -46,6 +47,7 @@ struct Sidecar {
 
 struct ShellState {
     origin: Option<String>,
+    connection: Option<Connection>,
     keychain: Mutex<()>,
     pending_pairing: Mutex<Option<PairingRequest>>,
     restart_link: Mutex<Option<String>>,
@@ -64,7 +66,6 @@ fn service_origin(value: &str) -> Result<Url, String> {
     Ok(url)
 }
 fn is_loopback_service(url: &Url) -> bool {
-    // shortcut: loopback tunnels also suppress the Sidecar; revisit when host identity is negotiated.
     match url.host() {
         Some(url::Host::Domain(host)) => host == "localhost",
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
@@ -73,9 +74,46 @@ fn is_loopback_service(url: &Url) -> bool {
     }
 }
 
+fn websocket_url(mut service: Url) -> Result<Url, String> {
+    service.set_scheme(if service.scheme() == "https" { "wss" } else { "ws" }).map_err(|_| "Invalid Sidecar Service URL.")?;
+    Ok(service)
+}
+
+#[tauri::command]
+fn host_digest(salt: String) -> Result<String, String> {
+    if salt.len() != 64 || !salt.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err("The Service returned an invalid host identity salt.".into());
+    }
+    let override_file = std::env::var_os("OMARCHY_BOT_MACHINE_ID_FILE");
+    let files: &[&std::ffi::OsStr] = match override_file.as_deref() {
+        Some(file) => &[file],
+        None => &[std::ffi::OsStr::new("/etc/machine-id"), std::ffi::OsStr::new("/var/lib/dbus/machine-id")],
+    };
+    for file in files {
+        if let Ok(machine_id) = std::fs::read_to_string(file) {
+            let machine_id = machine_id.trim();
+            if machine_id.len() == 32 && machine_id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                && machine_id.bytes().any(|byte| byte != b'0') {
+                let mut digest = Sha256::new();
+                digest.update(salt.as_bytes());
+                digest.update(b":");
+                digest.update(machine_id.as_bytes());
+                return Ok(format!("{:x}", digest.finalize()));
+            }
+        }
+    }
+    Err("This machine's host identity is unavailable.".into())
+}
+
+#[tauri::command]
+fn sidecar_start(app: tauri::AppHandle, state: tauri::State<ShellState>) -> Result<(), String> {
+    if state.sidecar.lock().map_err(|_| "Local Sidecar is busy.")?.is_some() { return Ok(()); }
+    let connection = state.connection.as_ref().ok_or("Pair with a Service before starting local actions.")?;
+    start_sidecar(&app, connection)
+}
+
 fn start_sidecar(app: &tauri::AppHandle, connection: &Connection) -> Result<(), String> {
-    let mut service = service_origin(&connection.base_url)?;
-    if is_loopback_service(&service) { return Ok(()); }
+    let service = websocket_url(service_origin(&connection.base_url)?)?;
     let config = app.path().app_config_dir().map_err(|_| "Could not locate app configuration.")?;
     std::fs::create_dir_all(&config).map_err(|_| "Could not create app configuration.")?;
     let identity_path = config.join("sidecar-device-id");
@@ -95,7 +133,6 @@ fn start_sidecar(app: &tauri::AppHandle, connection: &Connection) -> Result<(), 
     }
     let root = app.path().app_local_data_dir().map_err(|_| "Could not locate Local Sidecar data.")?.join("sidecar");
     std::fs::create_dir_all(&root).map_err(|_| "Could not create Local Sidecar data.")?;
-    service.set_scheme(if service.scheme() == "https" { "wss" } else { "ws" }).map_err(|_| "Invalid Sidecar Service URL.")?;
     let executable = std::env::current_exe().map_err(|_| "Could not locate bundled Local Sidecar.")?;
     let binary = executable.with_file_name(if cfg!(windows) { "omarchy-bot-sidecar.exe" } else { "omarchy-bot-sidecar" });
     let mut command = Command::new(binary);
@@ -418,8 +455,7 @@ fn main() {
     }
     let mut policy = context.config().app.security.csp.clone().expect("CSP configured").to_string();
     let network = if let Some(origin) = &origin {
-        let mut socket = Url::parse(origin).expect("validated Service origin");
-        socket.set_scheme(if socket.scheme() == "https" { "wss" } else { "ws" }).expect("WebSocket scheme");
+        let socket = websocket_url(Url::parse(origin).expect("validated Service origin")).expect("WebSocket scheme");
         format!("{origin} {}", socket.origin().ascii_serialization())
     } else { "http: https:".into() };
     policy = policy.replace("connect-src 'self' ipc: http://ipc.localhost", &format!("connect-src 'self' ipc: http://ipc.localhost {network}"));
@@ -435,16 +471,13 @@ fn main() {
     let application = builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
-        .manage(ShellState { origin, keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None), sidecar: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, sidecar_events, sidecar_decide])
+        .manage(ShellState { origin, connection: connection.clone(), keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None), sidecar: Mutex::new(None) })
+        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, sidecar_events, sidecar_decide, sidecar_start, host_digest])
         .setup(move |app| {
             let revoked = if connection.is_none() {
                 std::fs::read_to_string(app.path().app_config_dir()?.join("revoked-service")).ok()
                     .and_then(|origin| service_origin(&origin).ok()).map(|url| url.origin().ascii_serialization())
             } else { None };
-            if let Some(connection) = &connection {
-                if let Err(error) = start_sidecar(app.handle(), connection) { eprintln!("{error}"); }
-            }
             let defaults: serde_json::Value = serde_json::from_str(include_str!("../../shell-defaults.json"))?;
             let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "platform": std::env::consts::OS, "defaults": defaults });
             let script = format!("({})({});", include_str!("shell.js"), initial);

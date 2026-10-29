@@ -51,6 +51,7 @@ test("dismissed memory approvals fail closed and dismissal listeners unsubscribe
 
 test("memory shell reports Sidecar and platform state and remembers key mapping", async () => {
   const defaults = createMemoryShell({ storage: null });
+  await defaults.localSidecar.start();
   expect(defaults.localSidecar.status()).toEqual({ running: false });
   expect(defaults.keyMapping.platform()).toBe("linux");
   expect(defaults.keyMapping.metaSendsSuper()).toBe(false);

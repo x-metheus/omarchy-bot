@@ -33,6 +33,7 @@ export interface Shell {
     restart(): Promise<void>;
   };
   readonly localSidecar: {
+    start(): Promise<void>;
     status(): LocalSidecarStatus;
     onApproval(listener: (approval: LocalApproval) => void): () => void;
     onApprovalDismiss(listener: (jobId: string) => void): () => void;
@@ -140,6 +141,7 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
       async restart() { throw new Error("The development shell cannot restart the app."); },
     },
     localSidecar: {
+      async start() {},
       status: () => ({ ...options.localSidecar ?? { running: false } }),
       onApproval(listener: (approval: LocalApproval) => void) {
         approvalListeners.add(listener);
