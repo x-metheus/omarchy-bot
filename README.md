@@ -459,6 +459,8 @@ bash scripts/package-plugin-runtime.sh . dist-runtime <archive.tar.gz> .lane/fon
 
 The fourth argument (or `OMARCHY_BOT_FONT_ASSETS_DIR`) is required; packaging refuses to run without a font directory whose files match the pinned `FONT_ASSETS` checksums. No separate Sway release is published.
 
+Packaging stores hardlinked dependency files as independent regular files while preserving symlinks. This keeps archives compatible with the installer's strict file, directory, and symlink allowlist; hardlink entries remain rejected during extraction.
+
 The browser pack is a second artifact built from the same pins:
 
 ```bash

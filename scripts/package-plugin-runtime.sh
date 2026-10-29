@@ -143,6 +143,7 @@ printf 'Installing frozen production dependencies in runtime staging\n' >&2
   bun install --production --frozen-lockfile >&2
 )
 
-tar --zstd -cf "$out_dir/$asset" -C "$staging" .
+# Bun's dependency store uses hardlinks; the installer accepts only files, directories and symlinks.
+tar --hard-dereference --zstd -cf "$out_dir/$asset" -C "$staging" .
 (cd "$out_dir" && sha256sum -- "$asset" > "$asset.sha256")
 printf '%s\n' "$out_dir/$asset"
