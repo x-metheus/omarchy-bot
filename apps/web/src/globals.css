@@ -2,6 +2,11 @@
 @import "@astryxdesign/core/astryx.css";
 @import "@astryxdesign/theme-neutral/theme.css";
 
+/* WebKitGTK 2.50 loops in dialog focus restoration with anchor fallback layout. */
+[popover] {
+  position-try-fallbacks: none !important;
+}
+
 html,
 body,
 #root {
