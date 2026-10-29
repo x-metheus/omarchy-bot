@@ -79,7 +79,12 @@ async function download(url: string): Promise<Response> {
   return response;
 }
 
-export async function installApp(layout: Layout, env: NodeJS.ProcessEnv): Promise<void> {
+export async function installApp(layout: Layout, env: NodeJS.ProcessEnv): Promise<boolean> {
+  let publicKey = "";
+  if (!env.OMARCHY_BOT_APP_IMAGE || /^[a-z][a-z\d+.-]*:/i.test(env.OMARCHY_BOT_APP_IMAGE)) {
+    try { publicKey = readFileSync(new URL("./release-public-key", import.meta.url), "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  }
   if (existsSync(layout.desktopEntry) && !ownedDesktop(layout)) throw new Error(`Refusing to replace existing desktop entry: ${layout.desktopEntry}`);
   const receipt = `${layout.appImage}.installed`;
   if (existsSync(layout.appImage) && !ownedImage(layout)) throw new Error(`Refusing to replace existing AppImage: ${layout.appImage}`);
@@ -96,9 +101,6 @@ export async function installApp(layout: Layout, env: NodeJS.ProcessEnv): Promis
       let image = source;
       try {
         if (/^[a-z][a-z\d+.-]*:/i.test(source)) {
-          let publicKey: string;
-          try { publicKey = readFileSync(new URL("./release-public-key", import.meta.url), "utf8"); }
-          catch { throw new Error("This installer has no release public key; use a release runtime with a provisioned updater key"); }
           image = join(temporary, "app.AppImage");
           for (const suffix of ["", ".sha256", ".sig"]) await Bun.write(`${image}${suffix}`, await download(`${source}${suffix}`));
           verifyAppSignature(readFileSync(image), readFileSync(`${image}.sig`, "utf8"), publicKey);
@@ -117,6 +119,7 @@ export async function installApp(layout: Layout, env: NodeJS.ProcessEnv): Promis
   const exec = layout.appImage.replace(/%/g, "%%").replace(/[\\"`$]/g, "\\$&").replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r");
   publish(layout.desktopEntry, `${marker}[Desktop Entry]\nType=Application\nName=Omarchy Bot\nExec="${exec}" %u\nTerminal=false\nMimeType=${scheme};\n`);
   for (const file of mimePaths(layout)) publish(file, defaults(text(file), true));
+  return true;
 }
 
 export function uninstallApp(layout: Layout): void {
