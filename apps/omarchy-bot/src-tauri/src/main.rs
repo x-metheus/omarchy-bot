@@ -1,8 +1,12 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 #[cfg(target_os = "linux")]
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -90,7 +94,10 @@ fn start_sidecar(app: &tauri::AppHandle, connection: &Connection) -> Result<(), 
     service.set_scheme(if service.scheme() == "https" { "wss" } else { "ws" }).map_err(|_| "Invalid Sidecar Service URL.")?;
     let executable = std::env::current_exe().map_err(|_| "Could not locate bundled Local Sidecar.")?;
     let binary = executable.with_file_name(if cfg!(windows) { "omarchy-bot-sidecar.exe" } else { "omarchy-bot-sidecar" });
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW: the Sidecar communicates through pipes.
+    let mut child = command
         .env("OMARCHY_BOT_SERVICE_URL", service.as_str())
         .env("OMARCHY_BOT_DEVICE_ID", &device_id)
         .env("OMARCHY_BOT_DEVICE_TOKEN", &connection.token)
@@ -202,7 +209,8 @@ fn pairing_request(value: &str) -> Option<PairingRequest> {
 }
 
 fn keychain_error(error: keyring::Error) -> String {
-    format!("Could not access the OS keychain: {error}. Unlock your OS keychain and try again; credentials were not discarded.")
+    let recovery = if cfg!(windows) { "Check Windows Credential Manager and try again" } else if cfg!(target_os = "macos") { "Unlock your OS keychain and try again" } else { "Unlock your Secret Service keyring and try again" };
+    format!("Could not access the OS keychain: {error}. {recovery}; credentials were not discarded.")
 }
 
 fn keychain() -> Result<keyring::Entry, String> {
@@ -265,38 +273,65 @@ fn open_browser(app: tauri::AppHandle, value: String) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn certificate_untrusted_probe(url: &Url) -> bool {
+fn probe_certificate(url: &Url) -> Result<bool, String> {
     let client = gio::SocketClient::new();
     client.set_tls(true);
     client.set_timeout(10);
-    match client.connect_to_uri(url.as_str(), 443, gio::Cancellable::NONE) {
+    Ok(match client.connect_to_uri(url.as_str(), 443, gio::Cancellable::NONE) {
         Ok(stream) => { let _ = stream.close(gio::Cancellable::NONE); false },
         Err(error) => error.matches(gio::TlsError::BadCertificate),
-    }
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn certificate_untrusted_probe(url: &Url) -> bool {
+fn probe_certificate(url: &Url) -> Result<bool, String> {
     use security_framework::{policy::SecPolicy, secure_transport::{HandshakeError, SslConnectionType, SslContext, SslProtocolSide}};
     use std::net::{TcpStream, ToSocketAddrs};
-    let Some(host) = url.host() else { return false; };
+    let Some(host) = url.host() else { return Ok(false); };
     let host = match host {
         url::Host::Domain(domain) => std::borrow::Cow::Borrowed(domain),
         url::Host::Ipv4(address) => std::borrow::Cow::Owned(address.to_string()),
         url::Host::Ipv6(address) => std::borrow::Cow::Owned(address.to_string()),
     };
     let timeout = std::time::Duration::from_secs(10);
-    let Ok(addresses) = (host.as_ref(), url.port_or_known_default().unwrap_or(443)).to_socket_addrs() else { return false; };
-    let Some(stream) = addresses.filter_map(|address| TcpStream::connect_timeout(&address, timeout).ok()).next() else { return false; };
-    if stream.set_read_timeout(Some(timeout)).is_err() || stream.set_write_timeout(Some(timeout)).is_err() { return false; }
-    let Ok(mut context) = SslContext::new(SslProtocolSide::CLIENT, SslConnectionType::STREAM) else { return false; };
-    if context.set_peer_domain_name(&host).is_err() || context.set_break_on_server_auth(true).is_err() { return false; }
+    let Ok(addresses) = (host.as_ref(), url.port_or_known_default().unwrap_or(443)).to_socket_addrs() else { return Ok(false); };
+    let Some(stream) = addresses.filter_map(|address| TcpStream::connect_timeout(&address, timeout).ok()).next() else { return Ok(false); };
+    if stream.set_read_timeout(Some(timeout)).is_err() || stream.set_write_timeout(Some(timeout)).is_err() { return Ok(false); }
+    let Ok(mut context) = SslContext::new(SslProtocolSide::CLIENT, SslConnectionType::STREAM) else { return Ok(false); };
+    if context.set_peer_domain_name(&host).is_err() || context.set_break_on_server_auth(true).is_err() { return Ok(false); }
     // Stop at server authentication: diagnose system trust without sending credentials or accepting an exception.
-    let Err(HandshakeError::Interrupted(handshake)) = context.handshake(stream) else { return false; };
-    if !handshake.server_auth_completed() { return false; }
-    let Ok(Some(mut trust)) = handshake.context().peer_trust2() else { return false; };
-    if trust.set_policy(&SecPolicy::create_ssl(SslProtocolSide::SERVER, Some(&host))).is_err() { return false; }
-    trust.evaluate_with_error().is_err()
+    let Err(HandshakeError::Interrupted(handshake)) = context.handshake(stream) else { return Ok(false); };
+    if !handshake.server_auth_completed() { return Ok(false); }
+    let Ok(Some(mut trust)) = handshake.context().peer_trust2() else { return Ok(false); };
+    if trust.set_policy(&SecPolicy::create_ssl(SslProtocolSide::SERVER, Some(&host))).is_err() { return Ok(false); }
+    Ok(trust.evaluate_with_error().is_err())
+}
+
+#[cfg(windows)]
+fn probe_certificate(url: &Url) -> Result<bool, String> {
+    use schannel::{schannel_cred::{Direction, SchannelCred}, tls_stream};
+    use std::net::TcpStream;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::time::Duration;
+
+    let timeout = Duration::from_secs(10);
+    let addresses = match url.socket_addrs(|| Some(443)) {
+        Ok(addresses) => addresses,
+        Err(_) => return Ok(false),
+    };
+    let Some(stream) = addresses.iter().find_map(|address| TcpStream::connect_timeout(address, timeout).ok()) else { return Ok(false); };
+    stream.set_read_timeout(Some(timeout)).and_then(|_| stream.set_write_timeout(Some(timeout)))
+        .map_err(|_| "Could not configure the TLS certificate check.")?;
+    let credentials = SchannelCred::builder().acquire(Direction::Outbound)
+        .map_err(|_| "Could not initialize Windows TLS certificate validation.")?;
+    let untrusted = Arc::new(AtomicBool::new(false));
+    let validation_failed = Arc::clone(&untrusted);
+    let host = url.host_str().expect("validated Service host").trim_start_matches('[').trim_end_matches(']');
+    let _ = tls_stream::Builder::new().domain(host).verify_callback(move |validation| {
+        // Observe Windows trust/hostname validation without accepting an invalid certificate.
+        validation.result().inspect_err(|_| validation_failed.store(true, Ordering::Relaxed))
+    }).connect(credentials, stream);
+    Ok(untrusted.load(Ordering::Relaxed))
 }
 
 #[tauri::command]
@@ -306,8 +341,8 @@ async fn certificate_untrusted(state: tauri::State<'_, ShellState>, origin: Stri
     if state.origin.as_ref().is_some_and(|paired| paired != &url.origin().ascii_serialization()) {
         return Err("The certificate probe is restricted to the paired Service.".into());
     }
-    tauri::async_runtime::spawn_blocking(move || certificate_untrusted_probe(&url))
-        .await.map_err(|_| "The TLS certificate check failed.".into())
+    tauri::async_runtime::spawn_blocking(move || probe_certificate(&url))
+        .await.map_err(|_| "The TLS certificate check failed.")?
 }
 
 #[tauri::command]
@@ -369,6 +404,10 @@ fn main() {
     let connection = if incoming.is_some() { None } else { stored };
     let origin = connection.as_ref().map(|connection| connection.base_url.clone());
     let mut context = tauri::generate_context!();
+    #[cfg(windows)]
+    if let Some(directory) = std::env::var_os("OMARCHY_BOT_SMOKE_DIR") {
+        context.config_mut().app.app_directories_override = Some(tauri::utils::config::AppDirectoriesOverride::Root(directory.into()));
+    }
     let mut policy = context.config().app.security.csp.clone().expect("CSP configured").to_string();
     let network = if let Some(origin) = &origin {
         let mut socket = Url::parse(origin).expect("validated Service origin");
@@ -401,7 +440,8 @@ fn main() {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Omarchy Bot").inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)
                 .initialization_script(script)
-                .on_navigation(|url| matches!(url.scheme(), "tauri") && url.host_str() == Some("localhost"))
+                .on_navigation(|url| url.username().is_empty() && url.password().is_none() && url.port().is_none()
+                    && matches!((url.scheme(), url.host_str()), ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost"))))
                 .build()?;
             Ok(())
         })
@@ -460,12 +500,12 @@ mod tests {
                 assert!(std::time::Instant::now() < deadline, "TLS fixture did not start");
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            assert!(certificate_untrusted_probe(&Url::parse(&format!("https://{address}")).unwrap()));
+            assert!(probe_certificate(&Url::parse(&format!("https://{address}")).unwrap()).unwrap());
         });
         let _ = server.kill();
         let _ = server.wait();
         std::fs::remove_dir_all(directory).unwrap();
         result.unwrap();
-        assert!(!certificate_untrusted_probe(&Url::parse(&format!("https://{address}")).unwrap()));
+        assert!(!probe_certificate(&Url::parse(&format!("https://{address}")).unwrap()).unwrap());
     }
 }
