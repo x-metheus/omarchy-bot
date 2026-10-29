@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
 import type { Config } from "../bootstrap/config.ts";
+import { hostIdentity } from "../bootstrap/hostIdentity.ts";
 import type { EventLog } from "../modules/events/eventLog.ts";
 import type { AgentsRegistry } from "../modules/agents/registry.ts";
 import type { BotsService } from "../modules/bots/bots.ts";
@@ -272,6 +273,10 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     }
 
     if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION, protocol: PROTOCOL_VERSION });
+    if (pathname === "/api/host-identity" && req.method === "GET") {
+      const identity = hostIdentity(svc.cfg.stateDir);
+      return identity ? json(identity) : json({ error: "Service host identity is unavailable" }, 503);
+    }
     const pluginResponse = await handlePluginRequest(req, svc.plugins, pathname, publicOrigin(svc.cfg, server.requestIP(req)?.address, req.headers, url));
     if (pluginResponse !== undefined) return pluginResponse;
 

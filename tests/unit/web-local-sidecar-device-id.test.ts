@@ -30,7 +30,7 @@ for (const [label, status, tagged] of [
   });
 }
 
-test("the same Web client reads a replacement shell on each send", async () => {
+test("the same Web UI reads a replacement shell on each send", async () => {
   installShell(createMemoryShell({ storage: null, baseUrl: "https://first.example", localSidecar: { running: true, deviceId: DEVICE_A } }));
   await api.sendMessage("thread-1", { text: "first" });
   installShell(createMemoryShell({ storage: null, baseUrl: "https://second.example" }));

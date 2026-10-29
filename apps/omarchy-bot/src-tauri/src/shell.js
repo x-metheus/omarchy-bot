@@ -65,6 +65,28 @@ function installNativeShell(initial) {
       throw error;
     }
   };
+  async function startLocalSidecar() {
+    if (!connection) return;
+    try {
+      // macOS and Windows never run a Service.
+      if (initial.platform === "linux") {
+        const response = await fetch(new URL("/api/host-identity", connection.baseUrl), {
+          headers: { authorization: `Bearer ${connection.token}` }, redirect: "error", signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) throw new Error("The Service host identity is unavailable.");
+        const identity = await response.json();
+        if (!identity || typeof identity.salt !== "string" || typeof identity.digest !== "string"
+          || !/^[0-9a-f]{64}$/.test(identity.salt) || !/^[0-9a-f]{64}$/.test(identity.digest)) {
+          throw new Error("The Service returned an invalid host identity.");
+        }
+        const digest = await invoke("host_digest", { salt: identity.salt });
+        if (digest === identity.digest) return;
+      }
+      await invoke("sidecar_start");
+    } catch (error) {
+      showNotice(`Local actions are unavailable because this machine could not be verified with the Service. ${error instanceof Error ? error.message : String(error)} Check the connection and reopen Omarchy Bot to retry.`, "alert");
+    }
+  }
   window.__OMARCHY_BOT_SHELL__ = {
     service: {
       baseUrl: () => connection?.baseUrl ?? initial.revoked ?? "http://127.0.0.1:7321",
@@ -128,15 +150,19 @@ function installNativeShell(initial) {
       },
     },
   };
-  function showNotice(message) {
+  function showNotice(message, role = "status") {
+    if (!document.body) {
+      window.addEventListener("DOMContentLoaded", () => showNotice(message, role), { once: true });
+      return;
+    }
     let notice = document.getElementById("omarchy-shell-notice");
     if (!notice) {
       notice = document.createElement("p");
       notice.id = "omarchy-shell-notice";
-      notice.setAttribute("role", "status");
       document.body.prepend(notice);
     }
     notice.textContent = message;
+    notice.setAttribute("role", role);
   }
   document.addEventListener("click", event => {
     const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
@@ -167,4 +193,5 @@ function installNativeShell(initial) {
     message.textContent = notice;
     document.body.prepend(message);
   }, { once: true });
+  void startLocalSidecar();
 }
