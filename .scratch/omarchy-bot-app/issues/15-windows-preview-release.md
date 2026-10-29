@@ -4,7 +4,7 @@
 
 **Blocked by:** 09 (Compiled Sidecar inside the app), 10 (Windows executor for the Sidecar), 11 (Releases and auto-update)
 
-**Status:** needs-info
+**Status:** resolved
 
 Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
@@ -34,3 +34,5 @@ The investigation did prove a separate evidence-loss bug: directing Bun child st
 Final checks actually run on the merged source with that harness correction: `bash scripts/build-linux-app.sh` exited 0 (58.80s); `bash scripts/smoke-linux-app.sh .lane/dist/omarchy-bot_0.1.0_amd64.AppImage` exited 0 (44.60s), all 26 checks passed, SHA256 `b185e89996cbe323a7edc97414654b0c6d1b4f0ccafde537b5d0130eabb8a21c`. Earlier diagnostic runs included one managed-attachment download failure before the fixture was reached and two current-artifact 26-check passes; these do not establish that the intermittent fixture regression is fixed. Evidence is under `.lane/linux-app/evidence/` and `.lane/merge15-investigation.json`. The next occurrence needs its retained lifecycle failure and separate stderr to distinguish adapter startup failure from lifecycle/grant ordering. Status stays `needs-info`, every Windows criterion remains unchecked, and the integrator note above still applies.
 
 Bounded repeat experiment: five sequential fresh real Linux smoke sessions using the same `b185e899…` artifact each passed 26 checks (47.25s, 44.98s, 44.35s, 44.37s, 44.97s); zero fixture failures and zero attachment failures in that batch. Per-run evidence and command output are retained under `.lane/merge15-stress/run-1` through `run-5`. Review then found that failure snapshots survived later successful runs. The executable absence assertion went red against that retained stale file; clearing it at run start fixed the issue, and a final actual smoke plus the same absence assertion exited 0 (60.25s, 26 checks). Failure capture now also projects only persisted lifecycle event times, Surface identities and enum states, showing retries without exporting whole event payloads. These results still leave the original intermittent startup cause unresolved; no speculative product fix was applied.
+
+2026-10-29 integrator: closed at the user's request ("Just close 14 and 15. I will test it later"). The unticked criteria above were not met and stay unticked. They are deferred, not passed: signing and notarization or publication credentials, the self-hosted Windows smoke runner where it applies, a real `app-release` run, and manual testing on real hardware. The user will test the unsigned CI builds from `a92c542` later.
