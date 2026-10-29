@@ -4,14 +4,14 @@
 
 **Blocked by:** 21 (Rust Local Sidecar passes the existing Sidecar suites on every OS), 16 (Sidecar decides "same machine" by host identity)
 
-**Status:** needs-info
+**Status:** resolved
 
 Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
 - [x] Linux AppImage smoke runs one approved `local.run` end to end with the Rust Sidecar
-- [ ] macOS dmg and Windows NSIS CI jobs build and bundle the Rust Sidecar; the Windows install check passes
+- [x] macOS dmg and Windows NSIS CI jobs build and bundle the Rust Sidecar; the Windows install check passes
 - [x] No TypeScript Sidecar source, build script or bundled Bun Sidecar binary remains; the package-boundary tests are updated
-- [ ] Installer sizes before and after are recorded per platform in Comments
+- [x] Installer sizes before and after are recorded per platform in Comments
 - [x] Review cleanups in the same code: the Sidecar decision is a typed value, not a string; approvals are typed, not `serde_json::Value`; the restart exit code has a descriptive name; `approvalId` and `jobId` naming is consistent
 
 ## Comments
@@ -31,3 +31,14 @@ Review: the independent review's sole P2 was lost Windows test coverage from del
 All temporary instrumentation, disposable runners, the temporary wire harness, the diagnostic browser pack and the private Pi auth/models/settings (mode 0700 directory, 0600 files) were removed, with absence verified. No host changes were made.
 
 Acceptance ticked here is the Linux smoke, the TypeScript Sidecar removal with updated package-boundary tests, and the review cleanups. The macOS dmg/Windows NSIS CI criterion and the all-platform installer-size criterion remain unticked because no native installer build and no macOS/Windows installer measurement were observed on this host. The user will push and report CI. Status is needs-info, not resolved.
+
+2026-10-29 integrator: CI evidence on PR #10 at `a92c542`. macOS dmg run https://github.com/x-metheus/omarchy-bot/actions/runs/40896349391 (aarch64 and x64 pass; both logs show "Bundled Rust Sidecar", and the x64 log signs `Contents/MacOS/omarchy-bot-sidecar`). Windows run https://github.com/x-metheus/omarchy-bot/actions/runs/40896349408 (`nsis-install` passes; the log shows "Bundled Rust Sidecar: …omarchy-bot-sidecar.exe"). All other PR checks pass except the Vercel site checks, which also fail on `main`.
+
+Installer sizes, before (`d27d343`, Bun Sidecar) and after (`a92c542`, Rust Sidecar):
+
+| Installer | Before | After |
+| --- | ---: | ---: |
+| Linux AppImage | 149,699,064 B | 105,323,000 B |
+| macOS dmg aarch64 | 46,137,137 B | 5,977,903 B |
+| macOS dmg x64 | 48,932,999 B | 6,305,024 B |
+| Windows NSIS x64 (unsigned preview) | 45,409,604 B | 4,087,718 B |
