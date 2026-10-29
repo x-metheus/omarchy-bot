@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { assertNotRoot, extractRuntimeArchive, verifyChecksum } from "../../apps/cli/src/archive.ts";
@@ -138,6 +138,54 @@ test("extracts the packager's dot directory and safe symlinks", async () => {
   if (result.exitCode === 0) expect(lstatSync(path.join(destination, "link")).isSymbolicLink()).toBe(true);
 });
 
+test("extracts the runtime packager's hardlinked files while preserving symlinks", () => {
+  const source = path.join(root, "source");
+  const output = path.join(root, "output");
+  const bundleRoot = path.join(root, "sway");
+  const bundle = path.join(root, "sway.tar.gz");
+  const fonts = path.join(root, "fonts");
+  const write = (name: string, content: string) => {
+    const file = path.join(source, name);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, content);
+    return file;
+  };
+  const run = (args: string[]) => {
+    const result = Bun.spawnSync(args, { cwd: source, env: { ...process.env, OMARCHY_BOT_PLUGIN_REVISION: "hardlink-fixture" } });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+  };
+  write("package.json", JSON.stringify({ name: "archive-fixture", private: true, dependencies: { fixture: "file:packages/fixture" } }));
+  write("packages/fixture/package.json", JSON.stringify({ name: "fixture", version: "1.0.0" }));
+  mkdirSync(path.join(source, "node_modules"));
+  run([process.execPath, "install"]);
+  for (const helper of ["pointer/omarchy-bot-wayland-input", "capture/omarchy-bot-wayland-capture", "bot-desktop/omarchy-bot-desktop"]) {
+    chmodSync(write(`apps/daemon/dist/native-${helper}`, "#!/bin/sh\n"), 0o755);
+  }
+  write("scripts/serve.sh", "#!/bin/sh\n");
+  const original = write("apps/daemon/original.ts", "export const runtime = true;\n");
+  linkSync(original, path.join(source, "apps/daemon/duplicate.ts"));
+  symlinkSync("original.ts", path.join(source, "apps/daemon/link.ts"));
+  mkdirSync(bundleRoot);
+  writeFileSync(path.join(bundleRoot, "runtime"), "sway fixture\n");
+  run(["tar", "-czf", bundle, "-C", bundleRoot, "."]);
+  const bundleChecksum = createHash("sha256").update(readFileSync(bundle)).digest("hex");
+  write("apps/daemon/src/modules/computer/swayRuntimeSupply.ts", `export const SWAY_RUNTIME_RELEASE = "fixture";\nexport const bundle = { sha256: "${bundleChecksum}" };\n`);
+  mkdirSync(fonts);
+  const font = path.join(fonts, "Fixture.ttf");
+  writeFileSync(font, "font fixture\n");
+  const fontChecksum = createHash("sha256").update(readFileSync(font)).digest("hex");
+  write("apps/daemon/src/modules/computer/botComputerAssets.ts", `export const FONT_ASSETS = Object.freeze([\n{ file: "Fixture.ttf", sha256: "${fontChecksum}" },\n]);\n`);
+  run(["bash", path.resolve(import.meta.dir, "../../scripts/package-plugin-runtime.sh"), source, output, bundle, fonts]);
+  const archive = path.join(output, "omarchy-bot-runtime-hardlink-fixture-x86_64.tar.zst");
+  verifyChecksum(archive, `${archive}.sha256`);
+  const destination = path.join(root, "runtime");
+  extractRuntimeArchive(archive, destination);
+  for (const name of ["original.ts", "duplicate.ts", "link.ts"]) {
+    expect(readFileSync(path.join(destination, "apps/daemon", name), "utf8")).toBe("export const runtime = true;\n");
+  }
+  expect(readlinkSync(path.join(destination, "apps/daemon/link.ts"))).toBe("original.ts");
+});
+
 async function tarEntry(name: string, type: string, content = Buffer.alloc(0), link = "") {
   const header = (await changedEntry(name, type)).subarray(0, 512);
   header.fill(0, 157, 257);
@@ -148,6 +196,18 @@ async function tarEntry(name: string, type: string, content = Buffer.alloc(0), l
   header.write(`${header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, "0")}\0 `, 148, 8);
   return Buffer.concat([header, content, Buffer.alloc((512 - content.length % 512) % 512)]);
 }
+
+test("rejects even internal hardlink entries before writing any payload", async () => {
+  const archive = path.join(root, "runtime.tar.zst");
+  const destination = path.join(root, "runtime");
+  writeFileSync(archive, Bun.zstdCompressSync(Buffer.concat([
+    await tarEntry("original.txt", "0", Buffer.from("runtime\n")),
+    await tarEntry("duplicate.txt", "1", Buffer.alloc(0), "original.txt"),
+    Buffer.alloc(1024),
+  ])));
+  expect(() => extractRuntimeArchive(archive, destination)).toThrow(/unsafe/);
+  expect(existsSync(destination)).toBe(false);
+});
 
 test("extracts safe symlinks and rejects escaping links and writing through links", async () => {
   const archive = path.join(root, "runtime.tar.zst");
