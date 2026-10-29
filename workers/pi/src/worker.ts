@@ -75,7 +75,9 @@ function getModelRuntime(): Promise<ModelRuntime> {
   return modelRuntimePromise;
 }
 
-const mcpControls = new NativeMcpControls(getModelRuntime);
+const mcpControls = new NativeMcpControls(getModelRuntime, (server, authorizationId, status, reason) => {
+  emit({ type: "native", agentId: AGENT_ID, capability: "mcp.authorization", payload: { server, authorizationId, status, ...(reason ? { reason } : {}) }, sensitivity: "public" });
+});
 
 function requestComputer(
   context: AgentComputerToolContext,

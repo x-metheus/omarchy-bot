@@ -84,10 +84,29 @@ test("plugin consent uses the shell and events refresh connected accounts and al
     await page.clock.runFor(16);
     return page.getByRole("button", { name: "Reconnect / Authorize", exact: true }).isEnabled();
   }).toBe(true);
+  const nativeEvent = (status: "completed" | "failed", cursor: number, reason?: string) => socket.send(JSON.stringify({ type: "event", envelope: { schemaVersion: 1, eventId: `oauth-${cursor}`, cursor, occurredAt: new Date().toISOString(), aggregateType: "plugin", aggregateId: "account_fixture", type: `plugin.authorization_${status}`, payload: { providerId: "google", accountId: "account_fixture", mcpId: "mcp_fixture", status, ...(reason ? { reason } : {}) } } }));
+  nativeEvent("completed", 3);
+  await expect.poll(async () => {
+    await page.clock.runFor(16);
+    return page.getByText("Complete consent in your system browser, then return to Omarchy Bot. Authorization is not complete yet.", { exact: true }).count();
+  }).toBe(0);
+  await page.getByRole("button", { name: "Reconnect / Authorize", exact: true }).click();
+  await expect(page.getByText("Complete consent in your system browser, then return to Omarchy Bot. Authorization is not complete yet.", { exact: true })).toBeVisible();
+  nativeEvent("failed", 4, "expired");
+  await expect.poll(async () => {
+    await page.clock.runFor(16);
+    return page.getByText("Authorization expired. Try again.", { exact: true }).count();
+  }).toBeGreaterThan(0);
+  await expect(page.getByText("Complete consent in your system browser, then return to Omarchy Bot. Authorization is not complete yet.", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Reconnect / Authorize", exact: true }).click();
+  await expect.poll(async () => {
+    await page.clock.runFor(16);
+    return page.getByRole("button", { name: "Reconnect / Authorize", exact: true }).isEnabled();
+  }).toBe(true);
   await page.getByText("Complete authorization manually", { exact: true }).click();
   await page.getByRole("textbox", { name: /^Full authorization redirect URL/ }).fill("https://native.example/callback?code=fixture");
   await page.getByRole("button", { name: "Complete authorization", exact: true }).click();
-  await expect(page.getByText("Authorization completed. Check the connection to discover its tools.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Authorization completed.", { exact: true })).toBeVisible();
   await expect(page).toHaveURL(conversationUrl);
 });
 
