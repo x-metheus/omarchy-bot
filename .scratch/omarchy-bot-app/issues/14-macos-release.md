@@ -4,7 +4,7 @@
 
 **Blocked by:** 09 (Compiled Sidecar inside the app), 11 (Releases and auto-update), 13 (⌘ key mapping during Takeover)
 
-**Status:** needs-info
+**Status:** resolved
 
 Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
@@ -39,3 +39,5 @@ Post-review targeted checks: final locked Linux release compile passed (11.68s);
 Final disposition: implementation and clean review are complete, and all evidence above is retained. This ticket stays **needs-info** pending native macOS runner/signing/notarization evidence and ticket 11's publication and runtime-updater work, neither of which is available in this session. The Pi-only model failure is explicitly non-blocking. All five acceptance checkboxes remain unchecked until their native criteria are observed.
 
 Integrator CI evidence (2026-10-29, draft PR #10 at 0e90a17): `sidecar-conformance` run 40807022457 passed Local Sidecar on `macos-15` (arm64) and `macos-15-intel` (x64); `macos-app` run 40807022506 built unsigned ad-hoc dmgs for aarch64 and x64. Still open: notarized/signed dmgs and Gatekeeper first-open (need Apple Developer ID and notarization secrets), Keychain and deep links on a real Mac, the WKWebView checklist run, and publication with updater entries (ticket 11).
+
+2026-10-29 integrator: closed at the user's request ("Just close 14 and 15. I will test it later"). The unticked criteria above were not met and stay unticked. They are deferred, not passed: signing and notarization or publication credentials, the self-hosted Windows smoke runner where it applies, a real `app-release` run, and manual testing on real hardware. The user will test the unsigned CI builds from `a92c542` later.
