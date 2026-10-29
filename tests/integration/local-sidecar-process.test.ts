@@ -96,6 +96,72 @@ test("production Sidecar authenticates, registers its shell, asks and returns ou
   }
 }, 25_000);
 
+test.skipIf(!windows)("production Sidecar returns readable PowerShell warning and error text through the device channel", async () => {
+  const sidecar = await startSidecar();
+  try {
+    sidecar.send({ type: "local.job", jobId: "streams", action: "run", hostname: "paired", botId: "bot", turnId: "turn", command: "Write-Warning 'warning <sentinel> & λ'; Write-Error 'error <sentinel> & λ'" });
+    await until(() => sidecar.stdout().includes('"type":"ask"'), "Sidecar never asked for approval");
+    sidecar.child.stdin.write(`${JSON.stringify({ type: "allow-once", jobId: "streams" })}\n`);
+    await until(() => sidecar.frames.some((frame) => frame.type === "local.result" && frame.jobId === "streams"), "PowerShell diagnostics never returned");
+    const result = sidecar.frames.find((frame) => frame.type === "local.result" && frame.jobId === "streams");
+    expect(result).toMatchObject({ type: "local.result", jobId: "streams", ok: true, exitCode: 1 });
+    if (result?.type !== "local.result" || !result.ok) throw new Error("PowerShell diagnostics failed");
+    expect(result.text).toContain("warning <sentinel> & λ");
+    expect(result.text).toContain("error <sentinel> & λ");
+    expect(result.text).not.toContain("#< CLIXML");
+    expect(result.text).not.toContain("<Objs");
+    expect(result.text).not.toContain("_x000D_");
+  } finally {
+    await sidecar.close();
+  }
+}, 40_000);
+
+test.skipIf(!windows)("production Sidecar returns clean remembered output and leaves a successfully launched application alive", async () => {
+  const encoded = Buffer.from("$PID | Set-Content descendant.pid; while (!(Test-Path release)) { Start-Sleep -Milliseconds 20 }; Set-Content marker.txt survived", "utf16le").toString("base64");
+  const script = `$PID | Set-Content root.pid; $p = Start-Process -FilePath "$PSHOME\\powershell.exe" -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','${encoded}' -WorkingDirectory (Get-Location).Path -RedirectStandardOutput child.out -RedirectStandardError child.err -PassThru; $p.Id | Set-Content launched.pid; Write-Output 'remembered-launch'`;
+  const sidecar = await startSidecar([`run:${script}`]);
+  const files = ["root.pid", "descendant.pid", "launched.pid"];
+  const alive = (pid: number): boolean => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+  try {
+    sidecar.send({ type: "local.job", jobId: "launch", action: "run", hostname: "paired", botId: "bot", turnId: "turn", command: script });
+    await until(() => files.every((file) => existsSync(path.join(sidecar.root, file)) && /^\d+$/.test(readFileSync(path.join(sidecar.root, file), "utf8").trim())), "PowerShell root and launched application never recorded their PIDs");
+    const rootPid = Number(readFileSync(path.join(sidecar.root, "root.pid"), "utf8").trim());
+    const descendantPid = Number(readFileSync(path.join(sidecar.root, "descendant.pid"), "utf8").trim());
+    for (const pid of [rootPid, descendantPid]) expect(Number.isSafeInteger(pid) && pid > 0).toBeTrue();
+    expect(Number(readFileSync(path.join(sidecar.root, "launched.pid"), "utf8").trim())).toBe(descendantPid);
+    expect(alive(descendantPid)).toBeTrue();
+    await until(() => !alive(rootPid), `PowerShell root ${rootPid} did not exit after launching application ${descendantPid}`);
+    await until(() => sidecar.frames.some((frame) => frame.type === "local.result" && frame.jobId === "launch"), `PowerShell root ${rootPid} exited but command completion still waits on application ${descendantPid}`);
+    const result = sidecar.frames.find((frame) => frame.type === "local.result" && frame.jobId === "launch");
+    expect(result).toMatchObject({ type: "local.result", jobId: "launch", ok: true, exitCode: 0 });
+    if (result?.type !== "local.result" || !result.ok) throw new Error("remembered launch failed");
+    expect(result.text?.trim()).toBe("remembered-launch");
+    expect(sidecar.stdout()).not.toContain('"type":"ask"');
+    expect(alive(descendantPid)).toBeTrue();
+    expect(existsSync(path.join(sidecar.root, "marker.txt"))).toBeFalse();
+    writeFileSync(path.join(sidecar.root, "release"), "");
+    await until(() => existsSync(path.join(sidecar.root, "marker.txt")) && readFileSync(path.join(sidecar.root, "marker.txt"), "utf8").trim() === "survived", "launched application did not survive normal command completion");
+  } finally {
+    sidecar.send({ type: "local.cancel", jobId: "launch" });
+    // Discover children before awaiting shutdown: inherited capture handles can block completion.
+    const pids = files.flatMap((file) => {
+      const target = path.join(sidecar.root, file);
+      const pid = existsSync(target) ? Number(readFileSync(target, "utf8").trim()) : NaN;
+      return Number.isSafeInteger(pid) && pid > 0 ? [pid] : [];
+    });
+    for (const pid of pids) {
+      if (alive(pid)) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+    }
+    try {
+      await until(() => pids.every((pid) => !alive(pid)), "launched application survived targeted cleanup");
+    } finally {
+      await sidecar.close();
+    }
+  }
+}, 90_000);
+
 test("production Sidecar exits and abandons a pending Ask when the app closes stdin", async () => {
   const sidecar = await startSidecar();
   try {
