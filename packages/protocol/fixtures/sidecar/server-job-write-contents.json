@@ -1,0 +1,13 @@
+{
+  "direction": "server",
+  "frame": {
+    "type": "local.job",
+    "jobId": "job-write-contents",
+    "hostname": "fixture-laptop",
+    "botId": "bot-fixture",
+    "turnId": "turn-fixture",
+    "action": "write",
+    "path": "notes/fixture.txt",
+    "contents": "fixture contents λ\n"
+  }
+}
