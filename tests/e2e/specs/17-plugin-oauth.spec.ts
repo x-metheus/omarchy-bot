@@ -69,8 +69,8 @@ test("plugin consent uses the shell and events refresh connected accounts and al
   await page.getByRole("button", { name: "Add account", exact: true }).click();
   await expect.poll(() => page.evaluate(() => Reflect.get(window, "oauthOpened"))).toEqual([providerUrl]);
   // Freeze interval polling: only an authorization event can fetch the new state.
-  await page.clock.install();
-  await page.clock.pauseAt(new Date());
+  await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-01-01T00:01:00Z"));
   state.accounts.push({ id: "account_fixture", providerId: "google", label: "person@example.invalid", identity: "google:person", enabledServices: ["google-drive"], grantedScopes: [], status: "connected", nativeConnectionId: "mcp_fixture" });
   const event = (status: "completed" | "failed", cursor: number) => socket.send(JSON.stringify({ type: "event", envelope: { schemaVersion: 1, eventId: `oauth-${cursor}`, cursor, occurredAt: new Date().toISOString(), aggregateType: "plugin", aggregateId: "account_fixture", type: `plugin.authorization_${status}`, payload: { providerId: "google", accountId: "account_fixture", status } } }));
   event("completed", 1);
