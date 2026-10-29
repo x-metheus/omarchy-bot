@@ -155,10 +155,14 @@ describe.skipIf(process.platform !== "win32")("Windows LocalExecutor", () => {
       for (const file of ["root.pid", "descendant.pid", "child-ready.pid"]) {
         if (!existsSync(path.join(root, file))) continue;
         const knownPid = Number(readFileSync(path.join(root, file), "utf8").trim());
-        if (Number.isSafeInteger(knownPid) && knownPid > 0 && alive(knownPid)) process.kill(knownPid, "SIGKILL");
+        if (!Number.isSafeInteger(knownPid) || knownPid <= 0) continue;
+        if (alive(knownPid)) {
+          try { process.kill(knownPid, "SIGKILL"); } catch { /* already gone */ }
+        }
+        await until(() => !alive(knownPid));
       }
       await pending;
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 25_000);
 
