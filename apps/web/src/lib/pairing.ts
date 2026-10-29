@@ -1,4 +1,5 @@
 import { getShell, type PairingRequest } from "./shell.ts";
+import { serviceFetch } from "./serviceFetch.ts";
 
 interface ConnectionState {
   paired: boolean;
@@ -9,11 +10,18 @@ interface ConnectionState {
 
 let state: ConnectionState | undefined;
 const listeners = new Set<() => void>();
-export const connectionState = (): ConnectionState => state ??= {
-  paired: Boolean(getShell().service.deviceToken()),
-  pending: false,
-  serviceUrl: getShell().service.baseUrl(),
-};
+export function connectionState(): ConnectionState {
+  if (state) return state;
+  const service = getShell().service;
+  const startupStatus = service.status();
+  const message = startupStatus.error ?? (startupStatus.revoked ? "This app's pairing was revoked. Pair again with a new code from the Service Host." : undefined);
+  return state = {
+    paired: Boolean(service.deviceToken()),
+    pending: false,
+    serviceUrl: service.baseUrl(),
+    ...(message === undefined ? {} : { message }),
+  };
+}
 export function subscribeConnection(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
@@ -27,6 +35,8 @@ export async function pairService({ serviceUrl, code }: PairingRequest): Promise
   if (connectionState().pending) return;
   publish({ paired: false, pending: true, serviceUrl });
   try {
+    const startupError = getShell().service.status().error;
+    if (startupError) throw new Error(startupError);
     let address: URL;
     try { address = new URL(serviceUrl.trim()); } catch { throw new Error("Enter a valid HTTP or HTTPS Service address."); }
     if (!/^https?:$/.test(address.protocol) || address.username || address.password || address.pathname !== "/" || address.search || address.hash) {
@@ -34,7 +44,7 @@ export async function pairService({ serviceUrl, code }: PairingRequest): Promise
     }
     const loopback = address.hostname === "localhost" || address.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(address.hostname);
     if (address.protocol === "http:" && !loopback) throw new Error("Use HTTPS or a loopback HTTP address through an SSH tunnel.");
-    const response = await fetch(`${address.origin}/api/pairing/exchange`, {
+    const response = await serviceFetch(`${address.origin}/api/pairing/exchange`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ code: code.trim() }),

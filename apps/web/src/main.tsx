@@ -4,11 +4,12 @@ import { getShell } from "./lib/shell.ts";
 try {
   const shell = getShell();
   for (const [capability, methods] of [
-    [shell.service, ["baseUrl", "deviceToken", "store", "clear"]],
+    [shell.service, ["baseUrl", "deviceToken", "status", "certificateUntrusted", "store", "clear"]],
     [shell.pairing, ["onRequest"]],
     [shell.browser, ["open"]],
+    [shell.attachments, ["save"]],
     [shell.updates, ["check", "download", "restart"]],
-    [shell.localSidecar, ["status", "onApproval", "onApprovalDismiss", "decide"]],
+    [shell.localSidecar, ["start", "status", "onApproval", "onApprovalDismiss", "decide"]],
     [shell.keyMapping, ["platform", "metaSendsSuper", "setMetaSendsSuper"]],
   ] as const) {
     if (!capability || methods.some(method => typeof Reflect.get(capability, method) !== "function")) {

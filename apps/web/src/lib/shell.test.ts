@@ -1,8 +1,24 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
-import type { Shell } from "./shell.ts";
 import { createMemoryShell } from "./shell.ts";
+
+test("pairing imports without a native shell and reads startup revocation only after explicit installation", async () => {
+  const child = Bun.spawn([process.execPath, "--eval", `
+    import { strict as assert } from "node:assert";
+    // Import before shell installation to exercise the production module-loading boundary.
+    const { connectionState } = await import(${JSON.stringify(new URL("./pairing.ts", import.meta.url).href)});
+    const { createMemoryShell, getShell, installShell } = await import(${JSON.stringify(new URL("./shell.ts", import.meta.url).href)});
+    assert.throws(getShell, /The native shell is unavailable/);
+    assert.equal(globalThis.__OMARCHY_BOT_SHELL__, undefined);
+    const shell = createMemoryShell({ storage: null, baseUrl: "https://service.example" });
+    installShell({ ...shell, service: { ...shell.service, status: () => ({ revoked: true }) } });
+    assert.deepEqual(connectionState(), {
+      paired: false, pending: false, serviceUrl: "https://service.example",
+      message: "This app's pairing was revoked. Pair again with a new code from the Service Host.",
+    });
+  `], { stdout: "pipe", stderr: "pipe" });
+  const error = await new Response(child.stderr).text();
+  expect(await child.exited, error).toBe(0);
+});
 
 test("the memory shell stores and clears the Service connection", async () => {
   const shell = createMemoryShell({ storage: null });
@@ -54,6 +70,7 @@ test("dismissed memory approvals fail closed and dismissal listeners unsubscribe
 
 test("memory shell reports Sidecar and platform state and remembers key mapping", async () => {
   const defaults = createMemoryShell({ storage: null });
+  await defaults.localSidecar.start();
   expect(defaults.localSidecar.status()).toEqual({ running: false });
   expect(defaults.keyMapping.platform()).toBe("linux");
   expect(defaults.keyMapping.metaSendsSuper()).toBe(false);
@@ -121,20 +138,11 @@ test("the harness reports the browser platform unless the shell platform is supp
   }
 });
 
-test("the native shell reports the operating system supplied by the app", () => {
-  const source = readFileSync(new URL("../../../omarchy-bot/src-tauri/src/shell.js", import.meta.url), "utf8");
-  for (const platform of ["linux", "windows", "macos"] as const) {
-    const window = {
-      __OMARCHY_BOT_SHELL__: undefined as Shell | undefined,
-      __TAURI_INTERNALS__: { async invoke() { return { status: { running: false }, approvals: [] }; } },
-      addEventListener() {},
-      fetch,
-    };
-    runInNewContext(`(${source})(initial)`, {
-      initial: { connection: null, platform }, window,
-      localStorage: { getItem() { return null; } },
-      document: { addEventListener() {} },
-    });
-    expect(window.__OMARCHY_BOT_SHELL__!.keyMapping.platform()).toBe(platform);
-  }
+test("memory shell refuses attachment and browser URLs that could expose the device token", async () => {
+  const shell = createMemoryShell({ storage: null, baseUrl: "https://service.example", deviceToken: "private-token" });
+  await expect(shell.attachments.save("https://foreign.example/api/attachments/att_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "report.txt")).rejects.toThrow("paired Service");
+  await expect(shell.browser.open("https://service.example/file?access_token=private-token")).rejects.toThrow("authenticated Service link");
+  expect(shell.service.status()).toEqual({ revoked: false });
+  expect(await shell.service.certificateUntrusted("https://service.example")).toBe(false);
 });
+

@@ -16,6 +16,25 @@ async function decision(page: Page, jobId: string): Promise<LocalApprovalDecisio
   return page.evaluate(jobId => globalThis.__localApprovalDecisions__[jobId]!, jobId);
 }
 
+test("Sidecar startup failure shows recovery through the shared UI", async ({ page }) => {
+  await page.addInitScript(() => localStorage.removeItem("omarchy-bot.device-token"));
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Add Service" })).toBeVisible();
+  await page.route("**/api/pairing/exchange", route => route.fulfill({ status: 201, json: { token: "fixture-token" } }));
+  await page.route("**/api/health", route => route.fulfill({ json: { protocol: 1 } }));
+  await page.route("**/api/agents", route => route.fulfill({ json: [] }));
+  await page.route("**/api/bots", route => route.fulfill({ json: [] }));
+  await page.evaluate(() => {
+    const shell = globalThis.__OMARCHY_BOT_MEMORY_SHELL__!;
+    shell.localSidecar.start = async () => { throw new Error("Local actions are unavailable. Check the connection and reopen Omarchy Bot to retry."); };
+  });
+  await page.getByLabel("Pairing code").fill("STARTUP1");
+  await page.getByRole("button", { name: "Pair", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Local actions are unavailable");
+  await expect(page.getByRole("alert")).toContainText("reopen Omarchy Bot to retry");
+  await expect(page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot", exact: true })).toBeVisible();
+});
+
 for (const [label, expected] of [
   ["Allow once", "allow-once"],
   ["Always allow", "always"],

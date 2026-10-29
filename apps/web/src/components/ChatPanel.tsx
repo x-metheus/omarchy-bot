@@ -43,6 +43,8 @@ import { isTerminalTurn } from "@omarchy-bot/domain";
 import { api, apiErrorMessage, randomUuid, trimSendText } from "../lib/api.ts";
 import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
 import { withDeviceToken } from "../lib/urls.ts";
+import { getShell } from "../lib/shell.ts";
+import { ExternalMarkdownLink } from "./ExternalLink.tsx";
 import {
   thinkingBoundaryAnnouncements,
   toolCallBoundaryAnnouncements,
@@ -79,22 +81,6 @@ type Row =
   | { kind: "responses"; key: string; items: MessageDto[] }
   | { kind: "tools"; key: string; items: MessageDto[] };
 
-function ExternalMarkdownLink({ href, children }: { href: string; children: ReactNode }): JSX.Element {
-  let protocol: string;
-  try {
-    protocol = new URL(href).protocol.toLowerCase();
-  } catch {
-    return <>{children}</>;
-  }
-  if (protocol !== "http:" && protocol !== "https:" && protocol !== "mailto:") {
-    return <>{children}</>;
-  }
-  return (
-    <a href={href} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.markdownLink)}>
-      {children}
-    </a>
-  );
-}
 
 function DirectMarkdownImage({ src, alt }: { src: string; alt: string }): JSX.Element {
   let protocol: string;
@@ -274,6 +260,7 @@ function attachmentErrorMessage(error: unknown, fileName: string): string {
 }
 
 function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentDto; previewUrl?: string }): JSX.Element {
+  const [notice, setNotice] = useState<string>();
   // The daemon route needs the token; object URLs used for staged previews do not.
   const downloadUrl = attachment.url === undefined ? undefined : withDeviceToken(attachment.url);
   const imageUrl = attachment.mediaType.startsWith("image/")
@@ -293,16 +280,25 @@ function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentD
       </AspectRatio>
     );
   }
-  return (
+  return <VStack gap={0}>
     <Item
       label={attachment.name}
       description={metadata}
       density="compact"
-      {...(downloadUrl !== undefined ? { href: downloadUrl } : {})}
+      onClickCapture={event => {
+        if (attachment.url === undefined || attachment.kind !== "managed") return;
+        event.preventDefault();
+        void getShell().attachments.save(attachment.url, attachment.name).then(
+          path => setNotice(`Attachment saved to ${path}`),
+          error => setNotice(error instanceof Error ? error.message : String(error)),
+        );
+      }}
+      {...(downloadUrl !== undefined ? { href: new URL(attachment.url!, getShell().service.baseUrl()).href } : {})}
       data-testid={downloadUrl !== undefined ? "message-file-attachment" : "staged-file-row"}
       data-attachment-name={attachment.name}
     />
-  );
+    {notice === undefined ? null : <Text role="status">{notice}</Text>}
+  </VStack>;
 }
 
 function StagedAttachment({

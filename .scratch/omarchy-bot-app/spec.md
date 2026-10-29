@@ -103,11 +103,12 @@ Every native capability sits behind one `shell` interface, so a phone shell can 
 ### Web UI
 
 - A `shell` interface is the only way the Web UI reaches native capability. Its surface:
-  - Service connection: read and store the Service base URL and device token, and clear them on unpair.
+  - Service connection: read and store the Service base URL and device token, clear them on unpair, report startup keychain/revocation status, and diagnose an untrusted Service certificate after a failed connection.
   - Pairing intake: subscribe to incoming pairing requests (deep links, including those delivered to an already running app).
   - System browser: open an external URL.
+  - Attachments: download managed attachment bytes with the paired token and save them to Downloads, preserving the filename with a collision prefix and reporting the saved path. The browser harness downloads the same authenticated bytes through its memory shell.
   - Updates: check, download, and restart.
-  - Local Sidecar: report whether one is running and its device identity, and exchange approval prompts and decisions.
+  - Local Sidecar: start after checking the Service host identity, report whether one is running and its device identity, and exchange approval prompts and decisions. Startup failure rejects through the shell; the shared UI displays the recovery notice.
   - Key mapping: report the platform and the per-device ⌘ mapping preference.
 - The Tauri implementation lives in the app. An in-memory implementation exists for tests and for the browser development harness.
 - `ApiClient` is constructed from the shell's base URL and token getter. Every place that currently derives an address from `window.location` (pairing, projection and RFB endpoints, plugin authorization, browser-loaded attachment URLs) uses the base URL instead.
@@ -121,7 +122,7 @@ Every native capability sits behind one `shell` interface, so a phone shell can 
 
 ### App (Tauri 2 shell)
 
-- A new app in this monorepo, Omarchy Bot, embeds the Web UI production build. The Rust side is kept thin: keychain (via the operating system credential store), deep-link registration with single-instance forwarding, opening the system browser, the updater, Sidecar process lifetime and stdio bridging, and nothing else. It uses only plugins that also exist for Tauri mobile, or isolates those that do not behind the `shell` interface.
+- A new app in this monorepo, Omarchy Bot, embeds the Web UI production build. The Rust side is kept thin: keychain (via the operating system credential store), deep-link registration with single-instance forwarding, opening the system browser, attachment writes to Downloads, certificate diagnosis, the updater, Sidecar process lifetime and stdio bridging, and nothing else. It uses only plugins that also exist for Tauri mobile, or isolates those that do not behind the `shell` interface. The injected script installs only the shell adapter; the shared UI owns notices and link actions, and Service requests use an explicit transport without replacing global `fetch`.
 - Content Security Policy allows connections only to the paired Service origin (`https`/`wss`, or `http`/`ws` for loopback).
 - Packaging: Linux AppImage (x86_64), macOS dmg signed and notarized (arm64 and x64), Windows NSIS (x64), signed when a certificate is available and labeled preview until then. Release artifacts and the signed updater manifest are published to GitHub Releases. App versions are independent of Service runtime versions; compatibility is decided only by the protocol version.
 
@@ -165,16 +166,19 @@ Good tests drive external behavior through the highest available seam and never 
   - OAuth through the system-browser call and completion event.
   - Local approval prompts.
   - ⌘ mapping on a simulated macOS platform.
+  - Managed file clicks download authenticated bytes through the memory shell and report the saved filename; external links call the shell browser without navigating the app.
+  - Startup keychain errors prevent consuming a pairing code; certificate diagnosis and revoked-device notices use the connection capability.
 
   Prior art is the existing e2e fixtures and specs.
+  Native adapter tests exercise the injected shell at its JavaScript IPC boundary, including authenticated attachment requests and refusal to send device-token URLs to the system browser. Isolated Rust attachment-writing tests cover exact bytes, safe filenames and collision prefixes.
   The existing native-shell VM integration seam also exercises the real injected adapter: same identity over loopback and LAN HTTPS suppresses Sidecar startup, a distinct identity over loopback starts it, and failed checks show recovery instructions without starting local actions.
-
 - **WebView smoke suite.** The packaged app under `tauri-driver` on Linux (WebKitGTK) and Windows (WebView2), and a written checklist run on macOS (WKWebView) before each release. Each run covers:
   - Pairing by deep link.
   - The event stream delivering a Bot reply.
   - Screen Projection rendering.
   - Takeover keyboard and pointer input reaching the Bot Screen.
   - One approved `local.run`.
+  - Managed attachments save authenticated bytes to Downloads, preserve an existing filename with a collision prefix, and never reach the system browser.
   - Equal machine identities over loopback and LAN HTTPS, unavailable identity recovery, and distinct identities over loopback with the bundled Sidecar.
 
   A platform is supported only after this suite passes there. Chromium results never stand in for it.

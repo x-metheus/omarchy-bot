@@ -18,6 +18,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { SKILL_CATALOG_PAGE_SIZE, type BotViewDto, type InstalledSkillDto, type McpConnectionDto, type PluginAccountDto, type PluginStateDto, type SaveMcpBody } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
 import { getShell } from "../lib/shell.ts";
+import { ExternalLink, ExternalMarkdownLink } from "./ExternalLink.tsx";
 import { onPluginAuthorization } from "../lib/events.ts";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 import { ServicesBrowser } from "./ServicesBrowser.tsx";
@@ -309,7 +310,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
         <Text>{service.description}</Text>
         <Text color="secondary">Each connection is bound to its own native MCP server. The Agent sees its label and identity-verification status; it must not assume an account identity that the provider has not exposed.</Text>
         {provider.registrationNote ? <Text color="secondary">{provider.registrationNote}</Text> : null}
-        <a {...stylex.props(styles.link)} href={provider.documentationUrl} target="_blank" rel="noreferrer">Official setup and permissions</a>
+        <ExternalLink {...stylex.props(styles.link)} href={provider.documentationUrl}>Official setup and permissions</ExternalLink>
         {provider.setupReason ? <Banner status="warning" title="Connection prerequisite" description={provider.setupReason} /> : null}
         <VStack gap={2} {...stylex.props(styles.card)}>
           <Heading level={3}>Official companion Skills</Heading>
@@ -537,12 +538,12 @@ function SkillsPanel({ data, bots, selectedBotId, onCreateSkill, busy, execute, 
         <Card padding={4}><VStack gap={3}>
           <Heading level={3}>{detail.data.name}</Heading><Text>{detail.data.description}</Text><Text color="secondary">{detail.data.source}</Text>
           <div {...stylex.props(styles.pager)}>
-            <a href={detail.data.url} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.link)}>View on skills.sh</a>
+            <ExternalLink href={detail.data.url} {...stylex.props(styles.link)}>View on skills.sh</ExternalLink>
             <Button label={selectedInstalled ? "Installed" : "Install"} isDisabled={busy || Boolean(selectedInstalled)} onClick={() => execute(() => api.installSkill(detailId), "Skill installed. Use / in the composer, or let the Agent discover it on the next turn.")} />
           </div>
         </VStack></Card>
         <Text color="secondary">Review third-party instructions before installing. The complete Skill folder is saved, but its scripts do not run during installation.</Text>
-        {detail.data.content ? <div {...stylex.props(styles.document)}><Markdown>{detail.data.content}</Markdown></div> : <Text color="secondary">No text preview is available. Installation checks the original source.</Text>}
+        {detail.data.content ? <div {...stylex.props(styles.document)}><Markdown components={{ link: ExternalMarkdownLink }}>{detail.data.content}</Markdown></div> : <Text color="secondary">No text preview is available. Installation checks the original source.</Text>}
       </> : null}
     </VStack> : <VStack gap={3}>
       <Text color="secondary">Find new capabilities for your Bots in the skills.sh catalog.</Text>

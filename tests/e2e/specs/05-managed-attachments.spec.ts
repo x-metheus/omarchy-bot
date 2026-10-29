@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { expect, test, type Locator, type Page } from "../fixtures.ts";
 
 async function createBot(page: Page, name: string): Promise<string> {
@@ -191,6 +192,14 @@ test.describe("managed attachments", () => {
     await composerInput(page).press("Enter");
     await expect(page.getByTestId("assistant-message")).toHaveCount(priorReplies + 1, { timeout: 15_000 });
     await expect(page.getByRole("link", { name: /notes\.txt/ })).toBeVisible();
+    const download = page.waitForEvent("download");
+    await page.getByRole("link", { name: /notes\.txt/ }).click();
+    const saved = await download;
+    expect(saved.suggestedFilename()).toBe("notes.txt");
+    expect(await saved.failure()).toBeNull();
+    const savedPath = await saved.path();
+    expect(await readFile(savedPath!, "utf8")).toBe("window-local notes");
+    await expect(page.getByRole("status").filter({ hasText: "Attachment saved to notes.txt" })).toBeVisible();
   });
 
   test("rejects unsupported attachments without losing the supported draft", async ({ page }) => {

@@ -1,3 +1,5 @@
+import defaults from "../../../omarchy-bot/shell-defaults.json";
+
 export type ShellPlatform = "linux" | "macos" | "windows";
 export interface PairingRequest { serviceUrl: string; code: string }
 export interface LocalSidecarStatus { running: boolean; deviceId?: string }
@@ -17,17 +19,21 @@ export interface Shell {
   readonly service: {
     baseUrl(): string;
     deviceToken(): string | undefined;
+    status(): { error?: string | undefined; revoked: boolean };
+    certificateUntrusted(origin: string): Promise<boolean>;
     store(baseUrl: string, token: string): Promise<void>;
     clear(): Promise<void>;
   };
   readonly pairing: { onRequest(listener: (request: PairingRequest) => void): () => void };
   readonly browser: { open(url: string): Promise<void> };
+  readonly attachments: { save(url: string, filename: string): Promise<string> };
   readonly updates: {
     check(): Promise<UpdateStatus>;
     download(): Promise<void>;
     restart(): Promise<void>;
   };
   readonly localSidecar: {
+    start(): Promise<void>;
     status(): LocalSidecarStatus;
     onApproval(listener: (approval: LocalApproval) => void): () => void;
     onApprovalDismiss(listener: (jobId: string) => void): () => void;
@@ -42,8 +48,8 @@ export interface Shell {
 
 export const DEVICE_TOKEN_STORAGE_KEY = "omarchy-bot.device-token";
 export const SERVICE_URL_STORAGE_KEY = "omarchy-bot.service-url";
-const DEFAULT_SERVICE_URL = "http://127.0.0.1:7321";
-const META_SENDS_SUPER_STORAGE_KEY = "omarchy-bot.meta-sends-super";
+const DEFAULT_SERVICE_URL = defaults.serviceUrl;
+const META_SENDS_SUPER_STORAGE_KEY = defaults.metaSendsSuperKey;
 type ConnectionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 interface MemoryShellOptions {
@@ -85,6 +91,8 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
     service: {
       baseUrl: () => baseUrl,
       deviceToken: () => token,
+      status: () => ({ revoked: false }),
+      async certificateUntrusted(_origin: string) { return false; },
       async store(nextBaseUrl: string, nextToken: string) {
         const normalized = nextBaseUrl.replace(/\/+$/, "");
         storage?.setItem(SERVICE_URL_STORAGE_KEY, normalized);
@@ -105,13 +113,35 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
         return () => { pairingListeners.delete(listener); };
       },
     },
-    browser: { async open(url: string) { window.open(url, "_blank", "noopener"); } },
+    browser: { async open(url: string) {
+      if (new URL(url).searchParams.has("access_token")) throw new Error("An authenticated Service link cannot be opened in the system browser.");
+      window.open(url, "_blank", "noopener");
+    } },
+    attachments: { async save(value: string, filename: string) {
+      const url = new URL(value, baseUrl);
+      if (!token || url.origin !== baseUrl || !/^\/api\/attachments\/att_[0-9a-f]{32}$/.test(url.pathname) || url.search || url.hash || url.username || url.password) {
+        throw new Error("Attachments must come from the paired Service.");
+      }
+      const response = await fetch(url.href, { headers: { authorization: `Bearer ${token}` }, redirect: "error" });
+      if (!response.ok) throw new Error("The attachment could not be downloaded. Check the Service connection and try again.");
+      const objectUrl = URL.createObjectURL(await response.blob());
+      try {
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        document.body.append(anchor);
+        anchor.click();
+        anchor.remove();
+      } finally { setTimeout(() => URL.revokeObjectURL(objectUrl), 0); }
+      return filename;
+    } },
     updates: {
       async check() { return { available: false }; },
       async download() { throw new Error("The development shell has no update to download."); },
       async restart() { throw new Error("The development shell cannot restart the app."); },
     },
     localSidecar: {
+      async start() {},
       status: () => ({ ...options.localSidecar ?? { running: false } }),
       onApproval(listener: (approval: LocalApproval) => void) {
         approvalListeners.add(listener);
@@ -152,11 +182,7 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
       resolve?.("deny");
       for (const listener of approvalDismissListeners) listener(jobId);
     },
-  } satisfies Shell & {
-    receivePairingRequest(request: PairingRequest): void;
-    receiveApproval(approval: LocalApproval): Promise<LocalApprovalDecision>;
-    receiveApprovalDismiss(jobId: string): void;
-  };
+  } satisfies MemoryShell;
 }
 
 // The app installs __OMARCHY_BOT_SHELL__ before the Web UI bundle loads.

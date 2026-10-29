@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod attachments;
+
 #[cfg(target_os = "linux")]
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -308,6 +310,9 @@ fn open_browser(app: tauri::AppHandle, value: String) -> Result<(), String> {
     if !matches!(url.scheme(), "https" | "http") || url.host().is_none()
         || !url.username().is_empty() || url.password().is_some()
     { return Err("Only HTTP or HTTPS browser URLs without credentials are allowed.".into()); }
+    if url.query_pairs().any(|(key, _)| key == "access_token") {
+        return Err("An authenticated Service link cannot be opened in the system browser.".into());
+    }
     app.opener().open_url(url.as_str(), None::<&str>).map_err(|error| format!("Could not open the system browser: {error}"))
 }
 
@@ -386,46 +391,29 @@ async fn certificate_untrusted(state: tauri::State<'_, ShellState>, origin: Stri
 
 #[tauri::command]
 fn save_attachment(app: tauri::AppHandle, filename: String, bytes: Vec<u8>) -> Result<String, String> {
-    use std::io::Write;
-    if filename.is_empty() || filename == "." || filename == ".." || filename.contains(['/', '\\']) || filename.chars().any(char::is_control) {
-        return Err("The attachment has an invalid filename.".into());
-    }
     let directory = app.path().download_dir().map_err(|error| format!("Could not locate Downloads: {error}"))?;
-    std::fs::create_dir_all(&directory).map_err(|error| format!("Could not create Downloads: {error}"))?;
-    let mut target = directory.join(&filename);
-    for suffix in 1.. {
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
-            Ok(mut file) => {
-                if let Err(error) = file.write_all(&bytes) {
-                    let _ = std::fs::remove_file(&target);
-                    return Err(format!("Could not save the attachment: {error}"));
-                }
-                return Ok(target.display().to_string());
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => target = directory.join(format!("{suffix}-{filename}")),
-            Err(error) => return Err(format!("Could not save the attachment: {error}")),
-        }
-    }
-    unreachable!()
+    attachments::write_attachment(&directory, &filename, &bytes).map(|path| path.display().to_string())
 }
 
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) { app.exit(RESTART); }
 
 #[cfg(desktop)]
+async fn available_update(app: &tauri::AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    app.updater().map_err(|error| error.to_string())?
+        .check().await.map_err(|error| format!("Could not check for app updates: {error}"))
+}
+
+#[cfg(desktop)]
 #[tauri::command]
 async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let update = app.updater().map_err(|error| error.to_string())?
-        .check().await.map_err(|error| format!("Could not check for app updates: {error}"))?;
-    Ok(update.map(|update| update.version))
+    Ok(available_update(&app).await?.map(|update| update.version))
 }
 
 #[cfg(desktop)]
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    let update = app.updater().map_err(|error| error.to_string())?
-        .check().await.map_err(|error| format!("Could not check for app updates: {error}"))?
-        .ok_or("No newer app release is available.")?;
+    let update = available_update(&app).await?.ok_or("No newer app release is available.")?;
     update.download_and_install(|_, _| {}, || {}).await
         .map_err(|error| format!("Could not verify and install the app update: {error}"))
 }
@@ -490,7 +478,8 @@ fn main() {
                 std::fs::read_to_string(app.path().app_config_dir()?.join("revoked-service")).ok()
                     .and_then(|origin| service_origin(&origin).ok()).map(|url| url.origin().ascii_serialization())
             } else { None };
-            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "platform": std::env::consts::OS });
+            let defaults: serde_json::Value = serde_json::from_str(include_str!("../../shell-defaults.json"))?;
+            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "platform": std::env::consts::OS, "defaults": defaults });
             let script = format!("({})({});", include_str!("shell.js"), initial);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Omarchy Bot").inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)

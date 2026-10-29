@@ -182,10 +182,10 @@ try {
     assert.equal(await script("return document.querySelector('button')?.textContent === 'Pair'"), false);
     assert.equal(await script("return window.__OMARCHY_BOT_MEMORY_SHELL__ === undefined"), true);
     assert.equal(await script("return localStorage.getItem('omarchy-bot.device-token')"), null);
+    pass(`actual packaged entry blocks ${state} native shell without memory credentials`);
     await wd("POST", `/session/${session}/refresh`, {});
     await visible("Add Service");
   }
-  pass("actual packaged entry blocks missing and broken native shell without memory credentials");
 
   const unpairedCsp = z.object({ blocked: z.array(z.object({ uri: z.string(), directive: z.string() })) }).parse(await asyncScript(`const done=arguments[arguments.length-1];const blocked=[];
     const violation=e=>blocked.push({uri:e.blockedURI,directive:e.effectiveDirective});
@@ -339,6 +339,11 @@ try {
   await wd("POST", `/session/${session}/element/${attachmentRow}/click`, {});
   const downloaded = path.join(process.env.HOME!, "Downloads", attachmentName);
   await until("managed text attachment saved with actual authenticated contents", async () => existsSync(downloaded) && readFileSync(downloaded, "utf8") === attachmentContent || undefined, 10_000);
+  await wd("POST", `/session/${session}/element/${attachment}/click`, {});
+  const collision = path.join(process.env.HOME!, "Downloads", `1-${attachmentName}`);
+  await until("repeated attachment preserves filename with collision prefix", async () => existsSync(collision) && readFileSync(collision, "utf8") === attachmentContent || undefined, 10_000);
+  assert.equal(readFileSync(downloaded, "utf8"), attachmentContent, "original attachment is not overwritten");
+  await visible(`Attachment saved to ${collision}`);
   const openedUrls = readFileSync(path.join(run!, "opened-urls"), "utf8").trim().split("\n");
   assert.deepEqual(openedUrls, [browserUrl], "attachment URL/token never leaves through system browser");
   writeFileSync(path.join(evidence, "opened-urls.txt"), `${openedUrls.join("\n")}\n`);
