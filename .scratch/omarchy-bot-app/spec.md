@@ -88,6 +88,7 @@ Every native capability sits behind one `shell` interface, so a phone shell can 
 - Pairing code issuance returns the code and a deep link (`omarchy-bot://pair?service=<origin>&code=<code>`) instead of a `/pair?code=` URL. The pairing exchange contract is unchanged.
 - Plugin authorization no longer accepts or validates a return URL. The OAuth callback page tells the user to return to Omarchy Bot and offers an `omarchy-bot://` link. Completion or failure of an authorization is published as an event on the existing event stream, scoped to the plugin and account, so every connected app refreshes plugin state.
 - Service-side dictation is removed: the dictation module, its routes, its configuration, its DTOs and events, and its Voxtype detection in `doctor`.
+- The Service exposes a non-secret host identity only to Paired Devices: a persisted random salt and SHA-256 of `${salt}:${trimmedMachineId}`. The Linux app compares the digest with its own machine ID before starting local actions; addresses do not decide host identity. An unavailable check starts no Sidecar and shows a notice with recovery instructions. macOS and Windows are always different machines because neither is a Service Host.
 
 ### Local Sidecar
 
@@ -144,6 +145,7 @@ Good tests drive external behavior through the highest available seam and never 
   - Pairing codes returned as deep links.
   - Plugin authorization started without a return URL, and its completion and failure arriving as events.
   - Dictation routes gone.
+  - Paired-only, non-leaking salted host identity and a 503 when machine identity is unavailable.
 
   The existing dictation integration test and e2e spec are deleted.
 - **Local Sidecar process boundary.** Uses the existing Local Sidecar helper and the local-sidecar integration tests. It covers:
@@ -152,6 +154,7 @@ Good tests drive external behavior through the highest available seam and never 
   - Per-OS denylists.
   - Cancel tearing down a process tree on each operating system.
   - Protocol wire types stay aligned through the shared canonical JSON fixtures in `packages/protocol/fixtures/sidecar/` defined by ADR 0015. TypeScript derives coverage requirements from the authoritative device-frame schemas and `LOCAL_SCHEMA`, failing if a frame variant, action, or property lacks a fixture, including both presence and absence for every optional property. It validates each fixture against those schemas with an unchanged JSON round-trip; Rust deserializes the same fixtures with unknown fields rejected and re-serializes equal JSON values. Adding an optional field or variant must fail coverage until the corpus and both consumers are updated.
+  - Distinct machine identities over loopback transport and approved `local.run` output on the client machine.
 
   The suite selects the compiled Rust binary through `OMARCHY_BOT_TEST_SIDECAR_BINARY` in CI on Linux, macOS, and Windows runners; both protocol-fixture consumers also run there. Windows-only cases (PowerShell syntax, Job Object teardown) run only there.
 - **The `shell` interface.** The existing Chromium Playwright suite moves from the Service-served UI to the Vite-served bundle with the in-memory shell, pointed at the harness Service. New specs cover:
@@ -164,12 +167,15 @@ Good tests drive external behavior through the highest available seam and never 
   - ⌘ mapping on a simulated macOS platform.
 
   Prior art is the existing e2e fixtures and specs.
+  The existing native-shell VM integration seam also exercises the real injected adapter: same identity over loopback and LAN HTTPS suppresses Sidecar startup, a distinct identity over loopback starts it, and failed checks show recovery instructions without starting local actions.
+
 - **WebView smoke suite.** The packaged app under `tauri-driver` on Linux (WebKitGTK) and Windows (WebView2), and a written checklist run on macOS (WKWebView) before each release. Each run covers:
   - Pairing by deep link.
   - The event stream delivering a Bot reply.
   - Screen Projection rendering.
   - Takeover keyboard and pointer input reaching the Bot Screen.
   - One approved `local.run`.
+  - Equal machine identities over loopback and LAN HTTPS, unavailable identity recovery, and distinct identities over loopback with the bundled Sidecar.
 
   A platform is supported only after this suite passes there. Chromium results never stand in for it.
 - **CLI and installer.** Extends the existing CLI lifecycle tests. They cover:
