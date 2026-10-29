@@ -1,11 +1,15 @@
 import { dlopen, ptr, type Library } from "bun:ffi";
-import type { Subprocess } from "bun";
+import type { BunFile, Subprocess } from "bun";
 import path from "node:path";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import { decodePowerShellDiagnostics } from "./windows-output.ts";
 import type { LocalExecutor } from "./posix.ts";
 
 const SYMBOLS = {
     CreateJobObjectW: { args: ["ptr", "ptr"], returns: "ptr" },
     SetInformationJobObject: { args: ["ptr", "u32", "ptr", "u32"], returns: "i32" },
+    QueryInformationJobObject: { args: ["ptr", "u32", "ptr", "u32", "ptr"], returns: "i32" },
     AssignProcessToJobObject: { args: ["ptr", "ptr"], returns: "i32" },
     OpenProcess: { args: ["u32", "i32", "u32"], returns: "ptr" },
     CloseHandle: { args: ["ptr"], returns: "i32" },
@@ -15,14 +19,33 @@ const SYMBOLS = {
 
 let kernel: Library<typeof SYMBOLS> | undefined;
 const BOOTSTRAP = Buffer.from([
+  "$ProgressPreference = 'SilentlyContinue'",
   "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false",
   "$payload = [Console]::In.ReadLine()",
   "if ($null -eq $payload) { exit 1 }",
-  "& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($payload))))",
+  "$script:completion = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([Console]::In.ReadLine()))",
+  "$command = try { [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($payload)) } catch { Write-Error $_; exit 1 }",
+  "$ast = [Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$null)",
+  // Capture status inside the final execution block; invocation masks nonterminating errors.
+  "$block = $ast.EndBlock",
+  "if ($null -eq $block) { $block = $ast.ProcessBlock }",
+  "if ($null -eq $block) { $block = $ast.BeginBlock }",
+  "$trailer = [Environment]::NewLine + @'",
   "$succeeded = $?",
-  "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }",
-  "if (!$succeeded) { exit 1 }",
-  "exit 0",
+  "$code = 0",
+  "if ($LASTEXITCODE) { $code = $LASTEXITCODE } elseif (!$succeeded) { $code = 1 }",
+  "[IO.File]::WriteAllText($script:completion, '')",
+  "exit $code",
+  "'@ + [Environment]::NewLine",
+  "if ($null -eq $block) { $command += [Environment]::NewLine + 'end {' + $trailer + '}' }",
+  "elseif ($block.Unnamed) { $command += $trailer }",
+  "else { $command = $command.Insert($block.Extent.EndOffset - 1, $trailer) }",
+  "& ([ScriptBlock]::Create($command))",
+  "$succeeded = $?",
+  "$code = 0",
+  "if ($LASTEXITCODE) { $code = $LASTEXITCODE } elseif (!$succeeded) { $code = 1 }",
+  "[IO.File]::WriteAllText($script:completion, '')",
+  "exit $code",
 ].join("\n"), "utf16le").toString("base64");
 
 /** Expand NTFS aliases, retaining missing suffixes for new write destinations. */
@@ -64,18 +87,20 @@ export const windowsExecutor: LocalExecutor = {
       if (!api.CloseHandle(job)) throw failure("CloseHandle(job)");
       closed = true;
     };
-    let proc: Subprocess<"pipe", "pipe", "pipe"> | undefined;
+    let proc: Subprocess<"pipe", BunFile, BunFile> | undefined;
+    let capture: string | undefined;
     try {
       if (!api.SetInformationJobObject(job, 9, ptr(limits), limits.byteLength)) throw failure("SetInformationJobObject");
+      capture = mkdtempSync(path.join(os.tmpdir(), "sidecar-windows-"));
+      const completion = path.join(capture, "completed");
+      const stdoutFile = Bun.file(path.join(capture, "stdout"));
+      const stderrFile = Bun.file(path.join(capture, "stderr"));
       const env = { ...process.env };
       delete env.OMARCHY_BOT_DEVICE_TOKEN;
       const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
       proc = Bun.spawn([path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", BOOTSTRAP], {
-        cwd: root, env, stdin: "pipe", stdout: "pipe", stderr: "pipe",
+        cwd: root, env, stdin: "pipe", stdout: stdoutFile, stderr: stderrFile,
       });
-      const finished = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-      // Drain even when assignment fails, so no rejected stream promise escapes cleanup.
-      void finished.catch(() => undefined);
       const processHandle = api.OpenProcess(0x0101, 0, proc.pid); // PROCESS_SET_QUOTA | PROCESS_TERMINATE
       if (processHandle === null) throw failure("OpenProcess");
       try {
@@ -86,9 +111,23 @@ export const windowsExecutor: LocalExecutor = {
       signal?.addEventListener("abort", closeJob, { once: true });
       signal?.throwIfAborted();
       // User code cannot spawn descendants until assignment succeeds and this gate opens.
-      proc.stdin.write(`${Buffer.from(command, "utf16le").toString("base64")}\n`);
+      proc.stdin.write(`${Buffer.from(command, "utf16le").toString("base64")}\n${Buffer.from(completion, "utf16le").toString("base64")}\n`);
       proc.stdin.end();
-      const [stdout, stderr, exitCode] = await finished;
+      const exitCode = await proc.exited;
+      // Explicit exit bypasses normal completion; descendants remain cancellable until the job is empty.
+      if (!existsSync(completion)) {
+        // JOBOBJECT_BASIC_ACCOUNTING_INFORMATION: 48 bytes, ActiveProcesses at offset 40.
+        const accounting = new Uint8Array(48);
+        const counts = new DataView(accounting.buffer);
+        for (;;) {
+          signal?.throwIfAborted();
+          if (!api.QueryInformationJobObject(job, 1, ptr(accounting), accounting.byteLength, null)) throw failure("QueryInformationJobObject");
+          if (counts.getUint32(40, true) === 0) break;
+          await Bun.sleep(20);
+        }
+      }
+      const [stdout, rawStderr] = await Promise.all([stdoutFile.text(), stderrFile.text()]);
+      const stderr = decodePowerShellDiagnostics(rawStderr);
       signal?.throwIfAborted();
       flags.setUint32(16, 0, true);
       if (!api.SetInformationJobObject(job, 9, ptr(limits), limits.byteLength)) throw failure("SetInformationJobObject(release)");
@@ -102,6 +141,7 @@ export const windowsExecutor: LocalExecutor = {
           if (proc.exitCode === null) proc.kill();
           await proc.exited;
         }
+        if (capture !== undefined) rmSync(capture, { recursive: true, force: true });
       }
     }
   },
