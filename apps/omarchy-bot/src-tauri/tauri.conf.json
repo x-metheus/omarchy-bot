@@ -12,5 +12,12 @@
     }
   },
   "bundle": { "active": true, "targets": "all", "externalBin": ["binaries/omarchy-bot-sidecar"], "icon": ["icons/icon.png", "icons/icon.icns"], "category": "Utility", "shortDescription": "Conversations and Bot Screens", "macOS": { "minimumSystemVersion": "13.0", "entitlements": "Entitlements.plist" } },
-  "plugins": { "deep-link": { "desktop": { "schemes": ["omarchy-bot"] } } }
+  "plugins": {
+    "deep-link": { "desktop": { "schemes": ["omarchy-bot"] } },
+    "updater": {
+      "pubkey": "UNCONFIGURED-DEVELOPMENT-BUILD",
+      "endpoints": ["https://github.com/XMethues/omarchy-bot/releases/download/app-latest/latest.json"],
+      "requireSignedVersion": true
+    }
+  }
 }

@@ -11,6 +11,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
+#[cfg(desktop)]
+use tauri_plugin_updater::UpdaterExt;
 use url::Url;
 
 const KEYCHAIN_SERVICE: &str = "com.omarchy.bot";
@@ -373,6 +375,24 @@ fn save_attachment(app: tauri::AppHandle, filename: String, bytes: Vec<u8>) -> R
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) { app.exit(RESTART); }
 
+#[cfg(desktop)]
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let update = app.updater().map_err(|error| error.to_string())?
+        .check().await.map_err(|error| format!("Could not check for app updates: {error}"))?;
+    Ok(update.map(|update| update.version))
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    let update = app.updater().map_err(|error| error.to_string())?
+        .check().await.map_err(|error| format!("Could not check for app updates: {error}"))?
+        .ok_or("No newer app release is available.")?;
+    update.download_and_install(|_, _| {}, || {}).await
+        .map_err(|error| format!("Could not verify and install the app update: {error}"))
+}
+
 #[tauri::command]
 fn take_pairing_request(state: tauri::State<ShellState>) -> Option<PairingRequest> {
     state.pending_pairing.lock().ok()?.take()
@@ -422,11 +442,13 @@ fn main() {
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, arguments, _| {
         for link in arguments.iter().skip(1) { receive_link(app, link); }
     }));
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     let application = builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .manage(ShellState { origin, keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None), sidecar: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, sidecar_events, sidecar_decide])
+        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, sidecar_events, sidecar_decide])
         .setup(move |app| {
             let revoked = if connection.is_none() {
                 std::fs::read_to_string(app.path().app_config_dir()?.join("revoked-service")).ok()

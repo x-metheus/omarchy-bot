@@ -17,7 +17,7 @@ if [[ $mode == --signed ]]; then
     [[ -n ${APPLE_CERTIFICATE:-} && -n ${APPLE_CERTIFICATE_PASSWORD:-} ]] || { echo 'Signed CI requires APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD' >&2; exit 1; }
   fi
   if [[ -n ${TAURI_SIGNING_PRIVATE_KEY:-} ]]; then
-    [[ -n ${TAURI_SIGNING_PUBLIC_KEY:-} ]] || { echo 'Updater artifacts require TAURI_SIGNING_PUBLIC_KEY' >&2; exit 1; }
+    [[ -n ${TAURI_SIGNING_PUBLIC_KEY:-} && -n ${APP_VERSION:-} ]] || { echo 'Updater artifacts require APP_VERSION and TAURI_SIGNING_PUBLIC_KEY' >&2; exit 1; }
   fi
 else
   for variable in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
@@ -32,6 +32,10 @@ case $(uname -m) in
   x86_64) architecture=x64; triple=x86_64-apple-darwin ;;
   *) echo 'Only arm64 and x64 macOS are supported' >&2; exit 1 ;;
 esac
+export APP_VERSION=${APP_VERSION:-$(bun -e 'console.log(JSON.parse(await Bun.file("apps/omarchy-bot/src-tauri/tauri.conf.json").text()).version)')}
+export TAURI_UPDATER_PUBKEY=${TAURI_SIGNING_PUBLIC_KEY:-}
+build_config=$(bun scripts/linux-app/build-config.ts)
+version=$APP_VERSION
 export CARGO_TARGET_DIR="$root/.lane/macos-app/target"
 export CARGO_HOME="$root/.lane/macos-app/cargo"
 export BUN_INSTALL_CACHE_DIR="$root/.lane/macos-app/bun-cache"
@@ -41,17 +45,12 @@ bun run --filter=@omarchy-bot/web build
 bun scripts/build-sidecar.ts
 binary="$root/apps/omarchy-bot/src-tauri/binaries/omarchy-bot-sidecar-$triple"
 OMARCHY_BOT_TEST_SIDECAR_BINARY="$binary" bun test tests/integration/local-sidecar-process.test.ts
-arguments=(--bundles app,dmg --target "$triple")
-if [[ -n ${TAURI_SIGNING_PRIVATE_KEY:-} ]]; then
-  updater_config=$(bun -e 'console.log(JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.TAURI_SIGNING_PUBLIC_KEY}}}))')
-  arguments+=(--config "$updater_config")
-fi
+arguments=(--bundles app,dmg --target "$triple" --config "$build_config")
 (cd apps/omarchy-bot && cargo tauri build "${arguments[@]}" -- --locked)
 bundle="$CARGO_TARGET_DIR/$triple/release/bundle"
 app="$bundle/macos/omarchy-bot.app"
 dmgs=("$bundle"/dmg/*.dmg)
 [[ ${#dmgs[@]} -eq 1 && -f ${dmgs[0]} && -d $app ]] || { echo 'Expected one dmg and application bundle' >&2; exit 1; }
-version=$(bun -e 'console.log(JSON.parse(await Bun.file("apps/omarchy-bot/src-tauri/tauri.conf.json").text()).version)')
 artifact="$root/.lane/dist/omarchy-bot_${version}_${architecture}.dmg"
 OMARCHY_BOT_TEST_SIDECAR_BINARY="$app/Contents/MacOS/omarchy-bot-sidecar" bun test tests/integration/local-sidecar-process.test.ts
 if [[ $mode == --signed ]]; then
@@ -70,7 +69,10 @@ cp "${dmgs[0]}" "$artifact"
 if [[ -n ${TAURI_SIGNING_PRIVATE_KEY:-} ]]; then
   updater="$bundle/macos/omarchy-bot.app.tar.gz"
   [[ -s $updater && -s $updater.sig ]] || { echo 'Missing signed updater archive' >&2; exit 1; }
-  cp "$updater" "$root/.lane/dist/omarchy-bot_${version}_${architecture}.app.tar.gz"
-  cp "$updater.sig" "$root/.lane/dist/omarchy-bot_${version}_${architecture}.app.tar.gz.sig"
+  archive="$root/.lane/dist/omarchy-bot_${version}_${architecture}.app.tar.gz"
+  cp "$updater" "$archive"
+  cp "$updater.sig" "$archive.sig"
+  bun scripts/linux-app/check-signature.ts "$archive.sig" "$version"
+  (cd "$root/.lane/dist" && shasum -a 256 "$(basename "$archive")") | tee "$archive.sha256"
 fi
 printf 'mode=%s\narchitecture=%s\nversion=%s\nWKWebView=not-run\n' "$mode" "$architecture" "$version" | tee "$root/.lane/macos-app/evidence/build-$architecture.txt"

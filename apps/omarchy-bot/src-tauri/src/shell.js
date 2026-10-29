@@ -92,8 +92,11 @@ function installNativeShell(initial) {
     },
     browser: { open: value => invoke("open_browser", { value }) },
     updates: {
-      async check() { return { available: false }; },
-      async download() { throw new Error("Signed app updates are not configured for this build."); },
+      async check() {
+        const version = await invoke("check_update");
+        return version ? { available: true, version } : { available: false };
+      },
+      download: () => invoke("install_update"),
       restart: () => invoke("restart_app"),
     },
     localSidecar: {

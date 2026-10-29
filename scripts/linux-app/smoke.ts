@@ -569,5 +569,5 @@ try {
     for (const child of children) child.kill("SIGINT");
     await Promise.all(children.map(child => child.exited));
   }
-  writeFileSync(path.join(evidence, "results.json"), JSON.stringify({ artifact: "omarchy-bot_0.1.0_amd64.AppImage", sha256: artifactSha256, checks }, null, 2));
+  writeFileSync(path.join(evidence, "results.json"), JSON.stringify({ artifact: path.basename(artifact), sha256: artifactSha256, checks }, null, 2));
 }

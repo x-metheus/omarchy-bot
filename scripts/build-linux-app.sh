@@ -9,4 +9,6 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -e HOME=/src/.lane/linux-app/build-home \
   -e CARGO_HOME=/src/.lane/linux-app/cargo \
   -e CARGO_TARGET_DIR=/src/.lane/linux-app/target \
+  -e APP_VERSION -e TAURI_UPDATER_PUBKEY -e TAURI_UPDATER_ENDPOINT \
+  -e TAURI_SIGNING_PRIVATE_KEY -e TAURI_SIGNING_PRIVATE_KEY_PASSWORD -e OMARCHY_BOT_UPDATER_SMOKE \
   "$image" bash /src/scripts/linux-app/build.sh
