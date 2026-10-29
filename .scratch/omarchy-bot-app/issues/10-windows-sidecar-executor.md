@@ -8,11 +8,11 @@
 
 Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
-- [ ] `local.run` executes PowerShell 5.1 syntax and returns output and exit code
-- [ ] Cancel and timeout terminate the command and every descendant
-- [ ] Windows credential and key stores are refused
-- [ ] Registration reports `windows` and `powershell-5.1`
-- [ ] The Sidecar suite, including Windows-only cases, passes on a Windows CI runner
+- [x] `local.run` executes PowerShell 5.1 syntax and returns output and exit code
+- [x] Cancel and timeout terminate the command and every descendant
+- [x] Windows credential and key stores are refused
+- [x] Registration reports `windows` and `powershell-5.1`
+- [x] The Sidecar suite, including Windows-only cases, passes on a Windows CI runner
 
 ## Comments
 
@@ -43,3 +43,5 @@ Fixture removal now retries for at most 10 seconds from its first attempt (100, 
 Local proof for this test-only change: a disposable extraction failed red without the retry and snapshot logic and passed green against a temporary directory with simulated locks, covering deterministic retry, deadline, snapshot order and original-error rethrow; the extracted query ran against synthetic CIM rows in portable PowerShell and killed a hung process at the 2 s timeout. That is not Windows proof. `bun run typecheck` passed; the focused `bun test apps/sidecar tests/integration/local-sidecar-process.test.ts` gave 20 pass, 15 skip, 0 fail (170 assertions, 3.55 s) in a private TMPDIR lane; earlier runs failed on `/tmp` ENOSPC during fixture setup and left no host cleanup. No full-suite, Pi or compiled run was needed for a diagnostics-only test change. The throwaway scripts were removed.
 
 Remaining gap: these diagnostics cannot reveal the real lock owner; the next Windows runner run must show the ancestry snapshots, the actual removal elapsed time and whether cleanup succeeds, so no green or leak-free claim is made. The five Windows skips remain the same Linux-only guards, and the acceptance boxes stay unchecked under the earlier user direction; the ticket stays resolved with the Windows runner confirmation deferred.
+
+Integrator CI evidence (2026-10-29, draft PR #10 at d27d343, `sidecar-conformance` run 40819941636, job `Local Sidecar (windows-latest)` 123269806775): executor and policy suite 23 pass, 5 skip (POSIX-only), 0 fail; compiled production Sidecar suite 7 pass, 0 fail. Criteria map: PowerShell 5.1 syntax, Unicode and exit code (`runs PowerShell 5.1 syntax…`, `production Sidecar authenticates, registers its shell, asks and returns output and exit code`); cancel/timeout/shell-exits-first kill the root and detached descendants via the Job Object (`… kills the root and detached descendants`, `production Sidecar cancels a remembered job and its descendant on this OS`); credential and key stores refused, including NTFS short aliases (`Windows credential stores > …`, `production Sidecar refuses this OS's credential stores…`); registration reports the Windows shell; the whole suite passes on a Windows runner. The earlier cleanup EBUSY was a transient lock: the diagnostics showed no surviving process at cleanup, and the bounded retry removes the fixture.
