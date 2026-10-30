@@ -16,7 +16,10 @@ const tlsOrigin = "https://127.0.0.1:7432";
 const artifactSha256 = new Bun.CryptoHasher("sha256").update(await Bun.file(artifact).arrayBuffer()).digest("hex");
 const evidence = path.resolve(".lane/linux-app/evidence");
 const checks: string[] = [];
+const idleSamples: { mode: string; cpuPercent: number; wallMs: number; pids: number[] }[] = [];
 let session = "";
+let launchLogStart = 0;
+const nativeLog = path.join(process.env.XDG_DATA_HOME!, "com.omarchy.bot/logs/omarchy-bot.log");
 const children: Bun.Subprocess[] = [];
 const services = new Map<number, Bun.Subprocess>();
 const webElement = z.object({ "element-6066-11e4-a52e-4f735466cecf": z.string() });
@@ -36,7 +39,7 @@ async function wd(method: string, route: string, body?: unknown): Promise<unknow
   const response = await fetch(`${driver}${route}`, {
     method, headers: { "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(35_000),
-  });
+  }).catch(error => { throw new Error(`WebDriver request failed: ${method} ${route}`, { cause: error }); });
   const result = z.object({ value: z.unknown() }).parse(await response.json());
   const failure = z.object({ error: z.string() }).safeParse(result.value);
   assert.ok(response.ok && !failure.success, `WebDriver ${method} ${route}: ${JSON.stringify(result)}`);
@@ -71,7 +74,38 @@ async function input(label: string, value: string): Promise<void> {
   await wd("POST", `/session/${session}/element/${await element(selector)}/clear`, {});
   await keys(selector, value);
 }
+async function responsive(pids: number[], label: string): Promise<void> {
+  assert.ok(pids.length > 0, `${label}: native app was running before interaction`);
+  assert.deepEqual(appPids(), pids, `${label}: native app process survives`);
+  assert.equal(z.array(z.string()).parse(await wd("GET", `/session/${session}/window/handles`)).length, 1, `${label}: one native window survives`);
+  assert.equal(await script("return document.readyState"), "complete", `${label}: WebView responds`);
+}
+async function escape(): Promise<void> {
+  await wd("POST", `/session/${session}/actions`, { actions: [{ type: "key", id: "dialog-keyboard", actions: [
+    { type: "keyDown", value: "\uE00C" }, { type: "keyUp", value: "\uE00C" },
+  ] }] });
+}
+async function backdrop(): Promise<void> {
+  const click = Bun.spawnSync(["python3", "scripts/linux-app/input.py", "click", "20", "400"]);
+  assert.equal(click.exitCode, 0, click.stderr.toString());
+}
+async function dialogMatrix(trigger: string, label: string, closeButton: boolean, dismissBackdrop: boolean): Promise<void> {
+  const pids = appPids();
+  for (const method of [...(closeButton ? ["button"] : []), "Escape", ...(dismissBackdrop ? ["backdrop"] : [])]) {
+    await wd("POST", `/session/${session}/element/${await element(trigger)}/click`, {});
+    await until(`${label} opens`, async () => script("return !!document.querySelector('dialog[open]')"));
+    if (method === "button") {
+      const close = webElement.parse(await script("return [...document.querySelectorAll('dialog[open] button')].find(e=>e.getAttribute('aria-label')==='Close')"));
+      await wd("POST", `/session/${session}/element/${close["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
+    } else if (method === "Escape") await escape();
+    else await backdrop();
+    await until(`${label} closes by ${method}`, async () => script("return !document.querySelector('dialog[open]')"));
+    await responsive(pids, `${label} ${method}`);
+    pass(`${label} closes by ${method} with native window and WebView intact`);
+  }
+}
 async function start(args: string[] = [], application = app): Promise<void> {
+  launchLogStart = existsSync(nativeLog) ? readFileSync(nativeLog, "utf8").length : 0;
   const opened = z.object({ sessionId: z.string() }).parse(await wd("POST", "/session", { capabilities: { alwaysMatch: { "tauri:options": { application, args } } } }));
   session = opened.sessionId;
   await wd("POST", `/session/${session}/timeouts`, { script: 15_000, implicit: 0 });
@@ -95,6 +129,60 @@ function sidecarPids(): number[] {
         && readFileSync(`/proc/${name}/environ`, "utf8").split("\0").includes(`OMARCHY_BOT_SMOKE_DIR=${run}`) ? [Number(name)] : [];
     } catch { return []; }
   });
+}
+function webkitPids(): number[] {
+  return readdirSync("/proc").filter(name => /^\d+$/.test(name)).flatMap(name => {
+    try {
+      return /^WebKit(Web|Network)Process$/.test(path.basename(readlinkSync(`/proc/${name}/exe`)))
+        && readFileSync(`/proc/${name}/environ`, "utf8").split("\0").includes(`OMARCHY_BOT_SMOKE_DIR=${run}`) ? [Number(name)] : [];
+    } catch { return []; }
+  });
+}
+async function idleCpu(mode: string): Promise<void> {
+  const pids = [...appPids(), ...webkitPids()];
+  const ticks = (): number => pids.reduce((total, pid) => {
+    const fields = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ");
+    return total + Number(fields[11]) + Number(fields[12]);
+  }, 0);
+  const hz = Number(Bun.spawnSync(["getconf", "CLK_TCK"]).stdout.toString().trim());
+  assert.ok(hz > 0 && pids.length > 1, "sample native app and its WebKit subprocesses");
+  const before = ticks();
+  const start = performance.now();
+  await Bun.sleep(10_000);
+  const wallMs = performance.now() - start;
+  const cpuPercent = (ticks() - before) / hz / (wallMs / 1000) * 100;
+  idleSamples.push({ mode, cpuPercent, wallMs, pids });
+  console.log(`CPU ${mode}: ${cpuPercent.toFixed(2)}% of one core over ${Math.round(wallMs)}ms`);
+  assert.ok(cpuPercent < 50, `${mode}: idle app + WebKit CPU ${cpuPercent.toFixed(2)}% must remain below 50% of one core`);
+  pass(`${mode} idle app + WebKit CPU stays below 50% of one core`);
+}
+async function quit(): Promise<void> {
+  const native = appPids();
+  assert.equal(native.length, 1, "normal quit observes one native app process");
+  const pid = native[0]!;
+  const exits = path.join(evidence, "app-exits.log");
+  const launch = readFileSync(exits, "utf8").split("\n").findLast(line => line.endsWith(` app_pid=${pid} started`));
+  const wrapper = /^wrapper_pid=(\d+) /.exec(launch ?? "")?.[1];
+  assert.ok(wrapper, `final native PID ${pid} has a recorded wrapper launch`);
+  const webkit = webkitPids();
+  assert.ok(webkit.length > 0, "normal quit observes existing WebKit processes");
+  const started = Date.now();
+  const close = Bun.spawnSync(["python3", "scripts/linux-app/input.py", "close"]);
+  assert.equal(close.exitCode, 0, close.stderr.toString());
+  await until("normal window close exits app and WebKit without watchdog", async () => appPids().length === 0 && webkit.every(pid => !existsSync(`/proc/${pid}`)) || undefined, 5_000);
+  const elapsedMs = Date.now() - started;
+  await until("final native wrapper records its exit", async () => readFileSync(exits, "utf8").includes(`wrapper_pid=${wrapper} app_pid=${pid} exit_code=`) || undefined, 5_000);
+  assert.ok(readFileSync(exits, "utf8").split("\n").includes(`wrapper_pid=${wrapper} app_pid=${pid} exit_code=0`), "final native process exits with status zero");
+  const lifecycle = readFileSync(nativeLog, "utf8").slice(launchLogStart).split("\n").filter(line => line.includes(` pid=${pid} `)).join("\n");
+  for (const event of ["startup", "window-close-requested", "exit-requested code=None", "exit", "event-loop-return code=0"]) {
+    assert.ok(lifecycle.split("\n").some(line => line.endsWith(` ${event}`)), `final native PID ${pid} logs ${event}`);
+  }
+  const stderr = readFileSync(path.join(evidence, `app-${wrapper}.stderr.log`), "utf8");
+  assert.doesNotMatch(stderr, /watchdog|WebProcess didn't exit|SIG(?:TRAP|SEGV|ABRT|BUS|ILL)|segmentation fault|trace\/breakpoint trap|core dumped|\baborted\b|\bcrash(?:ed)?\b|assertion.*failed/i, "final launch reports no engine crash or watchdog");
+  writeFileSync(path.join(evidence, "normal-quit.json"), JSON.stringify({ pid, wrapperPid: Number(wrapper), nativeExitCode: 0, webkitPids: webkit, elapsedMs, lifecycle, stderrFile: `app-${wrapper}.stderr.log` }, null, 2));
+  await wd("DELETE", `/session/${session}`).catch(() => {});
+  session = "";
+  pass(`normal window close exits native PID ${pid} with status zero and WebKit within ${elapsedMs}ms, with no reported crash or watchdog`);
 }
 async function stop(): Promise<void> {
   if (session) await wd("DELETE", `/session/${session}`).catch(() => {});
@@ -155,8 +243,12 @@ async function send(message: string): Promise<void> {
 
 mkdirSync(evidence, { recursive: true });
 rmSync(path.join(evidence, "lifecycle-failure.json"), { force: true });
+rmSync(path.join(evidence, "normal-quit.json"), { force: true });
 try {
   await until("tauri-driver ready", async () => (await fetch(`${driver}/status`)).ok || undefined);
+  const logging = Bun.spawnSync(["python3", "scripts/linux-app/logging-check.py"]);
+  assert.equal(logging.exitCode, 0, logging.stderr.toString());
+  pass("packaged startup and early runtime panic persist with broken stderr");
   const state = await bootService(7431);
   await bootService(7432, "untrusted");
   await start();
@@ -312,6 +404,10 @@ try {
   await send("say: WEBKIT-EVENT-STREAM-OK");
   await until("Bot reply delivered by real event stream", async () => script("return [...document.querySelectorAll('[data-testid=assistant-message]')].some(e=>e.textContent.includes('WEBKIT-EVENT-STREAM-OK'))"));
   pass("real Service event stream delivers Bot reply inside packaged WebKit");
+  await dialogMatrix('[data-testid="settings-trigger"]', "Settings", true, true);
+  await dialogMatrix('[data-testid="plugins-trigger"]', "Plugins", true, true);
+  await dialogMatrix('[data-testid="thread-history-trigger"]', "History", false, true);
+  await dialogMatrix('button[aria-label="New bot"]', "Create Bot", false, false);
 
   const browserUrl = "https://example.com/omarchy-webkit-browser-proof";
   await send(`say: [Open browser proof](${browserUrl})`);
@@ -370,9 +466,24 @@ try {
   await wd("POST", `/session/${session}/actions`, { actions: [{ type: "key", id: "keyboard", actions: [{ type: "keyDown", value: "k" }, { type: "keyUp", value: "k" }] }] });
   await until("keyboard changed actual Bot Screen to yellow", async () => await color([255, 255, 0]) || undefined);
   pass("Takeover keyboard reaches Bot Screen (projected pixels turn yellow)");
+  await idleCpu("expanded Bot Screen");
+  const expandedPids = appPids();
+  for (const method of ["button", "Escape"]) {
+    if (method === "button") await button("Close Web Control");
+    else await escape();
+    await until(`expanded view closes by ${method}`, async () => script("return !document.querySelector('[data-testid=expanded-web-control][open]')"));
+    await responsive(expandedPids, `expanded view ${method}`);
+    pass(`expanded Bot Screen closes by ${method} with native window and WebView intact`);
+    await until("preview returns after expanded close", async () => script("const i=document.querySelector('[data-testid=computer-preview]');return i?.complete&&i.naturalWidth>0"));
+    await button("Open Web Control");
+    await until("expanded Bot Screen reopens", async () => color([255, 255, 0]));
+  }
   const capture = Bun.spawnSync(["python3", "scripts/linux-app/capture.py", path.join(evidence, "takeover.png")]);
   assert.equal(capture.exitCode, 0, "capture private packaged WebView evidence");
   await button("I'm done");
+  await button("Close Web Control");
+  await until("idle compact preview is visible", async () => script("const i=document.querySelector('[data-testid=computer-preview]');return !document.querySelector('[data-testid=expanded-web-control][open]')&&i?.complete&&i.naturalWidth>0"));
+  await idleCpu("Bot Screen preview");
 
   const otherHeaders = { authorization: `Bearer ${readFileSync(path.join(otherState, "pairing-host-secret"), "utf8").trim()}` };
   const devices = z.object({ devices: z.array(z.object({ id: z.string(), revokedAt: z.string().nullable() })) }).parse(
@@ -529,6 +640,7 @@ try {
   async function localTurn(command: string, decision?: string, succeeds = true): Promise<void> {
     const previousThread = await threadId();
     const previousTools = previousThread === "blank" ? 0 : transcript.parse(await remote(`/api/threads/${previousThread}/messages`)).filter(message => message.toolCall?.name === "local").length;
+    const approvalPids = appPids();
     await send(`local.run:${command}`);
     if (decision) {
       await element('[data-testid="local-approval"]');
@@ -536,8 +648,13 @@ try {
       if (command === "printf sidecar-smoke") {
         assert.equal(Bun.spawnSync(["python3", "scripts/linux-app/capture.py", path.join(evidence, "local-approval.png")]).exitCode, 0, "capture exact packaged approval");
       }
+      await escape();
+      await backdrop();
+      assert.equal(await script("return !!document.querySelector('[data-testid=local-approval][open]')"), true, "required approval resists Esc and backdrop dismissal");
+      await responsive(approvalPids, "required approval dismissal attempts");
       await button(decision);
     }
+    await responsive(approvalPids, "local approval decision");
     const messages = await until("local Tool Call reaches expected terminal status", async () => {
       const current = await threadId();
       if (current === "blank") return undefined;
@@ -552,6 +669,7 @@ try {
       await button("Close");
     }
     assert.equal(await script("return !!document.querySelector('[data-testid=local-approval]')"), false);
+    await responsive(approvalPids, "local approval closed");
   }
   await localTurn("printf sidecar-smoke", "Allow once");
   await until("approved command output in conversation", async () => script("return [...document.querySelectorAll('[data-testid=assistant-message]')].some(e=>e.textContent==='sidecar-smoke')"));
@@ -600,6 +718,7 @@ try {
   await visible("Add Service");
   assert.deepEqual(sidecarPids(), []);
   pass("unpair terminates Sidecar, fails pending local job and restarts at Add Service");
+  await quit();
 } catch (error) {
   // Keep lifecycle facts before private session teardown; never copy the credential-bearing database.
   const lifecycle = [...services.keys()].map(port => {
@@ -633,5 +752,5 @@ try {
     for (const child of children) child.kill("SIGINT");
     await Promise.all(children.map(child => child.exited));
   }
-  writeFileSync(path.join(evidence, "results.json"), JSON.stringify({ artifact: path.basename(artifact), sha256: artifactSha256, checks }, null, 2));
+  writeFileSync(path.join(evidence, "results.json"), JSON.stringify({ artifact: path.basename(artifact), sha256: artifactSha256, checks, idleSamples }, null, 2));
 }

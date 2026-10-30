@@ -22,6 +22,17 @@ const KEYCHAIN_SERVICE: &str = "com.omarchy.bot";
 const KEYCHAIN_USER: &str = "service-connection";
 const RESTART_EXIT_CODE: i32 = 75;
 
+static APP_LOG: std::sync::OnceLock<Mutex<std::fs::File>> = std::sync::OnceLock::new();
+
+fn log_lifecycle(message: &str) {
+    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let line = format!("{timestamp} pid={} {message}\n", std::process::id());
+    let _ = std::io::stderr().write_all(line.as_bytes());
+    if let Some(file) = APP_LOG.get() {
+        if let Ok(mut file) = file.lock() { let _ = file.write_all(line.as_bytes()); }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Connection {
@@ -490,6 +501,32 @@ fn receive_link(app: &tauri::AppHandle, link: &str) {
 }
 
 fn main() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        log_lifecycle(&format!("panic location={:?}\n{}", panic.location(), std::backtrace::Backtrace::force_capture()));
+        default_hook(panic);
+    }));
+    let mut context = tauri::generate_context!();
+    #[cfg(windows)]
+    if let Some(directory) = std::env::var_os("OMARCHY_BOT_SMOKE_DIR") {
+        context.config_mut().app.app_directories_override = Some(tauri::utils::config::AppDirectoriesOverride::Root(directory.into()));
+    }
+    // Match Tauri's app_log_dir before creating the native runtime, which can panic.
+    let logging = (|| -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(target_os = "macos")]
+        let directory = dirs::home_dir().map(|home| home.join("Library/Logs").join(&context.config().identifier));
+        #[cfg(not(target_os = "macos"))]
+        let directory = dirs::data_local_dir().map(|data| data.join(&context.config().identifier).join("logs"));
+        #[cfg(windows)]
+        let directory = std::env::var_os("OMARCHY_BOT_SMOKE_DIR").map(|root| std::path::PathBuf::from(root).join("logs")).or(directory);
+        let directory = directory.ok_or("Native app log directory is unavailable")?;
+        std::fs::create_dir_all(&directory)?;
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(directory.join("omarchy-bot.log"))?;
+        let _ = APP_LOG.set(Mutex::new(file));
+        Ok(())
+    })();
+    if let Err(error) = logging { let _ = writeln!(std::io::stderr(), "Could not open native app log: {error}"); }
+    log_lifecycle("startup");
     let incoming = std::env::args().skip(1).find_map(|argument| pairing_request(&argument));
     let loaded = read_connection();
     let error = loaded.as_ref().err().cloned();
@@ -497,11 +534,6 @@ fn main() {
     // An explicit pairing link opens Add Service without deleting the previous keychain entry.
     let connection = if incoming.is_some() { None } else { stored };
     let origin = connection.as_ref().map(|connection| connection.base_url.clone());
-    let mut context = tauri::generate_context!();
-    #[cfg(windows)]
-    if let Some(directory) = std::env::var_os("OMARCHY_BOT_SMOKE_DIR") {
-        context.config_mut().app.app_directories_override = Some(tauri::utils::config::AppDirectoriesOverride::Root(directory.into()));
-    }
     let mut policy = context.config().app.security.csp.clone().expect("CSP configured").to_string();
     let network = if let Some(origin) = &origin {
         let socket = websocket_url(Url::parse(origin).expect("validated Service origin")).expect("WebSocket scheme");
@@ -538,6 +570,11 @@ fn main() {
                 .build()?;
             Ok(())
         })
+        .on_window_event(|_, event| match event {
+            tauri::WindowEvent::CloseRequested { .. } => log_lifecycle("window-close-requested"),
+            tauri::WindowEvent::Destroyed => log_lifecycle("window-destroyed"),
+            _ => {},
+        })
         .build(context)
         .expect("Could not start Omarchy Bot");
     let handle = application.handle().clone();
@@ -550,8 +587,16 @@ fn main() {
         if let tauri::RunEvent::Opened { urls } = &event {
             for url in urls { receive_link(app, url.as_str()); }
         }
-        if matches!(event, tauri::RunEvent::Exit) { stop_sidecar(&app.state::<ShellState>()); }
+        match event {
+            tauri::RunEvent::ExitRequested { code, .. } => log_lifecycle(&format!("exit-requested code={code:?}")),
+            tauri::RunEvent::Exit => {
+                log_lifecycle("exit");
+                stop_sidecar(&app.state::<ShellState>());
+            },
+            _ => {},
+        }
     });
+    log_lifecycle(&format!("event-loop-return code={exit}"));
     if exit == RESTART_EXIT_CODE {
         if let Ok(mut link) = handle.state::<ShellState>().restart_link.lock() {
             if let Some(link) = link.take() { environment.args_os.push(link.into()); }

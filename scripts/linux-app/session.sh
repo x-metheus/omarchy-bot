@@ -62,7 +62,13 @@ else
   /artifact/omarchy-bot.AppImage --appimage-extract > extract.log
 cat > "$OMARCHY_BOT_SMOKE_APP" <<EOF
 #!/bin/sh
-exec "$session/squashfs-root/AppRun" "\$@"
+"$session/squashfs-root/AppRun" "\$@" 2> "/src/.lane/linux-app/evidence/app-\$\$.stderr.log" &
+app_pid=\$!
+printf 'wrapper_pid=%s app_pid=%s started\\n' "\$\$" "\$app_pid" >> /src/.lane/linux-app/evidence/app-exits.log
+wait "\$app_pid"
+status=\$?
+printf 'wrapper_pid=%s app_pid=%s exit_code=%s\\n' "\$\$" "\$app_pid" "\$status" >> /src/.lane/linux-app/evidence/app-exits.log
+exit "\$status"
 EOF
 chmod 755 "$OMARCHY_BOT_SMOKE_APP"
 cat > "$OMARCHY_BOT_SMOKE_APP-no-keyring" <<EOF

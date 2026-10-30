@@ -251,6 +251,10 @@ bash scripts/smoke-linux-app.sh .lane/dist/omarchy-bot_0.1.0_amd64.AppImage
 
 The container owns the toolchain, private display, D-Bus, keyring, and app profile. The smoke suite drives the shipped artifact with `tauri-driver` and WebKitWebDriver. Build and smoke details are in [scripts/linux-app/README.md](scripts/linux-app/README.md). The Service runtime archive excludes the native app.
 
+Native app lifecycle and panic diagnostics are appended to `~/.local/share/com.omarchy.bot/logs/omarchy-bot.log` on Linux (`$XDG_DATA_HOME/com.omarchy.bot/logs/omarchy-bot.log` when set), `~/Library/Logs/com.omarchy.bot/omarchy-bot.log` on macOS, and `%LOCALAPPDATA%\com.omarchy.bot\logs\omarchy-bot.log` on Windows. Include the entries around the failure time when reporting a disappearing window: startup, window close/destruction, requested exit code, event-loop return and Rust panic backtraces distinguish normal quit, pairing/update restarts and failures. Abrupt process termination may leave only the last startup entry; collect the operating system's crash report as well. Logs exclude pairing links and credentials.
+
+The log opens before native runtime creation, so display/runtime initialization panics are recorded too. File and stderr writes are best effort; an unavailable or broken stderr does not prevent persistent logging or native startup.
+
 App releases use independent stable `app-vX.Y.Z` tags. The [app release workflow](.github/workflows/app-release.yml) builds and smokes Linux x86_64 AppImages in the existing container, builds signed and notarized macOS arm64/x64 packages, and requires the full Windows x64 WebView2 preview smoke before publication. It publishes all installers, checksums, signed updater payloads and one complete four-platform manifest, then promotes newer versions at the fixed `app-latest` manifest URL. macOS updater entries use `.app.tar.gz` archives rather than dmgs; unsigned Windows installers keep the release labeled preview. The updater manifest carries the artifact signatures enforced by Tauri and points at the immutable versioned release. The protocol-mismatch screen's **update Omarchy Bot** action checks, installs, and restarts into the verified update. Signing-key provisioning, GitHub configuration, rollback behavior, and the disposable-key updater smoke are documented in [the Linux release instructions](scripts/linux-app/README.md#release-setup) and the platform build instructions. GitHub publication and real macOS/Windows checks remain pending until run in their respective environments.
 
 On first launch, enter the Service address and one-time code in **Add Service**, or open the Service-issued `omarchy-bot://pair?service=…&code=…` link. A running instance receives later links in its existing window. The address must be an HTTPS origin, or HTTP on loopback for an SSH tunnel. Links with credentials, paths, duplicate parameters, or non-loopback plaintext are refused. URL-scheme desktop integration is handled by the installer; the AppImage also accepts the deep link as its argument.
@@ -609,6 +613,7 @@ Mail does not forward the source Thread, Native Session, memory, attachments, or
 | :--- | :--- |
 | Product data, managed attachments, avatar uploads | `~/.local/share/omarchy-bot/` |
 | Persistent runtime state and launch logs | `~/.local/state/omarchy-bot/` |
+| Native app lifecycle and panic log (Linux) | `~/.local/share/com.omarchy.bot/logs/omarchy-bot.log` (respects `XDG_DATA_HOME`) |
 | Transient sockets | `$XDG_RUNTIME_DIR`; `serve` uses private `/tmp/ob-<uid>` when absent |
 | Shared Workspace | User work files, separate from plugin source and conversation data |
 | Native Sessions | Owned by the selected Agent, not erased by Bot deletion |
