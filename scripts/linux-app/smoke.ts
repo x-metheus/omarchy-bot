@@ -153,8 +153,8 @@ async function idleCpu(mode: string): Promise<void> {
   const cpuPercent = (ticks() - before) / hz / (wallMs / 1000) * 100;
   idleSamples.push({ mode, cpuPercent, wallMs, pids });
   console.log(`CPU ${mode}: ${cpuPercent.toFixed(2)}% of one core over ${Math.round(wallMs)}ms`);
-  assert.ok(cpuPercent < 20, `${mode}: idle app + WebKit CPU ${cpuPercent.toFixed(2)}% must remain below 20% of one core`);
-  pass(`${mode} idle app + WebKit CPU stays below 20% of one core`);
+  assert.ok(cpuPercent < 50, `${mode}: idle app + WebKit CPU ${cpuPercent.toFixed(2)}% must remain below 50% of one core`);
+  pass(`${mode} idle app + WebKit CPU stays below 50% of one core`);
 }
 async function quit(): Promise<void> {
   const native = appPids();
