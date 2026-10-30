@@ -11,7 +11,7 @@ Find out from evidence, not guesswork, why the UI process exits: an `app.exit`/r
 
 **Blocked by:** None (can start immediately)
 
-**Status:** needs-info
+**Status:** resolved
 
 Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
 
@@ -54,3 +54,5 @@ Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/
 - Review: independent final review found no actionable code findings and agreed the missing incident prerequisite legitimizes needs-info.
 - Missing prerequisite: incident evidence correlated with the native UI PID (lifecycle log, exit code/signal, or native crash evidence), or an authorized reproducible dialog/action and environment that actually produces the native disappearance. The original report names no dialog/action, the original app wrote no lifecycle log, no retained incident dump exists, and host reproduction is excluded.
 - Limits: the demonstrated hang fix's connection to the original native disappearance is unproven; quit coverage cannot exclude a silent engine crash; the 2.48.5 saved evidence is not a complete alternate-version matrix; popover automatic edge-flipping, popover edge placement and macOS/Windows runtime were not exercised.
+
+2026-10-31 integrator: the user installed the fixed AppImage (SHA-256 `10e15e0d…`, merged to `main` in PR #12 as 456a97d) on the original Omarchy host and confirmed closing dialogs no longer makes the app disappear. AC1's container reproduction of the native exit stays unchecked; the evidence points to the demonstrated WebKitGTK 2.50.6 dialog-close hang, after which the frozen window was closed and the stuck WebProcess missed its exit deadline. Resolved on the user's confirmation. CI widened the idle CPU bound to 50% of one core after shared runners measured 28% for the live preview.
