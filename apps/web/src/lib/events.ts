@@ -1,4 +1,4 @@
-import type { EventEnvelope } from "@omarchy-bot/protocol";
+import { MessageDto, ToolCallSummaryDto, type EventEnvelope } from "@omarchy-bot/protocol";
 import { api } from "./api.ts";
 import { clearDraftsByBot } from "./drafts.ts";
 
@@ -13,6 +13,17 @@ export type QueryTag =
   | "plugin-commands";
 
 export type Invalidate = (tag: QueryTag, threadId?: string) => void;
+
+/**
+ * One streamed transcript mutation. `cursor` is the WS envelope cursor, a
+ * monotonic server event-log sequence that orders payloads for one record.
+ */
+export type TranscriptUpdate =
+  | { kind: "message"; message: MessageDto; cursor: number }
+  | { kind: "toolCall"; messageId: string; toolCall: ToolCallSummaryDto; cursor: number };
+
+/** Applies a streamed transcript mutation to the `["messages", threadId]` cache. */
+export type ApplyTranscriptUpdate = (threadId: string, update: TranscriptUpdate) => void;
 
 export interface NotificationContext {
   selectedBotId?: string;
@@ -91,7 +102,70 @@ function threadIdOf(envelope: EventEnvelope): string | undefined {
   return typeof p.threadId === "string" ? p.threadId : envelope.aggregateType === "thread" ? envelope.aggregateId : undefined;
 }
 
-function route(envelope: EventEnvelope, invalidate: Invalidate): void {
+/**
+ * Merges one streamed transcript record into a cached thread transcript.
+ * Returns the transcript to store, or `undefined` when nothing should be written:
+ * the transcript is not loaded (never seed a single-message transcript) or
+ * the payload would regress a completed block to streaming.
+ */
+export function patchCachedMessage(
+  cached: MessageDto[] | undefined,
+  message: MessageDto,
+): MessageDto[] | undefined {
+  if (cached === undefined) return undefined;
+  const index = cached.findIndex((candidate) => candidate.id === message.id);
+  if (index === -1) {
+    const insertAt = cached.findIndex((candidate) => candidate.seq > message.seq);
+    const next = [...cached];
+    next.splice(insertAt === -1 ? next.length : insertAt, 0, message);
+    return next;
+  }
+  const existingState = cached[index]!.response?.state ?? cached[index]!.thinking?.state;
+  const incomingState = message.response?.state ?? message.thinking?.state;
+  if (existingState === "completed" && incomingState === "streaming") return undefined;
+  const next = [...cached];
+  next[index] = message;
+  return next;
+}
+
+/**
+ * Merges one streamed Tool Call summary into the cached transcript row.
+ * `tool.updated` carries only the summary, so a row that is not loaded yet must
+ * be refetched: `undefined` tells the caller to invalidate.
+ */
+export function patchCachedToolCall(
+  cached: MessageDto[] | undefined,
+  messageId: string,
+  toolCall: ToolCallSummaryDto,
+): MessageDto[] | undefined {
+  if (cached === undefined) return undefined;
+  const index = cached.findIndex((candidate) => candidate.id === messageId);
+  const existing = cached[index];
+  if (existing === undefined || existing.kind !== "tool") return undefined;
+  const next = [...cached];
+  next[index] = { ...existing, toolCall };
+  return next;
+}
+
+interface ToolCallUpdate {
+  threadId: string;
+  messageId: string;
+  toolCall: ToolCallSummaryDto;
+}
+
+function toolCallUpdateOf(envelope: EventEnvelope): ToolCallUpdate | undefined {
+  const p = payloadOf(envelope);
+  if (typeof p.threadId !== "string" || typeof p.messageId !== "string") return undefined;
+  const toolCall = ToolCallSummaryDto.safeParse(p.toolCall);
+  if (!toolCall.success) return undefined;
+  return { threadId: p.threadId, messageId: p.messageId, toolCall: toolCall.data };
+}
+
+export function route(
+  envelope: EventEnvelope,
+  invalidate: Invalidate,
+  applyUpdate?: ApplyTranscriptUpdate,
+): void {
   const p = payloadOf(envelope);
   switch (envelope.type) {
     case "plugin.authorization_completed":
@@ -131,12 +205,31 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
       return;
     }
     case "response.updated":
-    case "response.removed":
-    case "thinking.updated":
-    case "thinking.removed":
+    case "thinking.updated": {
+      const message = MessageDto.safeParse(envelope.payload);
+      if (message.success && applyUpdate !== undefined) {
+        applyUpdate(message.data.threadId, { kind: "message", message: message.data, cursor: envelope.cursor });
+        return;
+      }
       invalidate("messages", threadIdOf(envelope));
       return;
-    case "tool.updated":
+    }
+    case "tool.updated": {
+      const update = toolCallUpdateOf(envelope);
+      if (update !== undefined && applyUpdate !== undefined) {
+        applyUpdate(update.threadId, {
+          kind: "toolCall",
+          messageId: update.messageId,
+          toolCall: update.toolCall,
+          cursor: envelope.cursor,
+        });
+        return;
+      }
+      invalidate("messages", threadIdOf(envelope));
+      return;
+    }
+    case "response.removed":
+    case "thinking.removed":
       invalidate("messages", threadIdOf(envelope));
       return;
     case "agent.native":
@@ -167,6 +260,7 @@ export function startEventPump(
   onSnapshotRequired: () => void,
   beforeReconnect: () => Promise<boolean>,
   getNotificationContext?: () => NotificationContext,
+  applyUpdate?: ApplyTranscriptUpdate,
 ): () => void {
   let cursor: number | undefined;
   let socket: WebSocket | undefined;
@@ -176,10 +270,12 @@ export function startEventPump(
     invalidate: Invalidate;
     onSnapshotRequired: () => void;
     getNotificationContext?: () => NotificationContext;
+    applyUpdate?: ApplyTranscriptUpdate;
   } | undefined = {
     invalidate,
     onSnapshotRequired,
     ...(getNotificationContext !== undefined ? { getNotificationContext } : {}),
+    ...(applyUpdate !== undefined ? { applyUpdate } : {}),
   };
   let retries = 0;
 
@@ -201,7 +297,7 @@ export function startEventPump(
         cursor = envelope.cursor;
         const current = handlers;
         if (current === undefined) return;
-        route(envelope, current.invalidate);
+        route(envelope, current.invalidate, current.applyUpdate);
         if (notificationsReady && current.getNotificationContext !== undefined) {
           notifyForAttentionEvent(envelope, current.getNotificationContext());
         }
