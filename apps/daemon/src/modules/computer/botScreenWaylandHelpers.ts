@@ -22,6 +22,14 @@ type CaptureProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
 
 const INPUT_RPC_TIMEOUT_MS = 1_000;
 const CAPTURE_RPC_TIMEOUT_MS = 5_000;
+const CAPTURE_TERM_GRACE_MS = 1_000;
+
+/** The part of a spawned capture helper that ends its process. */
+export interface CaptureChild {
+  readonly exitCode: number | null;
+  readonly exited: Promise<number>;
+  kill(signal?: NodeJS.Signals): void;
+}
 
 export interface CommandResult {
   status: number;
@@ -45,16 +53,54 @@ export async function command(argv: string[], env: Record<string, string>): Prom
   return { status, stdout, stderr };
 }
 
-async function terminateCapture(child: CaptureProcess): Promise<void> {
+async function terminateCapture(child: CaptureChild): Promise<void> {
   if (child.exitCode !== null) return;
   child.kill("SIGTERM");
   const stopped = await Promise.race([
-    child.exited.then(() => true),
-    Bun.sleep(1_000).then(() => false),
+    child.exited.then(() => true, () => true),
+    Bun.sleep(CAPTURE_TERM_GRACE_MS).then(() => false),
   ]);
   if (stopped) return;
   child.kill("SIGKILL");
-  await child.exited;
+  await child.exited.catch(() => undefined);
+}
+
+/**
+ * Resolves only once a capture child has exited, ending it when `signal` aborts.
+ * A signal that is already aborted when the child starts still kills it, so a
+ * capture that lost a race with its deadline never leaves `grim` running while
+ * the next capture starts.
+ */
+export function captureChildExited(child: CaptureChild, signal?: AbortSignal): Promise<void> {
+  const exited = child.exited.then(() => undefined, () => undefined);
+  if (signal === undefined) return exited;
+  if (signal.aborted) return terminateCapture(child);
+  const abort = (): void => {
+    // Teardown runs to SIGKILL if needed; `exited` settles only afterwards.
+    void terminateCapture(child);
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  return exited.finally(() => signal.removeEventListener("abort", abort));
+}
+
+export interface SpawnedCaptureChild<Child extends CaptureChild = CaptureChild> {
+  readonly child: Child;
+  /** Settles only once the child has exited. */
+  readonly exited: Promise<void>;
+}
+
+/**
+ * Creates a capture child and arms its kill hook in one step. The hook reads
+ * the signal after the spawn, so an abort that landed while the child was being
+ * created ends it instead of waiting for an event that already fired, and no
+ * statement runs between the child existing and the hook being armed.
+ */
+export function spawnCaptureChild<Child extends CaptureChild>(
+  spawn: () => Child,
+  signal?: AbortSignal,
+): SpawnedCaptureChild<Child> {
+  const child = spawn();
+  return { child, exited: captureChildExited(child, signal) };
 }
 
 export class WaylandVirtualInput {

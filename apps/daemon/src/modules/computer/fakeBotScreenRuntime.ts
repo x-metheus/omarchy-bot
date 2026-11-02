@@ -1,6 +1,6 @@
 import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
 import type { BrowserAction, SurfaceId } from "@omarchy-bot/domain";
-import { BotScreenInputRejectedError } from "./botScreenManager.ts";
+import { BotScreenInputRejectedError, BotScreenUnavailableError } from "./botScreenManager.ts";
 import type {
   BotScreenCapture,
   BotScreenCaptureStream,
@@ -55,11 +55,17 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #windows = new Map<string, ComputerWindowListItem[]>();
   readonly focusRequests: string[] = [];
   #captureStarts = new Map<string, number>();
-  #capturesInFlight = new Map<string, number>();
+  #liveCaptureChildren = new Map<string, number>();
   #maxCapturesInFlight = new Map<string, number>();
+  /** Live child count each capture saw when it started, oldest first. */
+  #captureStartLiveChildren = new Map<string, number[]>();
   #blockedCaptureSurface: string | undefined;
   #blockedCaptureStarted = Promise.withResolvers<void>();
   #blockedCaptureRelease = Promise.withResolvers<void>();
+  #captureSpawnHook: ((surfaceId: string, signal: AbortSignal | undefined) => void) | undefined;
+  #captureTeardownGate: Promise<void> | undefined;
+  #captureTeardownStarted = Promise.withResolvers<void>();
+  #captureTeardownRelease = Promise.withResolvers<void>();
   #inputsInFlight = 0;
   #inputSurfacesInFlight = new Set<string>();
   maximumInputsInFlight = 0;
@@ -77,6 +83,10 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #captureStreamCloseWaiters: Array<{ count: number; resolve: () => void }> = [];
   #captureStreamFailures = new Set<string>();
   #captureFailures = new Set<string>();
+  /** Captures each Surface still owes as a stall, and the stalls it already aborted. */
+  #stalledCaptures = new Map<string, number>();
+  #abortedCaptures = new Map<string, number>();
+  #unavailableCaptures = new Map<string, string>();
   #releaseFailures = new Set<string>();
   #blockActions = false;
   #actionsStarted = 0;
@@ -199,6 +209,21 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#captureFailures.add(surfaceId);
   }
 
+  /** The next `count` captures on this Screen stall until their AbortSignal fires. */
+  stallNextCaptures(surfaceId: string, count: number): void {
+    this.#stalledCaptures.set(surfaceId, (this.#stalledCaptures.get(surfaceId) ?? 0) + count);
+  }
+
+  /** Captures on this Screen that ended because their AbortSignal fired. */
+  captureAborts(surfaceId: string): number {
+    return this.#abortedCaptures.get(surfaceId) ?? 0;
+  }
+
+  /** Every capture on this Screen fails the way a runtime reports an unusable Screen. */
+  failCapturesWith(surfaceId: string, message: string): void {
+    this.#unavailableCaptures.set(surfaceId, message);
+  }
+
   failNextRelease(surfaceId: string): void {
     this.#releaseFailures.add(surfaceId);
   }
@@ -218,6 +243,37 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   maxConcurrentCaptures(surfaceId: string): number {
     return this.#maxCapturesInFlight.get(surfaceId) ?? 0;
+  }
+
+  /** Runs at the first line of a capture, before it installs its abort listener. */
+  onCaptureSpawn(hook: (surfaceId: string, signal: AbortSignal | undefined) => void): void {
+    this.#captureSpawnHook = hook;
+  }
+
+  /**
+   * Holds the teardown of an aborted capture child, so a capture that lost its
+   * deadline keeps its child alive until the test releases the kill.
+   */
+  blockCaptureTeardown(): void {
+    this.#captureTeardownGate = this.#captureTeardownRelease.promise;
+  }
+
+  waitForCaptureTeardown(): Promise<void> {
+    return this.#captureTeardownStarted.promise;
+  }
+
+  releaseCaptureTeardown(): void {
+    this.#captureTeardownRelease.resolve();
+  }
+
+  /** Capture children this Screen still has running. */
+  liveCaptureChildren(surfaceId: string): number {
+    return this.#liveCaptureChildren.get(surfaceId) ?? 0;
+  }
+
+  /** For each capture on this Screen, the children already running when it began. */
+  captureStartLiveChildren(surfaceId: string): number[] {
+    return this.#captureStartLiveChildren.get(surfaceId) ?? [];
   }
 
   waitForBlockedCapture(): Promise<void> {
@@ -298,6 +354,83 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#record(surfaceId).finish(outcome);
   }
 
+  /**
+   * Waits while a stalled capture keeps its child alive. A signal that landed
+   * before this child's abort hook was installed still ends the child, matching
+   * the real adapter's kill hook. Without a signal the child never ends.
+   */
+  async #stallCapture(surfaceId: string, signal: AbortSignal | undefined): Promise<void> {
+    const ended = Promise.withResolvers<never>();
+    let killed = false;
+    const abort = (): void => {
+      if (killed) return;
+      killed = true;
+      this.#abortedCaptures.set(surfaceId, (this.#abortedCaptures.get(surfaceId) ?? 0) + 1);
+      ended.reject(signal?.reason instanceof Error ? signal.reason : new Error("fake Bot Screen capture was aborted"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted === true) abort();
+    try {
+      await ended.promise;
+    } catch (error) {
+      // A killed child still runs its teardown before it is gone.
+      await this.#captureTeardown();
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  /** The time a real adapter spends ending a capture child before it exits. */
+  async #captureTeardown(): Promise<void> {
+    this.#captureTeardownStarted.resolve();
+    await this.#captureTeardownGate;
+  }
+
+  /**
+   * Runs one capture. Its child exists from the first statement, so the live
+   * count a later capture records is the count that was still running, and the
+   * child is only reaped once this capture is about to settle.
+   */
+  async #capture(surfaceId: string, signal: AbortSignal | undefined): Promise<BotScreenCapture> {
+    const unavailable = this.#unavailableCaptures.get(surfaceId);
+    if (unavailable !== undefined) throw new BotScreenUnavailableError(unavailable);
+    if (this.#captureFailures.delete(surfaceId)) throw new Error("fake Bot Screen capture failed");
+    const live = this.#spawnCaptureChild(surfaceId);
+    try {
+      // The child exists before the capture installs its abort listener, so an
+      // abort landing here must still end it.
+      this.#captureSpawnHook?.(surfaceId, signal);
+      const count = this.captureStarts(surfaceId) + 1;
+      this.#captureStarts.set(surfaceId, count);
+      const blocked = surfaceId === this.#blockedCaptureSurface && count === 1;
+      const stalls = this.#stalledCaptures.get(surfaceId) ?? 0;
+      if (stalls > 0) this.#stalledCaptures.set(surfaceId, stalls - 1);
+      if (blocked) {
+        this.#blockedCaptureStarted.resolve();
+        await this.#blockedCaptureRelease.promise;
+      }
+      if (stalls > 0) await this.#stallCapture(surfaceId, signal);
+      signal?.throwIfAborted();
+      return { mediaType: "image/png", bytes: FAKE_SCREEN_PNG };
+    } finally {
+      this.#liveCaptureChildren.set(surfaceId, live - 1);
+    }
+  }
+
+  #spawnCaptureChild(surfaceId: string): number {
+    const live = this.liveCaptureChildren(surfaceId) + 1;
+    const starts = this.#captureStartLiveChildren.get(surfaceId) ?? [];
+    starts.push(live - 1);
+    this.#captureStartLiveChildren.set(surfaceId, starts);
+    this.#liveCaptureChildren.set(surfaceId, live);
+    this.#maxCapturesInFlight.set(
+      surfaceId,
+      Math.max(live, this.#maxCapturesInFlight.get(surfaceId) ?? 0),
+    );
+    return live;
+  }
+
   #countAction(): void {
     this.#actionsStarted += 1;
     for (const waiter of this.#actionWaiters.splice(0)) {
@@ -372,28 +505,9 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         capture: "ready",
         input: "ready",
       },
-      capture: async (): Promise<BotScreenCapture> => {
-        if (stopped) throw new Error("fake Bot Screen is stopped");
-        if (this.#captureFailures.delete(provision.surfaceId)) {
-          throw new Error("fake Bot Screen capture failed");
-        }
-        const count = this.captureStarts(provision.surfaceId) + 1;
-        const inFlight = (this.#capturesInFlight.get(provision.surfaceId) ?? 0) + 1;
-        this.#captureStarts.set(provision.surfaceId, count);
-        this.#capturesInFlight.set(provision.surfaceId, inFlight);
-        this.#maxCapturesInFlight.set(
-          provision.surfaceId,
-          Math.max(inFlight, this.#maxCapturesInFlight.get(provision.surfaceId) ?? 0),
-        );
-        try {
-          if (provision.surfaceId === this.#blockedCaptureSurface && count === 1) {
-            this.#blockedCaptureStarted.resolve();
-            await this.#blockedCaptureRelease.promise;
-          }
-          return { mediaType: "image/png", bytes: FAKE_SCREEN_PNG };
-        } finally {
-          this.#capturesInFlight.set(provision.surfaceId, inFlight - 1);
-        }
+      capture: (signal?: AbortSignal): Promise<BotScreenCapture> => {
+        if (stopped) return Promise.reject(new Error("fake Bot Screen is stopped"));
+        return this.#capture(provision.surfaceId, signal);
       },
       openCaptureStream: async (): Promise<BotScreenCaptureStream> => {
         if (stopped) throw new Error("fake Bot Screen is stopped");

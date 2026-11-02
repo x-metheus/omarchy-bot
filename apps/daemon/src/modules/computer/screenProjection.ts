@@ -13,11 +13,12 @@ import {
   type ScreenProjectionViewStateMessageDto,
 } from "@omarchy-bot/protocol";
 import type { ComputerSurfaceOwner } from "./broker.ts";
-import type {
-  BotScreenManager,
-  BotScreenInputEvent,
-  BotScreenExpandedView,
-  BotScreenProjectionSource,
+import {
+  BotScreenUnavailableError,
+  type BotScreenManager,
+  type BotScreenInputEvent,
+  type BotScreenExpandedView,
+  type BotScreenProjectionSource,
 } from "./botScreenManager.ts";
 import { InputDiagnostics, type InputDiagnosticCategory } from "./inputDiagnostics.ts";
 import type { ScreenInputLease, WebControlGrant } from "./screenInputLease.ts";
@@ -29,6 +30,11 @@ const MAX_INPUT_QUEUE = 256;
 const SOCKET_ATTACH_TIMEOUT_MS = 10_000;
 const RFB_BACKPRESSURE_TIMEOUT_MS = 5_000;
 const CAPTURE_TIMEOUT_MS = 2_000;
+/** Consecutive capture failures a session tolerates before its projection ends. */
+const MAX_CONSECUTIVE_CAPTURE_FAILURES = 3;
+/** Delay before retrying a failed capture, so a stalled compositor is not polled tightly. */
+const CAPTURE_RETRY_BACKOFF_MS = 250;
+const CAPTURE_TIMEOUT_MESSAGE = "Screen capture did not produce a frame within its latency bound";
 const FAILURE_DELIVERY_GRACE_MS = 100;
 
 export type ProjectionViewMode = ScreenProjectionModeDto;
@@ -51,6 +57,7 @@ export interface ProjectionLoadMetrics {
   readonly sequence: number;
   readonly captureAttempts: number;
   readonly sourceFrames: number;
+  readonly transientCaptureFailures: number;
   readonly previewFrames: number;
   readonly previewBytes: number;
   readonly rfbBytesSent: number;
@@ -149,6 +156,8 @@ interface ProjectionSession {
   captureLatencyTotalMs: number;
   captureLatencyMaxMs: number;
   captureInFlight: boolean;
+  consecutiveCaptureFailures: number;
+  transientCaptureFailures: number;
   inputSuspended: boolean;
 }
 
@@ -192,14 +201,33 @@ const KEY_CODES: Record<string, number> = {
   Pause: 119, MetaLeft: 125, MetaRight: 126, ContextMenu: 127,
 };
 
-async function withinProjectionDeadline<T>(operation: Promise<T>, message: string): Promise<T> {
+type CaptureOutcome<T> =
+  | { readonly state: "captured"; readonly value: T }
+  | { readonly state: "failed"; readonly error: unknown }
+  | { readonly state: "timed-out" };
+
+async function captureWithinProjectionDeadline<T>(capture: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const abort = new AbortController();
   let timer: Timer | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), CAPTURE_TIMEOUT_MS);
+  const captureOutcome = capture(abort.signal).then(
+    (value): CaptureOutcome<T> => ({ state: "captured", value }),
+    (error: unknown): CaptureOutcome<T> => ({ state: "failed", error }),
+  );
+  const deadline = new Promise<CaptureOutcome<T>>((resolve) => {
+    timer = setTimeout(() => resolve({ state: "timed-out" }), CAPTURE_TIMEOUT_MS);
     timer.unref?.();
   });
   try {
-    return await Promise.race([operation, timeout]);
+    const outcome = await Promise.race([captureOutcome, deadline]);
+    if (outcome.state === "timed-out") {
+      abort.abort(new Error(CAPTURE_TIMEOUT_MESSAGE));
+      // The capture settles only once its helper process has exited, so waiting
+      // for it keeps this frame's capture slot closed until `grim` is gone.
+      await captureOutcome;
+      throw new Error(CAPTURE_TIMEOUT_MESSAGE);
+    }
+    if (outcome.state === "failed") throw outcome.error;
+    return outcome.value;
   } finally {
     clearTimeout(timer);
   }
@@ -276,6 +304,8 @@ export class ScreenProjectionService {
       captureLatencyTotalMs: 0,
       captureLatencyMaxMs: 0,
       captureInFlight: false,
+      consecutiveCaptureFailures: 0,
+      transientCaptureFailures: 0,
       inputSuspended: false,
       cleanups: new Set(),
     };
@@ -634,27 +664,36 @@ export class ScreenProjectionService {
     session.captureInFlight = true;
     session.captureAttempts += 1;
     const captureStartedAt = performance.now();
+    let retryDelayMs: number | undefined;
     try {
-      const image = await withinProjectionDeadline(
-        session.source.capture(),
-        "Screen capture did not produce a frame within its latency bound",
-      );
+      const image = await captureWithinProjectionDeadline((signal) => session.source.capture(signal));
       if (session.mode !== "preview" || this.#sessions.get(session.id) !== session) return;
       session.sourceFrames += 1;
+      session.consecutiveCaptureFailures = 0;
       if (image.mediaType !== "image/png" || image.bytes.byteLength === 0 || image.bytes.byteLength > MAX_FRAME_BYTES) {
         session.invalidFrameDrops += 1;
         return;
       }
       this.#sendPreviewPng(session, image.bytes, new Date());
     } catch (error) {
-      queueMicrotask(() => this.#fail(session, "capture-failed", error));
+      if (error instanceof BotScreenUnavailableError) {
+        queueMicrotask(() => this.#fail(session, "capture-failed", error));
+        return;
+      }
+      session.transientCaptureFailures += 1;
+      session.consecutiveCaptureFailures += 1;
+      if (session.consecutiveCaptureFailures >= MAX_CONSECUTIVE_CAPTURE_FAILURES) {
+        queueMicrotask(() => this.#fail(session, "capture-failed", error));
+        return;
+      }
+      retryDelayMs = CAPTURE_RETRY_BACKOFF_MS;
     } finally {
       const captureLatency = Math.max(0, performance.now() - captureStartedAt);
       session.captureLatencySamples += 1;
       session.captureLatencyTotalMs += captureLatency;
       session.captureLatencyMaxMs = Math.max(session.captureLatencyMaxMs, captureLatency);
       session.captureInFlight = false;
-      this.#scheduleNext(session);
+      this.#scheduleNext(session, retryDelayMs);
     }
   }
 
@@ -702,10 +741,13 @@ export class ScreenProjectionService {
     }
   }
 
-  #scheduleNext(session: ProjectionSession): void {
+  #scheduleNext(session: ProjectionSession, retryDelayMs?: number): void {
     if (session.mode !== "preview" || this.#sessions.get(session.id) !== session) return;
     const now = performance.now();
-    session.nextFrameAt = Math.max((session.nextFrameAt ?? now) + PREVIEW_INTERVAL_MS, now);
+    const nextFrameAt = retryDelayMs === undefined
+      ? (session.nextFrameAt ?? now) + PREVIEW_INTERVAL_MS
+      : now + retryDelayMs;
+    session.nextFrameAt = Math.max(nextFrameAt, now);
     this.#schedule(session, session.nextFrameAt - now);
   }
 
@@ -1186,7 +1228,14 @@ export class ScreenProjectionService {
     const captureOutstanding = session.captureInFlight ? 1 : 0;
     const captureShortfall = session.state === "failed"
       ? 0
-      : Math.max(0, session.captureAttempts - session.sourceFrames - session.preCaptureBackpressureSkips - captureOutstanding);
+      : Math.max(
+          0,
+          session.captureAttempts
+            - session.sourceFrames
+            - session.preCaptureBackpressureSkips
+            - session.transientCaptureFailures
+            - captureOutstanding,
+        );
     const receiveShortfall = Math.max(0, session.previewFrames - browser.browserReceives);
     const decodeShortfall = Math.max(0, browser.browserReceives - browser.browserDecodes - browser.decodeDrops);
     const paintShortfall = Math.max(0, browser.browserDecodes - browser.browserPaints - browser.paintDrops);
@@ -1196,6 +1245,7 @@ export class ScreenProjectionService {
       sequence: session.sequence,
       captureAttempts: session.captureAttempts,
       sourceFrames: session.sourceFrames,
+      transientCaptureFailures: session.transientCaptureFailures,
       previewFrames: session.previewFrames,
       previewBytes: session.previewBytes,
       rfbBytesSent: session.rfbBytesSent,
