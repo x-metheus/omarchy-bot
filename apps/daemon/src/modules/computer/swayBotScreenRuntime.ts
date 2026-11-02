@@ -29,6 +29,7 @@ import {
 } from "./botComputer.ts";
 import {
   BotScreenInputRejectedError,
+  BotScreenUnavailableError,
   type BotScreenCapture,
   type BotScreenCaptureStream,
   type BotScreenExpandedView,
@@ -43,6 +44,7 @@ import {
   executable,
   ProcessLineReader,
   settleOwnedChild,
+  spawnCaptureChild,
   spawnDetachedChild,
   terminateOwnedChild,
   waitForSocket,
@@ -591,15 +593,16 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (sharedWayvncStart === starting) sharedWayvncStart = undefined;
       }
     };
-    const capture = async (): Promise<BotScreenCapture> => {
-      if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
-      if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
+    const capture = async (signal?: AbortSignal): Promise<BotScreenCapture> => {
+      if (stopped || !computer.running()) throw new BotScreenUnavailableError("Bot Computer compositor is not running");
+      if (!this.#desktopRunning(session)) throw new BotScreenUnavailableError("Bot Desktop is not running");
       return this.#capture(
         computer.grim,
         computer.childEnv,
         session.outputName,
         session.videoWidth,
         session.videoHeight,
+        signal,
       );
     };
     const openCaptureStream = async (): Promise<BotScreenCaptureStream> => {
@@ -1334,29 +1337,42 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     outputName: string,
     expectedWidth: number,
     expectedHeight: number,
+    signal?: AbortSignal,
   ): Promise<BotScreenCapture> {
-    const shot = Bun.spawn([grim, "-o", outputName, "-"], {
-      env: environment,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [status, bytes, stderr] = await Promise.all([
-      shot.exited,
-      new Response(shot.stdout).arrayBuffer(),
-      new Response(shot.stderr).text(),
-    ]);
-    const image = new Uint8Array(bytes);
-    if (status !== 0 || image.length < 8 || image[0] !== 0x89 || image[1] !== 0x50) {
-      throw new Error(
-        `Sway Bot Screen capture failed${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`,
-      );
+    signal?.throwIfAborted();
+    // The kill hook is armed by the same call that creates `shot`, so an abort
+    // that lands while `grim` is being created still ends it, and this capture
+    // settles only once `shot` has exited.
+    const { child: shot, exited: childExited } = spawnCaptureChild(
+      () => Bun.spawn([grim, "-o", outputName, "-"], {
+        env: environment,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }),
+      signal,
+    );
+    try {
+      const [status, bytes, stderr] = await Promise.all([
+        shot.exited,
+        new Response(shot.stdout).arrayBuffer(),
+        new Response(shot.stderr).text(),
+      ]);
+      signal?.throwIfAborted();
+      const image = new Uint8Array(bytes);
+      if (status !== 0 || image.length < 8 || image[0] !== 0x89 || image[1] !== 0x50) {
+        throw new Error(
+          `Sway Bot Screen capture failed${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`,
+        );
+      }
+      const metadata = await sharp(image).metadata();
+      if (metadata.width !== expectedWidth || metadata.height !== expectedHeight) {
+        throw new Error("Sway Bot Screen capture geometry does not match its configured output");
+      }
+      return { mediaType: "image/png", bytes: image };
+    } finally {
+      await childExited;
     }
-    const metadata = await sharp(image).metadata();
-    if (metadata.width !== expectedWidth || metadata.height !== expectedHeight) {
-      throw new Error("Sway Bot Screen capture geometry does not match its configured output");
-    }
-    return { mediaType: "image/png", bytes: image };
   }
 
   async #serializeLifecycle<T>(operation: () => Promise<T>): Promise<T> {

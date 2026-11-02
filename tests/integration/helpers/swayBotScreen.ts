@@ -154,6 +154,8 @@ for (;;) {
 
 export async function createScriptedSwayFixture(options?: {
   waylandDisplay?: string;
+  /** Replaces the scripted grim; `root` is the private fixture directory it may log into. */
+  grimScript?: (root: string) => string;
 }): Promise<ScriptedSwayFixture> {
   const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-public-"));
   const bin = path.join(root, "bin");
@@ -251,7 +253,7 @@ await Promise.withResolvers<void>().promise;
     assetSupply: assets,
     swayBin: sway,
     wlrRandrBin: executable(bin, "wlr-randr", "#!/bin/sh\nexit 0\n"),
-    grimBin: executable(bin, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
+    grimBin: executable(bin, "grim", options?.grimScript?.(root) ?? `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
     inputHelperBin: executable(bin, "input", `#!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
 const logPath = ${JSON.stringify(path.join(root, "input.log"))};
