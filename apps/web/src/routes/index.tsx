@@ -14,7 +14,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import type { BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage, isSupportedServiceProtocol, randomUuid, serviceHealthQuery } from "../lib/api.ts";
-import { requestDesktopNotificationPermission, startEventPump, type QueryTag } from "../lib/events.ts";
+import {
+  requestDesktopNotificationPermission,
+  startEventPump,
+  type QueryTag,
+} from "../lib/events.ts";
+import { createMessageStream } from "../lib/messageStream.ts";
 import { mostRecentlyActiveBot, Sidebar } from "../components/Sidebar.tsx";
 import { clearDraftsByBot, restoreDrafts, takeDraftsByBot } from "../lib/drafts.ts";
 import { ConversationHeader } from "../components/ConversationHeader.tsx";
@@ -102,6 +107,13 @@ function HomeScreen(): JSX.Element {
     [qc],
   );
 
+  // Streaming deltas carry the complete transcript record, so patch the loaded
+  // transcript in place instead of refetching the whole thread per delta.
+  const messageStream = useMemo(
+    () => createMessageStream({ queryClient: qc, invalidate, listMessages: (threadId) => api.listMessages(threadId) }),
+    [qc, invalidate],
+  );
+
   useEffect(() => {
     return startEventPump(invalidate, () => void qc.invalidateQueries(), async () => {
       const health = await qc.fetchQuery(serviceHealthQuery());
@@ -112,8 +124,8 @@ function HomeScreen(): JSX.Element {
         ...(current !== undefined ? { selectedBotId: current } : {}),
         botName: (botId) => botNamesRef.current[botId],
       };
-    });
-  }, [qc, invalidate]);
+    }, messageStream.applyUpdate);
+  }, [qc, invalidate, messageStream]);
 
   useEffect(() => {
     const markOnline = (): void => setIsOnline(true);
@@ -185,7 +197,7 @@ function HomeScreen(): JSX.Element {
 
   const messages = useQuery({
     queryKey: ["messages", thread?.id],
-    queryFn: () => api.listMessages(thread!.id),
+    queryFn: () => messageStream.fetchMessages(thread!.id),
     enabled: thread !== undefined,
     refetchInterval: 15_000,
   });
