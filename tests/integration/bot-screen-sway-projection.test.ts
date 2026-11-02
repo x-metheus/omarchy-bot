@@ -562,7 +562,7 @@ test("an aborted capture ends its grim child before the capture settles", async 
       grimHangMark = path.join(root, "grim-hang");
       grimPidsPath = path.join(root, "grim-pids");
       const png = path.join(root, "screen.png");
-      return `#!/usr/bin/env bun
+      return `#!${process.execPath}
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 // Readiness probes still get a frame; the capture under test hangs instead.
 if (!existsSync(${JSON.stringify(grimHangMark)})) {
