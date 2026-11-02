@@ -89,7 +89,91 @@ function handleCommand(controlDir: string, payload: string): string {
     const tree = JSON.parse(readFileSync(treePath, "utf8")) as unknown;
     writeFakeSwayTree(controlDir, markContainerFocused(tree, Number(focused[1])));
   }
+  const moved = /^\[con_id=(\d+)\] move container to workspace (\S+)$/.exec(payload);
+  if (moved !== null && existsSync(treePath) && readMode(controlDir) !== "ack") {
+    const tree = JSON.parse(readFileSync(treePath, "utf8")) as unknown;
+    writeFakeSwayTree(controlDir, moveContainerToWorkspace(tree, Number(moved[1]), moved[2]!));
+  }
   return JSON.stringify([{ success: true }]);
+}
+
+type SwayRecord = Record<string, unknown>;
+
+function childArrays(node: SwayRecord): unknown[][] {
+  return [node.nodes, node.floating_nodes]
+    .filter((value): value is unknown[] => Array.isArray(value));
+}
+
+function detachContainer(node: unknown, containerId: number): unknown {
+  if (node === null || typeof node !== "object") return undefined;
+  for (const children of childArrays(node as SwayRecord)) {
+    const index = children.findIndex((child) =>
+      child !== null && typeof child === "object" && (child as SwayRecord).id === containerId
+    );
+    if (index >= 0) return children.splice(index, 1)[0];
+    for (const child of children) {
+      const detached = detachContainer(child, containerId);
+      if (detached !== undefined) return detached;
+    }
+  }
+  return undefined;
+}
+
+function findRecord(
+  node: unknown,
+  matches: (record: SwayRecord) => boolean,
+): SwayRecord | undefined {
+  if (node === null || typeof node !== "object") return undefined;
+  const record = node as SwayRecord;
+  if (matches(record)) return record;
+  for (const children of childArrays(record)) {
+    for (const child of children) {
+      const found = findRecord(child, matches);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
+
+function highestNodeId(node: unknown, highest = 0): number {
+  if (node === null || typeof node !== "object") return highest;
+  const record = node as SwayRecord;
+  let next = typeof record.id === "number" ? Math.max(highest, record.id) : highest;
+  for (const children of childArrays(record)) {
+    for (const child of children) next = highestNodeId(child, next);
+  }
+  return next;
+}
+
+/**
+ * Models `move container to workspace` so a routing assertion can re-read a tree
+ * the way Sway would report it. A workspace the fixture tree does not have yet
+ * is created under the first output, matching a Sway workspace command.
+ */
+function moveContainerToWorkspace(tree: unknown, containerId: number, workspaceName: string): unknown {
+  if (tree === null || typeof tree !== "object") return tree;
+  const container = detachContainer(tree, containerId);
+  if (container === undefined) return tree;
+  let workspace = findRecord(
+    tree,
+    (record) => record.type === "workspace" && record.name === workspaceName,
+  );
+  if (workspace === undefined) {
+    const output = findRecord(tree, (record) => record.type === "output") ?? tree as SwayRecord;
+    if (!Array.isArray(output.nodes)) output.nodes = [];
+    workspace = {
+      id: highestNodeId(tree) + 1,
+      type: "workspace",
+      name: workspaceName,
+      nodes: [],
+      floating_nodes: [],
+    };
+    (output.nodes as unknown[]).push(workspace);
+  }
+  const key = (container as SwayRecord).type === "floating_con" ? "floating_nodes" : "nodes";
+  if (!Array.isArray(workspace[key])) workspace[key] = [];
+  (workspace[key] as unknown[]).push(container);
+  return tree;
 }
 
 export async function serveFakeSwayIpc(input: {

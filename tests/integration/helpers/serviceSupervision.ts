@@ -84,23 +84,83 @@ function executable(directory: string, name: string, body: string): string {
 
 /** Spawns a TERM-resistant descendant under `env -i`, so only its process group identifies it. */
 function resistantDescendant(pidFile: string): string {
-  return `env -i PIDFILE=${JSON.stringify(pidFile)} /bin/sh -c 'trap "" TERM; echo $$ > "$PIDFILE"; while :; do sleep 1; done' &`;
+  return `const descendant = Bun.spawn(["/usr/bin/env", "-i", "PIDFILE=" + ${JSON.stringify(pidFile)}, "/bin/sh", "-c", ${JSON.stringify('trap "" TERM; echo $$ > "$PIDFILE"; while :; do sleep 1; done')}]);\ndescendant.unref();`;
+}
+
+/**
+ * A fixture application also maps a window, because launching now succeeds only
+ * when the launched process's own window reaches its Screen workspace. The
+ * production adapter drives this fake sway through env binaries, so the
+ * scripted fixture's wrapper never seeds a workspace: derive it from the last
+ * `workspace` command the Screen focused.
+ */
+function supervisionApplication(directory: string, name: string, controlDir: string, body: string): string {
+  return executable(directory, name, `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(controlDir, "tree.json"))};
+const commandsPath = ${JSON.stringify(path.join(controlDir, "commands.log"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+const findWorkspace = (node) => {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findWorkspace(child);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (node === null || typeof node !== "object") return undefined;
+  if (node.type === "workspace") return node;
+  for (const key of ["nodes", "floating_nodes"]) {
+    const found = findWorkspace(node[key]);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+};
+const focusedWorkspace = (() => {
+  try {
+    return readFileSync(commandsPath, "utf8").split("\\n")
+      .filter((line) => line.startsWith("workspace "))
+      .at(-1)?.slice("workspace ".length);
+  } catch {
+    return undefined;
+  }
+})();
+let workspace = findWorkspace(tree);
+if (workspace === undefined && focusedWorkspace !== undefined) {
+  workspace = { id: 800, type: "workspace", name: focusedWorkspace, nodes: [], floating_nodes: [] };
+  tree.nodes.push(workspace);
+}
+if (workspace !== undefined) {
+  workspace.nodes.push({
+    id: 900,
+    type: "con",
+    name: "Supervision Fixture",
+    app_id: "supervision-fixture",
+    pid: process.pid,
+    focused: true,
+    shell: "xdg_shell",
+    rect: { x: 0, y: 0, width: 640, height: 480 },
+    nodes: [],
+    floating_nodes: [],
+  });
+  writeFileSync(treePath, JSON.stringify(tree));
+}
+${body}
+`);
 }
 
 /** An application that leaves a TERM-resistant descendant and stays alive itself. */
-export function writeResistantApplication(directory: string, pidFile: string): string {
-  return executable(directory, "resistant-app", `#!/bin/sh
-${resistantDescendant(pidFile)}
-while :; do sleep 1; done
-`);
+export function writeResistantApplication(directory: string, controlDir: string, pidFile: string): string {
+  return supervisionApplication(directory, "resistant-app", controlDir, `${resistantDescendant(pidFile)}
+await new Promise(() => {});`);
 }
 
 /** An application whose leader exits at once, leaving a TERM-resistant descendant. */
-export function writeOrphanApplication(directory: string, pidFile: string): string {
-  return executable(directory, "orphan-app", `#!/bin/sh
-${resistantDescendant(pidFile)}
-exit 0
-`);
+export function writeOrphanApplication(directory: string, controlDir: string, pidFile: string): string {
+  return supervisionApplication(directory, "orphan-app", controlDir, `${resistantDescendant(pidFile)}
+// Stay alive while the launch attributes the window to this process leader.
+await Bun.sleep(250);
+process.exit(0);`);
 }
 
 export interface UnrelatedSentinel {
