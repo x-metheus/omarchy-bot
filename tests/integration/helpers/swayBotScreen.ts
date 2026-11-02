@@ -22,6 +22,7 @@ export function scriptedSwayWindows(surfaceId: string): ComputerWindowListItem[]
     appId: "firefox",
     pid: 1001,
     focused: true,
+    visible: true,
     bounds: { x: 0, y: 0, width: 800, height: 600 },
     workspace: `bot-${surfaceId}`,
     clientType: "wayland",
@@ -101,7 +102,7 @@ export function createFakeWayvncBin(directory: string, paths: {
   envPath: string;
   exitPath: string;
 }): string {
-  return executable(directory, "wayvnc", `#!/usr/bin/env bun
+  return executable(directory, "wayvnc", `#!${process.execPath}
 import { appendFileSync, chmodSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 const startsPath = ${JSON.stringify(paths.startsPath)};
@@ -169,7 +170,7 @@ export async function createScriptedSwayFixture(options?: {
   mkdirSync(controlDir);
   const applicationCwd = path.join(root, "workspace");
   mkdirSync(applicationCwd);
-  const application = executable(bin, "fixture-application", `#!/usr/bin/env bun
+  const application = executable(bin, "fixture-application", `#!${process.execPath}
 import { readFileSync, writeFileSync } from "node:fs";
 const tree = JSON.parse(readFileSync(${JSON.stringify(path.join(controlDir, "tree.json"))}, "utf8"));
 const workspace = tree.nodes[0]?.nodes?.[0] ?? tree.nodes[0];
@@ -213,7 +214,7 @@ await Promise.withResolvers<void>().promise;
   }).png().toFile(png);
 
   const helperPath = path.resolve(import.meta.dir, "fakeSwayIpc.ts");
-  const sway = executable(bin, "sway", `#!/usr/bin/env bun
+  const sway = executable(bin, "sway", `#!${process.execPath}
 import path from "node:path";
 import { writeFileSync } from "node:fs";
 import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
@@ -238,7 +239,7 @@ await serveFakeSwayIpc({
   ].join("\n"));
   const assets = createFixtureAssetSupply({
     directory: path.join(root, "assets"),
-    browserScript: (logPath) => `#!/usr/bin/env bun
+    browserScript: (logPath) => `#!${process.execPath}
 import { appendFileSync } from "node:fs";
 appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");
 await Promise.withResolvers<void>().promise;
@@ -252,7 +253,7 @@ await Promise.withResolvers<void>().promise;
     swayBin: sway,
     wlrRandrBin: executable(bin, "wlr-randr", "#!/bin/sh\nexit 0\n"),
     grimBin: executable(bin, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
-    inputHelperBin: executable(bin, "input", `#!/usr/bin/env bun
+    inputHelperBin: executable(bin, "input", `#!${process.execPath}
 import { appendFileSync } from "node:fs";
 const logPath = ${JSON.stringify(path.join(root, "input.log"))};
 process.stdout.write("READY\\n");
@@ -310,7 +311,7 @@ for await (const chunk of Bun.stdin.stream()) {
     executable(bundleBin, name, `#!/bin/sh\nexec ${JSON.stringify(source)} "$@"\n`);
   }
   executable(bundleBin, "Xwayland", "#!/bin/sh\nexit 0\n");
-  executable(bundleBin, "dbus-daemon", `#!/usr/bin/env bun
+  executable(bundleBin, "dbus-daemon", `#!${process.execPath}
 const address = process.argv.find((arg) => arg.startsWith("--address=unix:path="));
 if (address === undefined) throw new Error("missing private session bus address");
 Bun.listen({ unix: address.slice("--address=unix:path=".length), socket: { data() {} } });

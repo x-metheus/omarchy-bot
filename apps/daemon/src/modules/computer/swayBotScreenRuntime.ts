@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -55,12 +56,16 @@ import {
   ownedProcessIdentity,
   ownedProcessRunning,
   ownedSessionAt,
+  processDescendsFrom,
+  processIdentity,
+  processIdentityRunning,
   readOwnedIdentity,
   terminateOwnedProcess,
   terminateOwnedSession,
   watchOwnedProcess,
   type OwnedProcessIdentity,
   type OwnedSession,
+  type ProcessIdentity,
 } from "../../supervision/ownedProcesses.ts";
 import { BOT_DESKTOP_APP_ID, listApplicationToplevels, SwayIpcClient } from "./swayIpc.ts";
 import { resolveSwayRuntimeBinaries } from "./swayRuntimeSupply.ts";
@@ -68,7 +73,7 @@ import {
   PortableBotComputerAssets,
   type BotComputerAssetSupply,
 } from "./botComputerAssets.ts";
-import { desktopApplicationCommand, nativeBrowserCommand } from "./hostBrowser.ts";
+import { desktopApplicationCommand, desktopExecutable, isBrowserExecutable, nativeBrowserCommand } from "./hostBrowser.ts";
 
 export interface SwayAdapterOptions extends BotComputerOptions {
   /** Test hook. The scripted fixture blocks here so an in-flight launch stays pending. */
@@ -162,6 +167,21 @@ function surfaceWorkspace(surfaceId: SurfaceId): string {
   return `bot-${surfaceId}`;
 }
 
+/** A launch command that is the shared browser, whatever opened it (URL, binary, desktop entry). */
+function browserLaunch(argv: readonly string[]): boolean {
+  const executable = desktopExecutable(argv);
+  return executable !== undefined && isBrowserExecutable(executable);
+}
+
+/** The executable a live tracked launch actually became: a launcher wrapper execs the browser. */
+function processExecutableIsBrowser(pid: number): boolean {
+  try {
+    return isBrowserExecutable(readlinkSync(`/proc/${pid}/exe`));
+  } catch {
+    return false;
+  }
+}
+
 function workspaceCriteria(workspaceName: string): string {
   return `[workspace="^${workspaceName.replaceAll(".", "[.]")}$"]`;
 }
@@ -199,6 +219,10 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #inputLeaseRelease: (() => void) | undefined;
   #resolvedWayvnc: string | undefined;
   #assets: BotComputerAssetSupply;
+  /** Tracked application leaders, which launches are shared browsers, and their spawn identity. */
+  #applicationOwners = new Map<number, { shared: boolean; identity: ProcessIdentity | undefined }>();
+  /** Windows already routed, and the Screen that routed them. */
+  #routedWindows = new Map<string, SurfaceId>();
 
   constructor(private readonly options: SwayAdapterOptions) {
     this.#units = new ApplicationUnits(options.hostRuntimeDir);
@@ -364,7 +388,10 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       await terminateOwnedChild(desktopChild).catch(() => {});
       await this.#units.stop(provision.surfaceId, computer.generation).catch(() => {});
       rmSync(runtimeSurfaceDir, { recursive: true, force: true });
-      if (computer.surfaceIds.size === 0) await computer.stop().catch(() => {});
+      if (computer.surfaceIds.size === 0) {
+        await computer.stop().catch(() => {});
+        this.#forgetComputerTracking();
+      }
       throw error;
     }
   }
@@ -664,9 +691,23 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
       if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
       return this.#withInputLease(session, async () => {
-        const result = await this.#launchApplication(session, request, signal);
-        await hideBotDesktop(swayIpc, session.workspaceName);
-        return result;
+        let launched = false;
+        try {
+          const result = await this.#launchApplication(session, request, signal);
+          launched = true;
+          return result;
+        } finally {
+          // The full-screen floating Bot Desktop stays visible until the
+          // launched window paints over it, including when the launch fails.
+          try {
+            await hideBotDesktop(swayIpc, session.workspaceName);
+          } catch (error) {
+            // A failed launch keeps its own error; only a successful launch
+            // reports that the Desktop could not be hidden.
+            if (launched) throw error;
+            console.error("Bot Desktop could not be hidden after a failed launch", error);
+          }
+        }
       });
     };
     const cleanupSurface = async (): Promise<void> => {
@@ -935,8 +976,11 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       throw new Error("Shared Workspace is unavailable for application launch");
     }
     const swayIpc = new SwayIpcClient(session.computer.sockets.swaySock);
-    const before = new Set(
-      listApplicationToplevels(await swayIpc.getTree()).map((window) => window.id),
+    // The tree is shared by every Screen, so this snapshot is tree-wide: it names
+    // the windows that already exist on every Surface, not just this one.
+    const before = new Map(
+      listApplicationToplevels(await swayIpc.getTree())
+        .map((window) => [window.id, window] as const),
     );
     // Fonts are only needed by graphical children, so fake-runtime tests stay offline.
     await session.computer.ensureFonts();
@@ -986,31 +1030,215 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     // shortcut: such an entry and its idle anchor live until the Computer stops,
     // upgrade to a session watcher if orphaned applications become common.
     session.computer.applicationProcesses.add(application);
+    // The identity captured now proves later that a reported pid still is this
+    // launch rather than a reused pid (see `processDescendsFrom`).
+    const applicationIdentity = processIdentity(application.process.pid);
+    this.#applicationOwners.set(application.process.pid, {
+      // A URL launch is the shared browser by construction; an app or desktop
+      // entry that resolves to a browser executable uses the same shared profile.
+      shared: request.url !== undefined || browserLaunch(argv),
+      identity: applicationIdentity,
+    });
     void application.process.exited.then(() => {
-      if (settleOwnedChild(application)) session.computer.applicationProcesses.delete(application);
+      if (settleOwnedChild(application)) {
+        session.computer.applicationProcesses.delete(application);
+        this.#applicationOwners.delete(application.process.pid);
+      }
     });
     // A cold portable Chromium can take longer than 5s to map its window, and the
     // window is routed only once it exists.
-    const deadline = Date.now() + (request.app !== undefined ? 5_000 : 30_000);
+    const timeoutMs = request.app !== undefined ? 5_000 : 30_000;
+    const deadline = Date.now() + timeoutMs;
+    const target = request.app !== undefined ? `application ${request.app}` : `URL ${request.url}`;
+    // Sway announces a container before it is mapped and routed, so a claimed
+    // window that is absent, still elsewhere, or not yet `visible` is a transient
+    // state: retry it within the same launch deadline instead of failing.
+    const claimed = new Map<string, ComputerWindowListItem>();
     while (Date.now() < deadline && session.computer.running()) {
       if (signal?.aborted) {
         await terminateOwnedChild(application);
         signal.throwIfAborted();
       }
-      const windows = listApplicationToplevels(await swayIpc.getTree());
-      const created = windows.filter((window) => !before.has(window.id));
-      if (created.length > 0) {
-        for (const window of created) {
-          await swayIpc.runCommand(
-            `[con_id=${window.id}] move container to workspace ${session.workspaceName}`,
-          );
-        }
+      const tree = listApplicationToplevels(await swayIpc.getTree());
+      const routedNow: ComputerWindowListItem[] = [];
+      for (const window of this.#claimLaunchedWindows(
+        session,
+        before,
+        tree,
+        application.process.pid,
+        applicationIdentity,
+      )) {
+        if (claimed.has(window.id)) continue;
+        claimed.set(window.id, window);
+        await swayIpc.runCommand(
+          `[con_id=${window.id}] move container to workspace ${session.workspaceName}`,
+        );
+        routedNow.push(window);
+      }
+      if (routedNow.length > 0) {
         await this.#focusWorkspace(session);
-        return { text };
+        // A just-routed tiled window is not arranged until it is focused: on
+        // Sway 1.10 the tabbed container stays 0x0 and the window unmapped, so
+        // focus only the claimed windows before checking that they are visible.
+        for (const window of routedNow) {
+          await swayIpc.runCommand(`[con_id=${window.id}] focus`);
+        }
+      }
+      if (claimed.size > 0) {
+        // Re-read the claimed containers themselves: a window on the right
+        // workspace that Sway still hides (scratchpad) is not a visible launch.
+        const routed = routedNow.length > 0
+          ? listApplicationToplevels(await swayIpc.getTree())
+          : tree;
+        const settled = [...claimed.keys()].every((id) => {
+          const current = routed.find((candidate) => candidate.id === id);
+          return current?.workspace === session.workspaceName && current.visible === true;
+        });
+        if (settled) return { text };
       }
       await Bun.sleep(20);
     }
-    return { text };
+    if (claimed.size > 0) {
+      // A claimed window that never settles is a failure, but the reason differs:
+      // it can disappear, stay on another workspace, or stay mapped invisible.
+      let current: ComputerWindowListItem[] = [];
+      try {
+        current = listApplicationToplevels(await swayIpc.getTree());
+      } catch {
+        // The launch already failed; a divergent final read must not replace its reason.
+      }
+      const absent: string[] = [];
+      const misplaced: string[] = [];
+      const invisible: string[] = [];
+      for (const id of claimed.keys()) {
+        const window = current.find((candidate) => candidate.id === id);
+        if (window === undefined) absent.push(id);
+        else if (window.workspace !== session.workspaceName) misplaced.push(id);
+        else if (window.visible !== true) invisible.push(id);
+      }
+      const reasons = [
+        ...(absent.length === 0
+          ? []
+          : [`window ${absent.join(", ")} never appeared on workspace ${session.workspaceName}`]),
+        ...(misplaced.length === 0
+          ? []
+          : [`window ${misplaced.join(", ")} is not on workspace ${session.workspaceName}`]),
+        ...(invisible.length === 0
+          ? []
+          : [`window ${invisible.join(", ")} is not visible on workspace ${session.workspaceName}`]),
+      ];
+      if (reasons.length > 0) {
+        throw new Error(`Launched ${target} but ${reasons.join("; ")} after routing`);
+      }
+    }
+    let foreign: Array<{ window: ComputerWindowListItem; surfaceId: SurfaceId }> = [];
+    try {
+      foreign = this.#foreignBrowserWindows(
+        session,
+        listApplicationToplevels(await swayIpc.getTree()),
+      );
+    } catch {
+      // The launch already failed; a second IPC error must not replace its reason.
+    }
+    throw new Error(
+      `Launched ${target} but no window owned by the launched process appeared on workspace `
+      + `${session.workspaceName} within ${timeoutMs}ms`
+      + (foreign.length === 0
+        ? ""
+        : `; the shared browser window ${
+          foreign.map(({ window, surfaceId }) => `${window.id} on Screen ${surfaceId}`).join(", ")
+        } was left in place`),
+    );
+  }
+
+  /**
+   * The windows this launch may route, taken from the current tree. `before` is
+   * the tree-wide snapshot taken just before the child spawned, so a window in it
+   * already belongs to the Screen showing it and is never claimed here. A
+   * descendant of the spawned child is unambiguous. The shared browser forwards
+   * `open_url` and browser `open_app` launches to an already running instance
+   * (the pack uses one `--user-data-dir`; a native browser reuses its own
+   * process), so the forwarded window belongs to the tracked browser process,
+   * not to the short-lived forwarding child. Exactly one new window of a live
+   * browser leader is that forwarding's window; several candidates cannot be
+   * attributed, so this launch claims none rather than move another Screen's
+   * window.
+   */
+  #claimLaunchedWindows(
+    session: SwaySession,
+    before: ReadonlyMap<string, ComputerWindowListItem>,
+    tree: readonly ComputerWindowListItem[],
+    applicationPid: number,
+    applicationIdentity: ProcessIdentity | undefined,
+  ): ComputerWindowListItem[] {
+    const surfaceId = session.provision.surfaceId;
+    const created = tree.filter((window) => !before.has(window.id));
+    const direct = created.filter((window) =>
+      window.pid !== undefined
+      && applicationIdentity !== undefined
+      && processDescendsFrom(window.pid, applicationPid, applicationIdentity)
+    );
+    const claimed = direct.filter((window) => this.#claimWindow(surfaceId, window));
+    if (claimed.length > 0) return claimed;
+    const forwarded = created.filter((window) =>
+      window.pid !== undefined
+      && !this.#routedWindows.has(window.id)
+      && this.#sharedBrowserOwns(window.pid)
+    );
+    const [shared] = forwarded;
+    if (forwarded.length !== 1 || shared === undefined) return [];
+    return this.#claimWindow(surfaceId, shared) ? [shared] : [];
+  }
+
+  /**
+   * A live launch that resolved to the shared browser, or one of its descendants.
+   * A URL launch is known by construction; an app or desktop entry is known when
+   * its command is a browser executable, or when the tracked process itself exec'd
+   * one (a launcher script or wrapper keeps the launch pid when it forwards).
+   */
+  #sharedBrowserOwns(pid: number): boolean {
+    for (const [leaderPid, owner] of this.#applicationOwners) {
+      if (!processIdentityRunning(owner.identity)) continue;
+      if (!owner.shared && !processExecutableIsBrowser(leaderPid)) continue;
+      if (processDescendsFrom(pid, leaderPid, owner.identity)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Already-running browser windows on other Screens. A forwarded `open_url` that
+   * opened no new window finds the browser there instead of here; naming it shows
+   * the launch left the other Screen's window untouched.
+   */
+  #foreignBrowserWindows(
+    session: SwaySession,
+    tree: readonly ComputerWindowListItem[],
+  ): Array<{ window: ComputerWindowListItem; surfaceId: SurfaceId }> {
+    const foreign: Array<{ window: ComputerWindowListItem; surfaceId: SurfaceId }> = [];
+    for (const window of tree) {
+      if (window.pid === undefined || !this.#sharedBrowserOwns(window.pid)) continue;
+      const surfaceId = this.#workspaceSurface(window.workspace);
+      if (surfaceId === undefined || surfaceId === session.provision.surfaceId) continue;
+      foreign.push({ window, surfaceId });
+    }
+    return foreign;
+  }
+
+  /** The Screen a live `bot-<surfaceId>` workspace belongs to. */
+  #workspaceSurface(workspace: string | undefined): SurfaceId | undefined {
+    if (workspace === undefined) return undefined;
+    for (const surfaceId of this.#runtimes.keys()) {
+      if (surfaceWorkspace(surfaceId) === workspace) return surfaceId;
+    }
+    return undefined;
+  }
+
+  /** A window already routed to another Screen stays there. */
+  #claimWindow(surfaceId: SurfaceId, window: ComputerWindowListItem): boolean {
+    const owner = this.#routedWindows.get(window.id);
+    if (owner !== undefined && owner !== surfaceId) return false;
+    this.#routedWindows.set(window.id, surfaceId);
+    return true;
   }
 
   async #withInputLease<T>(
@@ -1076,7 +1304,16 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     }
     rmSync(session.runtimeSurfaceDir, { recursive: true, force: true });
     session.computer.surfaceIds.delete(session.provision.surfaceId);
-    if (session.computer.surfaceIds.size === 0) await session.computer.stop();
+    if (session.computer.surfaceIds.size === 0) {
+      await session.computer.stop();
+      this.#forgetComputerTracking();
+    }
+  }
+
+  /** A stopped shared Computer starts a fresh Sway session with fresh window ids. */
+  #forgetComputerTracking(): void {
+    this.#applicationOwners.clear();
+    this.#routedWindows.clear();
   }
 
   async #discardSurfaceFromDisk(surfaceId: SurfaceId): Promise<void> {

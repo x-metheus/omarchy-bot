@@ -84,6 +84,7 @@ const EXPECTED_WINDOWS = [
     appId: "firefox",
     pid: 1001,
     focused: false,
+    visible: true,
     bounds: { x: 0, y: 0, width: 800, height: 600 },
     workspace: `bot-${SURFACE_ID}`,
     clientType: "wayland" as const,
@@ -93,6 +94,7 @@ const EXPECTED_WINDOWS = [
     title: "Dialog",
     pid: 2002,
     focused: true,
+    visible: true,
     bounds: { x: 100, y: 80, width: 400, height: 300 },
     workspace: `bot-${SURFACE_ID}`,
     clientType: "x11" as const,
@@ -247,7 +249,7 @@ async function startControlRuntime(options?: {
   process.env.PATH = bin;
 
   const helperPath = path.resolve(import.meta.dir, "helpers/fakeSwayIpc.ts");
-  const sway = executable(bin, "sway", `#!/usr/bin/env bun
+  const sway = executable(bin, "sway", `#!${process.execPath}
 import path from "node:path";
 import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
 const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "";
@@ -259,7 +261,7 @@ await serveFakeSwayIpc({
   controlDir: ${JSON.stringify(controlDir)},
 });
 `);
-  const input = executable(bin, "input", `#!/usr/bin/env bun
+  const input = executable(bin, "input", `#!${process.execPath}
 import { appendFileSync, existsSync } from "node:fs";
 const logPath = ${JSON.stringify(inputLog)};
 const failPastePath = ${JSON.stringify(failPastePath)};
@@ -283,7 +285,7 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `);
-  const application = executable(bin, "fixture-app", `#!/usr/bin/env bun
+  const application = executable(bin, "fixture-app", `#!${process.execPath}
 import { readFileSync, writeFileSync } from "node:fs";
 const treePath = ${JSON.stringify(path.join(controlDir, "tree.json"))};
 const tree = JSON.parse(readFileSync(treePath, "utf8"));
@@ -320,7 +322,7 @@ await Promise.withResolvers<void>().promise;
   const nativeArgv = path.join(root, "native-argv");
   const nativeBrowser = options?.nativeBrowserName === undefined
     ? undefined
-    : executable(bin, options.nativeBrowserName, `#!/usr/bin/env bun
+    : executable(bin, options.nativeBrowserName, `#!${process.execPath}
 import { readFileSync, writeFileSync } from "node:fs";
 const treePath = ${JSON.stringify(path.join(controlDir, "tree.json"))};
 const tree = JSON.parse(readFileSync(treePath, "utf8"));
@@ -375,7 +377,7 @@ await Promise.withResolvers<void>().promise;
   }
   const assets = options?.assets ?? createFixtureAssetSupply({
     directory: path.join(root, "assets"),
-    browserScript: (logPath) => `#!/usr/bin/env bun
+    browserScript: (logPath) => `#!${process.execPath}
 import { readFileSync, writeFileSync } from "node:fs";
 const treePath = ${JSON.stringify(path.join(controlDir, "tree.json"))};
 const tree = JSON.parse(readFileSync(treePath, "utf8"));
@@ -727,6 +729,7 @@ test("shared runtime launches applications into the requesting Screen workspace"
       `workspace bot-${SURFACE_ID}`,
       "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",
       `workspace bot-${SURFACE_ID}`,
+      "[con_id=30] focus",
       `[app_id="^dev[.]omarchy[.]BotDesktop$" workspace="^bot-${SURFACE_ID}$"] move scratchpad`,
     ]);
     expect(await Bun.file(fixture.applicationMarker).text()).toBe([
@@ -738,6 +741,680 @@ test("shared runtime launches applications into the requesting Screen workspace"
     expect(fixture.runtime.sessionEnv.SWAYSOCK).toContain(path.join(root!, "runtime", "computer"));
     expect(fixture.expandedViewCalls).toBe(0);
   } finally {
+    await fixture.runtime.stop();
+  }
+});
+
+test("launch routes only windows owned by the launched process", async () => {
+  const foreign = Bun.spawn(["sleep", "3600"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  const tree = {
+    id: 1,
+    type: "root",
+    name: "root",
+    nodes: [
+      {
+        id: 2,
+        type: "output",
+        name: "HEADLESS-1",
+        nodes: [{
+          id: 3,
+          type: "workspace",
+          name: `bot-${SURFACE_ID}`,
+          nodes: [],
+          floating_nodes: [],
+        }],
+      },
+      {
+        id: 4,
+        type: "output",
+        name: "HEADLESS-2",
+        nodes: [{
+          id: 5,
+          type: "workspace",
+          name: "bot-other-screen",
+          nodes: [],
+          floating_nodes: [],
+        }],
+      },
+    ],
+    floating_nodes: [],
+  };
+  const fixture = await startControlRuntime({ tree });
+  const application = executable(path.join(root!, "bin"), "concurrent-app", `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+// A foreign window appears during this launch, owned by no process of ours.
+tree.nodes[1].nodes[0].nodes.push({
+  id: 77,
+  type: "con",
+  name: "Foreign",
+  app_id: "foreign-app",
+  pid: ${foreign.pid},
+  focused: false,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 320, height: 200 },
+  nodes: [],
+  floating_nodes: [],
+});
+tree.nodes[0].nodes[0].nodes.push({
+  id: 76,
+  type: "con",
+  name: "Launched",
+  app_id: "fixture-app",
+  pid: process.pid,
+  focused: true,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+await Promise.withResolvers<void>().promise;
+`);
+  try {
+    await expect(fixture.runtime.launch({ app: application }))
+      .resolves.toEqual({ text: `launched ${application}` });
+    const commands = readFakeSwayCommands(fixture.controlDir);
+    expect(commands).toContain(`[con_id=76] move container to workspace bot-${SURFACE_ID}`);
+    expect(commands).not.toContain(`[con_id=77] move container to workspace bot-${SURFACE_ID}`);
+    expect((await fixture.runtime.listWindows()).map((window) => window.id)).toEqual(["76"]);
+  } finally {
+    await fixture.runtime.stop();
+    foreign.kill("SIGKILL");
+    await foreign.exited;
+  }
+}, 20_000);
+
+test("a shared browser launch claims only its forwarded browser window across Screens", async () => {
+  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const second = await fixture.adapter.start({
+    surfaceId: SURFACE_B,
+    geometryGeneration: 7,
+    logicalWidth: 2,
+    logicalHeight: 1,
+    scale: 1,
+    refreshRate: 15,
+  });
+  writeFakeSwayTree(fixture.controlDir, {
+    id: 1,
+    type: "root",
+    name: "root",
+    nodes: [
+      {
+        id: 2,
+        type: "output",
+        name: "HEADLESS-1",
+        nodes: [{
+          id: 3,
+          type: "workspace",
+          name: `bot-${SURFACE_ID}`,
+          nodes: [],
+          floating_nodes: [],
+        }],
+      },
+      {
+        id: 4,
+        type: "output",
+        name: "HEADLESS-2",
+        nodes: [{
+          id: 5,
+          type: "workspace",
+          name: `bot-${SURFACE_B}`,
+          nodes: [],
+          floating_nodes: [],
+        }],
+      },
+    ],
+    floating_nodes: [],
+  });
+  const appPidFile = path.join(root!, "app.pid");
+  const sharedPidFile = path.join(root!, "shared-browser.pid");
+  const forwardedIdsFile = path.join(root!, "forwarded-windows.json");
+  const application = executable(path.join(root!, "bin"), "non-browser-app", `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+const workspace = tree.nodes[0].nodes[0];
+workspace.nodes.push({
+  id: 55,
+  type: "con",
+  name: "App Window",
+  app_id: "non-browser-app",
+  pid: process.pid,
+  focused: true,
+  visible: true,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+writeFileSync(${JSON.stringify(appPidFile)}, String(process.pid));
+await Promise.withResolvers<void>().promise;
+`);
+  // A forwarding browser child: it maps the other Screen's app window (the app
+  // pid is ours, but the window appears on the other Screen) before the browser
+  // window itself, so a first-match claim steals it.
+  const forwardBrowser = executable(path.join(root!, "bin"), "forward-browser", `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+const appPid = Number(readFileSync(${JSON.stringify(appPidFile)}, "utf8"));
+const sharedPid = Number(readFileSync(${JSON.stringify(sharedPidFile)}, "utf8"));
+const ids = [];
+const collect = (node) => {
+  if (Array.isArray(node)) return node.forEach(collect);
+  if (node === null || typeof node !== "object") return;
+  if (typeof node.id === "number") ids.push(node.id);
+  collect(node.nodes);
+  collect(node.floating_nodes);
+};
+collect(tree);
+const otherWorkspace = tree.nodes[1].nodes[0];
+const appWindow = Math.max(0, ...ids) + 1;
+otherWorkspace.nodes.push({
+  id: appWindow,
+  type: "con",
+  name: "Stray App Window",
+  app_id: "non-browser-app",
+  pid: appPid,
+  focused: false,
+  visible: true,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+const browserWindow = appWindow + 1;
+otherWorkspace.nodes.push({
+  id: browserWindow,
+  type: "con",
+  name: "Forwarded Browser Window",
+  app_id: "chromium",
+  pid: sharedPid,
+  focused: true,
+  visible: true,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+writeFileSync(${JSON.stringify(forwardedIdsFile)}, JSON.stringify({ appWindow, browserWindow }));
+process.exit(0);
+`);
+  try {
+    await expect(fixture.runtime.launch({ app: application }))
+      .resolves.toEqual({ text: `launched ${application}` });
+    // The first pack launch owns its own window and leaves the shared browser running.
+    const firstUrl = "https://example.com/first";
+    await expect(fixture.runtime.launch({ url: firstUrl })).resolves.toEqual({ text: `opened ${firstUrl}` });
+    const sharedPid = (await fixture.runtime.listWindows())
+      .find((window) => window.appId === "chromium")?.pid;
+    expect(sharedPid).toBeNumber();
+    writeFileSync(sharedPidFile, String(sharedPid));
+
+    fixture.assets.ensureBrowser = async () => ({ browserBin: forwardBrowser });
+    const forwardUrl = "https://example.com/forward";
+    await expect(fixture.runtime.launch({ url: forwardUrl }))
+      .resolves.toEqual({ text: `opened ${forwardUrl}` });
+
+    const { appWindow, browserWindow } = JSON.parse(
+      readFileSync(forwardedIdsFile, "utf8"),
+    ) as { appWindow: number; browserWindow: number };
+    const commands = readFakeSwayCommands(fixture.controlDir);
+    expect(commands).toContain(
+      `[con_id=${browserWindow}] move container to workspace bot-${SURFACE_ID}`,
+    );
+    expect(commands).not.toContain(
+      `[con_id=${appWindow}] move container to workspace bot-${SURFACE_ID}`,
+    );
+    expect(commands).toContain(`[con_id=${browserWindow}] focus`);
+    expect(commands).not.toContain(`[con_id=${appWindow}] focus`);
+    const launchedSurface = (await fixture.runtime.listWindows()).map((window) => window.id);
+    expect(launchedSurface).toContain(String(browserWindow));
+    expect(launchedSurface).not.toContain(String(appWindow));
+    // The other Screen's window stays exactly where it was.
+    expect((await second.listWindows()).map((window) => window.id)).toContain(String(appWindow));
+  } finally {
+    await Promise.allSettled([fixture.runtime.stop(), second.stop()]);
+  }
+}, 20_000);
+
+const TWO_SCREEN_TREE = {
+  id: 1,
+  type: "root",
+  name: "root",
+  nodes: [
+    {
+      id: 2,
+      type: "output",
+      name: "HEADLESS-1",
+      nodes: [{
+        id: 3,
+        type: "workspace",
+        name: `bot-${SURFACE_ID}`,
+        nodes: [],
+        floating_nodes: [],
+      }],
+    },
+    {
+      id: 4,
+      type: "output",
+      name: "HEADLESS-2",
+      nodes: [{
+        id: 5,
+        type: "workspace",
+        name: `bot-${SURFACE_B}`,
+        nodes: [],
+        floating_nodes: [],
+      }],
+    },
+  ],
+  floating_nodes: [],
+};
+
+test("a forwarded open_url that creates no new window leaves the other Screen's browser window in place", async () => {
+  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const second = await fixture.adapter.start({
+    surfaceId: SURFACE_B,
+    geometryGeneration: 7,
+    logicalWidth: 2,
+    logicalHeight: 1,
+    scale: 1,
+    refreshRate: 15,
+  });
+  writeFakeSwayTree(fixture.controlDir, TWO_SCREEN_TREE);
+  // The running browser instance receives the forwarded URL and reuses its own
+  // window: no new toplevel appears for the second Screen.
+  const forwardNothing = executable(
+    path.join(root!, "bin"),
+    "forward-no-window",
+    `#!${process.execPath}\nprocess.exit(0);\n`,
+  );
+  try {
+    const firstUrl = "https://example.com/first";
+    await expect(fixture.runtime.launch({ url: firstUrl }))
+      .resolves.toEqual({ text: `opened ${firstUrl}` });
+    const browserWindow = (await fixture.runtime.listWindows())
+      .find((window) => window.appId === "chromium");
+    expect(browserWindow?.id).toBeString();
+    expect(browserWindow?.pid).toBeNumber();
+
+    fixture.assets.ensureBrowser = async () => ({ browserBin: forwardNothing });
+    const secondUrl = "https://example.com/second";
+    await expect(second.launch({ url: secondUrl })).rejects.toThrow(
+      `; the shared browser window ${browserWindow!.id} on Screen ${SURFACE_ID} was left in place`,
+    );
+
+    // The other Screen's window is still there, still visible, and still routable.
+    const keptWindow = (await fixture.runtime.listWindows())
+      .find((window) => window.id === browserWindow!.id);
+    expect(keptWindow).toMatchObject({
+      visible: true,
+      workspace: `bot-${SURFACE_ID}`,
+      pid: browserWindow!.pid,
+    });
+    await expect(fixture.runtime.focusWindow(keptWindow!)).resolves.toBeUndefined();
+    const commands = readFakeSwayCommands(fixture.controlDir);
+    expect(commands).toContain(`[con_id=${browserWindow!.id}] focus`);
+    expect(commands).not.toContain(
+      `[con_id=${browserWindow!.id}] move container to workspace bot-${SURFACE_B}`,
+    );
+    expect(await second.listWindows()).toEqual([]);
+  } finally {
+    await Promise.allSettled([fixture.runtime.stop(), second.stop()]);
+  }
+}, 40_000);
+
+test("a forwarded open_url moves only the window it created off the other Screen's workspace", async () => {
+  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const second = await fixture.adapter.start({
+    surfaceId: SURFACE_B,
+    geometryGeneration: 7,
+    logicalWidth: 2,
+    logicalHeight: 1,
+    scale: 1,
+    refreshRate: 15,
+  });
+  writeFakeSwayTree(fixture.controlDir, TWO_SCREEN_TREE);
+  const sharedPidFile = path.join(root!, "shared-browser.pid");
+  const forwardedIdFile = path.join(root!, "forwarded-window.json");
+  // The forwarding child only asks the running browser for a new window. Sway
+  // maps it on the Screen that already shows the browser, next to that Screen's
+  // own window, so the claiming launch must pick exactly the new container.
+  const forwardNewWindow = executable(path.join(root!, "bin"), "forward-new-window", `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+const sharedPid = Number(readFileSync(${JSON.stringify(sharedPidFile)}, "utf8"));
+const ids = [];
+const collect = (node) => {
+  if (Array.isArray(node)) return node.forEach(collect);
+  if (node === null || typeof node !== "object") return;
+  if (typeof node.id === "number") ids.push(node.id);
+  collect(node.nodes);
+  collect(node.floating_nodes);
+};
+collect(tree);
+const id = Math.max(0, ...ids) + 1;
+tree.nodes[0].nodes[0].nodes.push({
+  id,
+  type: "con",
+  name: "Forwarded Browser Window",
+  app_id: "chromium",
+  pid: sharedPid,
+  focused: true,
+  visible: true,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+writeFileSync(${JSON.stringify(forwardedIdFile)}, String(id));
+process.exit(0);
+`);
+  try {
+    const firstUrl = "https://example.com/first";
+    await expect(fixture.runtime.launch({ url: firstUrl }))
+      .resolves.toEqual({ text: `opened ${firstUrl}` });
+    const browserWindow = (await fixture.runtime.listWindows())
+      .find((window) => window.appId === "chromium");
+    expect(browserWindow?.pid).toBeNumber();
+    writeFileSync(sharedPidFile, String(browserWindow!.pid));
+
+    fixture.assets.ensureBrowser = async () => ({ browserBin: forwardNewWindow });
+    // The first Screen's own launch already focused the browser window, so only
+    // commands logged by the forwarded launch are attributable to it.
+    const commandsBeforeForward = readFakeSwayCommands(fixture.controlDir);
+    const secondUrl = "https://example.com/second";
+    await expect(second.launch({ url: secondUrl }))
+      .resolves.toEqual({ text: `opened ${secondUrl}` });
+
+    const forwardedId = readFileSync(forwardedIdFile, "utf8").trim();
+    expect(forwardedId).not.toBe(browserWindow!.id);
+    expect((await second.listWindows()).map((window) => window.id)).toEqual([forwardedId]);
+    const commands = readFakeSwayCommands(fixture.controlDir);
+    expect(commands).toContain(
+      `[con_id=${forwardedId}] move container to workspace bot-${SURFACE_B}`,
+    );
+    expect(commands).not.toContain(
+      `[con_id=${browserWindow!.id}] move container to workspace bot-${SURFACE_B}`,
+    );
+    const forwardedCommands = commands.slice(commandsBeforeForward.length);
+    expect(forwardedCommands).toContain(`[con_id=${forwardedId}] focus`);
+    expect(forwardedCommands).not.toContain(`[con_id=${browserWindow!.id}] focus`);
+    expect((await fixture.runtime.listWindows()).map((window) => window.id))
+      .toEqual([browserWindow!.id]);
+  } finally {
+    await Promise.allSettled([fixture.runtime.stop(), second.stop()]);
+  }
+}, 20_000);
+
+test("an open_app that resolves to the shared browser claims its forwarded window across Screens", async () => {
+  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const second = await fixture.adapter.start({
+    surfaceId: SURFACE_B,
+    geometryGeneration: 7,
+    logicalWidth: 2,
+    logicalHeight: 1,
+    scale: 1,
+    refreshRate: 15,
+  });
+  writeFakeSwayTree(fixture.controlDir, TWO_SCREEN_TREE);
+  const browserPidFile = path.join(root!, "shared-open-app-browser.pid");
+  // A browser executable: the first open_app maps its own window and stays live;
+  // the second is forwarded to it and maps one new window owned by that live
+  // browser pid on Screen A's workspace, the way a shared profile behaves.
+  const browser = executable(path.join(root!, "bin"), "brave", `#!${process.execPath}
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
+const pidFile = ${JSON.stringify(browserPidFile)};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+const screenA = tree.nodes[0].nodes[0];
+if (existsSync(pidFile)) {
+  screenA.nodes.push({
+    id: 61,
+    type: "con",
+    name: "Forwarded Browser Window",
+    app_id: "brave",
+    pid: Number(readFileSync(pidFile, "utf8")),
+    focused: true,
+    visible: true,
+    shell: "xdg_shell",
+    rect: { x: 0, y: 0, width: 640, height: 480 },
+    nodes: [],
+    floating_nodes: [],
+  });
+  writeFileSync(treePath, JSON.stringify(tree));
+  process.exit(0);
+}
+screenA.nodes.push({
+  id: 60,
+  type: "con",
+  name: "Shared Browser",
+  app_id: "brave",
+  pid: process.pid,
+  focused: true,
+  visible: true,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+writeFileSync(pidFile, String(process.pid));
+await Promise.withResolvers<void>().promise;
+`);
+  const applications = path.join(root!, "profiles", "computer", "data", "applications");
+  mkdirSync(applications, { recursive: true });
+  writeFileSync(
+    path.join(applications, "shared-browser.desktop"),
+    ["[Desktop Entry]", "Type=Application", "Name=Shared Browser", `Exec=${browser}`, ""].join("\n"),
+  );
+  try {
+    await expect(fixture.runtime.launch({ app: "shared-browser.desktop" }))
+      .resolves.toEqual({ text: "launched shared-browser.desktop" });
+    const browserPid = Number(readFileSync(browserPidFile, "utf8"));
+    expect(browserPid).toBeNumber();
+    const commandsBeforeForward = readFakeSwayCommands(fixture.controlDir);
+    await expect(second.launch({ app: "shared-browser.desktop" }))
+      .resolves.toEqual({ text: "launched shared-browser.desktop" });
+
+    const commands = readFakeSwayCommands(fixture.controlDir);
+    expect(commands).toContain(`[con_id=61] move container to workspace bot-${SURFACE_B}`);
+    expect(commands).not.toContain(`[con_id=60] move container to workspace bot-${SURFACE_B}`);
+    const forwardedCommands = commands.slice(commandsBeforeForward.length);
+    expect(forwardedCommands).toContain("[con_id=61] focus");
+    expect(forwardedCommands).not.toContain("[con_id=60] focus");
+    // The live browser keeps its own window; the forwarded window moved to B.
+    expect((await fixture.runtime.listWindows()).map((window) => window.id)).toEqual(["60"]);
+    const forwarded = await second.listWindows();
+    expect(forwarded.map((window) => window.id)).toEqual(["61"]);
+    expect(forwarded[0]?.pid).toBe(browserPid);
+  } finally {
+    await Promise.allSettled([fixture.runtime.stop(), second.stop()]);
+  }
+}, 20_000);
+
+test("a launch waits for a window Sway maps visibly after routing", async () => {
+  const fixture = await startControlRuntime();
+  const application = executable(
+    path.join(root!, "bin"),
+    "late-visible-app",
+    `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+const workspace = tree.nodes.find((node) => node.type === "output").nodes[0];
+workspace.nodes.push({
+  id: 91,
+  type: "con",
+  name: "Late App",
+  app_id: "late-visible-app",
+  pid: process.pid,
+  focused: true,
+  visible: false,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+// Like Sway announcing a container before it maps it: the first tree reads see
+// it on the right workspace but inert, and a later read shows it visible.
+setTimeout(() => {
+  const later = JSON.parse(readFileSync(treePath, "utf8"));
+  const collect = (node) => {
+    if (Array.isArray(node)) return node.forEach(collect);
+    if (node === null || typeof node !== "object") return;
+    if (node.id === 91) node.visible = true;
+    collect(node.nodes);
+    collect(node.floating_nodes);
+  };
+  collect(later);
+  writeFileSync(treePath, JSON.stringify(later));
+}, 150);
+await Promise.withResolvers<void>().promise;
+`,
+  );
+  try {
+    await expect(fixture.runtime.launch({ app: application })).resolves.toEqual({
+      text: `launched ${application}`,
+    });
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("a launch whose window is hidden on the Surface workspace reports failure", async () => {
+  const fixture = await startControlRuntime();
+  const application = executable(
+    path.join(root!, "bin"),
+    "hidden-app",
+    `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+const workspace = tree.nodes.find((node) => node.type === "output").nodes[0];
+workspace.nodes.push({
+  id: 90,
+  type: "con",
+  name: "Hidden App",
+  app_id: "hidden-app",
+  pid: process.pid,
+  focused: true,
+  visible: false,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+await Promise.withResolvers<void>().promise;
+`,
+  );
+  try {
+    // On the right workspace but hidden by Sway (scratchpad): not a launch.
+    await expect(fixture.runtime.launch({ app: application })).rejects.toThrow(
+      "is not visible on workspace",
+    );
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("a launch whose window never appears on the Surface workspace reports failure", async () => {
+  const fixture = await startControlRuntime();
+  const application = executable(
+    path.join(root!, "bin"),
+    "no-window-app",
+    "#!/bin/sh\nwhile :; do sleep 60; done\n",
+  );
+  try {
+    await expect(fixture.runtime.launch({ app: application })).rejects.toThrow(
+      `Launched application ${application} but no window owned by the launched process appeared on workspace bot-${SURFACE_ID}`,
+    );
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("Bot Desktop is hidden even when the launch throws", async () => {
+  const fixture = await startControlRuntime();
+  try {
+    fixture.assets.ensureBrowser = () => {
+      throw new Error("browser pack unavailable");
+    };
+    await expect(fixture.runtime.launch({ url: "https://example.com/launch-throws" }))
+      .rejects.toThrow("browser pack unavailable");
+    expect(readFakeSwayCommands(fixture.controlDir)).toContain(
+      `[app_id="^dev[.]omarchy[.]BotDesktop$" workspace="^bot-${SURFACE_ID}$"] move scratchpad`,
+    );
+  } finally {
+    await fixture.runtime.stop();
+  }
+});
+
+test("a failed Bot Desktop hide does not replace the launch error", async () => {
+  const fixture = await startControlRuntime();
+  try {
+    fixture.assets.ensureBrowser = () => {
+      // The hide command fails too, after the launch has already failed.
+      writeFakeSwayIpcMode(fixture.controlDir, "refuse");
+      throw new Error("browser pack unavailable");
+    };
+    await expect(fixture.runtime.launch({ url: "https://example.com/hide-fails" }))
+      .rejects.toThrow("browser pack unavailable");
+  } finally {
+    writeFakeSwayIpcMode(fixture.controlDir, "ok");
+    await fixture.runtime.stop();
+  }
+});
+
+test("host browser mode resolves a bare desktop command from the daemon PATH", async () => {
+  const fixture = await startControlRuntime({ hostBrowser: true, nativeBrowser: false });
+  const hostBin = path.join(root!, "host-bin");
+  mkdirSync(hostBin);
+  const argvPath = path.join(root!, "host-browser-argv");
+  // The browser lives only on the daemon's PATH, never on the Screen's.
+  executable(hostBin, "brave", `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+tree.nodes[0].nodes[0].nodes.push({
+  id: 60,
+  type: "con",
+  name: "Host Browser",
+  app_id: "brave",
+  pid: process.pid,
+  focused: true,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));
+await Promise.withResolvers<void>().promise;
+`);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${hostBin}:${previousPath ?? ""}`;
+  writeFileSync(
+    path.join(root!, "profiles", "computer", "data", "applications", "brave-browser.desktop"),
+    ["[Desktop Entry]", "Type=Application", "Exec=brave %U", ""].join("\n"),
+  );
+  const url = "https://example.com/host-bare-command";
+  try {
+    await expect(fixture.runtime.launch({ url })).resolves.toEqual({ text: `opened ${url}` });
+    expect(JSON.parse(readFileSync(argvPath, "utf8")) as unknown).toEqual(["--new-window", url]);
+    expect(fixture.runtime.sessionEnv.PATH!.split(":")).not.toContain(hostBin);
+    expect(fixture.assets.browserCalls()).toBe(0);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
     await fixture.runtime.stop();
   }
 });
@@ -900,6 +1577,7 @@ test("open_url opens the portable browser on a host with no native browser", asy
         new RegExp(`^\\[con_id=\\d+\\] move container to workspace bot-${SURFACE_ID}$`),
       ),
       `workspace bot-${SURFACE_ID}`,
+      expect.stringMatching(new RegExp(`^\\[con_id=\\d+\\] focus$`)),
       `[app_id="^dev[.]omarchy[.]BotDesktop$" workspace="^bot-${SURFACE_ID}$"] move scratchpad`,
     ]);
     const [launch] = fixture.assets.browserLaunches();
@@ -1018,3 +1696,4 @@ test("repeated open_url calls across Screens share one browser profile and route
     await Promise.allSettled([fixture.runtime.stop(), second.stop()]);
   }
 });
+

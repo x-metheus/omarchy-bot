@@ -449,12 +449,14 @@ export function explicitEnvironment(input: {
   dataHome?: string;
   stateHome: string;
   cacheHome: string;
+  /** The Bot Screen's explicit PATH; the daemon's host PATH is never copied in. */
+  path: string;
 }): Record<string, string> {
   const env: Record<string, string> = {
     HOME: input.homeDir ?? process.env.HOME ?? path.dirname(input.configHome),
     LANG: process.env.LANG ?? "C.UTF-8",
     LOGNAME: process.env.LOGNAME ?? process.env.USER ?? "",
-    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    PATH: input.path,
     USER: process.env.USER ?? "",
     XDG_CACHE_HOME: input.cacheHome,
     XDG_CONFIG_HOME: input.configHome,

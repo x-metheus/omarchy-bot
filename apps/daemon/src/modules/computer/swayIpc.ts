@@ -125,6 +125,9 @@ function toWindow(node: Record<string, unknown>, workspace: string | undefined):
     id: String(node.id),
     title: typeof node.name === "string" ? node.name : "",
     focused: node.focused === true,
+    // A live tree always carries `visible`; a fixture that omits it models a
+    // container Sway shows on its workspace.
+    visible: node.visible !== false,
     clientType: node.shell === "xwayland" || (node.window !== undefined && node.window !== null)
       ? "x11"
       : "wayland",

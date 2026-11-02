@@ -109,7 +109,7 @@ const ENV_WRAPPER = "env";
 type EnvWrapper =
   | { kind: "not-env" }
   | { kind: "unsupported" }
-  | { kind: "command"; command: string };
+  | { kind: "command"; command: string; /** Index of the command in the complete desktop Exec argv. */ index: number };
 
 /**
  * Only `env [--] NAME=value… command` is understood. Env *options* (`-S`,
@@ -119,6 +119,7 @@ type EnvWrapper =
  */
 function envWrapper(argv: readonly string[]): EnvWrapper {
   let tokens = [...argv];
+  let commandIndex = 0;
   let wrapped = false;
   while (path.basename(tokens[0] ?? "") === ENV_WRAPPER) {
     wrapped = true;
@@ -136,13 +137,26 @@ function envWrapper(argv: readonly string[]): EnvWrapper {
       if (assignment[1] === "PATH") return { kind: "unsupported" };
     }
     if (command === undefined) return { kind: "unsupported" };
+    commandIndex += index;
     tokens = tokens.slice(index);
   }
-  return wrapped ? { kind: "command", command: tokens[0]! } : { kind: "not-env" };
+  return wrapped ? { kind: "command", command: tokens[0]!, index: commandIndex } : { kind: "not-env" };
 }
 
 /** Chromium and Firefox families open a routable new window with `--new-window`. */
 const ROUTABLE_BROWSER_BASENAMES = /^(brave|brave-browser|google-chrome|chromium|chrome|firefox)(-[a-z0-9-]+)?$/;
+
+/** The browser families the Service starts and shares across Screens. */
+export function isBrowserExecutable(candidate: string): boolean {
+  return ROUTABLE_BROWSER_BASENAMES.test(path.basename(candidate));
+}
+
+/** The executable a desktop `Exec` runs after any plain `env NAME=value` wrapper. */
+export function desktopExecutable(argv: readonly string[]): string | undefined {
+  const wrapper = envWrapper(argv);
+  if (wrapper.kind === "unsupported") return undefined;
+  return argv[wrapper.kind === "command" ? wrapper.index : 0];
+}
 
 function isExecutableFile(candidate: string): boolean {
   try {
@@ -152,11 +166,15 @@ function isExecutableFile(candidate: string): boolean {
   }
 }
 
-/** The installed native browser command line, without a URL argument. */
+/**
+ * The installed native browser command line, without a URL argument. The
+ * executable is resolved from the daemon's own PATH: the Bot Screen child PATH
+ * is explicit and minimal, so the child receives an absolute argv it can run.
+ */
 export function nativeBrowserCommand(
   environment: Record<string, string>,
 ): { argv: string[]; routable: boolean } | undefined {
-  const searchPath = environment.PATH;
+  const searchPath = process.env.PATH;
   const which = (name: string): string | null =>
     searchPath === undefined ? Bun.which(name) : Bun.which(name, { PATH: searchPath });
   const runnable = (candidate: string): string | undefined => {
@@ -172,10 +190,14 @@ export function nativeBrowserCommand(
       // unsupported: fall through and let the portable browser handle the URL.
       const wrapper = envWrapper(argv);
       if (wrapper.kind === "unsupported") continue;
-      const target = runnable(wrapper.kind === "command" ? wrapper.command : argv[0]!);
+      const executableIndex = wrapper.kind === "command" ? wrapper.index : 0;
+      const target = runnable(argv[executableIndex]!);
       if (target !== undefined && !snapConfined(target)) {
+        // A bare desktop command would not resolve in the Screen's minimal PATH.
+        const absolute = [...argv];
+        absolute[executableIndex] = target;
         return {
-          argv,
+          argv: absolute,
           routable: ROUTABLE_BROWSER_BASENAMES.test(path.basename(target)),
         };
       }

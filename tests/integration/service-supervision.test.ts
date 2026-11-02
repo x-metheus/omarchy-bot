@@ -24,6 +24,11 @@ import { waitScreenReady } from "./helpers/bot-screen-load-observe.ts";
 import { createScriptedSwayFixture, type ScriptedSwayFixture } from "./helpers/swayBotScreen.ts";
 import { createFixtureFontSupply } from "./helpers/fontFixture.ts";
 import {
+  processDescendsFrom,
+  processIdentity,
+  processIdentityRunning,
+} from "../../apps/daemon/src/supervision/ownedProcesses.ts";
+import {
   createFakeManager,
   fileLines,
   processCmdline,
@@ -110,6 +115,26 @@ function trackPid(pid: number): number {
   leakedPids.push(pid);
   return pid;
 }
+
+test("a window reporting a dead leader pid is not attributed to the launch", async () => {
+  const leader = Bun.spawn(["/bin/sh", "-c", "while :; do sleep 1; done"], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const identity = processIdentity(leader.pid);
+  expect(identity).toBeDefined();
+  expect(processDescendsFrom(leader.pid, leader.pid, identity)).toBeTrue();
+  leader.kill("SIGKILL");
+  await leader.exited;
+  await waitFor(
+    () => processIdentityRunning(identity) ? undefined : true,
+    5_000,
+    "the recorded leader identity to disappear",
+  );
+  // The pid alone is no longer the launch, even for an exact match.
+  expect(processDescendsFrom(leader.pid, leader.pid, identity)).toBeFalse();
+});
 
 /**
  * Production Screen binaries and a local extracted bundle from the scripted
@@ -202,10 +227,10 @@ describe("Service supervision without a user manager", () => {
   }, 60_000);
 
   test("deletion stops a TERM-resistant descendant whose leader already exited", async () => {
-    await scriptedScreen();
+    const fixture = await scriptedScreen();
     const scratch = scratchRoot("orphan");
     const pidFile = path.join(scratch, "orphan.pid");
-    const application = writeOrphanApplication(scratch, pidFile);
+    const application = writeOrphanApplication(scratch, fixture.controlDir, pidFile);
     harness = await startDaemon(undefined, {
       useProductionBotScreen: true,
       botComputerAssetSupply: createFixtureFontSupply(scratch),
@@ -228,10 +253,10 @@ describe("Service supervision without a user manager", () => {
   }, 60_000);
 
   test("Service shutdown leaves no Bot Computer, application, or worker descendant", async () => {
-    await scriptedScreen();
+    const fixture = await scriptedScreen();
     const scratch = scratchRoot("shutdown");
     const pidFile = path.join(scratch, "resistant.pid");
-    const application = writeResistantApplication(scratch, pidFile);
+    const application = writeResistantApplication(scratch, fixture.controlDir, pidFile);
     sentinel = startUnrelatedSentinel(scratch);
     harness = await startDaemon(undefined, {
       useProductionBotScreen: true,
