@@ -8,7 +8,11 @@ mkdir -p "$HOME" "$OMARCHY_BOT_HOME/runtime" "$OMARCHY_BOT_STATE" \
 ln -sfnT "$image_root/runtime" "$OMARCHY_BOT_HOME/runtime/current"
 export OMARCHY_BOT_BROWSER_PACK_DIR=${OMARCHY_BOT_BROWSER_PACK_DIR:-$image_root/browser}
 # Chromium's singleton links name the previous container hostname and temporary sockets.
-rm -f -- "$OMARCHY_BOT_HOME/screens/computer/config/chromium/Singleton"{Lock,Cookie,Socket}
+# The pack profile is config/omarchy-bot-browser; config/chromium is the pre-ADR-0013
+# path the Service moves once on first launch.
+for profile in omarchy-bot-browser chromium; do
+  rm -f -- "$OMARCHY_BOT_HOME/screens/computer/config/$profile/Singleton"{Lock,Cookie,Socket}
+done
 if [[ -n ${OMARCHY_BOT_TLS_CERT:-} ]]; then
   bun run - "$image_root/runtime" <<'PAIR' &
 import { readFileSync } from "node:fs";

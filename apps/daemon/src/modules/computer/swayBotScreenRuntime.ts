@@ -5,7 +5,6 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  readlinkSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -60,7 +59,6 @@ import {
   ownedSessionAt,
   processDescendsFrom,
   processIdentity,
-  processIdentityRunning,
   readOwnedIdentity,
   terminateOwnedProcess,
   terminateOwnedSession,
@@ -75,7 +73,8 @@ import {
   PortableBotComputerAssets,
   type BotComputerAssetSupply,
 } from "./botComputerAssets.ts";
-import { desktopApplicationCommand, desktopExecutable, isBrowserExecutable, nativeBrowserCommand } from "./hostBrowser.ts";
+import { desktopApplicationCommand } from "./desktopEntry.ts";
+import { BrowserSupply } from "./browserSupply.ts";
 
 export interface SwayAdapterOptions extends BotComputerOptions {
   /** Test hook. The scripted fixture blocks here so an in-flight launch stays pending. */
@@ -123,65 +122,8 @@ interface SwaySession {
   cleanup?: (() => Promise<void>) | undefined;
 }
 
-/** Headless pixman Sway has no GPU and no desktop session for first-run UI. */
-const PORTABLE_BROWSER_FLAGS = [
-  "--ozone-platform=wayland",
-  "--disable-gpu",
-  "--no-first-run",
-  "--no-default-browser-check",
-  "--disable-sync",
-  "--password-store=basic",
-  "--remote-debugging-pipe",
-];
-
-
-/** Use the pinned pack unless the operator explicitly selects a native browser. */
-async function browserCommand(
-  url: string,
-  environment: Record<string, string>,
-  assets: BotComputerAssetSupply,
-  profileDir: string,
-): Promise<string[]> {
-  const native = environment.OMARCHY_BOT_BROWSER === "host" ? nativeBrowserCommand(environment) : undefined;
-  if (native !== undefined) {
-    // Without this a running native browser reuses a tab, so no new window can
-    // be routed to the requesting Screen.
-    return native.routable
-      ? [...native.argv, "--new-window", url]
-      : [...native.argv, url];
-  }
-  const { browserBin } = await assets.ensureBrowser();
-  // Chromium's own XDG default is <XDG_CONFIG_HOME>/chromium; naming it keeps
-  // one persistent profile no matter which Chromium-compatible binary ships.
-  const userDataDir = path.join(profileDir, "config", "chromium");
-  mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
-  return [
-    browserBin,
-    `--user-data-dir=${userDataDir}`,
-    ...PORTABLE_BROWSER_FLAGS,
-    "--new-window",
-    url,
-  ];
-}
-
-
 function surfaceWorkspace(surfaceId: SurfaceId): string {
   return `bot-${surfaceId}`;
-}
-
-/** A launch command that is the shared browser, whatever opened it (URL, binary, desktop entry). */
-function browserLaunch(argv: readonly string[]): boolean {
-  const executable = desktopExecutable(argv);
-  return executable !== undefined && isBrowserExecutable(executable);
-}
-
-/** The executable a live tracked launch actually became: a launcher wrapper execs the browser. */
-function processExecutableIsBrowser(pid: number): boolean {
-  try {
-    return isBrowserExecutable(readlinkSync(`/proc/${pid}/exe`));
-  } catch {
-    return false;
-  }
 }
 
 function workspaceCriteria(workspaceName: string): string {
@@ -221,8 +163,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #inputLeaseRelease: (() => void) | undefined;
   #resolvedWayvnc: string | undefined;
   #assets: BotComputerAssetSupply;
-  /** Tracked application leaders, which launches are shared browsers, and their spawn identity. */
-  #applicationOwners = new Map<number, { shared: boolean; identity: ProcessIdentity | undefined }>();
+  /** The only browser source: launch argv, profile, Screen plumbing, and pack identity. */
+  #browser: BrowserSupply;
   /** Windows already routed, and the Screen that routed them. */
   #routedWindows = new Map<string, SurfaceId>();
 
@@ -234,7 +176,11 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         ...(options.fontDir === undefined ? {} : { fontDir: options.fontDir }),
         ...(options.browserPackDir === undefined ? {} : { browserPackDir: options.browserPackDir }),
       });
-    this.#computer = new BotComputerRuntime({ ...options, assetSupply: this.#assets });
+    this.#browser = new BrowserSupply({
+      assets: this.#assets,
+      profileDir: path.join(options.profileRoot, "computer"),
+    });
+    this.#computer = new BotComputerRuntime({ ...options, assetSupply: this.#assets, browserSupply: this.#browser });
   }
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
@@ -911,12 +857,14 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       launch,
       browser: async (action, input, signal) => {
         signal.throwIfAborted();
-        if (computer.childEnv.OMARCHY_BOT_BROWSER === "host" && nativeBrowserCommand(computer.childEnv) !== undefined) {
-          throw new Error("Browser tool unavailable: the host browser has no owned CDP pipe. Use the pack browser or computer tools.");
-        }
+        // A Service Host without the pack has no Bot browser and no fallback.
+        await this.#browser.ensurePack();
         if (action.name === "request_takeover") return { text: "Browser is available for Takeover" };
         const routed = await listWindows();
-        if (computer.browser?.alive !== true || !routed.some((window) => /chrome|chromium/i.test(window.appId ?? ""))) {
+        if (
+          computer.browser?.alive !== true
+          || !routed.some((window) => window.pid !== undefined && this.#browser.isPackBrowser(window.pid))
+        ) {
           const beforeTargets = new Set(computer.browser?.alive === true ? (await computer.browser.pageTargets(signal)).map((target) => target.targetId) : []);
           await launch({ url: "about:blank" }, signal);
           signal.throwIfAborted();
@@ -987,14 +935,15 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     );
     // Fonts are only needed by graphical children, so fake-runtime tests stay offline.
     await session.computer.ensureFonts();
-    const argv = request.app !== undefined
-      ? desktopApplicationCommand(request.app, session.computer.childEnv)
-      : await browserCommand(
-        request.url!,
-        session.computer.childEnv,
-        this.#assets,
-        session.computer.profileDir,
-      );
+    let argv: string[];
+    if (request.app !== undefined) {
+      // Refuse by name first: a host browser's desktop entry need not resolve to be refused.
+      this.#browser.refuseHostBrowser(request.app);
+      argv = desktopApplicationCommand(request.app, session.computer.childEnv);
+      this.#browser.refuseHostBrowser(request.app, argv);
+    } else {
+      argv = await this.#browser.launchCommand(request.url!);
+    }
     const text = request.app !== undefined ? `launched ${request.app}` : `opened ${request.url}`;
     const browserPipe = argv.includes("--remote-debugging-pipe");
     const role = `application-${++session.computer.applicationSequence}` as const;
@@ -1036,16 +985,12 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     // The identity captured now proves later that a reported pid still is this
     // launch rather than a reused pid (see `processDescendsFrom`).
     const applicationIdentity = processIdentity(application.process.pid);
-    this.#applicationOwners.set(application.process.pid, {
-      // A URL launch is the shared browser by construction; an app or desktop
-      // entry that resolves to a browser executable uses the same shared profile.
-      shared: request.url !== undefined || browserLaunch(argv),
-      identity: applicationIdentity,
-    });
+    // A pack launch is the pack browser by construction, whatever its binary.
+    if (browserPipe) this.#browser.trackLaunch(application.process.pid, applicationIdentity);
     void application.process.exited.then(() => {
       if (settleOwnedChild(application)) {
         session.computer.applicationProcesses.delete(application);
-        this.#applicationOwners.delete(application.process.pid);
+        this.#browser.forgetLaunch(application.process.pid);
       }
     });
     // A cold portable Chromium can take longer than 5s to map its window, and the
@@ -1158,14 +1103,13 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
    * The windows this launch may route, taken from the current tree. `before` is
    * the tree-wide snapshot taken just before the child spawned, so a window in it
    * already belongs to the Screen showing it and is never claimed here. A
-   * descendant of the spawned child is unambiguous. The shared browser forwards
-   * `open_url` and browser `open_app` launches to an already running instance
-   * (the pack uses one `--user-data-dir`; a native browser reuses its own
-   * process), so the forwarded window belongs to the tracked browser process,
-   * not to the short-lived forwarding child. Exactly one new window of a live
-   * browser leader is that forwarding's window; several candidates cannot be
-   * attributed, so this launch claims none rather than move another Screen's
-   * window.
+   * descendant of the spawned child is unambiguous. The pack browser forwards
+   * `open_url` launches (and anything a shim or URL handler hands it) to the
+   * already running instance that holds its one `--user-data-dir`, so the
+   * forwarded window belongs to the running pack, not to the short-lived
+   * forwarding child. Exactly one new pack window is that forwarding's window;
+   * several candidates cannot be attributed, so this launch claims none rather
+   * than move another Screen's window.
    */
   #claimLaunchedWindows(
     session: SwaySession,
@@ -1186,26 +1130,11 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const forwarded = created.filter((window) =>
       window.pid !== undefined
       && !this.#routedWindows.has(window.id)
-      && this.#sharedBrowserOwns(window.pid)
+      && this.#browser.isPackBrowser(window.pid)
     );
     const [shared] = forwarded;
     if (forwarded.length !== 1 || shared === undefined) return [];
     return this.#claimWindow(surfaceId, shared) ? [shared] : [];
-  }
-
-  /**
-   * A live launch that resolved to the shared browser, or one of its descendants.
-   * A URL launch is known by construction; an app or desktop entry is known when
-   * its command is a browser executable, or when the tracked process itself exec'd
-   * one (a launcher script or wrapper keeps the launch pid when it forwards).
-   */
-  #sharedBrowserOwns(pid: number): boolean {
-    for (const [leaderPid, owner] of this.#applicationOwners) {
-      if (!processIdentityRunning(owner.identity)) continue;
-      if (!owner.shared && !processExecutableIsBrowser(leaderPid)) continue;
-      if (processDescendsFrom(pid, leaderPid, owner.identity)) return true;
-    }
-    return false;
   }
 
   /**
@@ -1219,7 +1148,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   ): Array<{ window: ComputerWindowListItem; surfaceId: SurfaceId }> {
     const foreign: Array<{ window: ComputerWindowListItem; surfaceId: SurfaceId }> = [];
     for (const window of tree) {
-      if (window.pid === undefined || !this.#sharedBrowserOwns(window.pid)) continue;
+      if (window.pid === undefined || !this.#browser.isPackBrowser(window.pid)) continue;
       const surfaceId = this.#workspaceSurface(window.workspace);
       if (surfaceId === undefined || surfaceId === session.provision.surfaceId) continue;
       foreign.push({ window, surfaceId });
@@ -1315,7 +1244,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   /** A stopped shared Computer starts a fresh Sway session with fresh window ids. */
   #forgetComputerTracking(): void {
-    this.#applicationOwners.clear();
+    this.#browser.forgetLaunches();
     this.#routedWindows.clear();
   }
 

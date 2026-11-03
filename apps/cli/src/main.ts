@@ -6,7 +6,7 @@ import { listenerConfig } from "../../daemon/src/bootstrap/listenerConfig.ts";
 import { assertNotRoot, extractRuntimeArchive, verifyChecksum } from "./archive.ts";
 import { graphicalSession, installApp } from "./appInstall.ts";
 import { layoutFromEnv, serviceFetch, serviceOrigin, type Layout } from "./layout.ts";
-import { checkConfigurationOverrides, checkLauncher, doctorText, installLauncher, installUnit, reconfigureUnit, startUnit, statusText, stopUnit, uninstall, userManagerAvailable } from "./lifecycle.ts";
+import { checkConfigurationOverrides, checkLauncher, doctorText, installLauncher, installUnit, reconfigureUnit, removedBrowserSettingError, startUnit, statusText, stopUnit, uninstall, unitHasRemovedBrowserSetting, userManagerAvailable } from "./lifecycle.ts";
 
 const commands = ["install", "start", "stop", "status", "pair", "devices", "revoke", "update", "reconfigure", "uninstall", "doctor"];
 const tlsUsage = "[--tls-cert <path> --tls-key <path>] [--trusted-proxy <address>]";
@@ -77,6 +77,11 @@ export async function run(
       case "update":
       case "reconfigure": {
         assertNotRoot();
+        const removedBrowser = removedBrowserSettingError(env);
+        if (removedBrowser !== undefined) {
+          io.error(removedBrowser);
+          return 2;
+        }
         let archive: string | undefined;
         let checksum: string | undefined;
         let browserPack: string | undefined;
@@ -99,10 +104,6 @@ export async function run(
         }
         if (noBrowserPack && browserPack !== undefined) {
           io.error("--no-browser-pack cannot be combined with --browser-pack");
-          return 2;
-        }
-        if (configured.OMARCHY_BOT_BROWSER && configured.OMARCHY_BOT_BROWSER !== "host") {
-          io.error("OMARCHY_BOT_BROWSER must be host or empty to use the browser pack");
           return 2;
         }
         if (Boolean(configured.OMARCHY_BOT_TLS_CERT) !== Boolean(configured.OMARCHY_BOT_TLS_KEY)) {
@@ -207,7 +208,7 @@ export async function run(
         if (!existsSync(layout.unitPath)) {
           await installUnit(layout, env);
           if (command === "update") await startUnit(layout, env);
-        } else if (env.OMARCHY_BOT_BROWSER !== undefined || Object.values(tlsFlags).some(key => env[key] !== undefined) || args.some(arg => Boolean(tlsFlags[arg]))) await reconfigureUnit(layout, env, () => waitForHealth(layout));
+        } else if (unitHasRemovedBrowserSetting(layout) || Object.values(tlsFlags).some(key => env[key] !== undefined) || args.some(arg => Boolean(tlsFlags[arg]))) await reconfigureUnit(layout, env, () => waitForHealth(layout));
         else await startUnit(layout, env);
         await waitForHealth(layout);
         let appFailure: unknown;

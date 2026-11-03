@@ -515,11 +515,13 @@ export function explicitEnvironment(input: {
     MOZ_ENABLE_WAYLAND: "1",
     QT_QPA_PLATFORM: "wayland",
   };
-  for (const key of ["OMARCHY_COMPUTER_BIN", "OMARCHY_BOT_COMPUTER_BIN", "OMARCHY_BOT_BROWSER"]) {
+  for (const key of ["OMARCHY_COMPUTER_BIN", "OMARCHY_BOT_COMPUTER_BIN"]) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
   // Desktop-entry lookup must see the same data directories the Service does.
+  // The Bot Computer's own XDG_CONFIG_HOME/mimeapps.list and XDG_DATA_HOME
+  // entries come first, so a host default URL handler never wins (ADR 0013).
   if (process.env.XDG_DATA_DIRS !== undefined) env.XDG_DATA_DIRS = process.env.XDG_DATA_DIRS;
   return env;
 }

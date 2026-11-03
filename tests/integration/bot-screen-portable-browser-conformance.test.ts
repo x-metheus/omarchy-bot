@@ -189,7 +189,8 @@ test("glyph analysis finds the page inside a desktop capture and separates shape
   expect(maskDistance(byId.get("latin")!, byId.get("zh")!)).toBeGreaterThan(MIN_DISTINCT_DISTANCE);
 });
 
-realTest.each(["default", "host"])("installed browser pack renders CJK and shares one profile with browser selection %s", async selection => {
+// Bots use only the pack (Computer ADR 0013): a host brave is present and must never run.
+realTest.each(["default"])("installed browser pack renders CJK and shares one profile with a host browser present (%s)", async selection => {
   const swayBin = process.env.OMARCHY_BOT_SWAY_BIN;
   const wlrRandrBin = process.env.OMARCHY_BOT_WLR_RANDR_BIN;
   const grimBin = process.env.OMARCHY_BOT_GRIM_BIN ?? Bun.which("grim") ?? undefined;
@@ -220,7 +221,6 @@ realTest.each(["default", "host"])("installed browser pack renders CJK and share
   // be found even with no browser on PATH.
   setEnvironment("PATH", browserlessPath(bin, snapMarker));
   setEnvironment("XDG_DATA_DIRS", emptyDataDirs);
-  setEnvironment("OMARCHY_BOT_BROWSER", selection === "host" ? "host" : undefined);
   // Bun caches PATH at startup, so resolution must be asked with the fixture PATH.
   const fixturePath = process.env.PATH ?? "";
   expect(Bun.which("brave", { PATH: fixturePath })).toBeNull();
@@ -342,8 +342,8 @@ realTest.each(["default", "host"])("installed browser pack renders CJK and share
     expect({ title: windowA.title, count: titleCount(windowA.title) })
       .toMatchObject({ count: 1 });
     expect(browserProcess(probeUrl("GLYPH-A")).binary).toBe(path.join(path.resolve(browserPackDir), "chrome-linux64/chrome"));
-    expect(browserProcess(probeUrl("GLYPH-A")).userDataDir
-      .startsWith(path.join(profileRoot, "computer"))).toBeTrue();
+    expect(browserProcess(probeUrl("GLYPH-A")).userDataDir)
+      .toBe(path.join(profileRoot, "computer", "config", "omarchy-bot-browser"));
 
     // Runtime fonts have no host directories or includes; fontconfig keeps its
     // cache inside the profile. Glyph pixels below prove the faces are used.
