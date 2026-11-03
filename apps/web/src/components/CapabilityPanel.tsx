@@ -1,16 +1,14 @@
-import { useCallback, type JSX, type RefObject } from "react";
+import { useCallback, useLayoutEffect, type JSX, type RefObject } from "react";
 import { Heading } from "@astryxdesign/core/Heading";
-import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
-import { LayoutPanel } from "@astryxdesign/core/Layout";
 import { StackItem } from "@astryxdesign/core/Stack";
-import { VStack } from "@astryxdesign/core/VStack";
 import type { ComputerSurfaceProps } from "./ComputerPanel.tsx";
 import { ComputerSurface } from "./ComputerPanel.tsx";
+import { WorkspaceDrawer } from "./WorkspaceDrawer.tsx";
 
-export interface CapabilityPanelProps extends Omit<ComputerSurfaceProps, "onRequestClose"> {
+export interface CapabilityPanelProps extends ComputerSurfaceProps {
   open: boolean;
   returnFocusRef: RefObject<HTMLButtonElement | null>;
   onClose: () => void;
@@ -24,60 +22,56 @@ export function CapabilityPanel({
   bot,
   ...surfaceProps
 }: CapabilityPanelProps): JSX.Element {
-  const { isMobile } = useAppShellMobile();
   const closePanel = useCallback((): void => {
     onClose();
     requestAnimationFrame(() => returnFocusRef.current?.focus());
   }, [onClose, returnFocusRef]);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closePanel();
+    };
+    // Expanded Web Control consumes Escape during capture before drawer dismissal.
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [closePanel, open]);
+
   return (
-    <VStack
-      gap={0}
-      height="100%"
-      className="capability-presence"
-      data-open={open}
-      data-mobile={isMobile}
-      data-testid="capability-presence"
-      inert={!open}
-      aria-hidden={!open}
-    >
-    <LayoutPanel
-      width="min(560px, 100vw)"
-      padding={0}
-      hasDivider
-      isScrollable
+    <WorkspaceDrawer
+      open={open}
+      width="560px"
       label="Workspace capabilities"
-      role="complementary"
-      className="capability-panel"
-      style={{ width: "min(560px, 100vw)", minWidth: 0, maxWidth: "100vw", height: "100%", animation: "none" }}
-      data-testid="workspace-capabilities"
+      data-testid="capability-presence"
+      panelTestId="workspace-capabilities"
+      header={
+        <HStack gap={2} padding={4} vAlign="center">
+          <StackItem size="fill">
+            <Heading level={2}>Capabilities</Heading>
+          </StackItem>
+          <IconButton
+            label="Close capabilities"
+            tooltip="Close capabilities"
+            icon={<Icon icon="close" size="md" />}
+            variant="ghost"
+            onClick={closePanel}
+            data-testid="capabilities-close"
+          />
+        </HStack>
+      }
     >
-      <HStack gap={2} padding={4} vAlign="center">
-        <StackItem size="fill">
-          <Heading level={2}>Capabilities</Heading>
-        </StackItem>
-        <IconButton
-          label="Close capabilities"
-          tooltip="Close capabilities"
-          icon={<Icon icon="close" size="md" />}
-          variant="ghost"
-          onClick={closePanel}
-          data-testid="capabilities-close"
-        />
-      </HStack>
-      {open ? (
-      <section className="capability-panel-content">
+      <section>
         <HStack gap={2} padding={4} paddingBlockEnd={0} vAlign="center">
           <Heading level={3}>{bot.name}’s screen</Heading>
         </HStack>
         <ComputerSurface
           {...surfaceProps}
           bot={bot}
-          onRequestClose={closePanel}
         />
       </section>
-      ) : null}
-    </LayoutPanel>
-    </VStack>
+    </WorkspaceDrawer>
   );
 }

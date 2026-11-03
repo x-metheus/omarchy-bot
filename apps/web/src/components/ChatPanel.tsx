@@ -1178,6 +1178,7 @@ export function ChatPanel({
       </VisuallyHidden>
       <ChatLayout
         className="thread-chat-layout"
+        density="spacious"
         {...(transcriptAttention !== null
           ? { ref: transcriptAttention.viewportRef, onScroll: transcriptAttention.onViewportScroll }
           : {})}

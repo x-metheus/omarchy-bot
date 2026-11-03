@@ -7,7 +7,6 @@ import { Heading } from "@astryxdesign/core/Heading";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { HStack } from "@astryxdesign/core/HStack";
-import { LayoutPanel } from "@astryxdesign/core/Layout";
 import { StackItem } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
@@ -20,6 +19,7 @@ import styles from "../lib/styles.ts";
 import { rollbackBotDisplaySetting, selectBotDisplayState } from "../lib/botDisplaySettings.ts";
 import type { BotDisplaySetting } from "../lib/botDisplaySettings.ts";
 import { AvatarView } from "./AvatarView.tsx";
+import { WorkspaceDrawer } from "./WorkspaceDrawer.tsx";
 
 export interface BotSettingsPanelProps {
   bot: BotViewDto;
@@ -41,7 +41,7 @@ export function BotSettingsPanel({
   returnFocusRef,
   onClose,
   onUpdated,
-}: BotSettingsPanelProps): JSX.Element | null {
+}: BotSettingsPanelProps): JSX.Element {
   const [current, setCurrent] = useState<BotDto>(bot);
   const [name, setName] = useState(bot.name);
   const [instructions, setInstructions] = useState(bot.instructions);
@@ -214,34 +214,31 @@ export function BotSettingsPanel({
     showThinking: current.showThinking,
     thinkingAvailability: bot.thinkingAvailability,
   });
-  if (!open) return null;
-
   return (
-    <LayoutPanel
-      width="min(440px, 100vw)"
-      padding={0}
-      hasDivider
-      isScrollable
+    <WorkspaceDrawer
+      open={open}
+      width="440px"
       label="Bot settings"
-      role="complementary"
-      style={{ width: "min(440px, 100vw)", minWidth: 0, maxWidth: "100vw" }}
+      data-testid="bot-settings-presence"
+      header={
+        <HStack gap={2} padding={4} vAlign="center">
+          <StackItem size="fill">
+            <VStack gap={0.5}>
+              <Heading level={2}>Bot settings</Heading>
+              <Text color="secondary">Manage this teammate’s profile and transcript display.</Text>
+            </VStack>
+          </StackItem>
+          <IconButton
+            label="Close bot settings"
+            tooltip="Close bot settings"
+            icon={<Icon icon="close" size="md" />}
+            variant="ghost"
+            onClick={closeDrawer}
+            data-testid="bot-settings-close"
+          />
+        </HStack>
+      }
     >
-      <HStack gap={2} padding={4} vAlign="center">
-        <StackItem size="fill">
-          <VStack gap={0.5}>
-            <Heading level={2}>Bot settings</Heading>
-            <Text color="secondary">Manage this teammate’s profile and transcript display.</Text>
-          </VStack>
-        </StackItem>
-        <IconButton
-          label="Close bot settings"
-          tooltip="Close bot settings"
-          icon={<Icon icon="close" size="md" />}
-          variant="ghost"
-          onClick={closeDrawer}
-          data-testid="bot-settings-close"
-        />
-      </HStack>
       <form
         noValidate
         onSubmit={(event) => {
@@ -263,7 +260,7 @@ export function BotSettingsPanel({
 
           <TextInput
             ref={nameInput}
-            autoFocus
+            hasAutoFocus
             label="Name"
             value={name}
             onChange={(value) => {
@@ -381,6 +378,6 @@ export function BotSettingsPanel({
           </VStack>
         </VStack>
       </form>
-    </LayoutPanel>
+    </WorkspaceDrawer>
   );
 }

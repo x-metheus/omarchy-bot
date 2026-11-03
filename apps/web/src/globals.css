@@ -25,108 +25,81 @@ body,
   inset-inline: 0;
 }
 
-/* Keep panel geometry reversible; closed content releases its resources at once. */
-.workspace-layout :has(> .capability-presence) {
+/* Reserve the final width immediately; release it only after the panel exits. */
+.workspace-layout :has(> .workspace-drawer) {
   position: relative;
 }
 
-.capability-presence {
+.workspace-drawer {
+  --workspace-drawer-enter: 230ms;
+  --workspace-drawer-exit: 150ms;
   flex: 0 0 auto;
   min-width: 0;
   width: 0;
   overflow: clip;
   visibility: hidden;
   transition:
-    width 150ms var(--ease-standard),
-    visibility 0s 150ms;
+    width 0s var(--workspace-drawer-exit),
+    visibility 0s var(--workspace-drawer-exit);
 }
 
-.capability-presence[data-open="true"] {
-  width: min(560px, 100vw);
+.workspace-drawer[data-open="true"] {
+  width: var(--workspace-drawer-width);
   visibility: visible;
-  transition:
-    width 230ms var(--ease-standard),
-    visibility 0s;
+  transition: none;
 }
 
-.capability-panel {
+/* Switching drawers must release the outgoing desktop slot immediately. */
+.workspace-drawer[data-mobile="false"][data-open="false"]:has(~ .workspace-drawer[data-open="true"]),
+.workspace-drawer[data-open="true"] ~ .workspace-drawer[data-mobile="false"][data-open="false"] {
+  transition: none;
+}
+
+.workspace-drawer-panel {
   background-color: var(--color-background);
   opacity: 0;
   transform: translateX(var(--spacing-6));
   transition:
-    transform 150ms var(--ease-standard),
-    opacity 150ms var(--ease-standard);
+    transform var(--workspace-drawer-exit) var(--ease-standard),
+    opacity var(--workspace-drawer-exit) var(--ease-standard);
 }
 
-.capability-presence[data-open="true"] .capability-panel {
+.workspace-drawer[data-entered="true"] .workspace-drawer-panel {
   opacity: 1;
   transform: translateX(0);
-  transition-duration: 230ms;
+  transition-duration: var(--workspace-drawer-enter);
 }
 
-.capability-presence[data-mobile="true"] {
+.workspace-drawer[data-mobile="true"] {
   position: absolute;
   inset-block: 0;
   inset-inline-end: 0;
-  width: min(560px, 100vw);
+  width: var(--workspace-drawer-width);
   pointer-events: none;
-  transition: visibility 0s 150ms;
+  transition: visibility 0s var(--workspace-drawer-exit);
 }
 
-.capability-presence[data-mobile="true"][data-open="true"] {
+.workspace-drawer[data-mobile="true"][data-open="true"] {
   pointer-events: auto;
   transition-delay: 0s;
 }
 
-.capability-presence[data-mobile="true"][data-open="false"] .capability-panel {
+.workspace-drawer[data-mobile="true"][data-entered="false"] .workspace-drawer-panel {
   transform: translateX(100%);
 }
 
-@starting-style {
-  .capability-presence[data-mobile="false"][data-open="true"] {
-    width: 0;
-  }
-
-  .capability-presence[data-open="true"] .capability-panel {
-    opacity: 0;
-    transform: translateX(var(--spacing-6));
-  }
-
-  .capability-presence[data-mobile="true"][data-open="true"] .capability-panel {
-    transform: translateX(100%);
-  }
-}
-
-.capability-panel-content {
-  animation: capability-content-enter 150ms var(--ease-standard);
-}
-
-@keyframes capability-content-enter {
-  from {
-    opacity: 0;
-    transform: translateY(var(--spacing-1));
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
-  .capability-presence,
-  .capability-presence[data-open="true"],
-  .capability-presence[data-mobile="true"],
-  .capability-panel,
-  .capability-presence[data-open="true"] .capability-panel {
+  .workspace-drawer,
+  .workspace-drawer[data-open="true"],
+  .workspace-drawer[data-mobile="true"],
+  .workspace-drawer-panel,
+  .workspace-drawer[data-entered="true"] .workspace-drawer-panel {
     transition: none;
   }
 
-  .capability-panel-content {
-    animation: none;
-  }
-
-  .capability-panel,
-  .capability-presence[data-mobile="true"][data-open="false"] .capability-panel {
+  .workspace-drawer-panel,
+  .workspace-drawer[data-mobile="true"][data-entered="false"] .workspace-drawer-panel {
     transform: none;
   }
 }

@@ -92,39 +92,64 @@ test.describe("Changes absent and Computer retained", () => {
     await createBot(page, "Motion Computer Bot");
     const conversation = page.getByLabel("Conversation workspace");
     const fullWidth = await conversation.evaluate((element) => element.getBoundingClientRect().width);
+    const immediateEscape = await page.evaluate(async () => {
+      const shell = document.querySelector<HTMLElement>('[data-testid="capability-presence"]')!;
+      document.querySelector<HTMLButtonElement>('[data-testid="header-computer"]')!.click();
+      await Promise.resolve();
+      const opening = {
+        open: shell.dataset.open === "true",
+        contentMounted: shell.querySelector('[data-testid="computer-drawer"]') !== null,
+      };
+      const close = document.querySelector<HTMLButtonElement>('[data-testid="capabilities-close"]')!;
+      close.focus();
+      close.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+      return opening;
+    });
+    expect(immediateEscape).toEqual({ open: true, contentMounted: false });
+    await expect(page.getByTestId("capability-presence")).toHaveAttribute("aria-hidden", "true");
+    await expect(page.getByTestId("computer-drawer")).toHaveCount(0);
+    await expect(page.getByTestId("header-computer")).toBeFocused();
+    await expect.poll(() => conversation.evaluate((element) => element.getBoundingClientRect().width)).toBe(fullWidth);
     const sampleTransition = async (closing: boolean, reverse = false) => page.evaluate(
       async ({ closing, reverse }) => {
         const shell = document.querySelector<HTMLElement>('[data-testid="capability-presence"]')!;
+        const panel = shell.querySelector<HTMLElement>('[data-testid="workspace-capabilities"]')!;
         const chat = document.querySelector<HTMLElement>('[aria-label="Conversation workspace"]')!;
         const trigger = document.querySelector<HTMLButtonElement>('[data-testid="header-computer"]')!;
         const close = document.querySelector<HTMLButtonElement>('[data-testid="capabilities-close"]')!;
         (closing ? close : trigger).click();
-        const samples: { panel: number; chat: number }[] = [];
+        const samples: { panel: number; chat: number; translateX: number; opacity: number; contentMounted: boolean }[] = [];
         const start = performance.now();
         let reversed = false;
-        await new Promise<void>((resolve) => {
-          const frame = (): void => {
-            const elapsed = performance.now() - start;
-            if (reverse && !reversed && elapsed >= 65) {
-              trigger.click();
-              reversed = true;
-            }
-            samples.push({
-              panel: shell.getBoundingClientRect().width,
-              chat: chat.getBoundingClientRect().width,
-            });
-            if (elapsed >= 400) resolve();
-            else requestAnimationFrame(frame);
-          };
-          requestAnimationFrame(frame);
-        });
+        const { promise, resolve } = Promise.withResolvers<void>();
+        const frame = (): void => {
+          const elapsed = performance.now() - start;
+          if (reverse && !reversed && elapsed >= 65) {
+            trigger.click();
+            reversed = true;
+          }
+          samples.push({
+            panel: shell.getBoundingClientRect().width,
+            chat: chat.getBoundingClientRect().width,
+            translateX: new DOMMatrixReadOnly(getComputedStyle(panel).transform).m41,
+            opacity: Number(getComputedStyle(panel).opacity),
+            contentMounted: shell.querySelector('[data-testid="computer-drawer"]') !== null,
+          });
+          if (elapsed >= 400) resolve();
+          else requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+        await promise;
         return samples;
       },
       { closing, reverse },
     );
     const opening = await sampleTransition(false);
-    expect(opening.some(({ panel }) => panel > 1 && panel < 559)).toBe(true);
+    expect(opening.some(({ panel, translateX, opacity }) => panel === 560 && translateX > 0 && translateX < 24 && opacity > 0 && opacity < 1)).toBe(true);
+    expect(opening.some(({ panel, contentMounted }) => panel === 560 && !contentMounted)).toBe(true);
+    expect(opening.at(-1)!.contentMounted).toBe(true);
     for (const frame of opening) {
+      expect([0, 560]).toContain(frame.panel);
       expect(Math.abs(frame.panel + frame.chat - fullWidth)).toBeLessThan(2);
     }
     expect(opening.at(-1)!.panel).toBeCloseTo(560, 0);
@@ -138,11 +163,18 @@ test.describe("Changes absent and Computer retained", () => {
     expect(changesRequests).toEqual([]);
 
     const reversing = await sampleTransition(true, true);
-    expect(reversing.some(({ panel }) => panel > 1 && panel < 559)).toBe(true);
-    expect(reversing.every(({ panel }) => panel > 0)).toBe(true);
+    for (const frame of reversing) {
+      expect([0, 560]).toContain(frame.panel);
+      expect(Math.abs(frame.panel + frame.chat - fullWidth)).toBeLessThan(2);
+    }
     expect(reversing.at(-1)!.panel).toBeCloseTo(560, 0);
     const closing = await sampleTransition(true);
-    expect(closing.some(({ panel }) => panel > 1 && panel < 559)).toBe(true);
+    expect(closing.some(({ panel, translateX, opacity }) => panel === 560 && translateX > 0 && translateX < 24 && opacity > 0 && opacity < 1)).toBe(true);
+    for (const frame of closing) {
+      expect([0, 560]).toContain(frame.panel);
+      expect(Math.abs(frame.panel + frame.chat - fullWidth)).toBeLessThan(2);
+      expect(frame.contentMounted).toBe(false);
+    }
     expect(closing.at(-1)!.panel).toBe(0);
     expect(closing.at(-1)!.chat).toBeCloseTo(fullWidth, 0);
     await expect(page.getByRole("heading", { name: "Motion Computer Bot’s screen" })).toHaveCount(0);
@@ -161,10 +193,14 @@ test.describe("Changes absent and Computer retained", () => {
     expect(await shell.evaluate((element) => element.getBoundingClientRect().width)).toBe(560);
     expect(await shell.evaluate((element) => [
       ...element.getAnimations(),
-      ...element.querySelector(".capability-panel")!.getAnimations(),
+      ...element.querySelector(".workspace-drawer-panel")!.getAnimations(),
     ].filter((animation) => animation.playState === "running").length)).toBe(0);
     await expect(page.getByRole("heading", { name: "Reduced Panel Bot’s screen" })).toBeVisible();
     await expectChangesAbsent(page);
+    await page.getByTestId("capabilities-close").click();
+    expect(await shell.evaluate((element) => element.getBoundingClientRect().width)).toBe(0);
+    await expect(page.getByTestId("computer-drawer")).toHaveCount(0);
+    await page.getByTestId("header-computer").click();
 
     await page.setViewportSize({ width: 390, height: 780 });
     await expect(page.getByLabel("Conversation workspace")).toHaveCount(0);
@@ -214,12 +250,42 @@ test.describe("Changes absent and Computer retained", () => {
     await expect(capabilities.getByRole("heading", { name: "Isolation Bot B’s screen" })).toBeVisible();
     await expectChangesAbsent(page);
 
-    await page.getByRole("button", { name: "Open settings for Isolation Bot B" }).click();
-    await expect(capabilities).toHaveCount(0);
-    await expect(settings).toBeVisible();
-    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    await expect(settings).toHaveCount(0);
-    await expect(capabilities).toBeVisible();
+    for (const openingSettings of [true, false]) {
+      const switching = await page.evaluate(async (openingSettings) => {
+        const settings = document.querySelector<HTMLElement>('[data-testid="bot-settings-presence"]')!;
+        const computer = document.querySelector<HTMLElement>('[data-testid="capability-presence"]')!;
+        document.querySelector<HTMLButtonElement>(openingSettings
+          ? '[data-testid="bot-settings-open"]'
+          : '[data-testid="header-computer"]')!.click();
+        const samples: { settings: number; computer: number }[] = [];
+        const start = performance.now();
+        const { promise, resolve } = Promise.withResolvers<void>();
+        const frame = (): void => {
+          samples.push({
+            settings: settings.getBoundingClientRect().width,
+            computer: computer.getBoundingClientRect().width,
+          });
+          if (performance.now() - start >= 300) resolve();
+          else requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+        await promise;
+        return samples;
+      }, openingSettings);
+      for (const frame of switching) {
+        expect(frame.settings).toBe(openingSettings ? 440 : 0);
+        expect(frame.computer).toBe(openingSettings ? 0 : 560);
+      }
+      if (openingSettings) {
+        await expect(capabilities).toHaveCount(0);
+        await expect(settings).toBeVisible();
+        await expect(settings.getByRole("textbox", { name: /^Name\b/ })).toBeFocused();
+        await expect(page.getByTestId("computer-drawer")).toHaveCount(0);
+      } else {
+        await expect(settings).toHaveCount(0);
+        await expect(capabilities).toBeVisible();
+      }
+    }
     await expect(capabilities.getByRole("heading", { name: "Isolation Bot B’s screen" })).toBeVisible();
 
     await capabilities.getByRole("button", { name: "Close capabilities" }).click();

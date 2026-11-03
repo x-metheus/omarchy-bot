@@ -38,7 +38,6 @@ export interface ComputerSurfaceProps {
   error?: string;
   loading?: boolean;
   onRetry?: () => void;
-  onRequestClose: () => void;
   onTakeControl: () => Promise<boolean>;
   onReturnToBot: () => Promise<boolean>;
 }
@@ -179,7 +178,7 @@ const localStyles = stylex.create({
 });
 interface ComputerSurfaceContentProps extends Omit<
   ComputerSurfaceProps,
-  "projectionUrl" | "onRequestClose" | "onTakeControl" | "onReturnToBot"
+  "projectionUrl" | "onTakeControl" | "onReturnToBot"
 > {
   previewOnly: boolean;
   projectionState: ScreenProjectionState;
@@ -334,7 +333,6 @@ export function ComputerSurface({
   projectionUrl,
   bot,
   view,
-  onRequestClose,
   onTakeControl,
   onReturnToBot,
   ...contentProps
@@ -400,13 +398,6 @@ export function ComputerSurface({
       expandedReconnectCountRef.current = 0;
     };
   }, [clearBrowserHeldInput, view.surfaceId]);
-  const requestClose = useCallback((): void => {
-    setPreviewExpanded(false);
-    setControlReady(false);
-    setScreenRetrying(false);
-    setProjectionError(undefined);
-    onRequestClose();
-  }, [onRequestClose]);
 
   useEffect(() => {
     if (view.state === "unavailable" && (!screenRetrying || view.unavailableReason === "capacity")) {
@@ -591,16 +582,16 @@ export function ComputerSurface({
   }, [clearBrowserHeldInput, isSmallScreen, previewExpanded]);
 
   useEffect(() => {
+    if (!previewExpanded) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (previewExpanded) setPreviewExpanded(false);
-      else requestClose();
+      setPreviewExpanded(false);
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [previewExpanded, requestClose]);
+  }, [previewExpanded]);
 
   const sendExpandedMotion = (event: ReactPointerEvent<HTMLDialogElement>): void => {
     const viewport = expandedViewport(event.currentTarget);

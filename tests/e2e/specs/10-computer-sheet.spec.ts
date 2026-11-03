@@ -26,7 +26,7 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
 
 async function settleCapabilityLayout(page: Page): Promise<void> {
   await page.getByTestId("capability-presence").evaluate(async (shell) => {
-    const regions = [shell, ...shell.querySelectorAll(".capability-panel, .capability-tab-content")];
+    const regions = [shell, ...shell.querySelectorAll(".workspace-drawer-panel, .capability-tab-content")];
     await Promise.all(regions.flatMap((region) =>
       region.getAnimations().map((animation) => animation.finished)
     ));
@@ -1110,6 +1110,14 @@ test.describe("contextual computer sheet", () => {
         __screenInputMessages: Array<{ type?: string }>;
       }).__screenInputMessages.filter(({ type }) => type === "key").length,
     )).toBe(2);
+
+    await page.keyboard.press("Escape");
+    await expect(control).toBeHidden();
+    const capabilities = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
+    await expect(capabilities).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(capabilities).toHaveCount(0);
+    await expect(page.getByTestId("header-computer")).toBeFocused();
   });
 
   for (const platform of ["Linux x86_64", "Win32"]) test(`sends unchanged ${platform} shortcuts and plain-text paste and releases on blur`, async ({ page }) => {

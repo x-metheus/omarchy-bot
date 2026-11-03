@@ -539,11 +539,11 @@ function HomeScreen(): JSX.Element {
         }
         end={
           bot !== undefined ? (
-            rightRegion.mode === "bot-settings" ? (
+            <>
               <BotSettingsPanel
                 bot={bot}
                 agentDisplayName={selectedAgent?.displayName ?? bot.agentId}
-                open
+                open={botSettingsOpen}
                 returnFocusRef={botSettingsTriggerRef}
                 onClose={() => setRightRegion({ mode: "closed" })}
                 onUpdated={(updated) => {
@@ -554,10 +554,9 @@ function HomeScreen(): JSX.Element {
                   );
                 }}
               />
-            ) : (
               <CapabilityPanel
                 key={`${bot.id}:${bot.surfaceId}`}
-                open={rightRegion.mode === "capabilities"}
+                open={computerOpen}
                 bot={bot}
                 view={
                   computer.data
@@ -582,7 +581,7 @@ function HomeScreen(): JSX.Element {
                 onTakeControl={() => computerAction.mutateAsync("take").then(() => true, () => false)}
                 onReturnToBot={() => computerAction.mutateAsync("return").then(() => true, () => false)}
               />
-            )
+            </>
           ) : undefined
         }
       />

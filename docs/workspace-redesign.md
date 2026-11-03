@@ -146,6 +146,8 @@ The Agent picker lists every supported Agent. An unavailable Agent remains visib
 
 The Bot avatar and name form one Conversation Header toggle for a right-side Astryx `LayoutPanel` named Bot Settings at every window width. Selecting the identity again closes the panel. Its Profile section identifies the Bot's immutable Agent as read-only context and lets the user edit the Bot's name, Instructions, and avatar. Changing execution backend means creating another Bot.
 
+Bot Settings and Computer reserve their final desktop width immediately; only the panel transform and opacity animate. Closing removes the body immediately and releases its resources, then releases the layout slot after the exit animation. Switching drawers reserves only the incoming slot. Heavy bodies mount after the opening frame; Bot Settings then focuses Name. Escape closes Computer even before its body mounts; expanded Web Control consumes the first Escape to collapse, and the next closes the drawer and restores trigger focus. Reduced motion makes geometry and mounting immediate. At narrow widths the drawer overlays the workspace.
+
 The Display section contains independent `Show tool calls` and `Show Thinking` switches. Both default off, apply to all Threads belonging to the Bot, persist through the daemon, and synchronize across windows. They filter presentation only: hidden content remains received and retained, and changing a switch does not change Agent configuration.
 
 ### Archive and delete
