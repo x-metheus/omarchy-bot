@@ -249,6 +249,9 @@ realTest("real portable browser completes a form through Broker input and holds 
     await viewer.close();
     viewer = undefined;
     await expect(act({ name: "click", args: { ref: oldRef } })).rejects.toThrow(/snapshot/i);
+    // Target discovery is what reports a page's opener, and with it the Screen a
+    // pop-up window belongs to (Computer ADR 0012, 2026-11-03 amendment).
+    expect(commands.some(command => command.method === "Target.setDiscoverTargets")).toBe(true);
     expect(commands.some(command => command.method === "Runtime.enable")).toBe(false);
     const evaluations = commands.filter(command => command.method === "Runtime.evaluate");
     expect(evaluations.length).toBeGreaterThan(0);

@@ -137,7 +137,7 @@ export interface BotScreenProjectionSource {
   capture(signal?: AbortSignal): Promise<BotScreenCapture>;
   openCaptureStream(): Promise<BotScreenCaptureStream>;
   acquireExpandedView(): Promise<BotScreenExpandedView>;
-  setInputAuthority(controllerEpoch: number): Promise<number>;
+  setInputAuthority(controllerEpoch: number, kind?: "web" | "bot"): Promise<number>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
 }
@@ -173,7 +173,7 @@ export interface BotScreenRuntime {
   focusWindow(window: ComputerWindowListItem): Promise<void>;
   /** Opens an application or URL on this Screen. */
   launch(request: BotScreenLaunchRequest): Promise<{ text?: string }>;
-  setInputAuthority(controllerEpoch: number): Promise<number>;
+  setInputAuthority(controllerEpoch: number, kind?: "web" | "bot"): Promise<number>;
   browser?(action: BrowserAction, input: (action: ComputerAction) => Promise<void>, signal: AbortSignal): Promise<{ text: string; truncated?: boolean }>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
@@ -640,9 +640,9 @@ export class BotScreenManager {
             },
           };
         },
-        setInputAuthority: (controllerEpoch) =>
+        setInputAuthority: (controllerEpoch, kind) =>
           this.#serialize(owner.surfaceId, () =>
-            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.setInputAuthority(controllerEpoch))
+            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.setInputAuthority(controllerEpoch, kind))
           ),
         input: (event) =>
           this.#serialize(owner.surfaceId, () =>

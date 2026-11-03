@@ -14,7 +14,7 @@ export type HeldInput = Readonly<{
 
 /** Runtime delivery. The lease decides who may type; the adapter only delivers. */
 export interface ScreenInputDelivery {
-  grant(surfaceId: SurfaceId, epoch: number, generation?: number): Promise<number>;
+  grant(surfaceId: SurfaceId, epoch: number, generation?: number, kind?: "web" | "bot"): Promise<number>;
   deliver(surfaceId: SurfaceId, epoch: number, event: BotScreenInputAction, sequence?: number, generation?: number): Promise<void>;
   release(surfaceId: SurfaceId, epoch: number, held: HeldInput, nextSequence?: number, generation?: number): Promise<void>;
   capture(surfaceId: SurfaceId): Promise<unknown>;
@@ -254,7 +254,7 @@ export class ScreenInputLease {
       this.#grantStarted.resolve();
       let accepted: number;
       try {
-        accepted = await this.delivery.grant(target.surfaceId, epoch, target.runtimeGeneration);
+        accepted = await this.delivery.grant(target.surfaceId, epoch, target.runtimeGeneration, holder.kind);
         if (accepted !== epoch) throw new Error(`stale controller epoch ${accepted}`);
         // The runtime may have been replaced while the grant was in flight.
         this.#requireGeneration(target);
@@ -317,7 +317,7 @@ export class ScreenInputLease {
       this.#held.resolve();
       let accepted: number;
       try {
-        accepted = await this.delivery.grant(target.surfaceId, epoch, target.runtimeGeneration);
+        accepted = await this.delivery.grant(target.surfaceId, epoch, target.runtimeGeneration, holder.kind);
         if (accepted !== epoch) throw new Error(`stale controller epoch ${accepted}`);
         // The runtime may have been replaced while the grant was in flight.
         this.#requireGeneration(target);

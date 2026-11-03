@@ -2,6 +2,9 @@ import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
 import type { BrowserAction, ComputerAction } from "@omarchy-bot/domain";
 import { setTimeout as delay } from "node:timers/promises";
 import { CdpReplyTooLargeError, type CdpPipe } from "./cdpPipe.ts";
+import { WindowOwnership, type OwnedWindow, type PendingWindowTarget } from "./windowOwnership.ts";
+import { attributeBrowserTarget, type BrowserWindowAttributionPort } from "./browserWindowAttribution.ts";
+export { BrowserWindowAttributionError, type BrowserWindowAttributionPort } from "./browserWindowAttribution.ts";
 
 export interface BrowserScreenPort {
   windows(): Promise<ComputerWindowListItem[]>;
@@ -9,7 +12,7 @@ export interface BrowserScreenPort {
   input(action: ComputerAction): Promise<void>;
 }
 export interface BrowserResult { text: string; truncated?: boolean }
-interface TargetInfo { targetId: string; type: string; title: string; url: string }
+interface TargetInfo { targetId: string; type: string; title: string; url: string; openerId?: string }
 interface TargetWindow { windowId: number; bounds: { left?: number; top?: number; width?: number; height?: number } }
 interface AxNode {
   nodeId: string;
@@ -33,12 +36,13 @@ interface Tab {
 }
 interface Screen {
   controller: AbortController;
-  windows: Map<number, string>;
   active?: string;
   refs: Map<string, { backendNodeId: number; targetId: string }>;
   tabs: Map<string, Tab>;
 }
 interface Scope { screen: Screen; window: ComputerWindowListItem; targets: TargetInfo[]; targetWindows: Map<string, ComputerWindowListItem> }
+/** Opener discovery is bounded independently of stamp/native-window observation. */
+const POPUP_ATTRIBUTION_TIMEOUT_MS = 1_000;
 const SNAPSHOT_BYTES = 16 * 1024;
 const SNAPSHOT_LINES = 300;
 /** Walk budget so long runs of ignored AX nodes cannot turn one snapshot into unbounded CDP traffic. */
@@ -49,13 +53,31 @@ const TEXT_BYTES = 8 * 1024;
 /** One private browser pipe, with target and element authority scoped to routed Screen windows. */
 export class BrowserRuntime {
   #screens = new Map<string, Screen>();
-  #owners = new Map<number, { surfaceId: string; swayWindowId: string }>();
   #refSequence = 0;
   #unsubscribe: () => void;
   #browserPid?: number;
+  #discovery: Promise<void> | undefined;
+  #lifetime = new AbortController();
+  #openerLookups = new Map<string, AbortController>();
+  #openerResults = new Map<string, Promise<void>>();
+  #destroyedTargets = new Set<string>();
+  #failedAttributions = new Set<string>();
+  #attributions = new Map<PendingWindowTarget, { controller: AbortController; result: Promise<OwnedWindow | undefined> }>();
 
-  constructor(private readonly cdp: CdpPipe) {
+  /**
+   * `ownership` is the Computer's one registry, shared with Sway routing; without
+   * one this runtime keeps its own, which scopes ownership to this pipe.
+   */
+  constructor(
+    private readonly cdp: CdpPipe,
+    private readonly ownership = new WindowOwnership(),
+    private readonly options: { stampTimeoutMs?: number; ownerForNewTarget?: (targetId: string) => string | undefined } = {},
+  ) {
+    if (!Number.isFinite(options.stampTimeoutMs ?? 2_000) || (options.stampTimeoutMs ?? 2_000) <= 0) {
+      throw new Error("Browser title stamp deadline must be positive");
+    }
     this.#unsubscribe = cdp.onEvent((method, params, sessionId) => {
+      this.#onTargetEvent(method, params);
       for (const screen of this.#screens.values()) {
         for (const tab of screen.tabs.values()) {
           if (method === "Target.targetDestroyed" && params.targetId === tab.targetId
@@ -80,9 +102,170 @@ export class BrowserRuntime {
         }
       }
     });
+    void this.#ensureDiscovery().catch(() => {});
   }
 
   get alive(): boolean { return this.cdp.alive; }
+
+  /**
+   * Chromium reports a page's `openerId` only while target discovery is on, and
+   * the pipe exists before any Screen asks for anything, so discovery is armed
+   * here. It is idempotent and awaited by request paths, so a command that races
+   * the listener still cannot lose an already delivered event.
+   */
+  async #ensureDiscovery(signal?: AbortSignal): Promise<void> {
+    this.#discovery ??= this.cdp
+      .request("Target.setDiscoverTargets", { discover: true })
+      .then(() => undefined, (error: Error) => {
+        this.#discovery = undefined;
+        throw error;
+      });
+    if (!signal) return this.#discovery;
+    const aborted = Promise.withResolvers<never>();
+    const onAbort = () => aborted.reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    // Cancelling one waiter must not cancel discovery for other Screens.
+    try { await Promise.race([this.#discovery, aborted.promise]); }
+    finally { signal.removeEventListener("abort", onAbort); }
+  }
+
+  /**
+   * A page opened by an owned or pending page belongs to that page's Screen.
+   * A registered opener is resolved by window identity; a pending opener already
+   * supplies its Screen. Neither title nor geometry selects an owner, and an
+   * unknown opener records nothing so Sway parks the pop-up without guessing.
+   */
+  #onTargetEvent(method: string, params: Record<string, unknown>): void {
+    if (method === "Target.targetDestroyed") {
+      const targetId = String(params.targetId);
+      const reason = new Error("Browser target destroyed during attribution");
+      this.#destroyedTargets.add(targetId);
+      this.#openerLookups.get(targetId)?.abort(reason);
+      for (const [candidate, work] of this.#attributions) {
+        if (candidate.targetId === targetId) work.controller.abort(reason);
+      }
+      this.ownership.removePendingTarget(targetId);
+      return;
+    }
+    if (method !== "Target.targetCreated" && method !== "Target.targetInfoChanged") return;
+    const info = params.targetInfo as { targetId?: unknown; type?: unknown; openerId?: unknown } | undefined;
+    if (info === null || typeof info !== "object") return;
+    if (info.type !== "page" || typeof info.targetId !== "string") return;
+    const { targetId, openerId } = info;
+    if (method === "Target.targetCreated") this.#destroyedTargets.delete(targetId);
+    if (this.#destroyedTargets.has(targetId) || this.#failedAttributions.has(targetId)) return;
+    if (this.#openerLookups.has(targetId) || this.ownership.pendingTargets().some(candidate => candidate.targetId === targetId)
+      || this.ownership.ownedWindows().some(owner => owner.targetId === targetId)) return;
+    if (typeof openerId !== "string") {
+      // Only a new target captures the trusted launch/Web Control context.
+      // An old ownerless target changing its metadata cannot acquire a later lease.
+      if (method === "Target.targetCreated") {
+        const owner = this.options.ownerForNewTarget?.(targetId);
+        if (owner !== undefined) this.ownership.recordPendingTarget(owner, targetId);
+      }
+      return;
+    }
+    const controller = new AbortController();
+    this.#openerLookups.set(targetId, controller);
+    const result = this.#attributePopup(targetId, openerId, controller.signal).catch(() => {}).finally(() => {
+      if (this.#openerLookups.get(targetId) === controller) this.#openerLookups.delete(targetId);
+      this.#openerResults.delete(targetId);
+    });
+    this.#openerResults.set(targetId, result);
+  }
+
+  /** Resolve opener ownership against a lifetime snapshot, never a window count or event age. */
+  async #attributePopup(targetId: string, openerId: string, targetSignal: AbortSignal): Promise<void> {
+    // A launch or popup can open another page before its own native window is
+    // stamped. Its pending Screen owner is already authoritative; do not wait
+    // for a CDP window to enter the registered-window snapshot below.
+    const pendingOpener = this.ownership.pendingTargets().find(candidate => candidate.targetId === openerId);
+    if (pendingOpener) {
+      this.#lifetime.signal.throwIfAborted();
+      targetSignal.throwIfAborted();
+      this.ownership.surfaceSignal(pendingOpener.surfaceId).throwIfAborted();
+      this.ownership.recordPendingTarget(pendingOpener.surfaceId, targetId);
+      return;
+    }
+    // For an opener tab not yet observed by the Browser Tool, its Screen is not
+    // known until CDP answers. Snapshot each candidate Screen's signal first so
+    // even that lookup cannot revive a released/recreated Screen with the same id.
+    const owners = new Map(this.ownership.ownedWindows().map(owner => [owner.browserWindowId, {
+      ...owner, signal: this.ownership.surfaceSignal(owner.surfaceId),
+    }]));
+    const openerOwner = [...owners.values()].find(owner => owner.targetId === openerId);
+    const surfaceSignals = new Map([
+      ...[...owners.values()].map(owner => [owner.surfaceId, owner.signal] as const),
+      ...this.ownership.pendingTargets().map(candidate => [candidate.surfaceId, this.ownership.surfaceSignal(candidate.surfaceId)] as const),
+    ]);
+    const openerResult = this.#openerResults.get(openerId);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const signal = AbortSignal.any([
+        this.#lifetime.signal, targetSignal, AbortSignal.timeout(POPUP_ATTRIBUTION_TIMEOUT_MS),
+        ...(openerOwner ? [openerOwner.signal] : []),
+      ]);
+      try {
+        const windowId = await this.#browserWindowId(openerId, signal);
+        signal.throwIfAborted();
+        // A nested popup can resolve its opener's native identity before that
+        // opener has learned its Screen. Wait for that existing discovery, then
+        // re-read ownership while retaining the original Screen lifetimes.
+        if (openerResult) {
+          const aborted = Promise.withResolvers<never>();
+          const onAbort = () => aborted.reject(signal.reason);
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+          try { await Promise.race([openerResult, aborted.promise]); }
+          finally { signal.removeEventListener("abort", onAbort); }
+          signal.throwIfAborted();
+          if (this.#destroyedTargets.has(openerId)) return;
+          const pending = this.ownership.pendingTargets().find(candidate => candidate.targetId === openerId);
+          const current = this.ownership.ownerOfBrowserWindow(windowId);
+          const surfaceId = pending?.surfaceId ?? current?.surfaceId;
+          if (surfaceId === undefined) return;
+          const lifetime = surfaceSignals.get(surfaceId);
+          if (!lifetime || lifetime.aborted) return;
+          this.ownership.recordPendingTarget(surfaceId, targetId);
+          return;
+        }
+        const owner = owners.get(windowId);
+        if (!owner || owner.signal.aborted) return;
+        if (this.ownership.ownerOfBrowserWindow(windowId)?.surfaceId !== owner.surfaceId) return;
+        this.ownership.recordPendingTarget(owner.surfaceId, targetId);
+        return;
+      } catch (error) {
+        if (this.#lifetime.signal.aborted || targetSignal.aborted || openerOwner?.signal.aborted) return;
+        if (!signal.aborted) throw error;
+      }
+    }
+  }
+
+  /** A Screen wait includes opener discovery already in flight, before it stamps. */
+  async settleOpenerDiscovery(signal: AbortSignal): Promise<void> {
+    const abort = Promise.withResolvers<never>();
+    const onAbort = () => abort.reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    try { await Promise.race([Promise.all(this.#openerResults.values()), abort.promise]); }
+    finally { signal.removeEventListener("abort", onAbort); }
+  }
+
+  /** Candidates for popups, Bot launches and human takeover all use this lifecycle. */
+  attributeTarget(candidate: PendingWindowTarget, port: BrowserWindowAttributionPort, signal?: AbortSignal): Promise<OwnedWindow | undefined> {
+    const existing = this.#attributions.get(candidate);
+    if (existing) return existing.result;
+    const controller = new AbortController();
+    const combined = AbortSignal.any([
+      this.#lifetime.signal, this.ownership.surfaceSignal(candidate.surfaceId),
+      ...(signal ? [signal] : []),
+    ]);
+    const result = Promise.resolve().then(() => attributeBrowserTarget(this.cdp, this.ownership, candidate, port, combined, this.options.stampTimeoutMs ?? 2_000, controller.signal))
+      .catch(error => { this.#failedAttributions.add(candidate.targetId); throw error; })
+      .finally(() => { this.#attributions.delete(candidate); });
+    this.#attributions.set(candidate, { controller, result });
+    return result;
+  }
 
   async pageTargets(signal?: AbortSignal): Promise<TargetInfo[]> {
     const { targetInfos } = await this.cdp.request<{ targetInfos: TargetInfo[] }>("Target.getTargets", {}, undefined, signal ? { signal } : {});
@@ -97,14 +280,10 @@ export class BrowserRuntime {
     return this.#browserPid = browser[0]!.id;
   }
 
-  /** Launch integration may bind an exact routed window when page titles are ambiguous. */
-  async registerTarget(surfaceId: string, targetId: string, swayWindowId: string, signal?: AbortSignal): Promise<void> {
+  async #browserWindowId(targetId: string, signal?: AbortSignal): Promise<number> {
     const { windowId } = await this.cdp.request<TargetWindow>("Browser.getWindowForTarget", { targetId }, undefined, signal ? { signal } : {});
-    signal?.throwIfAborted();
-    this.#bind(surfaceId, this.#screen(surfaceId), windowId, swayWindowId);
-    const screen = this.#screen(surfaceId);
-    screen.active = targetId;
-    screen.refs.clear();
+    if (!Number.isInteger(windowId)) throw new Error("Browser returned an invalid window identity");
+    return windowId;
   }
 
   async perform(surfaceId: string, action: BrowserAction, port: BrowserScreenPort, signal?: AbortSignal): Promise<BrowserResult> {
@@ -114,6 +293,8 @@ export class BrowserRuntime {
     const combined = AbortSignal.any([screen.controller.signal, deadline, ...(signal ? [signal] : [])]);
     try {
       combined.throwIfAborted();
+      // Pop-up attribution is only as complete as discovery; a closed pipe fails this action anyway.
+      await this.#ensureDiscovery(combined).catch(() => combined.throwIfAborted());
       const scope = await this.#scope(surfaceId, port, combined);
       if (action.name === "tabs") return await this.#tabs(surfaceId, scope, action.args, port, combined);
       const tab = await this.#tab(scope, combined);
@@ -174,16 +355,23 @@ export class BrowserRuntime {
   }
 
   dropScreen(surfaceId: string): void {
+    this.ownership.releaseSurface(surfaceId);
     const screen = this.#screens.get(surfaceId);
     if (!screen) return;
     screen.controller.abort(new Error("Browser Screen closed"));
     for (const tab of screen.tabs.values()) void this.cdp.request("Target.detachFromTarget", { sessionId: tab.sessionId }).catch(() => {});
-    for (const windowId of screen.windows.keys()) this.#owners.delete(windowId);
     this.#screens.delete(surfaceId);
   }
 
   close(): void {
-    for (const surfaceId of this.#screens.keys()) this.dropScreen(surfaceId);
+    this.#lifetime.abort(new Error("Browser runtime closed"));
+    for (const surfaceId of new Set([
+      ...this.#screens.keys(),
+      ...this.ownership.ownedWindows().map(owner => owner.surfaceId),
+      ...this.ownership.pendingTargets().map(candidate => candidate.surfaceId),
+    ])) this.dropScreen(surfaceId);
+    this.#destroyedTargets.clear();
+    this.#failedAttributions.clear();
     this.#unsubscribe();
     this.cdp.close();
   }
@@ -191,22 +379,17 @@ export class BrowserRuntime {
   #screen(surfaceId: string): Screen {
     let screen = this.#screens.get(surfaceId);
     if (!screen) {
-      screen = { controller: new AbortController(), windows: new Map(), refs: new Map(), tabs: new Map() };
+      screen = { controller: new AbortController(), refs: new Map(), tabs: new Map() };
       this.#screens.set(surfaceId, screen);
     }
     return screen;
   }
 
-  #bind(surfaceId: string, screen: Screen, windowId: number, swayWindowId: string): void {
-    if (!Number.isInteger(windowId)) throw new Error("Browser returned an invalid window identity");
-    const owner = this.#owners.get(windowId);
-    if (owner && (owner.surfaceId !== surfaceId || owner.swayWindowId !== swayWindowId)) throw new Error("Browser window belongs to another Screen");
-    this.#owners.set(windowId, { surfaceId, swayWindowId });
-    screen.windows.set(windowId, swayWindowId);
-  }
-
   async #scope(surfaceId: string, port: BrowserScreenPort, signal: AbortSignal): Promise<Scope> {
     const screen = this.#screen(surfaceId);
+    // Only registrations observed before the native snapshot are eligible for
+    // pruning; popup attribution can register windows during the CDP lookups.
+    const observedOwnership = this.ownership.windowsFor(surfaceId);
     const windows = await port.windows();
     const browserPid = await this.processId(signal);
     signal.throwIfAborted();
@@ -223,39 +406,20 @@ export class BrowserRuntime {
       }
     }
     let lostWindow = false;
-    for (const [windowId, swayWindowId] of screen.windows) {
-      if (!windows.some((window) => window.id === swayWindowId && window.pid === browserPid)) {
-        screen.windows.delete(windowId);
-        this.#owners.delete(windowId);
+    for (const window of observedOwnership) {
+      const current = this.ownership.ownerOfBrowserWindow(window.browserWindowId);
+      if (current?.surfaceId !== window.surfaceId || current.swayWindowId !== window.swayWindowId || current.targetId !== window.targetId) continue;
+      if (!windows.some((candidate) => candidate.id === window.swayWindowId && candidate.pid === browserPid)) {
+        this.ownership.releaseWindow(surfaceId, window.swayWindowId);
         screen.refs.clear();
         lostWindow = true;
       }
     }
-    const candidateMatches = new Map<string, Set<number>>();
-    for (const candidate of windows) {
-      if (candidate.pid !== browserPid || !candidate.bounds || [...screen.windows.values()].includes(candidate.id)) continue;
-      const matches = new Set<number>();
-      for (const target of pages) {
-        const location = locations.get(target.targetId);
-        if (!location || this.#owners.has(location.windowId) || !titleMatches(candidate.title, target.title, target.url)) continue;
-        // Chromium includes a synthetic outer frame; Sway reports content below its title bar.
-        if (Math.abs((location.bounds.width ?? 0) - candidate.bounds.width) > 40 || Math.abs((location.bounds.height ?? 0) - candidate.bounds.height) > 40) continue;
-        matches.add(location.windowId);
-      }
-      candidateMatches.set(candidate.id, matches);
-    }
-    for (const matches of candidateMatches.values()) {
-      const windowId = matches.values().next().value;
-      if (matches.size > 1 || windowId !== undefined && [...candidateMatches.values()].filter((other) => other.has(windowId)).length > 1) throw new Error("Ambiguous browser window ownership; give the Screen browser a unique page title");
-    }
-    for (const [swayWindowId, matches] of candidateMatches) {
-      const windowId = matches.values().next().value;
-      if (windowId !== undefined) this.#bind(surfaceId, screen, windowId, swayWindowId);
-    }
+    const swayWindowOf = new Map(this.ownership.windowsFor(surfaceId).map((window) => [window.browserWindowId, window.swayWindowId]));
     const targetWindows = new Map<string, ComputerWindowListItem>();
     for (const target of pages) {
       const location = locations.get(target.targetId);
-      const swayWindowId = location ? screen.windows.get(location.windowId) : undefined;
+      const swayWindowId = location ? swayWindowOf.get(location.windowId) : undefined;
       const window = windows.find((candidate) => candidate.id === swayWindowId);
       if (window) targetWindows.set(target.targetId, window);
     }
@@ -267,7 +431,13 @@ export class BrowserRuntime {
         void this.cdp.request("Target.detachFromTarget", { sessionId: tab.sessionId }).catch(() => {});
       }
     }
-    if (!targets.length) throw new Error(lostWindow ? "Browser window is no longer routed to this Screen; take a new snapshot after opening a browser" : "No browser window belongs to this Screen; open a browser on this Screen first");
+    if (!targets.length) {
+      // Every window is bound by a launch claim or by the Surface whose page opened
+      // it, so an unbound window is something the Agent can fix from this Screen.
+      throw new Error(lostWindow
+        ? "Browser window is no longer routed to this Screen; take a new snapshot after opening a browser"
+        : "No browser window belongs to this Screen; open the page with `browser tabs open` or `open_url` from this Screen");
+    }
     const focused = [...new Set(targetWindows.values())].filter(window => window.focused);
     if (focused.length > 1) throw new Error("Cannot determine the selected browser window; focus one browser window and take a new snapshot");
     const window = focused[0] ?? targetWindows.get(screen.active ?? "") ?? targetWindows.get(targets[0]!.targetId)!;
@@ -533,10 +703,6 @@ export class BrowserRuntime {
   }
 }
 
-function titleMatches(windowTitle: string, title: string, url: string): boolean {
-  const names = title ? [title] : [url, url === "about:blank" ? "about:blank" : ""];
-  return names.some((name) => name !== "" && (windowTitle === name || windowTitle.startsWith(`${name} - `) || windowTitle.startsWith(`${name} — `)));
-}
 function requiredString(value: unknown, message: string): string {
   if (typeof value !== "string" || value.trim() === "") throw new Error(message);
   return value;
