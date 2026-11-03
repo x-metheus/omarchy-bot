@@ -6,7 +6,34 @@ import { CdpPipe } from "../../apps/daemon/src/modules/computer/cdpPipe.ts";
 import { BrowserRuntime, type BrowserScreenPort } from "../../apps/daemon/src/modules/computer/browserRuntime.ts";
 
 type Command = { id: number; method: string; params: Record<string, unknown>; sessionId?: string };
-function fixture() {
+type AxFixtureNode = { nodeId: string; parentId?: string; childIds?: string[]; ignored?: boolean; backendDOMNodeId?: number; role?: { value: string }; name?: { value: string }; value?: { value: string }; properties?: { name: string; value: { value: unknown } }[] };
+
+/** A wide, deep page: 50 ignored wrappers x 40 sections x 100 fields, far beyond the old 8 MiB full-tree reply. */
+function largeAxTree(): Map<string, AxFixtureNode> {
+  const nodes = new Map<string, AxFixtureNode>();
+  const root: AxFixtureNode = { nodeId: "1", childIds: [], role: { value: "RootWebArea" }, name: { value: "Fixture" } };
+  nodes.set(root.nodeId, root);
+  let next = 2;
+  let backend = 1000;
+  for (let w = 0; w < 50; w++) {
+    const wrapper: AxFixtureNode = { nodeId: String(next++), parentId: root.nodeId, ignored: true, role: { value: "generic" }, childIds: [] };
+    root.childIds!.push(wrapper.nodeId);
+    nodes.set(wrapper.nodeId, wrapper);
+    for (let g = 0; g < 40; g++) {
+      const section: AxFixtureNode = { nodeId: String(next++), parentId: wrapper.nodeId, backendDOMNodeId: backend++, role: { value: "group" }, name: { value: `Section ${w}.${g}` }, childIds: [] };
+      wrapper.childIds!.push(section.nodeId);
+      nodes.set(section.nodeId, section);
+      for (let i = 0; i < 100; i++) {
+        const field: AxFixtureNode = { nodeId: String(next++), parentId: section.nodeId, backendDOMNodeId: backend++, role: { value: "textbox" }, name: { value: `Field ${w}.${g}.${i} ${"label ".repeat(20)}` }, value: { value: "" }, properties: [{ name: "required", value: { value: true } }] };
+        section.childIds!.push(field.nodeId);
+        nodes.set(field.nodeId, field);
+      }
+    }
+  }
+  return nodes;
+}
+
+function fixture(limits?: ConstructorParameters<typeof CdpPipe>[2]) {
   const commands = new PassThrough();
   const replies = new PassThrough();
   const log: Command[] = [];
@@ -22,6 +49,15 @@ function fixture() {
   const selected = new Map([[1, "a"], [2, "b"]]);
   let removed = false;
   let axCount = 1;
+  let axTree: Map<string, AxFixtureNode> | undefined;
+  const replySizes: number[] = [];
+  const smallAxTree = (sessionId?: string): Map<string, AxFixtureNode> => {
+    const nodes = new Map<string, AxFixtureNode>();
+    const children = Array.from({ length: axCount }, (_, i): AxFixtureNode => ({ nodeId: String(i + 2), parentId: "1", backendDOMNodeId: 42 + i, role: { value: "textbox" }, name: { value: "Name" }, value: { value: "" }, properties: [{ name: "required", value: { value: true } }] }));
+    nodes.set("1", { nodeId: "1", childIds: children.map((child) => child.nodeId), role: { value: "RootWebArea" }, name: { value: sessionId === "session-duplicate" ? "Human selected page" : "Fixture" } });
+    for (const child of children) nodes.set(child.nodeId, child);
+    return nodes;
+  };
   let geometry = { innerWidth: 800, innerHeight: 520, clientWidth: 800, clientHeight: 520 };
   const unlocated = new Set<string>();
   const disappearing = new Set<string>();
@@ -55,10 +91,15 @@ function fixture() {
           break;
         }
         case "Target.attachToTarget": result = { sessionId: `session-${command.params.targetId}` }; break;
-        case "Accessibility.getFullAXTree": result = { nodes: [
-          { nodeId: "1", childIds: ["2"], role: { value: "RootWebArea" }, name: { value: command.sessionId === "session-duplicate" ? "Human selected page" : "Fixture" } },
-          ...Array.from({ length: axCount }, (_, i) => ({ nodeId: String(i + 2), parentId: "1", backendDOMNodeId: 42 + i, role: { value: "textbox" }, name: { value: "Name" }, value: { value: "" }, properties: [{ name: "required", value: { value: true } }] })),
-        ] }; break;
+        case "Accessibility.getFullAXTree": result = { nodes: [...(axTree ?? smallAxTree(command.sessionId)).values()] }; break;
+        case "Accessibility.getRootAXNode": result = { node: (axTree ?? smallAxTree(command.sessionId)).get("1") }; break;
+        case "Accessibility.getChildAXNodes": {
+          const tree = axTree ?? smallAxTree(command.sessionId);
+          const parent = tree.get(String(command.params.id));
+          if (!parent) { replies.write(JSON.stringify({ id: command.id, error: { message: "Invalid ID" } }) + "\0"); continue; }
+          result = { nodes: (parent.childIds ?? []).map((id) => tree.get(id)!) };
+          break;
+        }
         case "Page.getFrameTree": result = { frameTree: { frame: { id: "main", loaderId: "load1" } } }; break;
         case "Page.createIsolatedWorld": result = { executionContextId: 123 }; break;
         case "Runtime.evaluate": {
@@ -73,7 +114,18 @@ function fixture() {
           break;
         }
         case "DOM.resolveNode": result = { object: { objectId: "isolated-element" } }; break;
-        case "Runtime.callFunctionOn": result = { result: { value: String(command.params.functionDeclaration).includes("this.options") ? [{ value: "red", label: "Red", disabled: false }, { value: "blue", label: "Blue", disabled: false }] : text } }; break;
+        case "Runtime.callFunctionOn": {
+          const declaration = String(command.params.functionDeclaration);
+          if (!declaration.includes("this.options")) { result = { result: { value: text } }; break; }
+          const select = { tagName: "SELECT", multiple: false, options: [
+            { value: "grey", label: "Grey", disabled: true, parentElement: { tagName: "SELECT" } },
+            { value: "red", label: "Red", disabled: false, parentElement: { tagName: "SELECT" } },
+            { value: "blue", label: "Blue", disabled: false, parentElement: { tagName: "SELECT" } },
+          ] };
+          const args = (command.params.arguments as { value: unknown }[] | undefined ?? []).map((arg) => arg.value);
+          result = { result: { value: (runInNewContext(`(${declaration})`) as (...args: unknown[]) => unknown).apply(select, args) } };
+          break;
+        }
         case "Page.getNavigationHistory": result = { currentIndex: 1, entries: [{ id: 1 }, { id: 2 }] }; break;
         case "Target.closeTarget": {
           const index = targets.findIndex((target) => target.targetId === command.params.targetId);
@@ -88,11 +140,13 @@ function fixture() {
         case "DOM.getBoxModel": result = { model: { content: [20, 30, 120, 30, 120, 70, 20, 70] } }; break;
         case "Page.getLayoutMetrics": result = { cssLayoutViewport: { clientWidth: geometry.clientWidth, clientHeight: geometry.clientHeight, pageX: 0, pageY: 0 } }; break;
       }
-      replies.write(JSON.stringify({ id: command.id, result }) + "\0");
+      const reply = JSON.stringify({ id: command.id, result }) + "\0";
+      replySizes.push(Buffer.byteLength(reply));
+      replies.write(reply);
       if (command.method === "Page.getFrameTree") onFrame?.();
     }
   });
-  const cdp = new CdpPipe(commands, replies);
+  const cdp = new CdpPipe(commands, replies, limits);
   const runtime = new BrowserRuntime(cdp);
   const port = (screen: "a" | "b"): BrowserScreenPort => ({
     windows: async () => [{ id: `window-${screen}`, pid: 100, title: `Screen ${screen.toUpperCase()} - Chromium`, focused: true, bounds: { x: 10, y: 20, width: 800, height: 600 } }],
@@ -106,7 +160,7 @@ function fixture() {
       }
     },
   });
-  return { runtime, cdp, log, input, targets, replies, port, selected, unlocated, disappearing, setGeometry: (value: typeof geometry) => { geometry = value; }, setText: (value: string) => { text = value; }, onFrame: (callback: () => void) => { onFrame = callback; }, hide: () => { hidden = true; }, remove: () => { removed = true; }, manyNodes: () => { axCount = 400; } };
+  return { runtime, cdp, log, input, targets, replies, port, selected, unlocated, disappearing, setGeometry: (value: typeof geometry) => { geometry = value; }, setText: (value: string) => { text = value; }, onFrame: (callback: () => void) => { onFrame = callback; }, hide: () => { hidden = true; }, remove: () => { removed = true; }, manyNodes: () => { axCount = 400; }, setAxTree: (tree: Map<string, AxFixtureNode>) => { axTree = tree; }, replySizes };
 }
 
 test("snapshot owns only the routed Screen and new snapshots invalidate element refs", async () => {
@@ -280,6 +334,58 @@ test("snapshot preserves AX hierarchy and caps node output", async () => {
     expect(large.truncated).toBe(true);
     expect(large.text.split("\n").length).toBeLessThanOrEqual(300);
     expect(Buffer.byteLength(large.text)).toBeLessThanOrEqual(16384);
+  } finally { f.runtime.close(); }
+});
+
+test("snapshot of a huge page walks the AX tree within caps and reports truncation", async () => {
+  const f = fixture();
+  const tree = largeAxTree();
+  // The old single getFullAXTree reply for this page would exceed the 8 MiB CDP frame limit.
+  expect(Buffer.byteLength(JSON.stringify({ id: 1, result: { nodes: [...tree.values()] } }))).toBeGreaterThan(8 * 1024 * 1024);
+  f.setAxTree(tree);
+  try {
+    const snapshot = await f.runtime.perform("screen-a", { name: "snapshot", args: {} }, f.port("a"));
+    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.text.split("\n").length).toBeLessThanOrEqual(300);
+    expect(Buffer.byteLength(snapshot.text)).toBeLessThanOrEqual(16384);
+    // Ignored wrappers are skipped but their descendants keep document order and hierarchy.
+    expect(snapshot.text).toMatch(/^RootWebArea "Fixture"\n  \[e\d+\] group "Section 0\.0"\n    \[e\d+\] textbox "Field 0\.0\.0 /);
+    expect(f.log.some((command) => command.method === "Accessibility.getFullAXTree")).toBe(false);
+    expect(f.log.filter((command) => command.method === "Accessibility.getChildAXNodes").length).toBeLessThan(20);
+    expect(Math.max(...f.replySizes)).toBeLessThan(256 * 1024);
+    expect(f.log.findLast((command) => command.method.startsWith("Accessibility."))?.method).toBe("Accessibility.disable");
+    // Refs from the walk act like refs from the old full-tree snapshot.
+    const ref = snapshot.text.match(/\[(e[^\]]+)\]/)![1]!;
+    expect((await f.runtime.perform("screen-a", { name: "read_text", args: { ref } }, f.port("a"))).text).toBe("Fixture ready");
+  } finally { f.runtime.close(); }
+});
+
+test("an oversized child list truncates only that snapshot and the shared pipe keeps serving every Screen", async () => {
+  const f = fixture({ maxFrameBytes: 64 * 1024 });
+  const tree = new Map<string, AxFixtureNode>();
+  const huge: AxFixtureNode = { nodeId: "2", parentId: "1", role: { value: "list" }, name: { value: "Huge" }, childIds: [] };
+  tree.set("1", { nodeId: "1", childIds: ["2", "3"], role: { value: "RootWebArea" }, name: { value: "Fixture" } });
+  tree.set("2", huge);
+  tree.set("3", { nodeId: "3", parentId: "1", backendDOMNodeId: 7, role: { value: "button" }, name: { value: "After" } });
+  for (let i = 0; i < 2000; i++) {
+    tree.set(`h${i}`, { nodeId: `h${i}`, parentId: "2", role: { value: "listitem" }, name: { value: "item ".repeat(20) } });
+    huge.childIds!.push(`h${i}`);
+  }
+  f.setAxTree(tree);
+  try {
+    const snapshot = await f.runtime.perform("screen-a", { name: "snapshot", args: {} }, f.port("a"));
+    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.text).toContain('list "Huge"');
+    expect(snapshot.text).toContain('button "After"');
+    expect(snapshot.text).not.toContain("listitem");
+    expect(f.cdp.alive).toBe(true);
+    expect((await f.runtime.perform("screen-b", { name: "read_text", args: {} }, f.port("b"))).text).toBe("Fixture ready");
+    // When nothing at all fits, the snapshot fails with the actionable message instead of an empty result.
+    tree.set("1", { nodeId: "1", ignored: true, childIds: [...huge.childIds!], role: { value: "RootWebArea" } });
+    await expect(f.runtime.perform("screen-a", { name: "snapshot", args: {} }, f.port("a"))).rejects.toThrow("page too large for a snapshot; narrow with read_text/wait_for or take a smaller snapshot");
+    expect(f.cdp.alive).toBe(true);
+    tree.set("1", { nodeId: "1", childIds: ["3"], role: { value: "RootWebArea" }, name: { value: "Fixture" } });
+    expect((await f.runtime.perform("screen-b", { name: "snapshot", args: {} }, f.port("b"))).text).toContain('button "After"');
   } finally { f.runtime.close(); }
 });
 

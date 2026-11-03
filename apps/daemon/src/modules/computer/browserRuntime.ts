@@ -1,7 +1,7 @@
 import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
 import type { BrowserAction, ComputerAction } from "@omarchy-bot/domain";
 import { setTimeout as delay } from "node:timers/promises";
-import { CdpPipe } from "./cdpPipe.ts";
+import { CdpReplyTooLargeError, type CdpPipe } from "./cdpPipe.ts";
 
 export interface BrowserScreenPort {
   windows(): Promise<ComputerWindowListItem[]>;
@@ -28,6 +28,8 @@ interface Tab {
   frameId?: string;
   contextId?: number;
   navigation: number;
+  /** Snapshots in flight that need the Accessibility domain enabled on this session. */
+  axUsers?: number;
 }
 interface Screen {
   controller: AbortController;
@@ -38,6 +40,10 @@ interface Screen {
 }
 interface Scope { screen: Screen; window: ComputerWindowListItem; targets: TargetInfo[]; targetWindows: Map<string, ComputerWindowListItem> }
 const SNAPSHOT_BYTES = 16 * 1024;
+const SNAPSHOT_LINES = 300;
+/** Walk budget so long runs of ignored AX nodes cannot turn one snapshot into unbounded CDP traffic. */
+const SNAPSHOT_VISIT_NODES = 4_000;
+const SNAPSHOT_FETCHES = 1_000;
 const TEXT_BYTES = 8 * 1024;
 
 /** One private browser pipe, with target and element authority scoped to routed Screen windows. */
@@ -122,11 +128,10 @@ export class BrowserRuntime {
           let optionIndex: number | undefined;
           if (action.name === "select") {
             const value = requiredString(action.args.value, "select requires args.value");
-            const options = await this.#elementValue<{ value: string; label: string; disabled: boolean }[]>(tab, backendNodeId,
-              "function() { if (this.tagName !== 'SELECT' || this.multiple) throw new Error('select requires a single native select'); return Array.from(this.options, o => ({value:o.value,label:o.label,disabled:o.disabled || (o.parentElement.tagName === 'OPTGROUP' && o.parentElement.disabled)})); }", combined);
-            const enabled = options.filter((option) => !option.disabled);
-            optionIndex = enabled.findIndex((option) => option.value === value || option.label === value);
-            if (optionIndex < 0) throw new Error(`No enabled select option matches ${JSON.stringify(value)}`);
+            // Match in the page so a huge option list never crosses the CDP pipe; only the index returns.
+            optionIndex = await this.#elementValue<number>(tab, backendNodeId,
+              "function(wanted) { if (this.tagName !== 'SELECT' || this.multiple) throw new Error('select requires a single native select'); return Array.from(this.options).filter(o => !(o.disabled || (o.parentElement.tagName === 'OPTGROUP' && o.parentElement.disabled))).findIndex(o => o.value === wanted || o.label === wanted); }", combined, [value]);
+            if (!Number.isSafeInteger(optionIndex) || optionIndex < 0) throw new Error(`No enabled select option matches ${JSON.stringify(value)}`);
           }
           await this.#click(surfaceId, screen, tab, backendNodeId, port, combined);
           combined.throwIfAborted();
@@ -330,36 +335,60 @@ export class BrowserRuntime {
   async #snapshot(screen: Screen, tab: Tab, signal: AbortSignal): Promise<BrowserResult> {
     screen.refs.clear();
     const navigation = tab.navigation;
-    const { nodes } = await this.cdp.request<{ nodes: AxNode[] }>("Accessibility.getFullAXTree", {}, tab.sessionId, { signal });
-    if (navigation !== tab.navigation) throw new Error("Page navigated during snapshot; take a new snapshot");
-    const lines: string[] = [];
-    let bytes = 0;
-    let truncated = false;
-    const byId = new Map(nodes.map((node) => [node.nodeId, node]));
-    const parents = new Map<string, string>();
-    for (const node of nodes) {
-      if (node.parentId) parents.set(node.nodeId, node.parentId);
-      for (const childId of node.childIds ?? []) parents.set(childId, node.nodeId);
-    }
-    for (const node of nodes) {
-      if (node.ignored) continue;
-      const ref = node.backendDOMNodeId ? `e${++this.#refSequence}` : undefined;
-      const states = (node.properties ?? []).filter((property) => ["disabled", "checked", "selected", "expanded", "required", "readonly", "pressed", "focused", "level"].includes(property.name)).map((property) => `${property.name}=${JSON.stringify(property.value.value)}`);
-      let depth = 0;
-      let parent = parents.get(node.nodeId);
-      const seen = new Set([node.nodeId]);
-      while (parent && !seen.has(parent) && depth < 30) {
-        seen.add(parent);
-        if (!byId.get(parent)?.ignored) depth++;
-        parent = parents.get(parent);
+    const checkNavigation = (): void => { if (navigation !== tab.navigation) throw new Error("Page navigated during snapshot; take a new snapshot"); };
+    // Walk the AX tree one node's children at a time so a huge page never produces a huge reply.
+    // AXNodeIds are only stable between calls while the Accessibility domain is enabled.
+    tab.axUsers = (tab.axUsers ?? 0) + 1;
+    try {
+      await this.cdp.request("Accessibility.enable", {}, tab.sessionId, { signal });
+      const { node: root } = await this.cdp.request<{ node: AxNode }>("Accessibility.getRootAXNode", {}, tab.sessionId, { signal });
+      checkNavigation();
+      const lines: string[] = [];
+      let bytes = 0;
+      let truncated = false;
+      let visited = 0;
+      let fetches = 0;
+      const seen = new Set([root.nodeId]);
+      const stack: { node: AxNode; depth: number }[] = [{ node: root, depth: 0 }];
+      while (stack.length) {
+        if (++visited > SNAPSHOT_VISIT_NODES) { truncated = true; break; }
+        const { node, depth } = stack.pop()!;
+        if (!node.ignored) {
+          const ref = node.backendDOMNodeId ? `e${++this.#refSequence}` : undefined;
+          const states = (node.properties ?? []).filter((property) => ["disabled", "checked", "selected", "expanded", "required", "readonly", "pressed", "focused", "level"].includes(property.name)).map((property) => `${property.name}=${JSON.stringify(property.value.value)}`);
+          const line = `${"  ".repeat(depth)}${ref ? `[${ref}] ` : ""}${String(node.role?.value ?? "node")} ${JSON.stringify(node.name?.value ?? "")}${node.value?.value !== undefined ? ` value=${JSON.stringify(node.value.value)}` : ""}${states.length ? ` ${states.join(" ")}` : ""}`;
+          if (lines.length >= SNAPSHOT_LINES || bytes + Buffer.byteLength(line) + 1 > SNAPSHOT_BYTES) { truncated = true; break; }
+          lines.push(line);
+          bytes += Buffer.byteLength(line) + 1;
+          if (ref) screen.refs.set(ref, { backendNodeId: node.backendDOMNodeId!, targetId: tab.targetId });
+        }
+        const childIds = node.childIds ?? [];
+        if (!childIds.length) continue;
+        if (++fetches > SNAPSHOT_FETCHES) { truncated = true; break; }
+        let children: AxNode[];
+        try {
+          ({ nodes: children } = await this.cdp.request<{ nodes: AxNode[] }>("Accessibility.getChildAXNodes", { id: node.nodeId }, tab.sessionId, { signal }));
+        } catch (error) {
+          // A node removed mid-walk invalidates the walk; one enormous child list is only truncation.
+          if (error instanceof Error && /invalid id/i.test(error.message)) throw new Error("Page changed during snapshot; take a new snapshot");
+          if (!(error instanceof CdpReplyTooLargeError)) throw error;
+          truncated = true;
+          continue;
+        }
+        checkNavigation();
+        const byId = new Map(children.map((child) => [child.nodeId, child]));
+        // Keep the declared child order; anything extra the browser returns (e.g. iframe documents) follows.
+        const declared = new Set(childIds);
+        const ordered = [...childIds.flatMap((id) => byId.get(id) ?? []), ...children.filter((child) => !declared.has(child.nodeId))]
+          .filter((child) => !seen.has(child.nodeId) && seen.add(child.nodeId));
+        const childDepth = Math.min(30, depth + (node.ignored ? 0 : 1));
+        for (let i = ordered.length - 1; i >= 0; i--) stack.push({ node: ordered[i]!, depth: childDepth });
       }
-      const line = `${"  ".repeat(depth)}${ref ? `[${ref}] ` : ""}${String(node.role?.value ?? "node")} ${JSON.stringify(node.name?.value ?? "")}${node.value?.value !== undefined ? ` value=${JSON.stringify(node.value.value)}` : ""}${states.length ? ` ${states.join(" ")}` : ""}`;
-      if (lines.length >= 300 || bytes + Buffer.byteLength(line) + 1 > SNAPSHOT_BYTES) { truncated = true; break; }
-      lines.push(line);
-      bytes += Buffer.byteLength(line) + 1;
-      if (ref) screen.refs.set(ref, { backendNodeId: node.backendDOMNodeId!, targetId: tab.targetId });
+      if (lines.length === 0 && truncated) throw new CdpReplyTooLargeError("Accessibility.getChildAXNodes", SNAPSHOT_BYTES);
+      return { text: lines.join("\n"), ...(truncated ? { truncated: true } : {}) };
+    } finally {
+      if (--tab.axUsers === 0) void this.cdp.request("Accessibility.disable", {}, tab.sessionId).catch(() => {});
     }
-    return { text: lines.join("\n"), ...(truncated ? { truncated: true } : {}) };
   }
 
   async #context(tab: Tab, signal: AbortSignal): Promise<number> {
@@ -371,12 +400,12 @@ export class BrowserRuntime {
     return executionContextId;
   }
 
-  async #elementValue<T>(tab: Tab, backendNodeId: number, functionDeclaration: string, signal: AbortSignal): Promise<T> {
+  async #elementValue<T>(tab: Tab, backendNodeId: number, functionDeclaration: string, signal: AbortSignal, args: unknown[] = []): Promise<T> {
     const executionContextId = await this.#context(tab, signal);
     const { object } = await this.cdp.request<{ object: { objectId?: string } }>("DOM.resolveNode", { backendNodeId, executionContextId }, tab.sessionId, { signal });
     if (!object.objectId) throw new Error("Element no longer exists; take a new snapshot");
     try {
-      const response = await this.cdp.request<{ result: { value: T }; exceptionDetails?: { text?: string } }>("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration, returnByValue: true }, tab.sessionId, { signal });
+      const response = await this.cdp.request<{ result: { value: T }; exceptionDetails?: { text?: string } }>("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration, ...(args.length ? { arguments: args.map((value) => ({ value })) } : {}), returnByValue: true }, tab.sessionId, { signal });
       if (response.exceptionDetails) throw new Error(`Browser element read failed: ${response.exceptionDetails.text ?? "element unavailable"}`);
       return response.result.value;
     } finally { void this.cdp.request("Runtime.releaseObject", { objectId: object.objectId }, tab.sessionId).catch(() => {}); }
