@@ -582,6 +582,40 @@ export async function waitForSocket(
 export interface OwnedChild {
   process: DetachedProcess;
   session?: OwnedSession;
+  /** The child's last stderr bytes, present only when the spawn captured them. */
+  stderrTail?: OutputTail;
+}
+
+/**
+ * The last bytes of a child's output, kept bounded while it runs: a launch
+ * diagnostic needs the tail of a failure, never the whole transcript.
+ */
+export class OutputTail {
+  static readonly LIMIT_BYTES = 4 * 1024;
+  #bytes = Buffer.alloc(0);
+
+  constructor(readonly limitBytes: number = OutputTail.LIMIT_BYTES) {}
+
+  append(chunk: Uint8Array): void {
+    const combined = Buffer.concat([this.#bytes, chunk]);
+    // Copied, not a view: the bytes kept must not retain a larger buffer behind them.
+    this.#bytes = combined.length <= this.limitBytes
+      ? combined
+      : Buffer.from(combined.subarray(combined.length - this.limitBytes));
+  }
+
+  text(): string {
+    return this.#bytes.toString("utf8");
+  }
+}
+
+/** Drains `stream` into `tail` until it closes; the bounded tail keeps only the end. */
+async function drainInto(stream: ReadableStream<Uint8Array>, tail: OutputTail): Promise<void> {
+  try {
+    for await (const chunk of stream) tail.append(chunk);
+  } catch {
+    // The child exited and its pipe ended abruptly; the tail keeps what it read.
+  }
 }
 
 /**
@@ -595,23 +629,31 @@ export function spawnDetachedChild(input: {
   env: Record<string, string>;
   cwd?: string;
   output: "pipe" | "ignore";
+  /** Keep the child's last stderr bytes in `stderrTail` instead of discarding them. */
+  captureStderr?: boolean;
   owned: boolean;
   browserPipe?: boolean;
 }): OwnedChild {
   const token = randomUUID();
+  const capture = input.captureStderr === true;
+  const stderr = capture ? "pipe" : input.output;
   const process = Bun.spawn(
     input.owned ? anchoredSessionCommand(input.argv, token) : [...input.argv],
     {
       env: input.env,
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(input.browserPipe
-        ? { stdio: ["ignore", input.output, input.output, "socket-fd", "socket-fd"] as const }
-        : { stdin: "ignore" as const, stdout: input.output, stderr: input.output }),
+        ? { stdio: ["ignore", input.output, stderr, "socket-fd", "socket-fd"] as const }
+        : { stdin: "ignore" as const, stdout: input.output, stderr }),
       detached: true,
     },
   );
+  const stderrTail = capture ? new OutputTail() : undefined;
+  // A piped stderr always has its stream; the non-piped spawns never capture one.
+  if (stderrTail !== undefined) void drainInto(process.stderr!, stderrTail);
   return {
     process,
+    ...(stderrTail === undefined ? {} : { stderrTail }),
     ...(input.owned ? { session: { sessionId: process.pid, anchor: sessionAnchor(token) } } : {}),
   };
 }

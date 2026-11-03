@@ -147,6 +147,19 @@ async function hideBotDesktop(
   }
 }
 
+/** How a process ended, or `undefined` while it still runs. */
+function exitDescription(process: DetachedProcess): string | undefined {
+  if (process.exitCode !== null) return `code ${process.exitCode}`;
+  if (process.signalCode !== null) return `signal ${process.signalCode}`;
+  return undefined;
+}
+
+/** The end of a child's stderr; a failure that printed nothing still says so. */
+function stderrTailText(child: OwnedChild): string {
+  const tail = child.stderrTail?.text().trim() ?? "";
+  return tail === "" ? "no stderr output" : tail;
+}
+
 
 /**
  * Bot Screens over one shared Bot Computer. Each Screen owns an
@@ -946,6 +959,11 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     }
     const text = request.app !== undefined ? `launched ${request.app}` : `opened ${request.url}`;
     const browserPipe = argv.includes("--remote-debugging-pipe");
+    // A pack that survived a Service restart still holds the profile singleton,
+    // but the CDP pipe that could drive it is gone, so a new piped pack would
+    // forward to it and exit. Replace it first: its tabs and URL are lost, its
+    // sign-ins stay in the profile (Computer ADR 0013).
+    if (browserPipe) await this.#browser.stopOrphanPacks();
     const role = `application-${++session.computer.applicationSequence}` as const;
     const application = spawnDetachedChild({
       argv: [
@@ -960,14 +978,21 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       env: browserPipe ? session.computer.childEnv : this.#units.launcherEnvironment(session.computer.childEnv),
       cwd,
       output: "ignore",
+      // A pack that dies during startup is diagnosed from the end of its stderr.
+      captureStderr: browserPipe,
       // Extra CDP descriptors cannot pass through systemd-run's stdio forwarding.
       owned: browserPipe || !this.#units.enabled,
       browserPipe,
     });
+    // True when this launch's CDP descriptors became the Service's browser pipe:
+    // a pack the Service can drive itself. A launch that forwards to the live pack
+    // already holding the pipe destroys its descriptors, so it owns none.
+    let ownsBrowserPipe = false;
     if (browserPipe) {
       const writer = createConnection({ fd: application.process.stdio[3]! });
       const reader = createConnection({ fd: application.process.stdio[4]! });
       if (session.computer.browser?.alive !== true) {
+        ownsBrowserPipe = true;
         const browser = new BrowserRuntime(new CdpPipe(writer, reader));
         session.computer.browser = browser;
         void application.process.exited.then(() => browser.close());
@@ -1043,6 +1068,19 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           return current?.workspace === session.workspaceName && current.visible === true;
         });
         if (settled) return { text };
+      }
+      // A pack that exited before any window was claimed never opens one, so
+      // report why now instead of waiting out the deadline. A forwarding child of
+      // a Chromium singleton handoff also exits by design, but it hands its URL to
+      // the live pack that keeps the Service's pipe, so only the launch that became
+      // that pipe can have failed here.
+      if (ownsBrowserPipe && claimed.size === 0) {
+        const exit = exitDescription(application.process);
+        if (exit !== undefined) {
+          throw new Error(
+            `The browser exited during startup (${exit}): ${stderrTailText(application)}`,
+          );
+        }
       }
       await Bun.sleep(20);
     }

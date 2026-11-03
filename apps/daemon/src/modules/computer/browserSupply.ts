@@ -11,7 +11,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 import {
+  processDescendsFrom,
+  processIdentity,
   processIdentityRunning,
+  signalAll,
   type ProcessIdentity,
 } from "../../supervision/ownedProcesses.ts";
 import { BROWSER_PACK_MISSING, type BotComputerAssetSupply } from "./botComputerAssets.ts";
@@ -50,6 +53,13 @@ const PROFILE_NAME = "omarchy-bot-browser";
 const LEGACY_PROFILE_NAME = "chromium";
 const SHIM_DIR_NAME = "browser-shims";
 const LAUNCHER_NAME = "omarchy-bot-browser";
+/**
+ * Orphan teardown windows, mirroring owned-session teardown: a pack gets a grace
+ * window after SIGTERM before SIGKILL, then a short wait for each to land.
+ */
+const PACK_TERM_GRACE_MS = 2_000;
+const PACK_KILL_WAIT_MS = 1_000;
+const PACK_SIGNAL_POLL_MS = 50;
 export const PACK_DESKTOP_ID = "omarchy-bot-browser.desktop";
 const PACK_MIME_TYPES = [
   "x-scheme-handler/http",
@@ -117,6 +127,15 @@ function parentPid(pid: number): number | undefined {
     return ppid !== undefined && /^\d+$/.test(ppid) ? Number(ppid) : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/** The argv a live process was started with; empty when it is already gone. */
+function processArguments(pid: number): string[] {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+  } catch {
+    return [];
   }
 }
 
@@ -291,6 +310,104 @@ export class BrowserSupply {
       current = parent;
     }
     return false;
+  }
+
+  /**
+   * Pack processes of this Bot Computer whose CDP pipe this Service does not
+   * hold: every pack process outside the pid tree of a tracked launch. They are
+   * orphans because only a launch the Service spawned can be driven over the
+   * pipe, and a pack without one still owns the profile singleton after a
+   * Service restart. `isPackBrowser` is global, so a candidate is scoped by this
+   * Bot Computer's own `--user-data-dir` as well: another data dir, checkout or
+   * Service instance's pack is never this Service's to stop.
+   */
+  orphanPacks(): ProcessIdentity[] {
+    if (this.#packExecutable === undefined) return [];
+    let entries: string[];
+    try {
+      entries = readdirSync("/proc");
+    } catch {
+      return [];
+    }
+    const orphans: ProcessIdentity[] = [];
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      if (!this.#isOwnPackProcess(pid)) continue;
+      if (this.#heldPipeCovers(pid)) continue;
+      const identity = processIdentity(pid);
+      if (identity !== undefined) orphans.push(identity);
+    }
+    return orphans;
+  }
+
+  /**
+   * Stops every orphan pack with targeted teardown: SIGTERM, a grace window,
+   * then SIGKILL, re-verifying each identity and rescanning between rounds so a
+   * descendant forked during teardown cannot escape. Only pack processes of
+   * this Bot Computer are signalled. A piped launch runs this first, so a
+   * pipe-less pack holding the profile singleton is replaced cleanly; its tabs
+   * and URLs are lost and its sign-ins persist in the profile.
+   */
+  async stopOrphanPacks(graceMs = PACK_TERM_GRACE_MS): Promise<number[]> {
+    const stopped = new Set<number>();
+    const termUntil = Date.now() + graceMs;
+    let orphans = this.orphanPacks();
+    while (orphans.length > 0 && Date.now() < termUntil) {
+      for (const orphan of orphans) stopped.add(orphan.pid);
+      signalAll(orphans, "SIGTERM");
+      await Bun.sleep(PACK_SIGNAL_POLL_MS);
+      orphans = this.orphanPacks();
+    }
+    const killUntil = Date.now() + PACK_KILL_WAIT_MS;
+    while (orphans.length > 0 && Date.now() < killUntil) {
+      for (const orphan of orphans) stopped.add(orphan.pid);
+      signalAll(orphans, "SIGKILL");
+      await Bun.sleep(PACK_SIGNAL_POLL_MS);
+      orphans = this.orphanPacks();
+    }
+    if (orphans.length > 0) {
+      throw new Error(
+        `browser pack processes survived SIGKILL: ${orphans.map((orphan) => orphan.pid).join(", ")}`,
+      );
+    }
+    return [...stopped];
+  }
+
+  /**
+   * True when `pid` belongs to the pid tree of a launch whose CDP pipe this
+   * Service holds, which is never an orphan. A tracked launch without a
+   * captured identity is still ours by pid, so it is skipped rather than killed.
+   */
+  #heldPipeCovers(pid: number): boolean {
+    for (const [launchPid, identity] of this.#launches) {
+      if (processDescendsFrom(pid, launchPid, identity)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * True when `pid` or a pack ancestor runs with one of this Bot Computer's own
+   * `--user-data-dir` values. A process whose profile arguments cannot be read
+   * fails closed: it is left alone, never guessed to be ours.
+   */
+  #isOwnPackProcess(pid: number): boolean {
+    let current = pid;
+    for (let depth = 0; depth < 64; depth += 1) {
+      if (this.#usesOwnProfile(current) && this.isPackBrowser(current)) return true;
+      if (current <= 1) return false;
+      const parent = parentPid(current);
+      if (parent === undefined || parent === current) return false;
+      current = parent;
+    }
+    return false;
+  }
+
+  /** One of this Bot Computer's profile paths, current or the pre-move legacy path. */
+  #usesOwnProfile(pid: number): boolean {
+    const argument = (directory: string): string => `--user-data-dir=${directory}`;
+    const own = [this.profilePath, this.#legacyProfilePath].map(argument);
+    return processArguments(pid).some((value) => own.includes(value));
   }
 
   async #resolvePack(): Promise<string> {

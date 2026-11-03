@@ -138,7 +138,7 @@ export function processIdentityRunning(candidate: ProcessIdentity | undefined): 
 }
 
 
-function signalAll(members: readonly ProcessIdentity[], signal: NodeJS.Signals): void {
+export function signalAll(members: readonly ProcessIdentity[], signal: NodeJS.Signals): void {
   for (const member of members) {
     if (!processIdentityRunning(member)) continue;
     try {
@@ -176,9 +176,10 @@ export function sessionAnchor(token: string): ProcessOwnership {
 
 /**
  * Wraps a detached child so its session outlives its leader: a marker process
- * that ignores SIGTERM keeps the session id reserved. Only the marker's own
- * descriptors go to `/dev/null`; the child keeps the descriptors it was spawned
- * with, so a worker's stdio pipes survive the `exec`. Teardown kills the marker last.
+ * that ignores SIGTERM keeps the session id reserved. The child keeps the
+ * descriptors it was spawned with, so a worker's stdio pipes survive the
+ * `exec`; the marker keeps only its own stdio, redirected to `/dev/null`.
+ * Teardown kills the marker last.
  */
 export function anchoredSessionCommand(argv: readonly string[], token: string): string[] {
   if (!/^[A-Za-z0-9_-]+$/.test(token)) throw new Error("owned session token has invalid characters");
@@ -186,7 +187,21 @@ export function anchoredSessionCommand(argv: readonly string[], token: string): 
     "trap '' HUP TERM",
     // The child's PATH may hold only bundle or fixture directories, so the marker
     // resolves its shell and sleep without it.
-    `( ${ANCHOR_ENV}='${token}' PATH=/usr/bin:/bin exec /bin/sh -c 'trap \"\" HUP TERM; while :; do sleep 3600; done' ) >/dev/null 2>&1 </dev/null &`,
+    "(",
+    `  ${ANCHOR_ENV}='${token}'`,
+    `  export ${ANCHOR_ENV}`,
+    "  PATH=/usr/bin:/bin",
+    "  export PATH",
+    // The marker must hold nothing but its redirected stdio. An inherited
+    // descriptor above stderr outlives the launched process and keeps its pipe
+    // open: the Service's CDP pipe EOF would then never be observable.
+    "  for descriptor in /proc/self/fd/*; do",
+    "    descriptor=${descriptor##*/}",
+    '    [ "$descriptor" -gt 2 ] 2>/dev/null || continue',
+    '    eval "exec $descriptor>&-"',
+    "  done",
+    `  exec /bin/sh -c 'trap "" HUP TERM; while :; do sleep 3600; done'`,
+    ") >/dev/null 2>&1 </dev/null &",
     "trap - HUP TERM",
     'exec "$@"',
   ].join("\n");

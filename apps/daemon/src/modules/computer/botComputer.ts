@@ -442,6 +442,11 @@ export class BotComputerRuntime {
       return undefined;
     }
     await this.#browser.prepare();
+    // A pack browser that survived a Service restart still holds the profile
+    // singleton, but the CDP pipe that could drive it is gone. Replace it before
+    // this generation is handed out, so the Browser Tool works on its next call
+    // (Computer ADR 0013). Only this Bot Computer's own pack processes are matched.
+    await this.#browser.stopOrphanPacks();
     const childEnv = this.#browser.environment(bundleEnvironment(
       sessionEnvironment({
         runtimeDir,

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SwayBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/swayBotScreenRuntime.ts";
@@ -1460,3 +1460,220 @@ test("repeated open_url calls across Screens share one browser profile and route
   }
 });
 
+/**
+ * A piped pack for the browser launch tests: it maps one window and speaks the
+ * Service's CDP pipe on fds 3 and 4. Two launches instead hand off, as Chromium
+ * does to the instance that holds its one `--user-data-dir`, and exit without a
+ * window of their own: when `pidFile` names the running pack's pid, and when
+ * another process already holds the profile.
+ */
+function pipedPackScript(input: { treePath: string; pidFile?: string }): string {
+  return `
+import { existsSync, readFileSync, readSync, readdirSync, writeFileSync, writeSync } from "node:fs";
+const treePath = ${JSON.stringify(input.treePath)};
+const pidFile = ${input.pidFile === undefined ? "undefined" : JSON.stringify(input.pidFile)};
+const mapWindow = (pid) => {
+  const tree = JSON.parse(readFileSync(treePath, "utf8"));
+  const ids = [];
+  const collect = (node) => {
+    if (Array.isArray(node)) return node.forEach(collect);
+    if (node === null || typeof node !== "object") return;
+    if (typeof node.id === "number") ids.push(node.id);
+    collect(node.nodes);
+    collect(node.floating_nodes);
+  };
+  collect(tree);
+  tree.nodes[0].nodes[0].nodes.push({
+    id: Math.max(0, ...ids) + 1,
+    type: "con",
+    name: "Piped Pack",
+    app_id: "chromium",
+    pid,
+    focused: true,
+    shell: "xdg_shell",
+    rect: { x: 0, y: 0, width: 640, height: 480 },
+    nodes: [],
+    floating_nodes: [],
+  });
+  writeFileSync(treePath, JSON.stringify(tree));
+};
+const heldByAnother = () => {
+  const profile = process.argv.find((argument) => argument.startsWith("--user-data-dir="));
+  if (profile === undefined) return false;
+  for (const entry of readdirSync("/proc")) {
+    if (!/^[0-9]+$/.test(entry) || Number(entry) === process.pid) continue;
+    let cmdline;
+    try { cmdline = readFileSync("/proc/" + entry + "/cmdline", "utf8").split(String.fromCharCode(0)); } catch { continue; }
+    if (cmdline.includes(profile)) return true;
+  }
+  return false;
+};
+if (pidFile !== undefined && existsSync(pidFile)) {
+  // A handoff into the running pack: its window appears, then this launch exits.
+  mapWindow(Number(readFileSync(pidFile, "utf8")));
+  process.exit(0);
+}
+if (heldByAnother()) process.exit(0);
+mapWindow(process.pid);
+const nul = String.fromCharCode(0);
+const reply = (command) => {
+  switch (command.method) {
+    case "Target.getTargets": return { targetInfos: [{ targetId: "pack-page", type: "page", title: "Piped Pack", url: "about:blank" }] };
+    case "SystemInfo.getProcessInfo": return { processInfo: [{ type: "browser", id: process.pid }] };
+    case "Browser.getWindowForTarget": return { windowId: 1, bounds: { left: 0, top: 0, width: 640, height: 480 } };
+    case "Target.attachToTarget": return { sessionId: "pack-session" };
+    case "Page.getFrameTree": return { frameTree: { frame: { id: "pack-frame" } } };
+    case "Page.createIsolatedWorld": return { executionContextId: 1 };
+    case "Runtime.evaluate": return { result: { value: true } };
+    default: return {};
+  }
+};
+let pending = Buffer.alloc(0);
+for (;;) {
+  const chunk = Buffer.alloc(65536);
+  let length;
+  try { length = readSync(3, chunk); } catch { break; }
+  if (length <= 0) break;
+  pending = Buffer.concat([pending, chunk.subarray(0, length)]);
+  for (let end = pending.indexOf(nul); end >= 0; end = pending.indexOf(nul)) {
+    const command = JSON.parse(pending.subarray(0, end).toString());
+    pending = pending.subarray(end + 1);
+    writeSync(4, JSON.stringify({ id: command.id, result: reply(command) }) + nul);
+  }
+}
+`;
+}
+
+/** The fake pack binary: a bun script at `<root>/pack/<name>`. */
+function packBinary(name: string, body: string): string {
+  const directory = path.join(root!, "pack");
+  mkdirSync(directory, { recursive: true });
+  return executable(directory, name, `#!${process.execPath}\n${body}`);
+}
+
+/** A copy of a real shell, so a live process can be the pack by `/proc/<pid>/exe`. */
+function packIdentity(): string {
+  const shell = Bun.which("bash", { PATH: "/usr/bin:/bin" });
+  if (shell === null) throw new Error("the fixture needs bash");
+  const target = path.join(root!, "pack", "pack-identity");
+  mkdirSync(path.dirname(target), { recursive: true });
+  copyFileSync(shell, target);
+  chmodSync(target, 0o755);
+  return target;
+}
+
+/** Whether a spawned child ended within `waitMs`; a signalled child settles `exited`. */
+async function settled(child: { exited: Promise<number> }, waitMs = 2_000): Promise<"exited" | "alive"> {
+  return await Promise.race([
+    child.exited.then(() => "exited" as const),
+    Bun.sleep(waitMs).then(() => "alive" as const),
+  ]);
+}
+
+test("a browser tool call replaces the pipe-less pack that holds the profile singleton", async () => {
+  const fixture = await startControlRuntime();
+  const identity = packIdentity();
+  const pack = packBinary("piped-pack", pipedPackScript({
+    treePath: path.join(root!, "ipc-control", "tree.json"),
+  }));
+  fixture.assets.ensureBrowser = async () => ({ browserBin: pack, executable: identity });
+  const profile = path.join(root!, "profiles", "computer", "config", "omarchy-bot-browser");
+  mkdirSync(profile, { recursive: true });
+  // What a Service restart leaves behind: a pack holding the profile with no CDP pipe.
+  const pipeLess = Bun.spawn([identity, "-c", "sleep 60 & wait", "sh", `--user-data-dir=${profile}`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    const result = await fixture.runtime.browser!(
+      { name: "tabs", args: {} } as Parameters<NonNullable<BotScreenRuntime["browser"]>>[0],
+      async () => { throw new Error("unexpected input"); },
+      new AbortController().signal,
+    );
+    // The orphan's replacement is the piped pack, and the tool operates on it.
+    expect(result.text).toContain("pack-page");
+    expect(await settled(pipeLess)).toBe("exited");
+  } finally {
+    pipeLess.kill("SIGKILL");
+    await pipeLess.exited;
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("a pack that exits during startup reports its stderr at once instead of waiting out the timeout", async () => {
+  const fixture = await startControlRuntime();
+  fixture.assets.ensureBrowser = async () => ({
+    browserBin: packBinary("doomed-pack", `
+process.stderr.write("boom\\n");
+process.exit(1);
+`),
+  });
+  try {
+    const started = Date.now();
+    const outcome = await fixture.runtime.launch({ url: "https://example.com/doomed" }).then(
+      () => "launched",
+      (error: unknown) => error,
+    );
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/^The browser exited during startup \(code 1\): boom$/);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("a forwarding child that exits after the running pack claims its window is not a startup failure", async () => {
+  const fixture = await startControlRuntime();
+  const livePackPidFile = path.join(root!, "live-pack.pid");
+  fixture.assets.ensureBrowser = async () => ({
+    browserBin: packBinary("piped-pack", pipedPackScript({
+      treePath: path.join(root!, "ipc-control", "tree.json"),
+      pidFile: livePackPidFile,
+    })),
+  });
+  try {
+    await expect(fixture.runtime.launch({ url: "https://example.com/running" }))
+      .resolves.toEqual({ text: "opened https://example.com/running" });
+    const running = (await fixture.runtime.listWindows()).filter((window) => window.title === "Piped Pack");
+    expect(running).toHaveLength(1);
+    writeFileSync(livePackPidFile, String(running[0]!.pid));
+    // Chromium hands the URL to the running pack and this launch exits by design.
+    await expect(fixture.runtime.launch({ url: "https://example.com/handoff" }))
+      .resolves.toEqual({ text: "opened https://example.com/handoff" });
+    const packWindows = (await fixture.runtime.listWindows()).filter((window) => window.pid === running[0]!.pid);
+    expect(packWindows).toHaveLength(2);
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("a second open_url leaves the pack launched by the first one running", async () => {
+  const fixture = await startControlRuntime();
+  const livePackPidFile = path.join(root!, "live-pack.pid");
+  fixture.assets.ensureBrowser = async () => ({
+    browserBin: packBinary("piped-pack", pipedPackScript({
+      treePath: path.join(root!, "ipc-control", "tree.json"),
+      pidFile: livePackPidFile,
+    })),
+    // The pack identity makes the orphan sweep able to see this pack at all.
+    executable: packIdentity(),
+  });
+  try {
+    await expect(fixture.runtime.launch({ url: "https://example.com/first" }))
+      .resolves.toEqual({ text: "opened https://example.com/first" });
+    const running = (await fixture.runtime.listWindows()).filter((window) => window.title === "Piped Pack");
+    expect(running).toHaveLength(1);
+    const packPid = running[0]!.pid!;
+    writeFileSync(livePackPidFile, String(packPid));
+    // Every piped launch sweeps orphan packs first, and this Service's own live pack
+    // holds the CDP pipe, so the sweep must leave it alone: the second open_url hands
+    // off to it and answers normally instead of replacing it.
+    const second = await fixture.runtime.launch({ url: "https://example.com/second" }).catch(
+      (error: unknown) => error,
+    );
+    expect(() => process.kill(packPid, 0)).not.toThrow();
+    expect(second).toEqual({ text: "opened https://example.com/second" });
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
