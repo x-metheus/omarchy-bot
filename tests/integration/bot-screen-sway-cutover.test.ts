@@ -85,7 +85,7 @@ async function installFakeSwayBins(directory: string): Promise<{
     throw new Error(`could not paint cutover fixture PNG: ${await new Response(painted.stderr).text()}`);
   }
   return {
-    sway: executable(directory, "sway", `#!/usr/bin/env bun
+    sway: executable(directory, "sway", `#!${process.execPath}
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
@@ -104,7 +104,7 @@ await serveFakeSwayIpc({
     wlrRandr: executable(directory, "wlr-randr", "#!/bin/sh\nexit 0\n"),
     xwayland: executable(directory, "Xwayland", "#!/bin/sh\nexit 0\n"),
     grim: executable(directory, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
-    dbusDaemon: executable(directory, "dbus-daemon", `#!/usr/bin/env bun
+    dbusDaemon: executable(directory, "dbus-daemon", `#!${process.execPath}
 const address = process.argv.find((argument) => argument.startsWith("--address=")) ?? "";
 Bun.listen({ unix: address.slice("--address=".length).replace("unix:path=", ""), socket: { data() {} } });
 await new Promise(() => {});

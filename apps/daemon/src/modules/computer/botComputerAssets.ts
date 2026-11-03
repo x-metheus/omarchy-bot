@@ -179,9 +179,20 @@ export const BROWSER_ASSETS_RELEASE = "chrome-for-testing-156.0.8078.47-linux64"
 const READY_FILE = ".omarchy-bot-assets";
 const LOADER = "ld-linux-x86-64.so.2";
 
+/** The one actionable error for a Service Host without the browser pack; there is no fallback browser. */
+export const BROWSER_PACK_MISSING =
+  "The browser pack is missing. Run omarchy-bot update --archive <path> --checksum <path> --browser-pack <file-or-https-url> to install it.";
+
+export interface BrowserPackLaunch {
+  /** The command that starts the pack browser. */
+  browserBin: string;
+  /** The binary the running browser process image is, for the pack identity check. */
+  executable?: string;
+}
+
 export interface BotComputerAssetSupply {
   ensureFonts(): Promise<{ fontConfigFile: string }>;
-  ensureBrowser(): Promise<{ browserBin: string }>;
+  ensureBrowser(): Promise<BrowserPackLaunch>;
 }
 
 export interface PortableBotComputerAssetsOptions {
@@ -251,7 +262,7 @@ export class PortableBotComputerAssets implements BotComputerAssetSupply {
   readonly #browserPackDir: string | undefined;
   readonly #fonts: readonly FontAsset[];
   #fontsInFlight: Promise<{ fontConfigFile: string }> | undefined;
-  #browserInFlight: Promise<{ browserBin: string }> | undefined;
+  #browserInFlight: Promise<BrowserPackLaunch> | undefined;
 
   constructor(options: PortableBotComputerAssetsOptions) {
     this.#profileDir = options.profileDir;
@@ -269,7 +280,7 @@ export class PortableBotComputerAssets implements BotComputerAssetSupply {
     return provision;
   }
 
-  ensureBrowser(): Promise<{ browserBin: string }> {
+  ensureBrowser(): Promise<BrowserPackLaunch> {
     if (this.#browserInFlight !== undefined) return this.#browserInFlight;
     const provision = this.#provisionBrowser().finally(() => {
       if (this.#browserInFlight === provision) this.#browserInFlight = undefined;
@@ -311,17 +322,18 @@ export class PortableBotComputerAssets implements BotComputerAssetSupply {
     return { fontConfigFile };
   }
 
-  async #provisionBrowser(): Promise<{ browserBin: string }> {
+  async #provisionBrowser(): Promise<BrowserPackLaunch> {
     const bundle = this.#browserPackDir;
     if (bundle !== undefined) {
       const browserBin = path.join(bundle, "browser");
+      const executable = path.join(bundle, "chrome-linux64", "chrome");
       try {
         if (readFileSync(path.join(bundle, READY_FILE), "utf8") === `${BROWSER_ASSETS_RELEASE}\n`
           && isExecutableFile(browserBin)
-          && isExecutableFile(path.join(bundle, "chrome-linux64", "chrome"))
-          && isExecutableFile(path.join(bundle, "libs", LOADER))) return { browserBin };
+          && isExecutableFile(executable)
+          && isExecutableFile(path.join(bundle, "libs", LOADER))) return { browserBin, executable };
       } catch {}
     }
-    throw new Error("No installed browser pack. Run omarchy-bot update --archive <path> --checksum <path> --browser-pack <file-or-https-url>, or set OMARCHY_BOT_BROWSER=host to use a host browser.");
+    throw new Error(BROWSER_PACK_MISSING);
   }
 }

@@ -58,7 +58,7 @@ if(args.includes("restart") && process.env.FAIL_RESTART_ONCE && existsSync(proce
 if(args.includes("enable") || args.includes("start") || args.includes("restart")){
 let running=false;if(existsSync(pidFile)){try{process.kill(Number(readFileSync(pidFile,"utf8")),0);running=true}catch{}}
 if(!running){const unit=readFileSync(process.env.XDG_CONFIG_HOME+"/systemd/user/omarchy-bot.service","utf8");
-const env={...process.env};for(const key of ["OMARCHY_BOT_TLS_CERT","OMARCHY_BOT_TLS_KEY","OMARCHY_BOT_TRUSTED_PROXY","OMARCHY_BOT_BROWSER"])delete env[key];for(const line of unit.split("\\n")){if(line.startsWith("Environment=")){const value=line.slice(12);const index=value.indexOf("=");env[value.slice(0,index)]=value.slice(index+1)}}
+const env={...process.env};for(const key of ["OMARCHY_BOT_TLS_CERT","OMARCHY_BOT_TLS_KEY","OMARCHY_BOT_TRUSTED_PROXY"])delete env[key];for(const line of unit.split("\\n")){if(line.startsWith("Environment=")){const value=line.slice(12);const index=value.indexOf("=");env[value.slice(0,index)]=value.slice(index+1)}}
 const executable=unit.split("\\n").find(line=>line.startsWith("ExecStart="))!.slice(10);
 const child=Bun.spawn([executable],{env,stdin:"ignore",stdout:"ignore",stderr:"ignore"});writeFileSync(pidFile,String(child.pid));child.unref();}}
 `);
@@ -104,7 +104,7 @@ SERVICE
 `;
   const files: Record<string, string> = { "scripts/serve.sh": serve };
   for (const name of ["main", "layout", "archive", "lifecycle", "browserPack", "appInstall", "appSignature"]) files[`apps/cli/src/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/cli/src/${name}.ts`), "utf8");
-  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "hostBrowser", "desktopEntry"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
+  for (const name of ["swayRuntimeSupply", "botComputerAssets", "browserPack", "desktopEntry"]) files[`apps/daemon/src/modules/computer/${name}.ts`] = readFileSync(path.join(projectRoot, `apps/daemon/src/modules/computer/${name}.ts`), "utf8");
   files["apps/daemon/src/bootstrap/listenerConfig.ts"] = readFileSync(path.join(projectRoot, "apps/daemon/src/bootstrap/listenerConfig.ts"), "utf8");
   if (options.pin) files["apps/daemon/src/modules/computer/botComputerAssets.ts"] = files["apps/daemon/src/modules/computer/botComputerAssets.ts"]!.replace(`BROWSER_ASSETS_RELEASE = "${BROWSER_ASSETS_RELEASE}"`, `BROWSER_ASSETS_RELEASE = "${options.pin}"`);
   if (options.appPublicKey) files["apps/cli/src/release-public-key"] = options.appPublicKey;
@@ -727,37 +727,31 @@ test.each(["install", "update"])("%s rejects conflicting browser flags and obsol
   expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual([]);
 });
 
-test("host opt-in persists through install, saved settings, update and explicit clearing", async () => {
+test.each(["install", "update", "reconfigure"])("%s rejects the removed OMARCHY_BOT_BROWSER before mutation", async command => {
   const setup = await fixture();
-  setup.env.OMARCHY_BOT_BROWSER = "host";
-  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
-  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain("Environment=OMARCHY_BOT_BROWSER=host");
-  const configPath = path.join(setup.layout.dataDir, "service.json");
-  expect(JSON.parse(readFileSync(configPath, "utf8")).OMARCHY_BOT_BROWSER).toBe("host");
-  expect(existsSync(setup.layout.browserPackDir)).toBe(true);
-  delete setup.env.OMARCHY_BOT_BROWSER;
-  expect((await cli(setup, ["reconfigure"])).code).toBe(0);
-  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain("Environment=OMARCHY_BOT_BROWSER=host");
-  setup.env.OMARCHY_BOT_BROWSER = "";
-  expect((await cli(setup, ["update", ...setup.archiveArgs])).code).toBe(0);
-  expect(readFileSync(setup.layout.unitPath, "utf8")).not.toContain("OMARCHY_BOT_BROWSER=");
-  expect(JSON.parse(readFileSync(configPath, "utf8")).OMARCHY_BOT_BROWSER).toBe("");
-  setup.env.OMARCHY_BOT_BROWSER = "host";
-  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
-  expect(readFileSync(setup.layout.unitPath, "utf8")).toContain("Environment=OMARCHY_BOT_BROWSER=host");
-  setup.env.OMARCHY_BOT_BROWSER = "";
-  expect((await cli(setup, ["reconfigure"])).code).toBe(0);
-  expect(readFileSync(setup.layout.unitPath, "utf8")).not.toContain("OMARCHY_BOT_BROWSER=");
-});
-
-test.each(["install", "update", "reconfigure"])("%s rejects invalid host browser selection before mutation", async command => {
-  const setup = await fixture();
-  setup.env.OMARCHY_BOT_BROWSER = "chromium";
-  const result = await cli(setup, [command, ...(command === "reconfigure" ? [] : setup.archiveArgs)]);
-  expect(result.code).toBe(2);
-  expect(result.stderr).toContain("OMARCHY_BOT_BROWSER must be host or empty");
+  for (const value of ["host", "chromium"]) {
+    setup.env.OMARCHY_BOT_BROWSER = value;
+    const result = await cli(setup, [command, ...(command === "reconfigure" ? [] : setup.archiveArgs)]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("OMARCHY_BOT_BROWSER was removed");
+    expect(result.stderr).toContain("adr/0013-bots-use-only-the-pack-browser.md");
+  }
   expect(existsSync(setup.layout.runtimeDir)).toBe(false);
   expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual([]);
+});
+
+test("update rewrites a unit and saved settings that still carry the removed host-browser setting", async () => {
+  const setup = await fixture();
+  expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
+  const configPath = path.join(setup.layout.dataDir, "service.json");
+  expect(readFileSync(setup.layout.unitPath, "utf8")).not.toContain("OMARCHY_BOT_BROWSER");
+  expect(JSON.parse(readFileSync(configPath, "utf8"))).not.toHaveProperty("OMARCHY_BOT_BROWSER");
+  // A Service installed before ADR 0013 with the host opt-in.
+  writeFileSync(setup.layout.unitPath, readFileSync(setup.layout.unitPath, "utf8").replace("[Service]\n", "[Service]\nEnvironment=OMARCHY_BOT_BROWSER=host\n"));
+  writeFileSync(configPath, JSON.stringify({ ...JSON.parse(readFileSync(configPath, "utf8")), OMARCHY_BOT_BROWSER: "host" }));
+  expect((await cli(setup, ["update", ...setup.archiveArgs])).code).toBe(0);
+  expect(readFileSync(setup.layout.unitPath, "utf8")).not.toContain("OMARCHY_BOT_BROWSER");
+  expect(JSON.parse(readFileSync(configPath, "utf8"))).not.toHaveProperty("OMARCHY_BOT_BROWSER");
 });
 
 test("refuses a mismatched browser pack before publishing the runtime or starting systemctl", async () => {
@@ -894,14 +888,12 @@ test("reconfigure rejects insecure and unusable TLS listeners before mutating a 
 
 test("failed reconfigure activation restores the prior unit, saved settings and running Service", async () => {
   const setup = await fixture({ tls: true });
-  setup.env.OMARCHY_BOT_BROWSER = "host";
   expect((await cli(setup, ["install", ...setup.archiveArgs])).code).toBe(0);
   const unit = readFileSync(setup.layout.unitPath, "utf8");
   const configPath = path.join(setup.layout.dataDir, "service.json");
   const config = readFileSync(configPath, "utf8");
   setup.env.FAIL_RESTART_ONCE = path.join(setup.root, "fail-restart");
   writeFileSync(setup.env.FAIL_RESTART_ONCE, "once");
-  setup.env.OMARCHY_BOT_BROWSER = "";
   const result = await cli(setup, ["reconfigure", "--trusted-proxy", "127.0.0.2"]);
   expect(result.code).toBe(1);
   expect(result.stderr).toContain("fixture activation failure");
@@ -917,7 +909,7 @@ test("reconfigure identifies legacy TLS drop-ins before mutation and preserves u
   const config = readFileSync(path.join(setup.layout.dataDir, "service.json"), "utf8");
   const directory = `${setup.layout.unitPath}.d`; mkdirSync(directory);
   const override = path.join(directory, "override.conf");
-  const previous = `[Service]\nEnvironment=OMARCHY_BOT_BROWSER=host\nEnvironment=OMARCHY_BOT_HOST=0.0.0.0\nEnvironment=OMARCHY_BOT_TLS_CERT=${setup.env.OMARCHY_BOT_TLS_CERT}\nEnvironment=OMARCHY_BOT_TLS_KEY=${setup.env.OMARCHY_BOT_TLS_KEY}\nNice=5\nEnvironment=USER_SETTING=keep\n`;
+  const previous = `[Service]\nEnvironment=OMARCHY_BOT_HOST=0.0.0.0\nEnvironment=OMARCHY_BOT_TLS_CERT=${setup.env.OMARCHY_BOT_TLS_CERT}\nEnvironment=OMARCHY_BOT_TLS_KEY=${setup.env.OMARCHY_BOT_TLS_KEY}\nNice=5\nEnvironment=USER_SETTING=keep\n`;
   writeFileSync(override, previous);
   const calls = recorded(setup.env.SYSTEMCTL_CALLS!);
   const refused = await cli(setup, ["reconfigure", "--tls-cert", "", "--tls-key", ""]);

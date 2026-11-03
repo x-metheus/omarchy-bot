@@ -52,7 +52,7 @@ function installFakeComputerBins(directory: string): FakeComputerBins {
   writeFakeSwayIpcMode(controlDir, "ok");
   const helperPath = path.resolve(import.meta.dir, "helpers/fakeSwayIpc.ts");
   const swayStarts = path.join(directory, "sway-starts");
-  const sway = executable(directory, "sway", `#!/usr/bin/env bun
+  const sway = executable(directory, "sway", `#!${process.execPath}
 import { appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
@@ -68,7 +68,7 @@ await serveFakeSwayIpc({
 });
 `);
   const dbusArgv = path.join(directory, "dbus-argv");
-  const dbusDaemon = executable(directory, "dbus-daemon", `#!/usr/bin/env bun
+  const dbusDaemon = executable(directory, "dbus-daemon", `#!${process.execPath}
 import { appendFileSync } from "node:fs";
 appendFileSync(${JSON.stringify(dbusArgv)}, process.argv.slice(2).join("\\n") + "\\n");
 const address = process.argv.find((argument) => argument.startsWith("--address=")) ?? "";
@@ -130,6 +130,55 @@ test("rejects an unavailable Xwayland override without a supply", async () => {
     `configured Xwayland executable is unavailable: ${path.join(root, "missing", "Xwayland")}`,
   );
   expect(existsSync(bin.swayStarts)).toBeFalse();
+});
+
+test("the Bot Screen PATH is the runtime bin, the browser pack, and system dirs only", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-path-"));
+  // A production bundle layout: launchers in `bin`, helper ELFs in `libexec`.
+  const bundle = installBundleBins(
+    root,
+    fakeBundleSway(root, 'writeFileSync(path.join(runtimeDir, "x11-display"), ":99");'),
+    { helperDir: path.join(root, "bundle", "libexec") },
+  );
+  const browserPackDir = path.join(root, "browser-pack");
+  mkdirSync(browserPackDir);
+  const hostOnly = path.join(root, "host-bin");
+  const hostHome = path.join(root, "host-home");
+  mkdirSync(hostOnly);
+  mkdirSync(path.join(hostHome, ".local", "bin"), { recursive: true });
+  mkdirSync(path.join(hostHome, ".cargo", "bin"), { recursive: true });
+  const previousPath = process.env.PATH;
+  // The daemon's own PATH holds host user installs; none may reach a Screen.
+  process.env.PATH = [
+    hostOnly,
+    path.join(hostHome, ".local", "bin"),
+    path.join(hostHome, ".cargo", "bin"),
+    previousPath ?? "/usr/local/bin:/usr/bin:/bin",
+  ].join(":");
+  try {
+    const runtime = bundleRuntime(root, bundle.binaries, browserPackDir);
+    const computer = await runtime.ensure();
+    try {
+      const entries = computer.childEnv.PATH!.split(":");
+      expect(entries).toEqual([
+        // Browser Supply's host-browser shims lead the Screen PATH (Computer ADR 0013).
+        path.join(root!, "profiles", "computer", "browser-shims"),
+        bundle.binDir,
+        path.resolve(browserPackDir),
+        "/usr/bin",
+        "/bin",
+      ]);
+      expect(entries).not.toContain(bundle.helperDir);
+      expect(entries).not.toContain(hostOnly);
+      expect(entries).not.toContain(path.join(hostHome, ".local", "bin"));
+      expect(entries).not.toContain(path.join(hostHome, ".cargo", "bin"));
+    } finally {
+      await runtime.stop();
+    }
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
 });
 
 function readComputerState(): ComputerState {
@@ -291,14 +340,17 @@ test("stop terminates the compositor and session bus and clears current", async 
 function installBundleBins(
   root: string,
   swayBody: string,
-): { bundleRoot: string; binDir: string; binaries: SwayRuntimeBinaries } {
+  options?: { helperDir?: string },
+): { bundleRoot: string; binDir: string; helperDir: string; binaries: SwayRuntimeBinaries } {
   const bundleRoot = path.join(root, "bundle");
   const binDir = path.join(bundleRoot, "bin");
+  const helperDir = options?.helperDir ?? binDir;
   mkdirSync(binDir, { recursive: true });
+  mkdirSync(helperDir, { recursive: true });
   mkdirSync(path.join(bundleRoot, "share", "X11", "xkb"), { recursive: true });
   const launchers: Record<string, string> = {
     sway: swayBody,
-    "dbus-daemon": `#!/usr/bin/env bun
+    "dbus-daemon": `#!${process.execPath}
 const address = process.argv.find((argument) => argument.startsWith("--address=")) ?? "";
 Bun.listen({ unix: address.slice("--address=".length).replace("unix:path=", ""), socket: { data() {} } });
 await new Promise(() => {});
@@ -308,6 +360,13 @@ await new Promise(() => {});
     "omarchy-bot-wayland-capture": "#!/bin/sh\nwhile :; do sleep 60; done\n",
     "omarchy-bot-desktop": "#!/bin/sh\nprintf 'READY %s %s\\n' \"$1\" \"$2\"\nwhile :; do sleep 60; done\n",
   };
+  const helperNames = new Set([
+    "omarchy-bot-wayland-input",
+    "omarchy-bot-wayland-capture",
+    "omarchy-bot-desktop",
+  ]);
+  const pathOf = (name: string): string =>
+    path.join(helperNames.has(name) ? helperDir : binDir, name);
   for (const name of [
     "sway",
     "swaymsg",
@@ -316,26 +375,26 @@ await new Promise(() => {});
     "Xwayland",
     "grim",
     "dbus-daemon",
-    "omarchy-bot-wayland-input",
-    "omarchy-bot-wayland-capture",
-    "omarchy-bot-desktop",
+    ...helperNames,
   ]) {
-    executable(binDir, name, launchers[name] ?? "#!/bin/sh\nexit 0\n");
+    const target = pathOf(name);
+    executable(path.dirname(target), name, launchers[name] ?? "#!/bin/sh\nexit 0\n");
   }
   return {
     bundleRoot,
     binDir,
+    helperDir,
     binaries: {
-      swayBin: path.join(binDir, "sway"),
-      swaymsgBin: path.join(binDir, "swaymsg"),
-      wayvncBin: path.join(binDir, "wayvnc"),
-      wlrRandrBin: path.join(binDir, "wlr-randr"),
-      xwaylandBin: path.join(binDir, "Xwayland"),
-      grimBin: path.join(binDir, "grim"),
-      dbusDaemonBin: path.join(binDir, "dbus-daemon"),
-      inputHelperBin: path.join(binDir, "omarchy-bot-wayland-input"),
-      captureHelperBin: path.join(binDir, "omarchy-bot-wayland-capture"),
-      botDesktopBin: path.join(binDir, "omarchy-bot-desktop"),
+      swayBin: pathOf("sway"),
+      swaymsgBin: pathOf("swaymsg"),
+      wayvncBin: pathOf("wayvnc"),
+      wlrRandrBin: pathOf("wlr-randr"),
+      xwaylandBin: pathOf("Xwayland"),
+      grimBin: pathOf("grim"),
+      dbusDaemonBin: pathOf("dbus-daemon"),
+      inputHelperBin: pathOf("omarchy-bot-wayland-input"),
+      captureHelperBin: pathOf("omarchy-bot-wayland-capture"),
+      botDesktopBin: pathOf("omarchy-bot-desktop"),
     },
   };
 }
@@ -346,7 +405,7 @@ function fakeBundleSway(root: string, recordDisplay: string): string {
   writeFakeSwayTree(controlDir, { id: 1, type: "root", name: "root", nodes: [], floating_nodes: [] });
   writeFakeSwayIpcMode(controlDir, "ok");
   const helperPath = path.resolve(import.meta.dir, "helpers/fakeSwayIpc.ts");
-  return `#!/usr/bin/env bun
+  return `#!${process.execPath}
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
@@ -357,11 +416,16 @@ await serveFakeSwayIpc({ socketPath: process.env.SWAYSOCK ?? path.join(runtimeDi
 `;
 }
 
-function bundleRuntime(root: string, binaries: SwayRuntimeBinaries): BotComputerRuntime {
+function bundleRuntime(
+  root: string,
+  binaries: SwayRuntimeBinaries,
+  browserPackDir?: string,
+): BotComputerRuntime {
   return new BotComputerRuntime({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "profiles"),
     runtimeSupply: { ensure: async () => binaries },
+    ...(browserPackDir === undefined ? {} : { browserPackDir }),
   });
 }
 
@@ -380,7 +444,10 @@ test("takes every runtime tool from the bundle and exports its launchers and DIS
     expect(computer.captureHelper).toBe(bundle.binaries.captureHelperBin);
     expect(computer.botDesktop).toBe(bundle.binaries.botDesktopBin);
     expect(computer.wlrRandr).toBe(bundle.binaries.wlrRandrBin);
-    expect(computer.childEnv.PATH!.split(":")[0]).toBe(bundle.binDir);
+    expect(computer.childEnv.PATH!.split(":").slice(0, 2)).toEqual([
+      path.join(root, "profiles", "computer", "browser-shims"),
+      bundle.binDir,
+    ]);
     expect(computer.childEnv.DISPLAY).toBe(":99");
     expect(computer.childEnv.XKB_CONFIG_ROOT!).toBe(path.join(bundle.bundleRoot, "share", "X11", "xkb"));
   } finally {
@@ -479,7 +546,7 @@ function installResistantSway(bin: FakeComputerBins, pidFile: string): void {
   chmodSync(realSway, 0o700);
   writeFileSync(bin.sway, `#!/bin/sh
 env -i PIDFILE=${JSON.stringify(pidFile)} /bin/sh -c 'trap "" TERM; echo $$ > "$PIDFILE"; while :; do sleep 1; done' &
-exec bun ${JSON.stringify(realSway)} "$@"
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(realSway)} "$@"
 `);
   chmodSync(bin.sway, 0o700);
 }

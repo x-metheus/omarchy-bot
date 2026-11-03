@@ -70,6 +70,17 @@ export class BotScreenInputRejectedError extends Error {
   }
 }
 
+/**
+ * A Screen that can no longer serve its surface at all, such as a stopped
+ * compositor or a stopped Bot Desktop. Retrying the operation cannot help.
+ */
+export class BotScreenUnavailableError extends Error {
+  constructor(message = "Bot Screen is unavailable") {
+    super(message);
+    this.name = "BotScreenUnavailableError";
+  }
+}
+
 
 
 export interface BotScreenProvision {
@@ -118,7 +129,12 @@ export interface BotScreenProjectionSource {
   scale: number;
   /** Present only when the runtime opts into RFB expanded viewing. */
   expandedProjection?: "rfb";
-  capture(): Promise<BotScreenCapture>;
+  /**
+   * Captures one frame. `signal` cancels the capture so its helper process ends
+   * instead of outliving the request that asked for the frame. The returned
+   * promise settles only after that helper process has exited.
+   */
+  capture(signal?: AbortSignal): Promise<BotScreenCapture>;
   openCaptureStream(): Promise<BotScreenCaptureStream>;
   acquireExpandedView(): Promise<BotScreenExpandedView>;
   setInputAuthority(controllerEpoch: number): Promise<number>;
@@ -143,7 +159,12 @@ export interface BotScreenRuntime {
   readonly readiness: BotScreenRuntimeReadiness;
   readonly sessionEnv: Record<string, string>;
   readonly expandedProjection?: "rfb";
-  capture(): Promise<BotScreenCapture>;
+  /**
+   * Captures one frame. `signal` cancels the capture so its helper process ends
+   * instead of outliving the request that asked for the frame. The returned
+   * promise settles only after that helper process has exited.
+   */
+  capture(signal?: AbortSignal): Promise<BotScreenCapture>;
   openCaptureStream(): Promise<BotScreenCaptureStream>;
   acquireExpandedView(): Promise<BotScreenExpandedView>;
   /** Windows this Screen routes to its workspace, in Screen coordinates. */
@@ -544,10 +565,12 @@ export class BotScreenManager {
         videoHeight: Math.round(logicalHeight * scale),
         scale,
         ...(runtime.expandedProjection === undefined ? {} : { expandedProjection: runtime.expandedProjection }),
-        capture: () =>
+        capture: (signal) =>
+          // Serialized on the capture promise, which includes the runtime's
+          // helper teardown: the next capture waits until the previous `grim` is gone.
           this.#serialize(owner.surfaceId, async () => {
             currentEntry();
-            return runtime.capture();
+            return runtime.capture(signal);
           }),
         openCaptureStream: async () => {
           currentEntry();

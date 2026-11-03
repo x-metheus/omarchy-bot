@@ -553,3 +553,55 @@ const startsPath =`));
     await runtime.stop();
   }
 });
+
+test("an aborted capture ends its grim child before the capture settles", async () => {
+  let grimHangMark = "";
+  let grimPidsPath = "";
+  fixture = await createScriptedSwayFixture({
+    grimScript: (root) => {
+      grimHangMark = path.join(root, "grim-hang");
+      grimPidsPath = path.join(root, "grim-pids");
+      const png = path.join(root, "screen.png");
+      return `#!${process.execPath}
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+// Readiness probes still get a frame; the capture under test hangs instead.
+if (!existsSync(${JSON.stringify(grimHangMark)})) {
+  process.stdout.write(readFileSync(${JSON.stringify(png)}));
+  process.exit(0);
+}
+// Ignoring SIGTERM proves the capture escalates to SIGKILL.
+process.on("SIGTERM", () => {});
+appendFileSync(${JSON.stringify(grimPidsPath)}, process.pid + "\\n");
+setInterval(() => {}, 1_000);
+`;
+    },
+  });
+  const runtime = await fixture.adapter.start(provision());
+  const spawn = Bun.spawn.bind(Bun);
+  const grimChildren: Array<Bun.Subprocess<"ignore", "pipe", "pipe">> = [];
+  const spawnSpy = spyOn(Bun, "spawn").mockImplementation(((argv: string[], options?: object) => {
+    const child = spawn(argv, options as Parameters<typeof Bun.spawn>[1]);
+    if (argv[0] === fixture!.binEnv.OMARCHY_BOT_GRIM_BIN) grimChildren.push(child);
+    return child;
+  }) as typeof Bun.spawn);
+  try {
+    writeFileSync(grimHangMark, "1");
+    const controller = new AbortController();
+    const capture = runtime.capture(controller.signal);
+    await until(() => existsSync(grimPidsPath), "scripted grim did not start");
+    const grimPid = Number(readFileSync(grimPidsPath, "utf8").trim());
+    expect(() => process.kill(grimPid, 0)).not.toThrow();
+
+    controller.abort(new Error("capture deadline passed"));
+
+    await expect(capture).rejects.toThrow("capture deadline passed");
+    // The capture settles only after its child is gone, so no next capture can
+    // start over a grim that its deadline already abandoned.
+    expect(() => process.kill(grimPid, 0)).toThrow();
+    // The grim that ignored SIGTERM died from the escalation, not the term.
+    expect(grimChildren.find((child) => child.pid === grimPid)?.signalCode).toBe("SIGKILL");
+  } finally {
+    spawnSpy.mockRestore();
+    await runtime.stop();
+  }
+}, 20_000);

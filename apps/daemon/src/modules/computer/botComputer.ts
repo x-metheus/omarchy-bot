@@ -47,6 +47,7 @@ import {
 } from "./botComputerAssets.ts";
 import { listApplicationToplevels, SwayIpcClient } from "./swayIpc.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
+import { BrowserSupply } from "./browserSupply.ts";
 
 type SwayProcess = DetachedProcess;
 export type ApplicationProcess = OwnedChild;
@@ -72,6 +73,8 @@ export interface BotComputerOptions {
   runtimeSupply?: SwayRuntimeSupply;
   /** Portable browser and font supply; fontDir supplies installed runtime fonts. */
   assetSupply?: BotComputerAssetSupply;
+  /** The pack-only browser plumbing; built from `assetSupply` when omitted. */
+  browserSupply?: BrowserSupply;
   capacity?: number;
 }
 
@@ -249,6 +252,7 @@ function sessionEnvironment(input: {
   dataHome: string;
   stateHome: string;
   cacheHome: string;
+  path: string;
   swaySock: string;
   dbusAddress: string;
   x11Display?: string;
@@ -279,6 +283,42 @@ function bundleEnvironment(
     PATH: `${path.join(bundleRoot, "bin")}:${env.PATH}`,
     ...(existsSync(xkbRoot) ? { XKB_CONFIG_ROOT: xkbRoot } : {}),
   };
+}
+
+/**
+ * Only what `/bin/sh` and coreutils need in every Screen: the browser shim's
+ * `#!/bin/sh` and `dirname`, the anchored session marker's `sleep`, and the
+ * desktop entry's `env`. Nothing here is a host user install directory.
+ */
+const SYSTEM_PATH_DIRS = ["/usr/bin", "/bin"] as const;
+
+/**
+ * The Bot Screen child PATH: the bundled browser directory plus the system
+ * directories above. `bundleEnvironment` prepends the runtime bundle's own
+ * `bin`, and Browser Supply puts its host-browser shims before everything. No path is derived from a resolved tool, so bundle `libexec` helpers
+ * (and implicit system dirs such as `/usr/sbin`) never reach a Screen; tools
+ * are invoked by their absolute paths. The daemon's host PATH is never
+ * included, so mise shims, `~/.local/bin`, `~/.cargo/bin` and similar host
+ * installs cannot be resolved inside a Screen.
+ */
+function childPath(browserPackDir: string | undefined): string {
+  return [
+    ...(browserPackDir === undefined ? [] : [path.resolve(browserPackDir)]),
+    ...SYSTEM_PATH_DIRS,
+  ].join(":");
+}
+
+interface ResolvedComputerTools {
+  sway: string;
+  wlrRandr: string;
+  grim: string;
+  inputHelper: string;
+  captureHelper: string;
+  botDesktop: string;
+  dbusDaemon: string;
+  /** Set only when the runtime bundle supplies the tools. */
+  xwayland?: string;
+  bundleRoot?: string;
 }
 
 const X11_DISPLAY_PATTERN = /^:[0-9]+(?:\.[0-9]+)?$/;
@@ -323,6 +363,7 @@ export class BotComputerRuntime {
   #capacity: number;
   #computer: LiveComputer | undefined;
   #assets: BotComputerAssetSupply;
+  #browser: BrowserSupply;
   #fontConfigFile: string | undefined;
 
   constructor(private readonly options: BotComputerOptions) {
@@ -333,6 +374,10 @@ export class BotComputerRuntime {
         ...(options.fontDir === undefined ? {} : { fontDir: options.fontDir }),
         ...(options.browserPackDir === undefined ? {} : { browserPackDir: options.browserPackDir }),
       });
+    this.#browser = options.browserSupply ?? new BrowserSupply({
+      assets: this.#assets,
+      profileDir: path.join(options.profileRoot, "computer"),
+    });
     this.#capacity = options.capacity ?? 8;
     if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {
       throw new Error("Bot Computer output capacity must be a positive integer");
@@ -396,7 +441,8 @@ export class BotComputerRuntime {
       await this.#discardComputerFromDisk();
       return undefined;
     }
-    const childEnv = bundleEnvironment(
+    await this.#browser.prepare();
+    const childEnv = this.#browser.environment(bundleEnvironment(
       sessionEnvironment({
         runtimeDir,
         waylandDisplay: sockets.waylandDisplay,
@@ -405,12 +451,13 @@ export class BotComputerRuntime {
         dataHome,
         stateHome,
         cacheHome,
+        path: childPath(this.options.browserPackDir),
         swaySock: sockets.swaySock,
         dbusAddress: `unix:path=${dbusPath}`,
         ...(x11Display === undefined ? {} : { x11Display }),
       }),
       tools.bundleRoot,
-    );
+    ));
     const computer: LiveComputer = {
       generation: state.generation,
       runtimeComputerDir,
@@ -457,6 +504,7 @@ export class BotComputerRuntime {
   async #start(): Promise<BotComputer> {
     await this.#discardComputerFromDisk();
     const tools = await this.#resolveTools();
+    const screenPath = childPath(this.options.browserPackDir);
     const generation = Date.now();
     const runtimeComputerDir = path.join(this.options.runtimeRoot, "computer");
     const runtimeDir = path.join(runtimeComputerDir, String(generation));
@@ -489,7 +537,9 @@ export class BotComputerRuntime {
     if (this.options.fontDir !== undefined) {
       this.#fontConfigFile ??= (await this.#assets.ensureFonts()).fontConfigFile;
     }
-    const bootstrapEnv = bundleEnvironment({
+    // Sway's own `exec` resolves commands through this PATH, so the shims lead it too.
+    await this.#browser.prepare();
+    const bootstrapEnv = this.#browser.environment(bundleEnvironment({
       ...explicitEnvironment({
         runtimeDir,
         waylandDisplay: "wayland-0",
@@ -498,6 +548,7 @@ export class BotComputerRuntime {
         dataHome,
         stateHome,
         cacheHome,
+        path: screenPath,
       }),
       XDG_CURRENT_DESKTOP: "sway",
       ...(this.#fontConfigFile === undefined ? {} : { FONTCONFIG_FILE: this.#fontConfigFile }),
@@ -508,7 +559,7 @@ export class BotComputerRuntime {
       WLR_RENDERER: "pixman",
       OMARCHY_BOT_DISPLAY_FILE: path.join(runtimeDir, DISPLAY_FILE),
       ...(tools.xwayland === undefined ? {} : { WLR_XWAYLAND: tools.xwayland }),
-    }, tools.bundleRoot);
+    }, tools.bundleRoot));
     await this.#units.stopComputer();
     const swayChild = spawnDetachedChild({
       argv: [
@@ -532,7 +583,7 @@ export class BotComputerRuntime {
         ? recordedX11Display(runtimeDir)
         : await awaitX11Display(runtimeDir, swayProcess.exited);
       const sessionBusConfig = writeSessionBusConfig(runtimeDir);
-      const childEnv = bundleEnvironment(
+      const childEnv = this.#browser.environment(bundleEnvironment(
         sessionEnvironment({
           runtimeDir,
           waylandDisplay: sockets.waylandDisplay,
@@ -541,12 +592,13 @@ export class BotComputerRuntime {
           dataHome,
           stateHome,
           cacheHome,
+          path: screenPath,
           swaySock: sockets.swaySock,
           dbusAddress: `unix:path=${dbusPath}`,
           ...(x11Display === undefined ? {} : { x11Display }),
         }),
         tools.bundleRoot,
-      );
+      ));
       dbusChild = spawnDetachedChild({
         argv: [
           ...this.#units.computerCommand(generation, "session-bus", childEnv),
@@ -710,18 +762,7 @@ export class BotComputerRuntime {
     await terminateOwnedChild(application);
   }
 
-  async #resolveTools(): Promise<{
-    sway: string;
-    wlrRandr: string;
-    grim: string;
-    inputHelper: string;
-    captureHelper: string;
-    botDesktop: string;
-    dbusDaemon: string;
-    /** Set only when the runtime bundle supplies the tools. */
-    xwayland?: string;
-    bundleRoot?: string;
-  }> {
+  async #resolveTools(): Promise<ResolvedComputerTools> {
     if (this.options.runtimeSupply !== undefined) {
       const binaries = await resolveSwayRuntimeBinaries({
         supply: this.options.runtimeSupply,

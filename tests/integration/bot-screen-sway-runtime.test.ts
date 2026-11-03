@@ -59,6 +59,7 @@ function installFakeSwayBins(directory: string, options: {
   input: string;
   capture: string;
   desktop: string;
+  controlDir: string;
 } {
   const controlDir = path.join(directory, "ipc-control");
   mkdirSync(controlDir);
@@ -71,7 +72,7 @@ function installFakeSwayBins(directory: string, options: {
   });
   writeFakeSwayIpcMode(controlDir, "ok");
   const helperPath = path.resolve(import.meta.dir, "helpers/fakeSwayIpc.ts");
-  const sway = executable(directory, "sway", `#!/usr/bin/env bun
+  const sway = executable(directory, "sway", `#!${process.execPath}
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
@@ -96,6 +97,7 @@ await serveFakeSwayIpc({
   ];
   return {
     sway,
+    controlDir,
     wlrRandr: executable(directory, "wlr-randr", "#!/bin/sh\nexit 0\n"),
     grim: executable(directory, "grim", `#!/bin/sh\ncat ${JSON.stringify(options.png)}\n`),
     input: executable(directory, "input", [
@@ -872,9 +874,34 @@ test("a Screen application leader exit leaves no resistant descendant behind", a
   mkdirSync(workspace);
   writeFileSync(png, SCREEN_PNG);
   const bins = installFakeSwayBins(bin, { png });
-  const application = executable(bin, "orphan-app", `#!/bin/sh
-env -i PIDFILE=${JSON.stringify(pidFile)} /bin/sh -c 'trap "" TERM; echo $$ > "$PIDFILE"; while :; do sleep 1; done' &
-exit 0
+  const application = executable(bin, "orphan-app", `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(bins.controlDir, "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+tree.nodes.push({
+  id: 30,
+  type: "workspace",
+  name: ${JSON.stringify(`bot-${SURFACE_A}`)},
+  nodes: [{
+    id: 31,
+    type: "con",
+    name: "Orphan App",
+    app_id: "orphan-app",
+    pid: process.pid,
+    focused: true,
+    shell: "xdg_shell",
+    rect: { x: 0, y: 0, width: 640, height: 480 },
+    nodes: [],
+    floating_nodes: [],
+  }],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+const orphan = Bun.spawn(["/usr/bin/env", "-i", "PIDFILE=" + ${JSON.stringify(pidFile)}, "/bin/sh", "-c", ${JSON.stringify('trap "" TERM; echo $$ > "$PIDFILE"; while :; do sleep 1; done')}]);
+orphan.unref();
+// Stay alive while the launch attributes the window to this process leader.
+await Bun.sleep(250);
+process.exit(0);
 `);
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
@@ -911,9 +938,31 @@ test("stopping one Screen leaves another Screen's application and computer runni
   mkdirSync(workspace);
   writeFileSync(png, SCREEN_PNG);
   const bins = installFakeSwayBins(bin, { png });
-  const application = executable(bin, "shared-app", `#!/bin/sh
-printf '%s' "$$" > ${JSON.stringify(pidFile)}
-while :; do sleep 1; done
+  const application = executable(bin, "shared-app", `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(bins.controlDir, "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+tree.nodes.push({
+  id: 40,
+  type: "workspace",
+  name: ${JSON.stringify(`bot-${SURFACE_A}`)},
+  nodes: [{
+    id: 41,
+    type: "con",
+    name: "Shared App",
+    app_id: "shared-app",
+    pid: process.pid,
+    focused: true,
+    shell: "xdg_shell",
+    rect: { x: 0, y: 0, width: 640, height: 480 },
+    nodes: [],
+    floating_nodes: [],
+  }],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+await new Promise(() => {});
 `);
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),

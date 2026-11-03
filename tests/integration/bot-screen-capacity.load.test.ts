@@ -332,6 +332,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
         ...browserMetric,
         captureAttempts: metricDelta(after, before, "captureAttempts"),
         sourceFrames: metricDelta(after, before, "sourceFrames"),
+        transientCaptureFailures: metricDelta(after, before, "transientCaptureFailures"),
         browserReceives,
         browserDecodes,
         browserPaints,
@@ -627,6 +628,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
   const aggregateMetrics = {
     captureAttempts: frameMetrics.reduce((sum, metric) => sum + (metric.captureAttempts ?? 0), 0),
     sourceFrames: frameMetrics.reduce((sum, metric) => sum + (metric.sourceFrames ?? 0), 0),
+    transientCaptureFailures: frameMetrics.reduce((sum, metric) => sum + (metric.transientCaptureFailures ?? 0), 0),
     browserReceives: frameMetrics.reduce((sum, metric) => sum + (metric.browserReceives ?? 0), 0),
     browserDecodes: frameMetrics.reduce((sum, metric) => sum + (metric.browserDecodes ?? 0), 0),
     browserPaints: frameMetrics.reduce((sum, metric) => sum + (metric.browserPaints ?? 0), 0),

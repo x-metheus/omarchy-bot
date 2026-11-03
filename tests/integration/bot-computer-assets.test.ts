@@ -33,14 +33,17 @@ describe("portable Bot Computer assets", () => {
     const profileDir = temporaryProfile();
     const browserPackDir = path.join(root!, "installed-browser");
     const supply = new PortableBotComputerAssets({ profileDir, browserPackDir });
-    await expect(supply.ensureBrowser()).rejects.toThrow("omarchy-bot update");
+    await expect(supply.ensureBrowser()).rejects.toThrow("The browser pack is missing. Run omarchy-bot update");
     mkdirSync(path.join(browserPackDir, "chrome-linux64"), { recursive: true });
     mkdirSync(path.join(browserPackDir, "libs"));
     writeFileSync(path.join(browserPackDir, ".omarchy-bot-assets"), "chrome-for-testing-156.0.8078.47-linux64\n");
     for (const file of ["browser", "chrome-linux64/chrome", "libs/ld-linux-x86-64.so.2"]) {
       writeFileSync(path.join(browserPackDir, file), "fixture", { mode: 0o755 });
     }
-    expect(await supply.ensureBrowser()).toEqual({ browserBin: path.join(browserPackDir, "browser") });
+    expect(await supply.ensureBrowser()).toEqual({
+      browserBin: path.join(browserPackDir, "browser"),
+      executable: path.join(browserPackDir, "chrome-linux64", "chrome"),
+    });
     const chrome = path.join(browserPackDir, "chrome-linux64/chrome");
     writeFileSync(chrome, "");
     await expect(supply.ensureBrowser()).rejects.toThrow("--browser-pack");

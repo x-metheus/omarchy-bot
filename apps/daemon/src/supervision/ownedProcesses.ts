@@ -73,6 +73,46 @@ function readStat(pid: number): ProcessStat | undefined {
   }
 }
 
+/** Field 4 of /proc/<pid>/stat; zombies keep their stat entry but are not ancestry. */
+function readParentPid(pid: number): number | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const ppid = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1];
+    if (ppid === undefined || !/^\d+$/.test(ppid)) return undefined;
+    return Number(ppid);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True when `pid` is `ancestor` or descends from it through the kernel's ppid
+ * chain. A window's reported pid is attributable to a launch when it satisfies
+ * this check against the launched child. The launcher's captured identity must
+ * still be that process: a pid merely reused after the leader exited is not the
+ * launch, even for an exact pid match.
+ */
+export function processDescendsFrom(
+  pid: number,
+  ancestor: number,
+  ancestorIdentity?: ProcessIdentity,
+): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  if (!Number.isSafeInteger(ancestor) || ancestor <= 0) return false;
+  let current = pid;
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (current === ancestor) {
+      return ancestorIdentity === undefined || processIdentityRunning(ancestorIdentity);
+    }
+    if (current <= 1) return false;
+    const parent = readParentPid(current);
+    if (parent === undefined || parent === current) return false;
+    current = parent;
+  }
+  return false;
+}
+
 function readEnvironment(pid: number): string[] {
   try {
     return readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");

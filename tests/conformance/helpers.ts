@@ -104,7 +104,6 @@ export async function startConformanceDaemon(): Promise<ConformanceDaemon> {
   process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR ??= path.join(repo, ".lane/dist/sway");
   process.env.OMARCHY_BOT_FONT_DIR ??= path.join(repo, ".lane/fonts");
   process.env.OMARCHY_BOT_BROWSER_PACK_DIR ??= path.join(repo, ".lane/browser");
-  delete process.env.OMARCHY_BOT_BROWSER; // Always exercise the owned pack, never a host browser.
   for (const dir of [process.env.OMARCHY_BOT_SWAY_BUNDLE_DIR, process.env.OMARCHY_BOT_FONT_DIR, process.env.OMARCHY_BOT_BROWSER_PACK_DIR]) {
     if (!existsSync(dir)) {
       throw new Error(`conformance needs ${dir}; set OMARCHY_BOT_SWAY_BUNDLE_DIR, OMARCHY_BOT_FONT_DIR and OMARCHY_BOT_BROWSER_PACK_DIR to prepared runtime assets`);

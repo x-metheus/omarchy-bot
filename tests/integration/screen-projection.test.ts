@@ -72,7 +72,7 @@ class SocketInbox {
     });
   }
 
-  json(type: string): Promise<Record<string, unknown>> {
+  json(type: string, timeoutMs = 5_000): Promise<Record<string, unknown>> {
     return this.next(
       (message) => {
         if (typeof message !== "string") return false;
@@ -83,6 +83,7 @@ class SocketInbox {
         }
       },
       `${type} message`,
+      timeoutMs,
     ).then((message) => JSON.parse(message as string) as Record<string, unknown>);
   }
 
@@ -462,4 +463,173 @@ describe("WebSocket Screen Projection", () => {
     expect(h.svc.screens.status(owner)).toEqual({ state: "ready" });
     expect(adapter.stops).toEqual([]);
   }, 15_000);
+
+  // Ticket 02 acceptance runs this file by path: bun test tests/integration/screen-projection.test.ts
+  test("tolerates consecutive stalled captures and keeps the Bot Screen in preview", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Stalled preview"));
+    const session = await createSession(h, owner);
+    const control = await connectControl(h, session);
+    sockets.add(control.socket);
+
+    adapter.stallNextCaptures(owner.surfaceId, 2);
+    await setMode(control, session, "preview");
+    expect(await control.json("preview-frame", 20_000)).toMatchObject({
+      ...envelope(session),
+      type: "preview-frame",
+      sequence: 1,
+    });
+    expect((await control.binary("preview PNG")).byteLength).toBeGreaterThan(0);
+    expect(h.svc.projections.failureDiagnostic(owner, session.sessionId)).toBeUndefined();
+    expect(h.svc.projections.status(owner, session.sessionId)).toMatchObject({ state: "preview", mode: "preview" });
+
+    adapter.stallNextCaptures(owner.surfaceId, 1);
+    expect(await control.json("preview-frame", 20_000)).toMatchObject({
+      ...envelope(session),
+      type: "preview-frame",
+      sequence: 2,
+    });
+    expect(h.svc.projections.failureDiagnostic(owner, session.sessionId)).toBeUndefined();
+    const metrics = h.svc.projections.loadMetrics(owner, session.sessionId)!;
+    expect(metrics).toMatchObject({
+      captureAttempts: 5,
+      sourceFrames: 2,
+      previewFrames: 2,
+      transientCaptureFailures: 3,
+    });
+    expect(metrics.unexplainedShortfalls).toBe(metrics.previewFrames - metrics.browserReceives);
+  }, 40_000);
+
+  test("ends the preview with capture-failed after three consecutive stalled captures", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Persistently stalled preview"));
+    const session = await createSession(h, owner);
+    const control = await connectControl(h, session);
+    sockets.add(control.socket);
+
+    adapter.stallNextCaptures(owner.surfaceId, 3);
+    await setMode(control, session, "preview");
+    expect(await control.json("projection-failure", 20_000)).toMatchObject({
+      ...envelope(session),
+      type: "projection-failure",
+      reason: "capture-failed",
+      snapshotFallback: true,
+    });
+    expect(h.svc.projections.failureDiagnostic(owner, session.sessionId)).toMatchObject({
+      reason: "capture-failed",
+      technicalError: "Screen capture did not produce a frame within its latency bound",
+    });
+    expect(h.svc.projections.loadMetrics(owner, session.sessionId)).toMatchObject({
+      captureAttempts: 3,
+      sourceFrames: 0,
+      transientCaptureFailures: 3,
+      unexplainedShortfalls: 0,
+    });
+    expect(adapter.captureStarts(owner.surfaceId)).toBe(3);
+  }, 30_000);
+
+  test("aborts a timed-out capture and starts no capture over a live one", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Aborted capture"));
+    const session = await createSession(h, owner);
+    const control = await connectControl(h, session);
+    sockets.add(control.socket);
+
+    adapter.stallNextCaptures(owner.surfaceId, 2);
+    // A killed child takes real time to end, so a retry that did not wait for
+    // it would be visible as a capture accounted for before its child is gone.
+    adapter.blockCaptureTeardown();
+    await setMode(control, session, "preview");
+    await adapter.waitForCaptureTeardown();
+    await Bun.sleep(400);
+    // The timed-out frame still owns the capture slot while its child lives.
+    expect(adapter.liveCaptureChildren(owner.surfaceId)).toBe(1);
+    expect(adapter.captureStarts(owner.surfaceId)).toBe(1);
+    expect(h.svc.projections.loadMetrics(owner, session.sessionId)).toMatchObject({
+      captureAttempts: 1,
+      transientCaptureFailures: 0,
+    });
+    expect(h.svc.projections.surfaceMedia(owner.surfaceId).captureActive).toBeTrue();
+    adapter.releaseCaptureTeardown();
+
+    expect(await control.json("preview-frame", 20_000)).toMatchObject({
+      ...envelope(session),
+      type: "preview-frame",
+      sequence: 1,
+    });
+    expect(adapter.captureAborts(owner.surfaceId)).toBe(2);
+    expect(adapter.captureStarts(owner.surfaceId)).toBe(3);
+    expect(adapter.maxConcurrentCaptures(owner.surfaceId)).toBe(1);
+    // Every capture began with no child still running from the previous one.
+    expect(adapter.captureStartLiveChildren(owner.surfaceId)).toEqual([0, 0, 0]);
+    expect(adapter.liveCaptureChildren(owner.surfaceId)).toBe(0);
+  }, 30_000);
+
+  test("ends a capture child whose signal had already aborted before its kill hook", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Pre-aborted capture"));
+    const source = (await h.svc.screens.projectionSource(owner))!;
+    adapter.stallNextCaptures(owner.surfaceId, 1);
+    const controller = new AbortController();
+    controller.abort(new Error("capture deadline already passed"));
+
+    await expect(source.capture(controller.signal)).rejects.toThrow("capture deadline already passed");
+
+    expect(adapter.captureAborts(owner.surfaceId)).toBe(1);
+    expect(adapter.captureStartLiveChildren(owner.surfaceId)).toEqual([0]);
+    expect(adapter.liveCaptureChildren(owner.surfaceId)).toBe(0);
+    expect(adapter.maxConcurrentCaptures(owner.surfaceId)).toBe(1);
+  }, 15_000);
+
+  test("a capture aborted while its child spawns holds the next capture until that child is gone", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Spawn-window abort"));
+    const source = (await h.svc.screens.projectionSource(owner))!;
+    adapter.stallNextCaptures(owner.surfaceId, 1);
+    adapter.blockCaptureTeardown();
+    const controller = new AbortController();
+    // The deadline lands after the child exists, before the capture installs
+    // its kill hook.
+    adapter.onCaptureSpawn(() => controller.abort(new Error("capture deadline passed during spawn")));
+
+    const aborted = source.capture(controller.signal);
+    await adapter.waitForCaptureTeardown();
+    const next = source.capture();
+    await Bun.sleep(50);
+    expect(adapter.captureStarts(owner.surfaceId)).toBe(1);
+    expect(adapter.liveCaptureChildren(owner.surfaceId)).toBe(1);
+
+    adapter.releaseCaptureTeardown();
+    await expect(aborted).rejects.toThrow("capture deadline passed during spawn");
+    expect(adapter.captureAborts(owner.surfaceId)).toBe(1);
+    expect(adapter.liveCaptureChildren(owner.surfaceId)).toBe(0);
+
+    await next;
+    expect(adapter.captureStarts(owner.surfaceId)).toBe(2);
+    expect(adapter.captureStartLiveChildren(owner.surfaceId)).toEqual([0, 0]);
+    expect(adapter.maxConcurrentCaptures(owner.surfaceId)).toBe(1);
+  }, 15_000);
+
+  test("fails the first time a capture reports an unusable Bot Screen", async () => {
+    for (const technicalError of ["Bot Desktop is not running", "Bot Computer compositor is not running"]) {
+      const owner = await ownerFor(h, await makeBot(h, `Unusable screen ${technicalError}`));
+      adapter.failCapturesWith(owner.surfaceId, technicalError);
+      const session = await createSession(h, owner);
+      const control = await connectControl(h, session);
+      sockets.add(control.socket);
+
+      await setMode(control, session, "preview");
+      expect(await control.json("projection-failure")).toMatchObject({
+        ...envelope(session),
+        type: "projection-failure",
+        reason: "capture-failed",
+        snapshotFallback: true,
+      });
+      expect(h.svc.projections.failureDiagnostic(owner, session.sessionId)).toMatchObject({
+        reason: "capture-failed",
+        technicalError,
+      });
+      expect(h.svc.projections.loadMetrics(owner, session.sessionId)).toMatchObject({
+        captureAttempts: 1,
+        sourceFrames: 0,
+        transientCaptureFailures: 0,
+        unexplainedShortfalls: 0,
+      });
+    }
+  }, 30_000);
 });

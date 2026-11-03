@@ -22,6 +22,14 @@ type CaptureProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
 
 const INPUT_RPC_TIMEOUT_MS = 1_000;
 const CAPTURE_RPC_TIMEOUT_MS = 5_000;
+const CAPTURE_TERM_GRACE_MS = 1_000;
+
+/** The part of a spawned capture helper that ends its process. */
+export interface CaptureChild {
+  readonly exitCode: number | null;
+  readonly exited: Promise<number>;
+  kill(signal?: NodeJS.Signals): void;
+}
 
 export interface CommandResult {
   status: number;
@@ -45,16 +53,54 @@ export async function command(argv: string[], env: Record<string, string>): Prom
   return { status, stdout, stderr };
 }
 
-async function terminateCapture(child: CaptureProcess): Promise<void> {
+async function terminateCapture(child: CaptureChild): Promise<void> {
   if (child.exitCode !== null) return;
   child.kill("SIGTERM");
   const stopped = await Promise.race([
-    child.exited.then(() => true),
-    Bun.sleep(1_000).then(() => false),
+    child.exited.then(() => true, () => true),
+    Bun.sleep(CAPTURE_TERM_GRACE_MS).then(() => false),
   ]);
   if (stopped) return;
   child.kill("SIGKILL");
-  await child.exited;
+  await child.exited.catch(() => undefined);
+}
+
+/**
+ * Resolves only once a capture child has exited, ending it when `signal` aborts.
+ * A signal that is already aborted when the child starts still kills it, so a
+ * capture that lost a race with its deadline never leaves `grim` running while
+ * the next capture starts.
+ */
+export function captureChildExited(child: CaptureChild, signal?: AbortSignal): Promise<void> {
+  const exited = child.exited.then(() => undefined, () => undefined);
+  if (signal === undefined) return exited;
+  if (signal.aborted) return terminateCapture(child);
+  const abort = (): void => {
+    // Teardown runs to SIGKILL if needed; `exited` settles only afterwards.
+    void terminateCapture(child);
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  return exited.finally(() => signal.removeEventListener("abort", abort));
+}
+
+export interface SpawnedCaptureChild<Child extends CaptureChild = CaptureChild> {
+  readonly child: Child;
+  /** Settles only once the child has exited. */
+  readonly exited: Promise<void>;
+}
+
+/**
+ * Creates a capture child and arms its kill hook in one step. The hook reads
+ * the signal after the spawn, so an abort that landed while the child was being
+ * created ends it instead of waiting for an event that already fired, and no
+ * statement runs between the child existing and the hook being armed.
+ */
+export function spawnCaptureChild<Child extends CaptureChild>(
+  spawn: () => Child,
+  signal?: AbortSignal,
+): SpawnedCaptureChild<Child> {
+  const child = spawn();
+  return { child, exited: captureChildExited(child, signal) };
 }
 
 export class WaylandVirtualInput {
@@ -449,12 +495,14 @@ export function explicitEnvironment(input: {
   dataHome?: string;
   stateHome: string;
   cacheHome: string;
+  /** The Bot Screen's explicit PATH; the daemon's host PATH is never copied in. */
+  path: string;
 }): Record<string, string> {
   const env: Record<string, string> = {
     HOME: input.homeDir ?? process.env.HOME ?? path.dirname(input.configHome),
     LANG: process.env.LANG ?? "C.UTF-8",
     LOGNAME: process.env.LOGNAME ?? process.env.USER ?? "",
-    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    PATH: input.path,
     USER: process.env.USER ?? "",
     XDG_CACHE_HOME: input.cacheHome,
     XDG_CONFIG_HOME: input.configHome,
@@ -467,11 +515,13 @@ export function explicitEnvironment(input: {
     MOZ_ENABLE_WAYLAND: "1",
     QT_QPA_PLATFORM: "wayland",
   };
-  for (const key of ["OMARCHY_COMPUTER_BIN", "OMARCHY_BOT_COMPUTER_BIN", "OMARCHY_BOT_BROWSER"]) {
+  for (const key of ["OMARCHY_COMPUTER_BIN", "OMARCHY_BOT_COMPUTER_BIN"]) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
   // Desktop-entry lookup must see the same data directories the Service does.
+  // The Bot Computer's own XDG_CONFIG_HOME/mimeapps.list and XDG_DATA_HOME
+  // entries come first, so a host default URL handler never wins (ADR 0013).
   if (process.env.XDG_DATA_DIRS !== undefined) env.XDG_DATA_DIRS = process.env.XDG_DATA_DIRS;
   return env;
 }

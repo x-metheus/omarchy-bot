@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
+import { BROWSER_PACK_MISSING } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 import type { SurfaceId } from "../../packages/domain/src/index.ts";
 import type { ComputerViewDto } from "../../packages/protocol/src/index.ts";
 import { api, authedFetch, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
@@ -195,17 +196,17 @@ describe("Bot-bound Agent browser tool", () => {
     expect(adapter.browserActions).toEqual([]);
   });
 
-  test("request_takeover rejects unavailable host browser before holding", async () => {
+  test("request_takeover rejects a missing browser pack before holding", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: {
       start: async provision => {
         const runtime = await adapter.start(provision);
-        return { ...runtime, browser: async () => { throw new Error("Browser tool unavailable: the host browser has no owned CDP pipe. Use the pack browser or computer tools."); } };
+        return { ...runtime, browser: async () => { throw new Error(BROWSER_PACK_MISSING); } };
       },
     } });
-    const binding = await owner(h, await makeBot(h, "Host browser unavailable"));
-    const call = h.svc.computer.agentBrowserAct(binding, "host-turn", "host-tool", { name: "request_takeover", args: { reason: "Please log in" } }, AbortSignal.timeout(200));
-    await expect(call).rejects.toThrow("host browser has no owned CDP pipe. Use the pack browser or computer tools.");
+    const binding = await owner(h, await makeBot(h, "Browser pack missing"));
+    const call = h.svc.computer.agentBrowserAct(binding, "pack-turn", "pack-tool", { name: "request_takeover", args: { reason: "Please log in" } }, AbortSignal.timeout(200));
+    await expect(call).rejects.toThrow(BROWSER_PACK_MISSING);
     expect(h.svc.computer.state(binding).takeover).toBe("unavailable");
     expect(h.svc.computer.state(binding).takeoverReason).toBeUndefined();
     expect(adapter.inputEvents).toEqual([]);

@@ -16,6 +16,7 @@ export interface BrowserFrameMetric {
   displayedFps: number;
   captureAttempts?: number;
   sourceFrames?: number;
+  transientCaptureFailures?: number;
   browserReceives?: number;
   browserDecodes?: number;
   browserPaints?: number;
