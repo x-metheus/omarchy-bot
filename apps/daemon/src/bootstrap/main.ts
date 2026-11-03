@@ -167,14 +167,14 @@ export async function main(options: MainOptions = {}): Promise<{
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices);
   mailbox = new MailboxService(db, events, threads, agents, turns);
   const lease = new ScreenInputLease({
-    grant: async (surfaceId, epoch, generation) => {
+    grant: async (surfaceId, epoch, generation, kind) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));
       if (source === undefined) throw new Error("Bot Screen is unavailable");
       // A grant for a replaced runtime must not arm the new compositor.
       if (generation !== undefined && source.runtimeGeneration !== generation) {
         throw new Error(`stale runtime generation ${generation}`);
       }
-      return source.setInputAuthority(epoch);
+      return source.setInputAuthority(epoch, kind);
     },
     deliver: async (surfaceId, epoch, event, sequence = 1, generation) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));

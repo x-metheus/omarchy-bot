@@ -4,6 +4,7 @@ import { runInNewContext } from "node:vm";
 import type { ComputerAction } from "../../packages/domain/src/computer.ts";
 import { CdpPipe } from "../../apps/daemon/src/modules/computer/cdpPipe.ts";
 import { BrowserRuntime, type BrowserScreenPort } from "../../apps/daemon/src/modules/computer/browserRuntime.ts";
+import { WindowOwnership } from "../../apps/daemon/src/modules/computer/windowOwnership.ts";
 
 type Command = { id: number; method: string; params: Record<string, unknown>; sessionId?: string };
 type AxFixtureNode = { nodeId: string; parentId?: string; childIds?: string[]; ignored?: boolean; backendDOMNodeId?: number; role?: { value: string }; name?: { value: string }; value?: { value: string }; properties?: { name: string; value: { value: unknown } }[] };
@@ -33,7 +34,12 @@ function largeAxTree(): Map<string, AxFixtureNode> {
   return nodes;
 }
 
-function fixture(limits?: ConstructorParameters<typeof CdpPipe>[2]) {
+function fixture(
+  limits?: ConstructorParameters<typeof CdpPipe>[2],
+  /** Seeds the launch claims a live Computer would have made; off means no window is owned. */
+  seedOwnership = true,
+  holdDiscovery = false,
+) {
   const commands = new PassThrough();
   const replies = new PassThrough();
   const log: Command[] = [];
@@ -69,6 +75,7 @@ function fixture(limits?: ConstructorParameters<typeof CdpPipe>[2]) {
       const command: Command = JSON.parse(pending.slice(0, end));
       pending = pending.slice(end + 1);
       log.push(command);
+      if (holdDiscovery && command.method === "Target.setDiscoverTargets") continue;
       let result: unknown = {};
       if ((hidden || removed) && command.method.startsWith("DOM.")) {
         replies.write(JSON.stringify({ id: command.id, error: { message: removed ? "No node with given id found" : "Could not compute box model." } }) + "\0");
@@ -147,7 +154,12 @@ function fixture(limits?: ConstructorParameters<typeof CdpPipe>[2]) {
     }
   });
   const cdp = new CdpPipe(commands, replies, limits);
-  const runtime = new BrowserRuntime(cdp);
+  const ownership = new WindowOwnership();
+  if (seedOwnership) {
+    ownership.register("screen-a", "window-a", 1, "a");
+    ownership.register("screen-b", "window-b", 2, "b");
+  }
+  const runtime = new BrowserRuntime(cdp, ownership);
   const port = (screen: "a" | "b"): BrowserScreenPort => ({
     windows: async () => [{ id: `window-${screen}`, pid: 100, title: `Screen ${screen.toUpperCase()} - Chromium`, focused: true, bounds: { x: 10, y: 20, width: 800, height: 600 } }],
     focusWindow: async () => {},
@@ -160,7 +172,11 @@ function fixture(limits?: ConstructorParameters<typeof CdpPipe>[2]) {
       }
     },
   });
-  return { runtime, cdp, log, input, targets, replies, port, selected, unlocated, disappearing, setGeometry: (value: typeof geometry) => { geometry = value; }, setText: (value: string) => { text = value; }, onFrame: (callback: () => void) => { onFrame = callback; }, hide: () => { hidden = true; }, remove: () => { removed = true; }, manyNodes: () => { axCount = 400; }, setAxTree: (tree: Map<string, AxFixtureNode>) => { axTree = tree; }, replySizes };
+  return { runtime, ownership, cdp, log, releaseDiscovery: () => {
+    const discovery = log.find(command => command.method === "Target.setDiscoverTargets");
+    if (!discovery) throw new Error("Discovery was not requested");
+    replies.write(JSON.stringify({ id: discovery.id, result: {} }) + "\0");
+  }, input, targets, replies, port, selected, unlocated, disappearing, setGeometry: (value: typeof geometry) => { geometry = value; }, setText: (value: string) => { text = value; }, onFrame: (callback: () => void) => { onFrame = callback; }, hide: () => { hidden = true; }, remove: () => { removed = true; }, manyNodes: () => { axCount = 400; }, setAxTree: (tree: Map<string, AxFixtureNode>) => { axTree = tree; }, replySizes };
 }
 
 test("snapshot owns only the routed Screen and new snapshots invalidate element refs", async () => {
@@ -177,6 +193,29 @@ test("snapshot owns only the routed Screen and new snapshots invalidate element 
     expect(tabs.text).not.toContain("http://fixture/b");
     await expect(f.runtime.perform("screen-a", { name: "tabs", args: { operation: "switch", tabId: "b" } }, f.port("a"))).rejects.toThrow("Screen");
     expect(f.log.some((command) => command.method === "Runtime.enable")).toBe(false);
+  } finally { f.runtime.close(); }
+});
+
+test.each(["removed", "browser window changed", "target changed", "owner changed"])("scope pruning preserves a registration that was %s during native observation", async (change) => {
+  const f = fixture();
+  const port: BrowserScreenPort = {
+    ...f.port("a"),
+    windows: async () => {
+      f.ownership.releaseWindow("screen-a", "window-a");
+      if (change !== "removed") {
+        f.ownership.register(change === "owner changed" ? "screen-b" : "screen-a", "window-a", change === "browser window changed" ? 3 : 1, change === "target changed" ? "replacement" : "a");
+      }
+      return [];
+    },
+  };
+  try {
+    await expect(f.runtime.perform("screen-a", { name: "tabs", args: {} }, port)).rejects.toThrow("No browser window belongs to this Screen");
+    expect(f.ownership.ownerOfBrowserWindow(change === "browser window changed" ? 3 : 1)).toEqual(change === "removed" ? undefined : {
+      surfaceId: change === "owner changed" ? "screen-b" : "screen-a",
+      swayWindowId: "window-a",
+      browserWindowId: change === "browser window changed" ? 3 : 1,
+      targetId: change === "target changed" ? "replacement" : "a",
+    });
   } finally { f.runtime.close(); }
 });
 
@@ -213,7 +252,7 @@ test("Screen isolation survives identical titles and refs never cross Screens", 
     ...f.port(screen), windows: async () => [{ id: `window-${screen}`, pid: 100, title: "about:blank - Chromium", focused: true, bounds: { x: 10, y: 20, width: 800, height: 600 } }],
   });
   try {
-    await f.runtime.registerTarget("screen-a", "a", "window-a");
+    f.ownership.register("screen-a", "window-a", 1, "a");
     const a = await f.runtime.perform("screen-a", { name: "snapshot", args: {} }, port("a"));
     await f.runtime.perform("screen-b", { name: "snapshot", args: {} }, port("b"));
     const ref = a.text.match(/\[(e[^\]]+)\]/)![1]!;
@@ -270,6 +309,32 @@ test("wait_for text/ref/navigation has a bounded deadline and abort/drop/close c
   } finally { f.runtime.close(); }
 });
 
+for (const cancellation of ["caller", "Screen closure", "deadline"] as const) test(`shared target discovery respects ${cancellation} while another caller stays live`, async () => {
+  const f = fixture(undefined, true, true);
+  try {
+    const abort = new AbortController();
+    const waiting = f.runtime.perform("screen-a", cancellation === "deadline"
+      ? { name: "wait_for", args: { text: "ready", timeoutMs: 10 } }
+      : { name: "tabs", args: {} }, f.port("a"), abort.signal)
+      .then(() => "unexpected success", error => (error as Error).message);
+    let liveSettled = false;
+    const live = f.runtime.perform("screen-b", { name: "tabs", args: {} }, f.port("b"))
+      .then(result => { liveSettled = true; return result.text; }, error => { liveSettled = true; return String(error); });
+    if (cancellation === "caller") abort.abort(new Error("cancelled discovery wait"));
+    if (cancellation === "Screen closure") f.runtime.dropScreen("screen-a");
+    const expected = cancellation === "caller" ? "cancelled discovery wait"
+      : cancellation === "Screen closure" ? "Browser Screen closed" : "Browser wait_for timed out after 10ms";
+    expect(await Promise.race([waiting, Bun.sleep(250).then(() => "discovery wait did not settle promptly")])).toBe(expected);
+    expect(liveSettled).toBe(false);
+    expect(f.log.filter(command => command.method === "Target.setDiscoverTargets")).toHaveLength(1);
+    expect(f.log.some(command => command.method === "Target.getTargets")).toBe(false);
+    f.releaseDiscovery();
+    expect(await live).toContain("http://fixture/b");
+    expect(f.cdp.alive).toBe(true);
+    expect(f.log.filter(command => command.method === "Target.setDiscoverTargets")).toHaveLength(1);
+  } finally { f.runtime.close(); }
+});
+
 test("page text caps preserve UTF8 boundaries", async () => {
   const f = fixture();
   try {
@@ -301,27 +366,18 @@ test("wait_for observes navigation and target destruction detaches scoped refs",
   } finally { f.runtime.close(); }
 });
 
-test("ambiguous unregistered browser windows refuse ownership", async () => {
-  const f = fixture();
+test("a browser window no launch claimed is never adopted by its title", async () => {
+  const f = fixture(undefined, false);
   f.targets[1]!.title = "Screen A";
   const port = f.port("a");
   try {
-    await expect(f.runtime.perform("screen-a", { name: "snapshot", args: {} }, port)).rejects.toThrow("Ambiguous");
+    await expect(f.runtime.perform("screen-a", { name: "snapshot", args: {} }, port)).rejects
+      .toThrow("open the page with `browser tabs open` or `open_url` from this Screen");
     expect(f.log.some((command) => command.method === "Target.attachToTarget")).toBe(false);
-    await f.runtime.registerTarget("screen-a", "a", "window-a");
-    await expect(f.runtime.registerTarget("screen-b", "a", "window-b")).rejects.toThrow("another Screen");
+    f.ownership.register("screen-a", "window-a", 1, "a");
+    expect(() => f.ownership.register("screen-b", "window-b", 1, "a")).toThrow("another Screen");
     expect((await f.runtime.perform("screen-a", { name: "snapshot", args: {} }, port)).text).toContain("Name");
   } finally { f.runtime.close(); }
-});
-
-test("Chromium synthetic outer decoration bounds map to the routed Screen content window", async () => {
-  const f = fixture();
-  const port: BrowserScreenPort = {
-    ...f.port("a"),
-    windows: async () => [{ id: "window-a", pid: 100, title: "Screen A - Google Chrome for Testing", focused: true, bounds: { x: 10, y: 47, width: 780, height: 580 } }],
-  };
-  try { expect((await f.runtime.perform("screen-a", { name: "snapshot", args: {} }, port)).text).toContain("Name"); }
-  finally { f.runtime.close(); }
 });
 
 test("snapshot preserves AX hierarchy and caps node output", async () => {
@@ -403,7 +459,7 @@ test("removed DOM nodes request a new snapshot and hidden refs wait until deadli
 });
 
 test("registered launches expose every routed browser window and focus the selected tab window", async () => {
-  const f = fixture();
+  const f = fixture(undefined, false);
   const focused: string[] = [];
   const port: BrowserScreenPort = {
     ...f.port("a"),
@@ -414,14 +470,14 @@ test("registered launches expose every routed browser window and focus the selec
     focusWindow: async (window) => { focused.push(window.id); },
   };
   try {
-    await f.runtime.registerTarget("screen-a", "a", "window-a");
-    await f.runtime.registerTarget("screen-a", "b", "window-second");
+    f.ownership.register("screen-a", "window-a", 1, "a");
+    f.ownership.register("screen-a", "window-second", 2, "b");
     const tabs = await f.runtime.perform("screen-a", { name: "tabs", args: { operation: "list" } }, port);
     expect(tabs.text).toContain("http://fixture/a");
     expect(tabs.text).toContain("http://fixture/b");
     await f.runtime.perform("screen-a", { name: "tabs", args: { operation: "switch", tabId: "a" } }, port);
     expect(focused).toEqual(["window-a"]);
-    await expect(f.runtime.registerTarget("screen-b", "b", "window-b")).rejects.toThrow("another Screen");
+    expect(() => f.ownership.register("screen-b", "window-b", 2, "b")).toThrow("another Screen");
   } finally { f.runtime.close(); }
 });
 
@@ -429,7 +485,9 @@ test("aborted target attachment detaches the eventual session", async () => {
   const commands = new PassThrough();
   const replies = new PassThrough();
   const cdp = new CdpPipe(commands, replies);
-  const runtime = new BrowserRuntime(cdp);
+  const ownership = new WindowOwnership();
+  ownership.register("screen", "window", 1, "a");
+  const runtime = new BrowserRuntime(cdp, ownership);
   const attached = Promise.withResolvers<Command>();
   const detached = Promise.withResolvers<Command>();
   let pending = "";
@@ -460,18 +518,6 @@ test("aborted target attachment detaches the eventual session", async () => {
     replies.write(JSON.stringify({ id: command.id, result: { sessionId: "late-session" } }) + "\0");
     expect((await detached.promise).params).toEqual({ sessionId: "late-session" });
   } finally { runtime.close(); }
-});
-
-test("one CDP window cannot be inferred as either of two routed Sway windows", async () => {
-  const f = fixture();
-  const port: BrowserScreenPort = {
-    ...f.port("a"),
-    windows: async () => ["first", "second"].map((id) => ({ id, pid: 100, title: "Screen A - Chromium", focused: false, bounds: { x: 10, y: 20, width: 800, height: 600 } })),
-  };
-  try {
-    await expect(f.runtime.perform("screen-a", { name: "snapshot", args: {} }, port)).rejects.toThrow("Ambiguous");
-    expect(f.log.some((command) => command.method === "Target.attachToTarget")).toBe(false);
-  } finally { f.runtime.close(); }
 });
 
 test("unrelated routed app title cannot adopt another Screen browser", async () => {
@@ -528,8 +574,8 @@ for (const zoom of [1, 1.25]) test(`non-overlay scrollbars do not alter click co
   } finally { f.runtime.close(); }
 });
 
-test("equal unregistered Orders browser windows on separate Screens fail closed globally", async () => {
-  const f = fixture();
+test("a Screen with no bound browser window is told how to open the page", async () => {
+  const f = fixture(undefined, false);
   for (const target of f.targets) target.title = "Orders";
   const port = (screen: "a" | "b"): BrowserScreenPort => ({
     ...f.port(screen),
@@ -537,16 +583,17 @@ test("equal unregistered Orders browser windows on separate Screens fail closed 
   });
   try {
     for (const screen of ["a", "b"] as const) {
-      await expect(f.runtime.perform(`screen-${screen}`, { name: "tabs", args: {} }, port(screen))).rejects.toThrow("Ambiguous");
-      await expect(f.runtime.perform(`screen-${screen}`, { name: "navigate", args: { url: "http://fixture/unsafe" } }, port(screen))).rejects.toThrow("Ambiguous");
-      await expect(f.runtime.perform(`screen-${screen}`, { name: "tabs", args: { operation: "close", tabId: screen === "a" ? "b" : "a" } }, port(screen))).rejects.toThrow("Ambiguous");
+      await expect(f.runtime.perform(`screen-${screen}`, { name: "tabs", args: {} }, port(screen))).rejects.toThrow("No browser window belongs to this Screen; open the page with `browser tabs open` or `open_url` from this Screen");
+      await expect(f.runtime.perform(`screen-${screen}`, { name: "navigate", args: { url: "http://fixture/unsafe" } }, port(screen))).rejects.toThrow("open_url");
+      await expect(f.runtime.perform(`screen-${screen}`, { name: "tabs", args: { operation: "close", tabId: screen === "a" ? "b" : "a" } }, port(screen))).rejects.toThrow("open_url");
     }
     expect(f.targets).toHaveLength(2);
     expect(f.input).toEqual([]);
+    expect(f.log.some((command) => command.method === "Target.attachToTarget")).toBe(false);
   } finally { f.runtime.close(); }
 });
 
-test("unlocated live browser target cannot hide an ambiguous cross-Screen match", async () => {
+test("an unlocatable live browser target fails closed instead of scoping a Screen", async () => {
   const f = fixture();
   for (const target of f.targets) target.title = "Orders";
   f.unlocated.add("a");

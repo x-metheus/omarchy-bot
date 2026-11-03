@@ -16,6 +16,7 @@ import {
 } from "../../supervision/ownedProcesses.ts";
 import { BROWSER_PACK_MISSING, type BotComputerAssetSupply } from "./botComputerAssets.ts";
 import { desktopExecutable } from "./desktopEntry.ts";
+import { BROWSER_HANDLER_CLIENT } from "./browserHandler.ts";
 
 /**
  * Browser Supply: the one place that knows how the Bot Computer gets a browser
@@ -165,6 +166,8 @@ export interface BrowserSupplyOptions {
   assets: BotComputerAssetSupply;
   /** The Bot Computer profile (`<profileRoot>/computer`) that holds `config/` and `data/`. */
   profileDir: string;
+  /** Live Bot Computers dispatch handlers to the daemon that owns the CDP pipe. */
+  handlerDispatch?: boolean;
 }
 
 export class BrowserSupply {
@@ -174,10 +177,12 @@ export class BrowserSupply {
   #packExecutable: string | undefined;
   /** Pack launches this Service spawned: a pack process by construction. */
   #launches = new Map<number, ProcessIdentity | undefined>();
+  readonly #handlerDispatch: boolean;
 
   constructor(options: BrowserSupplyOptions) {
     this.#assets = options.assets;
     this.#profileDir = options.profileDir;
+    this.#handlerDispatch = options.handlerDispatch ?? false;
   }
 
   /** Service-owned directory placed first on the Screen and Sway PATH. */
@@ -346,6 +351,8 @@ export class BrowserSupply {
     mkdirSync(shimDir, { recursive: true, mode: 0o700 });
     chmodSync(shimDir, 0o700);
     // Host browser flags (profiles, app modes) never reach the pack; URLs do.
+    const client = path.join(shimDir, "browser-handler.js");
+    if (this.#handlerDispatch) writeFileSync(client, BROWSER_HANDLER_CLIENT, { mode: 0o600 });
     writeExecutable(this.launcher, browserBin === undefined
       ? [
         "#!/bin/sh",
@@ -363,7 +370,9 @@ export class BrowserSupply {
         "    *) set -- \"$@\" \"$argument\" ;;",
         "  esac",
         "done",
-        `exec ${[browserBin, `--user-data-dir=${userDataDir}`, ...PACK_FLAGS, "--new-window"].map(shellQuote).join(" ")} "$@"`,
+        this.#handlerDispatch
+          ? `exec ${[process.execPath, client].map(shellQuote).join(" ")} "$@"`
+          : `exec ${[browserBin, `--user-data-dir=${userDataDir}`, ...PACK_FLAGS, "--new-window"].map(shellQuote).join(" ")} "$@"`,
         "",
       ].join("\n"));
     const stub = `#!/bin/sh\nexec ${shellQuote(this.launcher)} "$@"\n`;

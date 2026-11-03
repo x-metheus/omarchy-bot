@@ -13,7 +13,7 @@ import {
 import path from "node:path";
 import { createConnection } from "node:net";
 import { CdpPipe } from "./cdpPipe.ts";
-import { BrowserRuntime } from "./browserRuntime.ts";
+import { BrowserRuntime, BrowserWindowAttributionError } from "./browserRuntime.ts";
 import sharp from "sharp";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
@@ -67,7 +67,7 @@ import {
   type OwnedSession,
   type ProcessIdentity,
 } from "../../supervision/ownedProcesses.ts";
-import { BOT_DESKTOP_APP_ID, listApplicationToplevels, SwayIpcClient } from "./swayIpc.ts";
+import { BOT_DESKTOP_APP_ID, listApplicationToplevels, SwayIpcClient, SwayWindowSubscription, type SwayWindowEvent } from "./swayIpc.ts";
 import { resolveSwayRuntimeBinaries } from "./swayRuntimeSupply.ts";
 import {
   PortableBotComputerAssets,
@@ -75,6 +75,9 @@ import {
 } from "./botComputerAssets.ts";
 import { desktopApplicationCommand } from "./desktopEntry.ts";
 import { BrowserSupply } from "./browserSupply.ts";
+import { WindowOwnership, type PendingWindowTarget } from "./windowOwnership.ts";
+import { openBrowserHandler } from "./browserHandler.ts";
+import { matchesBrowserWindowTitleStamp } from "./browserWindowAttribution.ts";
 
 export interface SwayAdapterOptions extends BotComputerOptions {
   /** Test hook. The scripted fixture blocks here so an in-flight launch stays pending. */
@@ -120,6 +123,8 @@ interface SwaySession {
   desktopIdentity?: OwnedProcessIdentity | undefined;
   virtualInput?: WaylandVirtualInput;
   cleanup?: (() => Promise<void>) | undefined;
+  /** The last launch's window binding; a Browser Tool call on this Screen waits for it. */
+  pendingBinding?: Promise<void> | undefined;
 }
 
 function surfaceWorkspace(surfaceId: SurfaceId): string {
@@ -165,8 +170,19 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #assets: BotComputerAssetSupply;
   /** The only browser source: launch argv, profile, Screen plumbing, and pack identity. */
   #browser: BrowserSupply;
-  /** Windows already routed, and the Screen that routed them. */
-  #routedWindows = new Map<string, SurfaceId>();
+  /**
+   * The Computer's one window record: Sway routing here and the Browser Tool's
+   * target binding both go through it, so a window has one owning Screen.
+   */
+  #ownership = new WindowOwnership();
+  /** The open `window::new` subscription for the current Bot Computer. */
+  #windowEvents: { computer: BotComputer; subscription: SwayWindowSubscription } | undefined;
+  #parkingJobs = new Map<string, Promise<void>>();
+  #attributionJobs = new Map<PendingWindowTarget, Promise<void>>();
+  #attributionErrors = new Map<string, unknown>();
+  #parkingFailures = new Map<string, Error>();
+  #launchClaim: { session: SwaySession; result: ReturnType<typeof Promise.withResolvers<void>>; targets: Set<string>; signal: AbortSignal; active: boolean } | undefined;
+  #humanLease: { session: SwaySession; epoch: number } | undefined;
 
   constructor(private readonly options: SwayAdapterOptions) {
     this.#units = new ApplicationUnits(options.hostRuntimeDir);
@@ -179,8 +195,10 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#browser = new BrowserSupply({
       assets: this.#assets,
       profileDir: path.join(options.profileRoot, "computer"),
+      handlerDispatch: true,
     });
     this.#computer = new BotComputerRuntime({ ...options, assetSupply: this.#assets, browserSupply: this.#browser });
+    this.#ownership.onPendingTarget(candidate => this.#startAttribution(candidate));
   }
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
@@ -193,6 +211,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       await this.#units.stop(provision.surfaceId);
       this.#validateProvision(provision);
       const computer = await this.#computer.ensure();
+      await this.#subscribeWindowEvents(computer);
       return this.#startSurface(computer, provision);
     });
   }
@@ -207,6 +226,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         && await this.#liveSurfaceValid(current)
       ) {
         await this.#ensureHelpers(current);
+        await this.#subscribeWindowEvents(current.computer);
         return this.#runtimes.get(provision.surfaceId) ?? currentRuntime;
       }
       if (current !== undefined && currentRuntime !== undefined) {
@@ -218,6 +238,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         await this.#discardSurfaceFromDisk(provision.surfaceId);
         return undefined;
       }
+      await this.#subscribeWindowEvents(computer);
       try {
         return await this.#reattachSurface(computer, provision);
       } catch {
@@ -666,6 +687,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const cleanup = (async (): Promise<void> => {
         await virtualInput.release().catch(() => {});
         computer.browser?.dropScreen(provision.surfaceId);
+        this.#ownership.releaseSurface(provision.surfaceId);
+        this.#attributionErrors.delete(provision.surfaceId);
         this.#releaseInputLease(provision.surfaceId);
         await virtualInput.stop().catch(() => {});
         await Promise.allSettled(captureStreamStarts);
@@ -859,26 +882,25 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         signal.throwIfAborted();
         // A Service Host without the pack has no Bot browser and no fallback.
         await this.#browser.ensurePack();
+        if (session.pendingBinding) await this.#waitForAttributionJobs([session.pendingBinding], signal);
+        await this.#awaitAttributions(session, signal);
         if (action.name === "request_takeover") return { text: "Browser is available for Takeover" };
         const routed = await listWindows();
         if (
           computer.browser?.alive !== true
           || !routed.some((window) => window.pid !== undefined && this.#browser.isPackBrowser(window.pid))
         ) {
-          const beforeTargets = new Set(computer.browser?.alive === true ? (await computer.browser.pageTargets(signal)).map((target) => target.targetId) : []);
           await launch({ url: "about:blank" }, signal);
           signal.throwIfAborted();
-          if (computer.browser?.alive === true) {
-            const targets = (await computer.browser.pageTargets(signal)).filter((target) => !beforeTargets.has(target.targetId));
-            const browserPid = await computer.browser.processId(signal);
-            const windows = (await listWindows()).filter((window) => window.pid === browserPid && !routed.some((before) => before.id === window.id));
-            if (targets.length === 1 && windows.length === 1) await computer.browser.registerTarget(provision.surfaceId, targets[0]!.targetId, windows[0]!.id, signal);
-          }
+          // The launch binds the window it claimed; nothing here pairs a new page
+          // target with a new pack window, which would bind a pop-up that merely
+          // mapped while the launch ran.
+          if (session.pendingBinding) await this.#waitForAttributionJobs([session.pendingBinding], signal);
         }
         if (computer.browser?.alive !== true) throw new Error("Browser tool unavailable: browser CDP pipe closed; close browser windows and relaunch. Computer tools remain available.");
         return computer.browser.perform(provision.surfaceId, action, { windows: listWindows, focusWindow, input }, signal);
       },
-      setInputAuthority: async (controllerEpoch) => {
+      setInputAuthority: async (controllerEpoch, kind = "bot") => {
         if (!Number.isSafeInteger(controllerEpoch) || controllerEpoch <= lastInputEpoch) {
           throw new BotScreenInputRejectedError("stale controller epoch");
         }
@@ -887,6 +909,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           await this.#focusWorkspace(session);
           lastInputEpoch = controllerEpoch;
           await virtualInput.setInputAuthority(controllerEpoch);
+          this.#humanLease = kind === "web" ? { session, epoch: controllerEpoch } : undefined;
           return controllerEpoch;
         } catch (error) {
           if (acquired) this.#releaseInputLease(provision.surfaceId);
@@ -919,8 +942,12 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     session: SwaySession,
     request: BotScreenLaunchRequest,
     signal?: AbortSignal,
+    inheritedTargets?: Set<string>,
   ): Promise<{ text?: string }> {
+    const surfaceLifetime = this.#ownership.surfaceSignal(session.provision.surfaceId);
     await this.options.onLaunch?.();
+    surfaceLifetime.throwIfAborted();
+    if (session.computer !== this.#computer.current() || this.#sessions.get(session.provision.surfaceId) !== session) throw new Error("Browser Screen changed before launch");
     signal?.throwIfAborted();
     const cwd = this.options.applicationCwd;
     if (cwd === undefined || cwd === "" || !existsSync(cwd)) {
@@ -946,171 +973,443 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     }
     const text = request.app !== undefined ? `launched ${request.app}` : `opened ${request.url}`;
     const browserPipe = argv.includes("--remote-debugging-pipe");
-    const role = `application-${++session.computer.applicationSequence}` as const;
-    const application = spawnDetachedChild({
-      argv: [
-        ...(browserPipe ? [] : this.#units.computerCommand(
-          session.computer.generation,
-          role,
-          session.computer.childEnv,
-          cwd,
-        )),
-        ...argv,
-      ],
-      env: browserPipe ? session.computer.childEnv : this.#units.launcherEnvironment(session.computer.childEnv),
-      cwd,
-      output: "ignore",
-      // Extra CDP descriptors cannot pass through systemd-run's stdio forwarding.
-      owned: browserPipe || !this.#units.enabled,
-      browserPipe,
-    });
-    if (browserPipe) {
-      const writer = createConnection({ fd: application.process.stdio[3]! });
-      const reader = createConnection({ fd: application.process.stdio[4]! });
-      if (session.computer.browser?.alive !== true) {
-        const browser = new BrowserRuntime(new CdpPipe(writer, reader));
-        session.computer.browser = browser;
-        void application.process.exited.then(() => browser.close());
-      } else {
-        writer.destroy();
-        reader.destroy();
-      }
+    const lifetime = AbortSignal.any([surfaceLifetime, AbortSignal.timeout(30_000), ...(signal ? [signal] : [])]);
+    lifetime.throwIfAborted();
+    const launchClaim = { session, result: Promise.withResolvers<void>(), targets: inheritedTargets ?? new Set<string>(), signal: lifetime, active: true };
+    this.#launchClaim = launchClaim;
+    // Ordinary apps may hand a URL to the running pack; they use this same
+    // launch context and stamp path, while keeping process claims for app windows.
+    void launchClaim.result.promise.catch(() => {});
+    const binding = browserPipe ? launchClaim.result : undefined;
+    if (binding) {
+      session.pendingBinding = binding.promise;
     }
-    // An application is shared by every Screen, so it is stopped with the Bot
-    // Computer. Its entry survives its leader while descendants still live in the
-    // owned session; that is what makes the teardown find them.
-    // shortcut: such an entry and its idle anchor live until the Computer stops,
-    // upgrade to a session watcher if orphaned applications become common.
-    session.computer.applicationProcesses.add(application);
-    // The identity captured now proves later that a reported pid still is this
-    // launch rather than a reused pid (see `processDescendsFrom`).
-    const applicationIdentity = processIdentity(application.process.pid);
-    // A pack launch is the pack browser by construction, whatever its binary.
-    if (browserPipe) this.#browser.trackLaunch(application.process.pid, applicationIdentity);
-    void application.process.exited.then(() => {
-      if (settleOwnedChild(application)) {
-        session.computer.applicationProcesses.delete(application);
-        this.#browser.forgetLaunch(application.process.pid);
+    try {
+      const role = `application-${++session.computer.applicationSequence}` as const;
+      const application = spawnDetachedChild({
+        argv: [
+          ...(browserPipe ? [] : this.#units.computerCommand(
+            session.computer.generation,
+            role,
+            session.computer.childEnv,
+            cwd,
+          )),
+          ...argv,
+        ],
+        env: browserPipe ? session.computer.childEnv : this.#units.launcherEnvironment(session.computer.childEnv),
+        cwd,
+        output: "ignore",
+        // Extra CDP descriptors cannot pass through systemd-run's stdio forwarding.
+        owned: browserPipe || !this.#units.enabled,
+        browserPipe,
+      });
+      if (browserPipe) {
+        const writer = createConnection({ fd: application.process.stdio[3]! });
+        const reader = createConnection({ fd: application.process.stdio[4]! });
+        if (session.computer.browser?.alive !== true) {
+          const browser = new BrowserRuntime(new CdpPipe(writer, reader), this.#ownership, {
+            ownerForNewTarget: (targetId) => {
+              if (session.computer !== this.#computer.current()) return undefined;
+              const launch = this.#launchClaim;
+              if (launch?.session.computer === session.computer && !launch.signal.aborted
+                && this.#sessions.get(launch.session.provision.surfaceId) === launch.session) {
+                launch.targets.add(targetId);
+                return launch.session.provision.surfaceId;
+              }
+              const human = this.#humanLease;
+              if (human?.session.computer === session.computer
+                && this.#inputLeaseOwner === human.session.provision.surfaceId) return human.session.provision.surfaceId;
+              return undefined;
+            },
+          });
+          session.computer.browser = browser;
+          void application.process.exited.then(() => browser.close());
+        } else {
+          writer.destroy();
+          reader.destroy();
+        }
       }
-    });
-    // A cold portable Chromium can take longer than 5s to map its window, and the
-    // window is routed only once it exists.
-    const timeoutMs = request.app !== undefined ? 5_000 : 30_000;
-    const deadline = Date.now() + timeoutMs;
-    const target = request.app !== undefined ? `application ${request.app}` : `URL ${request.url}`;
+      // An application is shared by every Screen, so it is stopped with the Bot
+      // Computer. Its entry survives its leader while descendants still live in the
+      // owned session; that is what makes the teardown find them.
+      // shortcut: such an entry and its idle anchor live until the Computer stops,
+      // upgrade to a session watcher if orphaned applications become common.
+      session.computer.applicationProcesses.add(application);
+      // The identity captured now proves later that a reported pid still is this
+      // launch rather than a reused pid (see `processDescendsFrom`).
+      const applicationIdentity = processIdentity(application.process.pid);
+      // A pack launch is the pack browser by construction, whatever its binary.
+      if (browserPipe) this.#browser.trackLaunch(application.process.pid, applicationIdentity);
+      void application.process.exited.then(() => {
+        if (settleOwnedChild(application)) {
+          session.computer.applicationProcesses.delete(application);
+          this.#browser.forgetLaunch(application.process.pid);
+        }
+      });
+      if (binding) {
+        const abort = () => {
+          if (signal?.aborted || surfaceLifetime.aborted) {
+            binding.reject(lifetime.reason);
+            return;
+          }
+          void (async () => {
+            const foreign = this.#foreignBrowserWindows(session, listApplicationToplevels(await swayIpc.getTree()));
+            binding.reject(new BrowserWindowAttributionError("launch", new Error("No stamped browser window appeared"
+              + (foreign.length ? `; the shared browser window ${foreign.map(({ window, surfaceId }) => `${window.id} on Screen ${surfaceId}`).join(", ")} was left in place` : ""))));
+          })().catch(error => binding.reject(new BrowserWindowAttributionError("launch", error)));
+        };
+        lifetime.addEventListener("abort", abort, { once: true });
+        if (lifetime.aborted) abort();
+        try {
+          await binding.promise;
+          return { text };
+        } finally {
+          lifetime.removeEventListener("abort", abort);
+          if (this.#launchClaim?.result === binding) this.#launchClaim = undefined;
+          if (session.pendingBinding === binding.promise) session.pendingBinding = undefined;
+        }
+      }
+      // A cold portable Chromium can take longer than 5s to map its window, and the
+      // window is routed only once it exists.
+      const timeoutMs = request.app !== undefined ? 5_000 : 30_000;
+      const target = request.app !== undefined ? `application ${request.app}` : `URL ${request.url}`;
+      const { claimed, settled } = await this.#routeWindowsOntoWorkspace(swayIpc, session, {
+        timeoutMs,
+        discover: (tree) => {
+          const applications = this.#claimLaunchedWindows(session, before, tree, application.process.pid, applicationIdentity);
+          const stamped = this.#ownership.windowsFor(session.provision.surfaceId)
+            .filter(owned => owned.targetId !== undefined && launchClaim.targets.has(owned.targetId))
+            .flatMap(owned => tree.filter(window => window.id === owned.swayWindowId));
+          return [...applications, ...stamped];
+        },
+        settled: (current) => current?.workspace === session.workspaceName && current.visible === true,
+        beforePoll: async () => {
+          if (signal?.aborted) {
+            await terminateOwnedChild(application);
+            signal.throwIfAborted();
+          }
+        },
+      });
+      if (settled) {
+        return { text };
+      }
+      if (claimed.length > 0) {
+        // A claimed window that never settles is a failure, but the reason differs:
+        // it can disappear, stay on another workspace, or stay mapped invisible.
+        let current: ComputerWindowListItem[] = [];
+        try {
+          current = listApplicationToplevels(await swayIpc.getTree());
+        } catch {
+          // The launch already failed; a divergent final read must not replace its reason.
+        }
+        const absent: string[] = [];
+        const misplaced: string[] = [];
+        const invisible: string[] = [];
+        for (const { id } of claimed) {
+          const window = current.find((candidate) => candidate.id === id);
+          if (window === undefined) absent.push(id);
+          else if (window.workspace !== session.workspaceName) misplaced.push(id);
+          else if (window.visible !== true) invisible.push(id);
+        }
+        const reasons = [
+          ...(absent.length === 0
+            ? []
+            : [`window ${absent.join(", ")} never appeared on workspace ${session.workspaceName}`]),
+          ...(misplaced.length === 0
+            ? []
+            : [`window ${misplaced.join(", ")} is not on workspace ${session.workspaceName}`]),
+          ...(invisible.length === 0
+            ? []
+            : [`window ${invisible.join(", ")} is not visible on workspace ${session.workspaceName}`]),
+        ];
+        if (reasons.length > 0) {
+          throw new Error(`Launched ${target} but ${reasons.join("; ")} after routing`);
+        }
+      }
+      let foreign: Array<{ window: ComputerWindowListItem; surfaceId: SurfaceId }> = [];
+      try {
+        foreign = this.#foreignBrowserWindows(
+          session,
+          listApplicationToplevels(await swayIpc.getTree()),
+        );
+      } catch {
+        // The launch already failed; a second IPC error must not replace its reason.
+      }
+      throw new Error(
+        `Launched ${target} but no window owned by the launched process appeared on workspace `
+        + `${session.workspaceName} within ${timeoutMs}ms`
+        + (foreign.length === 0
+          ? ""
+          : `; the shared browser window ${
+            foreign.map(({ window, surfaceId }) => `${window.id} on Screen ${surfaceId}`).join(", ")
+          } was left in place`),
+      );
+    } finally {
+      launchClaim.active = false;
+      if (this.#launchClaim === launchClaim) this.#launchClaim = undefined;
+    }
+  }
+
+  /**
+   * Moves the windows a launch may route onto the Screen's workspace and waits
+   * for every one of them to reach the state the caller needs. `discover` picks
+   * this launch's windows out of a tree snapshot, and `settled` decides when one
+   * has arrived, so a tiled application and a transient pop-up can each state
+   * their own rule instead of sharing the tiled one.
+   */
+  async #routeWindowsOntoWorkspace(
+    swayIpc: SwayIpcClient,
+    session: SwaySession,
+    options: {
+      timeoutMs: number;
+      discover: (tree: readonly ComputerWindowListItem[]) => ComputerWindowListItem[];
+      settled: (current: ComputerWindowListItem | undefined) => boolean;
+      /** Runs before each poll; throws to stop waiting, e.g. when the caller aborts. */
+      beforePoll?: () => Promise<void>;
+    },
+  ): Promise<{ claimed: ComputerWindowListItem[]; settled: boolean }> {
     // Sway announces a container before it is mapped and routed, so a claimed
-    // window that is absent, still elsewhere, or not yet `visible` is a transient
-    // state: retry it within the same launch deadline instead of failing.
+    // window that is absent, still elsewhere, or not yet settled is a transient
+    // state: retry it within the same deadline instead of failing.
     const claimed = new Map<string, ComputerWindowListItem>();
+    const deadline = Date.now() + options.timeoutMs;
     while (Date.now() < deadline && session.computer.running()) {
-      if (signal?.aborted) {
-        await terminateOwnedChild(application);
-        signal.throwIfAborted();
-      }
+      await options.beforePoll?.();
       const tree = listApplicationToplevels(await swayIpc.getTree());
-      const routedNow: ComputerWindowListItem[] = [];
-      for (const window of this.#claimLaunchedWindows(
-        session,
-        before,
-        tree,
-        application.process.pid,
-        applicationIdentity,
-      )) {
+      const moved: ComputerWindowListItem[] = [];
+      for (const window of options.discover(tree)) {
         if (claimed.has(window.id)) continue;
         claimed.set(window.id, window);
+        if (window.pid !== undefined && this.#browser.isPackBrowser(window.pid)) continue;
         await swayIpc.runCommand(
           `[con_id=${window.id}] move container to workspace ${session.workspaceName}`,
         );
-        routedNow.push(window);
+        moved.push(window);
       }
-      if (routedNow.length > 0) {
+      if (moved.length > 0) {
         await this.#focusWorkspace(session);
         // A just-routed tiled window is not arranged until it is focused: on
         // Sway 1.10 the tabbed container stays 0x0 and the window unmapped, so
-        // focus only the claimed windows before checking that they are visible.
-        for (const window of routedNow) {
+        // focus only the routed windows before the caller's settle check.
+        for (const window of moved) {
           await swayIpc.runCommand(`[con_id=${window.id}] focus`);
         }
       }
       if (claimed.size > 0) {
         // Re-read the claimed containers themselves: a window on the right
-        // workspace that Sway still hides (scratchpad) is not a visible launch.
-        const routed = routedNow.length > 0
+        // workspace that Sway still hides (scratchpad) has not settled.
+        const routed = moved.length > 0
           ? listApplicationToplevels(await swayIpc.getTree())
           : tree;
-        const settled = [...claimed.keys()].every((id) => {
-          const current = routed.find((candidate) => candidate.id === id);
-          return current?.workspace === session.workspaceName && current.visible === true;
-        });
-        if (settled) return { text };
+        const allSettled = [...claimed.keys()].every((id) =>
+          options.settled(routed.find((candidate) => candidate.id === id)));
+        if (allSettled) return { claimed: [...claimed.values()], settled: true };
       }
       await Bun.sleep(20);
     }
-    if (claimed.size > 0) {
-      // A claimed window that never settles is a failure, but the reason differs:
-      // it can disappear, stay on another workspace, or stay mapped invisible.
-      let current: ComputerWindowListItem[] = [];
-      try {
-        current = listApplicationToplevels(await swayIpc.getTree());
-      } catch {
-        // The launch already failed; a divergent final read must not replace its reason.
-      }
-      const absent: string[] = [];
-      const misplaced: string[] = [];
-      const invisible: string[] = [];
-      for (const id of claimed.keys()) {
-        const window = current.find((candidate) => candidate.id === id);
-        if (window === undefined) absent.push(id);
-        else if (window.workspace !== session.workspaceName) misplaced.push(id);
-        else if (window.visible !== true) invisible.push(id);
-      }
-      const reasons = [
-        ...(absent.length === 0
-          ? []
-          : [`window ${absent.join(", ")} never appeared on workspace ${session.workspaceName}`]),
-        ...(misplaced.length === 0
-          ? []
-          : [`window ${misplaced.join(", ")} is not on workspace ${session.workspaceName}`]),
-        ...(invisible.length === 0
-          ? []
-          : [`window ${invisible.join(", ")} is not visible on workspace ${session.workspaceName}`]),
-      ];
-      if (reasons.length > 0) {
-        throw new Error(`Launched ${target} but ${reasons.join("; ")} after routing`);
-      }
-    }
-    let foreign: Array<{ window: ComputerWindowListItem; surfaceId: SurfaceId }> = [];
-    try {
-      foreign = this.#foreignBrowserWindows(
-        session,
-        listApplicationToplevels(await swayIpc.getTree()),
-      );
-    } catch {
-      // The launch already failed; a second IPC error must not replace its reason.
-    }
-    throw new Error(
-      `Launched ${target} but no window owned by the launched process appeared on workspace `
-      + `${session.workspaceName} within ${timeoutMs}ms`
-      + (foreign.length === 0
-        ? ""
-        : `; the shared browser window ${
-          foreign.map(({ window, surfaceId }) => `${window.id} on Screen ${surfaceId}`).join(", ")
-        } was left in place`),
-    );
+    return { claimed: [...claimed.values()], settled: false };
+  }
+
+  /** Cold handlers request the same daemon-owned pipe lifecycle as open_url. */
+  async #ensureBrowserHandler(computer: BotComputer): Promise<void> {
+    if (computer.browserHandler) return;
+    let tail = Promise.resolve();
+    computer.browserHandler = await openBrowserHandler(computer.runtimeDir, (urls, requestSignal) => {
+      const launch = this.#launchClaim;
+      const human = this.#humanLease;
+      const activeLaunch = launch?.active && launch.session.computer === computer && !launch.signal.aborted ? launch : undefined;
+      const activeHuman = human?.session.computer === computer && this.#inputLeaseOwner === human.session.provision.surfaceId ? human : undefined;
+      const session = activeLaunch?.session ?? activeHuman?.session;
+      if (!session) return Promise.reject(new Error("Browser handler requires an active Bot launch or Web Control lease"));
+      const signal = AbortSignal.any([requestSignal, this.#ownership.surfaceSignal(session.provision.surfaceId), ...(activeLaunch ? [activeLaunch.signal] : [])]);
+      const work = tail.then(async () => {
+        signal.throwIfAborted();
+        if (computer !== this.#computer.current() || this.#sessions.get(session.provision.surfaceId) !== session
+          || (activeLaunch && !activeLaunch.active) || (!activeLaunch && this.#humanLease !== activeHuman)) throw new Error("Browser handler authority changed before launch");
+        for (const url of urls) {
+          signal.throwIfAborted();
+          const previous = this.#launchClaim;
+          try {
+            await this.#launchApplication(session, { url }, signal, activeLaunch?.targets);
+            await hideBotDesktop(new SwayIpcClient(computer.sockets.swaySock), session.workspaceName);
+          }
+          finally {
+            if (previous?.active && !previous.signal.aborted && this.#sessions.get(previous.session.provision.surfaceId) === previous.session) this.#launchClaim = previous;
+          }
+        }
+      });
+      tail = work.catch(() => {});
+      return work;
+    });
+  }
+
+  /** Opens the one window-event subscription a live Bot Computer needs. */
+  async #subscribeWindowEvents(computer: BotComputer): Promise<void> {
+    await this.#ensureBrowserHandler(computer);
+    const open = this.#windowEvents;
+    if (open !== undefined && open.computer === computer && !open.subscription.closed) return;
+    open?.subscription.close();
+    this.#windowEvents = undefined;
+    const subscription = await SwayWindowSubscription.open(computer.sockets.swaySock);
+    this.#windowEvents = { computer, subscription };
+    computer.windowEvents = subscription;
+    subscription.onWindowEvent((event) => this.#enqueueWindowEvent(computer, event));
+    // New events may have been lost before this listener was installed. Feed
+    // the current tree through the same identity and parking-job guards.
+    const windows = listApplicationToplevels(await new SwayIpcClient(computer.sockets.swaySock).getTree());
+    if (computer !== this.#computer.current() || this.#windowEvents?.subscription !== subscription) return;
+    for (const window of windows) this.#enqueueWindowEvent(computer, { change: "new", window });
+    await Promise.all(this.#parkingJobs.values());
   }
 
   /**
-   * The windows this launch may route, taken from the current tree. `before` is
-   * the tree-wide snapshot taken just before the child spawned, so a window in it
-   * already belongs to the Screen showing it and is never claimed here. A
-   * descendant of the spawned child is unambiguous. The pack browser forwards
-   * `open_url` launches (and anything a shim or URL handler hands it) to the
-   * already running instance that holds its one `--user-data-dir`, so the
-   * forwarded window belongs to the running pack, not to the short-lived
-   * forwarding child. Exactly one new pack window is that forwarding's window;
-   * several candidates cannot be attributed, so this launch claims none rather
-   * than move another Screen's window.
+   * Parking cannot wait behind a launch's completion or attribution observation.
+   * Each event catches its own failure so later events can still be handled.
    */
+  #enqueueWindowEvent(computer: BotComputer, event: SwayWindowEvent): void {
+    if (event.change !== "new" || computer !== this.#computer.current()) return;
+    if (this.#parkingJobs.has(event.window.id)) return;
+    // Each new window issues parking immediately, independently of slow CDP
+    // attribution or another window's verification. Every task catches its tail.
+    const job = this.#routeWindowEvent(computer, event.window).catch(error => {
+      console.error("Bot Computer window event routing failed", error);
+    }).finally(() => {
+      if (this.#parkingJobs.get(event.window.id) === job) this.#parkingJobs.delete(event.window.id);
+    });
+    this.#parkingJobs.set(event.window.id, job);
+  }
+
+  /** No pack window enters ownership until the Sway stamp port verifies its identity. */
+  async #routeWindowEvent(computer: BotComputer, window: ComputerWindowListItem): Promise<void> {
+    if (window.pid === undefined || !this.#browser.isPackBrowser(window.pid)) return;
+    if (this.#ownership.ownerOfSwayWindow(window.id) !== undefined) return;
+    if (this.#ownership.isUnowned(window.id) || this.#ownership.isParked(window.id)) return;
+    try {
+      await this.#parkUnownedWindow(computer, window);
+      if (computer !== this.#computer.current()) return;
+      this.#parkingFailures.delete(window.id);
+      this.#ownership.markParked(window.id);
+    } catch (error) {
+      if (computer === this.#computer.current()) this.#parkingFailures.set(window.id, error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+  }
+
+  async #parkUnownedWindow(computer: BotComputer, window: Pick<ComputerWindowListItem, "id">, signal?: AbortSignal): Promise<void> {
+    const bounded = AbortSignal.any([AbortSignal.timeout(1_500), ...(signal ? [signal] : [])]);
+    const ipc = new SwayIpcClient(computer.sockets.swaySock);
+    try {
+      bounded.throwIfAborted();
+      if (computer !== this.#computer.current()) throw new Error("Bot Computer changed before parking");
+      await ipc.runCommand(`[con_id=${window.id}] move scratchpad`, bounded);
+      while (true) {
+        bounded.throwIfAborted();
+        if (computer !== this.#computer.current()) throw new Error("Bot Computer changed during parking");
+        const current = listApplicationToplevels(await ipc.getTree(bounded)).find(candidate => candidate.id === window.id);
+        if (!current || current.workspace === "__i3_scratch") return;
+        await this.#attributionTick(bounded);
+      }
+    } catch (error) {
+      throw new Error(`Bot Computer could not park window ${window.id} on the scratchpad`, { cause: error });
+    }
+  }
+
+  /** Schedules CDP work outside the Sway event tail: title/new events keep flowing. */
+  #startAttribution(candidate: PendingWindowTarget): void {
+    if (!this.#ownership.hasPendingTarget(candidate) || this.#attributionJobs.has(candidate)) return;
+    const session = this.#sessions.get(candidate.surfaceId as SurfaceId);
+    const computer = session?.computer;
+    const browser = computer?.browser;
+    if (!session || !computer || !browser || computer !== this.#computer.current()) return;
+    const launch = this.#launchClaim?.targets.has(candidate.targetId) ? this.#launchClaim : undefined;
+    const check = (signal: AbortSignal) => {
+      signal.throwIfAborted();
+      if (computer !== this.#computer.current() || !computer.running()) throw new Error("Bot Computer changed during attribution");
+    };
+    const ipc = new SwayIpcClient(computer.sockets.swaySock);
+    const job = browser.attributeTarget(candidate, {
+      observeTitle: async (nonce, signal) => {
+        while (true) {
+          check(signal);
+          const windows = listApplicationToplevels(await ipc.getTree(signal));
+          check(signal);
+          const matched = windows.find(window => matchesBrowserWindowTitleStamp(window.title, nonce)
+            && window.pid !== undefined && this.#browser.isPackBrowser(window.pid));
+          if (matched) {
+            if (this.#ownership.isParked(matched.id)) return { swayWindowId: matched.id, title: matched.title! };
+            const parkingError = this.#parkingFailures.get(matched.id);
+            if (parkingError) throw parkingError;
+          }
+          await this.#attributionTick(signal);
+        }
+      },
+      routeAndVerify: async (surfaceId, swayWindowId, signal) => {
+        check(signal);
+        if (this.#sessions.get(surfaceId as SurfaceId) !== session) throw new Error("Browser Screen changed during attribution");
+        const deadline = AbortSignal.timeout(2_000);
+        const routeSignal = AbortSignal.any([signal, deadline]);
+        try {
+          await ipc.runCommand(`[con_id=${swayWindowId}] move container to workspace ${session.workspaceName}`, routeSignal);
+          // Workspace identity and scratchpad removal are the routing evidence.
+          // An inactive tab/output need not be visible and must never be focused.
+          while (true) {
+            check(routeSignal);
+            const window = listApplicationToplevels(await ipc.getTree(routeSignal)).find(window => window.id === swayWindowId);
+            if (!window) throw new Error("Stamped browser window disappeared during routing");
+            if (window.workspace === session.workspaceName) return;
+            await this.#attributionTick(routeSignal);
+          }
+        } catch (error) {
+          if (deadline.aborted && !signal.aborted) throw new Error("Browser window move was not verified within 2000ms", { cause: error });
+          throw error;
+        }
+      },
+      park: async (swayWindowId, signal) => {
+        check(signal);
+        await this.#parkUnownedWindow(computer, { id: swayWindowId }, signal);
+      },
+    }, launch?.signal).then(owned => {
+      if (owned) launch?.result.resolve();
+    }).catch(error => {
+      if (computer !== this.#computer.current() || this.#sessions.get(candidate.surfaceId as SurfaceId) !== session) return;
+      if (launch) launch.result.reject(error);
+      else this.#attributionErrors.set(candidate.surfaceId, error);
+    }).finally(() => { this.#attributionJobs.delete(candidate); });
+    this.#attributionJobs.set(candidate, job);
+  }
+
+  async #awaitAttributions(session: SwaySession, signal: AbortSignal): Promise<void> {
+    await session.computer.browser?.settleOpenerDiscovery(signal);
+    while (true) {
+      signal.throwIfAborted();
+      const jobs = [...this.#attributionJobs].filter(([candidate]) => candidate.surfaceId === session.provision.surfaceId).map(([, job]) => job);
+      if (jobs.length === 0) break;
+      await this.#waitForAttributionJobs(jobs, signal);
+    }
+    const error = this.#attributionErrors.get(session.provision.surfaceId);
+    this.#attributionErrors.delete(session.provision.surfaceId);
+    if (error !== undefined) throw error;
+  }
+
+  #attributionTick(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(signal.reason); };
+      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 10);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+    });
+  }
+
+  async #waitForAttributionJobs(jobs: Promise<void>[], signal: AbortSignal): Promise<void> {
+    const abort = Promise.withResolvers<never>();
+    const onAbort = () => abort.reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    try { await Promise.race([Promise.all(jobs), abort.promise]); }
+    finally { signal.removeEventListener("abort", onAbort); }
+  }
+
+  /** Ordinary application launch claims remain process-based; pack windows require a stamp. */
   #claimLaunchedWindows(
     session: SwaySession,
     before: ReadonlyMap<string, ComputerWindowListItem>,
@@ -1122,19 +1421,11 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const created = tree.filter((window) => !before.has(window.id));
     const direct = created.filter((window) =>
       window.pid !== undefined
+      && !this.#browser.isPackBrowser(window.pid)
       && applicationIdentity !== undefined
       && processDescendsFrom(window.pid, applicationPid, applicationIdentity)
     );
-    const claimed = direct.filter((window) => this.#claimWindow(surfaceId, window));
-    if (claimed.length > 0) return claimed;
-    const forwarded = created.filter((window) =>
-      window.pid !== undefined
-      && !this.#routedWindows.has(window.id)
-      && this.#browser.isPackBrowser(window.pid)
-    );
-    const [shared] = forwarded;
-    if (forwarded.length !== 1 || shared === undefined) return [];
-    return this.#claimWindow(surfaceId, shared) ? [shared] : [];
+    return direct.filter((window) => this.#ownership.claim(surfaceId, window.id));
   }
 
   /**
@@ -1163,14 +1454,6 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       if (surfaceWorkspace(surfaceId) === workspace) return surfaceId;
     }
     return undefined;
-  }
-
-  /** A window already routed to another Screen stays there. */
-  #claimWindow(surfaceId: SurfaceId, window: ComputerWindowListItem): boolean {
-    const owner = this.#routedWindows.get(window.id);
-    if (owner !== undefined && owner !== surfaceId) return false;
-    this.#routedWindows.set(window.id, surfaceId);
-    return true;
   }
 
   async #withInputLease<T>(
@@ -1203,6 +1486,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   #releaseInputLease(surfaceId: SurfaceId): void {
+    if (this.#humanLease?.session.provision.surfaceId === surfaceId) this.#humanLease = undefined;
     if (this.#inputLeaseOwner === surfaceId) this.#inputLeaseRelease?.();
   }
 
@@ -1245,7 +1529,16 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   /** A stopped shared Computer starts a fresh Sway session with fresh window ids. */
   #forgetComputerTracking(): void {
     this.#browser.forgetLaunches();
-    this.#routedWindows.clear();
+    this.#ownership.reset();
+    this.#attributionJobs.clear();
+    this.#attributionErrors.clear();
+    this.#parkingFailures.clear();
+    this.#parkingJobs.clear();
+    this.#humanLease = undefined;
+    this.#launchClaim?.result.reject(new Error("Bot Computer restarted"));
+    this.#launchClaim = undefined;
+    this.#windowEvents?.subscription.close();
+    this.#windowEvents = undefined;
   }
 
   async #discardSurfaceFromDisk(surfaceId: SurfaceId): Promise<void> {

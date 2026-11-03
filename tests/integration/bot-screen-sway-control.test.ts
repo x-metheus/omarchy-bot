@@ -315,13 +315,16 @@ await Promise.withResolvers<void>().promise;
     directory: path.join(root, "assets"),
     browserScript: (logPath) => `#!${process.execPath}
 import { readFileSync, writeFileSync } from "node:fs";
+import { serveControlBrowserCdp } from ${JSON.stringify(path.resolve(import.meta.dir, "helpers/controlBrowserCdp.ts"))};
 const treePath = ${JSON.stringify(path.join(controlDir, "tree.json"))};
 const tree = JSON.parse(readFileSync(treePath, "utf8"));
 const ids = [];
+let sharedPid;
 const collect = (node) => {
   if (Array.isArray(node)) return node.forEach(collect);
   if (node === null || typeof node !== "object") return;
   if (typeof node.id === "number") ids.push(node.id);
+  if (node.app_id === "chromium") sharedPid ??= node.pid;
   collect(node.nodes);
   collect(node.floating_nodes);
 };
@@ -332,7 +335,7 @@ workspace.nodes.push({
   type: "con",
   name: "Portable Browser",
   app_id: "chromium",
-  pid: process.pid,
+  pid: sharedPid ?? process.pid,
   focused: true,
   shell: "xdg_shell",
   rect: { x: 0, y: 0, width: 640, height: 480 },
@@ -346,6 +349,8 @@ writeFileSync(${JSON.stringify(logPath)}, JSON.stringify({
   home: process.env.HOME ?? null,
   configHome: process.env.XDG_CONFIG_HOME ?? null,
 }) + "\\n", { flag: "a" });
+if (sharedPid !== undefined) process.exit(0);
+serveControlBrowserCdp(treePath);
 await Promise.withResolvers<void>().promise;
 `,
   });
@@ -651,6 +656,8 @@ test("a paste the private helper cannot perform fails the Screen input", async (
 
 test("shared runtime launches applications into the requesting Screen workspace", async () => {
   const fixture = await startControlRuntime();
+  const browserCalls = fixture.assets.browserCalls();
+  fixture.assets.ensureBrowser = () => { throw new Error("browser pack unavailable"); };
   try {
     const shot = await fixture.runtime.capture();
     expect(shot.bytes.slice(0, 8)).toEqual(
@@ -661,6 +668,8 @@ test("shared runtime launches applications into the requesting Screen workspace"
     await expect(
       fixture.runtime.launch({ app: fixture.application }),
     ).resolves.toEqual({ text: `launched ${fixture.application}` });
+    expect(fixture.assets.browserCalls()).toBe(browserCalls);
+    expect(existsSync(path.join(root!, "assets", "browser.log"))).toBe(false);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
       "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",
@@ -906,7 +915,7 @@ process.exit(0);
     expect(commands).not.toContain(
       `[con_id=${appWindow}] move container to workspace bot-${SURFACE_ID}`,
     );
-    expect(commands).toContain(`[con_id=${browserWindow}] focus`);
+    expect(commands).not.toContain(`[con_id=${browserWindow}] focus`);
     expect(commands).not.toContain(`[con_id=${appWindow}] focus`);
     const launchedSurface = (await fixture.runtime.listWindows()).map((window) => window.id);
     expect(launchedSurface).toContain(String(browserWindow));
@@ -1080,7 +1089,7 @@ process.exit(0);
       `[con_id=${browserWindow!.id}] move container to workspace bot-${SURFACE_B}`,
     );
     const forwardedCommands = commands.slice(commandsBeforeForward.length);
-    expect(forwardedCommands).toContain(`[con_id=${forwardedId}] focus`);
+    expect(forwardedCommands).not.toContain(`[con_id=${forwardedId}] focus`);
     expect(forwardedCommands).not.toContain(`[con_id=${browserWindow!.id}] focus`);
     expect((await fixture.runtime.listWindows()).map((window) => window.id))
       .toEqual([browserWindow!.id]);
@@ -1297,7 +1306,7 @@ test("open_url uses the browser pack even on a host whose default browser is bra
   const fixture = await startControlRuntime();
   const url = "https://example.com/pack-default";
   try {
-    await expect(fixture.runtime.launch({ url })).resolves.toEqual({ text: `opened ${url}` });
+    expect(await fixture.runtime.launch({ url })).toEqual({ text: `opened ${url}` });
     expect(fixture.assets.browserLaunches()).toHaveLength(1);
     expect(fixture.assets.fontCalls()).toBe(1);
     expect(existsSync(fixture.hostBrowserMarker)).toBeFalse();
@@ -1342,20 +1351,23 @@ test("every browser path in the Screen environment ends at the pack", async () =
         expect(query.stdout.toString().trim(), type).toBe("omarchy-bot-browser.desktop");
       }
     }
+    await fixture.runtime.setInputAuthority(1, "web");
     const shim = Bun.spawn(["/bin/sh", "-c", "brave https://x.example/"], { env, stdout: "ignore", stderr: "ignore" });
     try {
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline && !existsSync(path.join(root!, "assets", "browser.log"))) await Bun.sleep(20);
+      expect(await shim.exited).toBe(0);
       expect(fixture.assets.browserLaunches().map((launch) => launch.argv.slice(1))).toEqual([[
         `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "omarchy-bot-browser")}`,
         "--ozone-platform=wayland", "--disable-gpu", "--no-first-run",
         "--no-default-browser-check", "--disable-sync", "--password-store=basic",
-        "--new-window", "https://x.example/",
+        "--remote-debugging-pipe", "--new-window", "https://x.example/",
       ]]);
     } finally {
-      shim.kill("SIGKILL");
+      if (shim.exitCode === null) shim.kill("SIGKILL");
       await shim.exited;
     }
+    await fixture.runtime.releaseInput(1);
     expect(existsSync(fixture.hostBrowserMarker)).toBeFalse();
   } finally {
     await fixture.runtime.stop();
@@ -1371,11 +1383,10 @@ test("open_url opens the pack with its private profile and the CDP pipe", async 
     ).resolves.toEqual({ text: `opened ${url}` });
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
+      expect.stringMatching(new RegExp(`^\\[con_id=\\d+\\] move scratchpad$`)),
       expect.stringMatching(
         new RegExp(`^\\[con_id=\\d+\\] move container to workspace bot-${SURFACE_ID}$`),
       ),
-      `workspace bot-${SURFACE_ID}`,
-      expect.stringMatching(new RegExp(`^\\[con_id=\\d+\\] focus$`)),
       `[app_id="^dev[.]omarchy[.]BotDesktop$" workspace="^bot-${SURFACE_ID}$"] move scratchpad`,
     ]);
     const [launch] = fixture.assets.browserLaunches();

@@ -588,3 +588,24 @@ describe("ScreenInputLease", () => {
     expect(after).toBe("after");
   });
 });
+
+test("ScreenInputLease carries authoritative controller kind and generation to runtime delivery", async () => {
+  const grants: Array<{ surfaceId: SurfaceId; generation: number | undefined; kind: string | undefined }> = [];
+  const sink = delivery();
+  const lease = new ScreenInputLease({ ...sink.adapter, grant: async (surfaceId, epoch, generation, kind) => {
+    grants.push({ surfaceId, generation, kind });
+    return epoch;
+  } });
+  await lease.runtimeReady(SURFACE_A, 8);
+  const web = await lease.acquireWebControl(target(SURFACE_A, 8));
+  await web.release();
+  await lease.performBotInput(target(SURFACE_A, 8), {
+    turnId: "turn", signal: new AbortController().signal, run: async () => {},
+  });
+  expect(grants).toEqual([
+    { surfaceId: SURFACE_A, generation: 8, kind: "web" },
+    { surfaceId: SURFACE_A, generation: 8, kind: "bot" },
+  ]);
+  await expect(lease.acquireWebControl(target(SURFACE_A, 7))).rejects.toThrow(/stale/);
+  expect(grants).toHaveLength(2);
+});
