@@ -26,7 +26,7 @@ test("container Launcher attaches image assets and preserves one state volume ac
   const installed = path.join(root, "image", "entrypoint.sh");
   writeFileSync(installed, readFileSync(entrypoint));
   for (let launch = 0; launch < 2; launch += 1) {
-    const profile = path.join(env.OMARCHY_BOT_HOME, "screens/computer/config/chromium");
+    const profile = path.join(env.OMARCHY_BOT_HOME, launch === 0 ? "screens/computer/config/chromium" : "screens/computer/config/omarchy-bot-browser");
     mkdirSync(profile, { recursive: true });
     writeFileSync(path.join(profile, "profile-marker"), "retained browser state");
     for (const file of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) symlinkSync("old-container-404", path.join(profile, file));

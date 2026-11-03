@@ -15,7 +15,7 @@ import {
   createFixtureAssetSupply,
   type FixtureAssetSupply,
 } from "./helpers/botComputerAssetsFixture.ts";
-import { PortableBotComputerAssets } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
+import { BROWSER_PACK_MISSING, PortableBotComputerAssets } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 
 const SURFACE_ID = "surf_33333333333333333333333333333333" as SurfaceId;
 const SURFACE_B = "surf_44444444444444444444444444444444" as SurfaceId;
@@ -168,7 +168,6 @@ test("native window data excludes the Bot Desktop infrastructure surface", () =>
 let root: string | undefined;
 const originalPath = process.env.PATH;
 const originalDataDirs = process.env.XDG_DATA_DIRS;
-const originalBrowser = process.env.OMARCHY_BOT_BROWSER;
 
 afterEach(() => {
   if (root !== undefined) rmSync(root, { recursive: true, force: true });
@@ -177,8 +176,6 @@ afterEach(() => {
   else process.env.PATH = originalPath;
   if (originalDataDirs === undefined) delete process.env.XDG_DATA_DIRS;
   else process.env.XDG_DATA_DIRS = originalDataDirs;
-  if (originalBrowser === undefined) delete process.env.OMARCHY_BOT_BROWSER;
-  else process.env.OMARCHY_BOT_BROWSER = originalBrowser;
 });
 
 function executable(directory: string, name: string, body: string): string {
@@ -191,18 +188,6 @@ function executable(directory: string, name: string, body: string): string {
 async function startControlRuntime(options?: {
   tree?: unknown;
   failPastePath?: string;
-  hostBrowser?: boolean;
-  /** Omit the native browser desktop entry to simulate a browser-less host. */
-  nativeBrowser?: boolean;
-  /** Install a snap-only browser desktop entry and a `snap` shim on PATH. */
-  snapOnly?: boolean;
-  /**
-   * Create a native browser executable with this basename (for example `brave`)
-   * and point the desktop entry at it.
-   */
-  nativeBrowserName?: string;
-  /** Exact desktop `Exec` line for the browser entry (overrides the defaults). */
-  browserExec?: string;
   assets?: FixtureAssetSupply;
 }): Promise<{
   runtime: BotScreenRuntime;
@@ -214,8 +199,10 @@ async function startControlRuntime(options?: {
   application: string;
   applicationMarker: string;
   assets: FixtureAssetSupply;
-  snapMarker: string;
-  nativeArgv: string;
+  /** A fake host browser on the daemon PATH and in the host data dirs; it only leaves this marker. */
+  hostBrowserMarker: string;
+  /** The PATH the fake Sway itself was started with. */
+  swayPath: () => string;
   unlinkIpc: () => void;
 }> {
   root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-control-"));
@@ -233,9 +220,7 @@ async function startControlRuntime(options?: {
   writeFakeSwayTree(controlDir, options?.tree ?? TWO_TOPLEVEL_TREE);
   writeFakeSwayIpcMode(controlDir, "ok");
   writeFileSync(inputLog, "");
-  // Hide host desktop entries and host browsers so only this fixture is detectable.
-  if (options?.hostBrowser) process.env.OMARCHY_BOT_BROWSER = "host";
-  else delete process.env.OMARCHY_BOT_BROWSER;
+  // Hide the real host's desktop entries; the fixture host has only a fake brave.
   process.env.XDG_DATA_DIRS = path.join(root, "host-data");
   for (const [name, target] of Object.entries({
     bun: process.execPath,
@@ -255,6 +240,7 @@ import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
 const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "";
 const wayland = path.join(runtimeDir, "wayland-0");
 const swaySock = process.env.SWAYSOCK ?? path.join(runtimeDir, "sway-ipc.sock");
+await Bun.write(${JSON.stringify(path.join(controlDir, "sway-path"))}, process.env.PATH ?? "");
 Bun.listen({ unix: wayland, socket: { data() {} } });
 await serveFakeSwayIpc({
   socketPath: swaySock,
@@ -309,72 +295,22 @@ writeFileSync(${JSON.stringify(applicationMarker)}, [
 ].join("|"));
 await Promise.withResolvers<void>().promise;
 `);
-  const browserApplications = path.join(
-    root,
-    "profiles",
-    "computer",
-    "data",
-    "applications",
-  );
-  mkdirSync(browserApplications, { recursive: true });
-  const snapMarker = path.join(root, "snap-launched");
-  const snapBin = path.join(bin, "snap");
-  const nativeArgv = path.join(root, "native-argv");
-  const nativeBrowser = options?.nativeBrowserName === undefined
-    ? undefined
-    : executable(bin, options.nativeBrowserName, `#!${process.execPath}
-import { readFileSync, writeFileSync } from "node:fs";
-const treePath = ${JSON.stringify(path.join(controlDir, "tree.json"))};
-const tree = JSON.parse(readFileSync(treePath, "utf8"));
-tree.nodes[0].nodes[0].nodes.push({
-  id: 50,
-  type: "con",
-  name: "Native Browser",
-  app_id: ${JSON.stringify(options.nativeBrowserName)},
-  pid: process.pid,
-  focused: true,
-  shell: "xdg_shell",
-  rect: { x: 0, y: 0, width: 640, height: 480 },
-  nodes: [],
-  floating_nodes: [],
-});
-writeFileSync(treePath, JSON.stringify(tree));
-writeFileSync(${JSON.stringify(nativeArgv)}, process.argv.slice(2).join(" ") + "\\n");
-await Promise.withResolvers<void>().promise;
-`);
-  const nativeExec = options?.browserExec ?? nativeBrowser ?? application;
-  if (options?.snapOnly === true) {
-    executable(bin, "snap", `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(snapMarker)}\nexit 1\n`);
-    writeFileSync(
-      path.join(browserApplications, "brave-browser.desktop"),
-      [
-        "[Desktop Entry]",
-        "Type=Application",
-        `Exec="${snapBin}" run brave %U`,
-        "",
-      ].join("\n"),
-    );
-  } else if (options?.browserExec !== undefined) {
-    writeFileSync(
-      path.join(browserApplications, "brave-browser.desktop"),
-      [
-        "[Desktop Entry]",
-        "Type=Application",
-        `Exec=${options.browserExec}`,
-        "",
-      ].join("\n"),
-    );
-  } else if (options?.nativeBrowser !== false) {
-    writeFileSync(
-      path.join(browserApplications, "brave-browser.desktop"),
-      [
-        "[Desktop Entry]",
-        "Type=Application",
-        `Exec="${nativeExec}" %U`,
-        "",
-      ].join("\n"),
-    );
-  }
+  // A fake host browser: on the daemon PATH, in the host data dirs, and the host's
+  // default URL handler. It must never run inside the Bot Computer.
+  const hostBrowserMarker = path.join(root, "host-brave-ran");
+  const hostBrave = executable(bin, "brave", `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(hostBrowserMarker)}\n`);
+  const hostApplications = path.join(root, "host-data", "applications");
+  mkdirSync(hostApplications, { recursive: true });
+  writeFileSync(path.join(hostApplications, "brave-browser.desktop"), [
+    "[Desktop Entry]", "Type=Application", "Name=Brave", `Exec=${hostBrave} %U`, "",
+  ].join("\n"));
+  writeFileSync(path.join(hostApplications, "mimeapps.list"), [
+    "[Default Applications]",
+    "x-scheme-handler/http=brave-browser.desktop",
+    "x-scheme-handler/https=brave-browser.desktop",
+    "text/html=brave-browser.desktop",
+    "",
+  ].join("\n"));
   const assets = options?.assets ?? createFixtureAssetSupply({
     directory: path.join(root, "assets"),
     browserScript: (logPath) => `#!${process.execPath}
@@ -460,8 +396,8 @@ await Promise.withResolvers<void>().promise;
     application,
     applicationMarker,
     assets,
-    snapMarker,
-    nativeArgv,
+    hostBrowserMarker,
+    swayPath: () => readFileSync(path.join(controlDir, "sway-path"), "utf8"),
     get expandedViewCalls() {
       return expandedViewCalls;
     },
@@ -827,7 +763,7 @@ await Promise.withResolvers<void>().promise;
 }, 20_000);
 
 test("a shared browser launch claims only its forwarded browser window across Screens", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const fixture = await startControlRuntime();
   const second = await fixture.adapter.start({
     surfaceId: SURFACE_B,
     geometryGeneration: 7,
@@ -1016,7 +952,7 @@ const TWO_SCREEN_TREE = {
 };
 
 test("a forwarded open_url that creates no new window leaves the other Screen's browser window in place", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const fixture = await startControlRuntime();
   const second = await fixture.adapter.start({
     surfaceId: SURFACE_B,
     geometryGeneration: 7,
@@ -1069,7 +1005,7 @@ test("a forwarded open_url that creates no new window leaves the other Screen's 
 }, 40_000);
 
 test("a forwarded open_url moves only the window it created off the other Screen's workspace", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const fixture = await startControlRuntime();
   const second = await fixture.adapter.start({
     surfaceId: SURFACE_B,
     geometryGeneration: 7,
@@ -1153,8 +1089,8 @@ process.exit(0);
   }
 }, 20_000);
 
-test("an open_app that resolves to the shared browser claims its forwarded window across Screens", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false });
+test("a handoff into the running pack claims only the pack's forwarded window across Screens", async () => {
+  const fixture = await startControlRuntime();
   const second = await fixture.adapter.start({
     surfaceId: SURFACE_B,
     geometryGeneration: 7,
@@ -1164,23 +1100,23 @@ test("an open_app that resolves to the shared browser claims its forwarded windo
     refreshRate: 15,
   });
   writeFakeSwayTree(fixture.controlDir, TWO_SCREEN_TREE);
-  const browserPidFile = path.join(root!, "shared-open-app-browser.pid");
-  // A browser executable: the first open_app maps its own window and stays live;
-  // the second is forwarded to it and maps one new window owned by that live
-  // browser pid on Screen A's workspace, the way a shared profile behaves.
-  const browser = executable(path.join(root!, "bin"), "brave", `#!${process.execPath}
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+  // A process that is not the pack but maps a window with a Chromium app id.
+  const impostor = Bun.spawn(["sleep", "3600"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  const packPidFile = path.join(root!, "pack.pid");
+  // An application that hands a URL to the running pack (as a link handoff or a
+  // shim does): the running pack maps the new window, then the handoff exits.
+  const handoff = executable(path.join(root!, "bin"), "pack-handoff", `#!${process.execPath}
+import { readFileSync, writeFileSync } from "node:fs";
 const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
-const pidFile = ${JSON.stringify(browserPidFile)};
 const tree = JSON.parse(readFileSync(treePath, "utf8"));
 const screenA = tree.nodes[0].nodes[0];
-if (existsSync(pidFile)) {
+for (const [id, pid] of [[71, ${impostor.pid}], [72, Number(readFileSync(${JSON.stringify(packPidFile)}, "utf8"))]]) {
   screenA.nodes.push({
-    id: 61,
+    id,
     type: "con",
-    name: "Forwarded Browser Window",
-    app_id: "brave",
-    pid: Number(readFileSync(pidFile, "utf8")),
+    name: "Handed Off",
+    app_id: "chromium",
+    pid,
     focused: true,
     visible: true,
     shell: "xdg_shell",
@@ -1188,54 +1124,37 @@ if (existsSync(pidFile)) {
     nodes: [],
     floating_nodes: [],
   });
-  writeFileSync(treePath, JSON.stringify(tree));
-  process.exit(0);
 }
-screenA.nodes.push({
-  id: 60,
-  type: "con",
-  name: "Shared Browser",
-  app_id: "brave",
-  pid: process.pid,
-  focused: true,
-  visible: true,
-  shell: "xdg_shell",
-  rect: { x: 0, y: 0, width: 640, height: 480 },
-  nodes: [],
-  floating_nodes: [],
-});
 writeFileSync(treePath, JSON.stringify(tree));
-writeFileSync(pidFile, String(process.pid));
-await Promise.withResolvers<void>().promise;
+process.exit(0);
 `);
   const applications = path.join(root!, "profiles", "computer", "data", "applications");
-  mkdirSync(applications, { recursive: true });
   writeFileSync(
-    path.join(applications, "shared-browser.desktop"),
-    ["[Desktop Entry]", "Type=Application", "Name=Shared Browser", `Exec=${browser}`, ""].join("\n"),
+    path.join(applications, "pack-handoff.desktop"),
+    ["[Desktop Entry]", "Type=Application", "Name=Handoff", `Exec=${handoff}`, ""].join("\n"),
   );
   try {
-    await expect(fixture.runtime.launch({ app: "shared-browser.desktop" }))
-      .resolves.toEqual({ text: "launched shared-browser.desktop" });
-    const browserPid = Number(readFileSync(browserPidFile, "utf8"));
-    expect(browserPid).toBeNumber();
-    const commandsBeforeForward = readFakeSwayCommands(fixture.controlDir);
-    await expect(second.launch({ app: "shared-browser.desktop" }))
-      .resolves.toEqual({ text: "launched shared-browser.desktop" });
+    await expect(fixture.runtime.launch({ url: "https://example.com/first" }))
+      .resolves.toEqual({ text: "opened https://example.com/first" });
+    const packWindow = (await fixture.runtime.listWindows())[0]!;
+    writeFileSync(packPidFile, String(packWindow.pid));
+    const commandsBeforeHandoff = readFakeSwayCommands(fixture.controlDir);
+    await expect(second.launch({ app: "pack-handoff.desktop" }))
+      .resolves.toEqual({ text: "launched pack-handoff.desktop" });
 
-    const commands = readFakeSwayCommands(fixture.controlDir);
-    expect(commands).toContain(`[con_id=61] move container to workspace bot-${SURFACE_B}`);
-    expect(commands).not.toContain(`[con_id=60] move container to workspace bot-${SURFACE_B}`);
-    const forwardedCommands = commands.slice(commandsBeforeForward.length);
-    expect(forwardedCommands).toContain("[con_id=61] focus");
-    expect(forwardedCommands).not.toContain("[con_id=60] focus");
-    // The live browser keeps its own window; the forwarded window moved to B.
-    expect((await fixture.runtime.listWindows()).map((window) => window.id)).toEqual(["60"]);
+    const commands = readFakeSwayCommands(fixture.controlDir).slice(commandsBeforeHandoff.length);
+    expect(commands).toContain(`[con_id=72] move container to workspace bot-${SURFACE_B}`);
+    expect(commands).not.toContain(`[con_id=71] move container to workspace bot-${SURFACE_B}`);
+    expect(commands).not.toContain(`[con_id=${packWindow.id}] move container to workspace bot-${SURFACE_B}`);
     const forwarded = await second.listWindows();
-    expect(forwarded.map((window) => window.id)).toEqual(["61"]);
-    expect(forwarded[0]?.pid).toBe(browserPid);
+    expect(forwarded.map((window) => window.id)).toEqual(["72"]);
+    expect(forwarded[0]?.pid).toBe(packWindow.pid);
+    expect((await fixture.runtime.listWindows()).map((window) => window.id).sort())
+      .toEqual([packWindow.id, "71"].sort());
   } finally {
     await Promise.allSettled([fixture.runtime.stop(), second.stop()]);
+    impostor.kill("SIGKILL");
+    await impostor.exited;
   }
 }, 20_000);
 
@@ -1374,198 +1293,77 @@ test("a failed Bot Desktop hide does not replace the launch error", async () => 
   }
 });
 
-test("host browser mode resolves a bare desktop command from the daemon PATH", async () => {
-  const fixture = await startControlRuntime({ hostBrowser: true, nativeBrowser: false });
-  const hostBin = path.join(root!, "host-bin");
-  mkdirSync(hostBin);
-  const argvPath = path.join(root!, "host-browser-argv");
-  // The browser lives only on the daemon's PATH, never on the Screen's.
-  executable(hostBin, "brave", `#!${process.execPath}
-import { readFileSync, writeFileSync } from "node:fs";
-const treePath = ${JSON.stringify(path.join(root!, "ipc-control", "tree.json"))};
-const tree = JSON.parse(readFileSync(treePath, "utf8"));
-tree.nodes[0].nodes[0].nodes.push({
-  id: 60,
-  type: "con",
-  name: "Host Browser",
-  app_id: "brave",
-  pid: process.pid,
-  focused: true,
-  shell: "xdg_shell",
-  rect: { x: 0, y: 0, width: 640, height: 480 },
-  nodes: [],
-  floating_nodes: [],
-});
-writeFileSync(treePath, JSON.stringify(tree));
-writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));
-await Promise.withResolvers<void>().promise;
-`);
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${hostBin}:${previousPath ?? ""}`;
-  writeFileSync(
-    path.join(root!, "profiles", "computer", "data", "applications", "brave-browser.desktop"),
-    ["[Desktop Entry]", "Type=Application", "Exec=brave %U", ""].join("\n"),
-  );
-  const url = "https://example.com/host-bare-command";
-  try {
-    await expect(fixture.runtime.launch({ url })).resolves.toEqual({ text: `opened ${url}` });
-    expect(JSON.parse(readFileSync(argvPath, "utf8")) as unknown).toEqual(["--new-window", url]);
-    expect(fixture.runtime.sessionEnv.PATH!.split(":")).not.toContain(hostBin);
-    expect(fixture.assets.browserCalls()).toBe(0);
-  } finally {
-    if (previousPath === undefined) delete process.env.PATH;
-    else process.env.PATH = previousPath;
-    await fixture.runtime.stop();
-  }
-});
-
-test("open_url uses the installed browser pack even when a native browser is available", async () => {
+test("open_url uses the browser pack even on a host whose default browser is brave", async () => {
   const fixture = await startControlRuntime();
   const url = "https://example.com/pack-default";
   try {
     await expect(fixture.runtime.launch({ url })).resolves.toEqual({ text: `opened ${url}` });
-    expect(existsSync(fixture.applicationMarker)).toBeFalse();
     expect(fixture.assets.browserLaunches()).toHaveLength(1);
     expect(fixture.assets.fontCalls()).toBe(1);
+    expect(existsSync(fixture.hostBrowserMarker)).toBeFalse();
   } finally { await fixture.runtime.stop(); }
 });
 
-test("open_url asks a native Chromium browser for a routable new window", async () => {
-  const fixture = await startControlRuntime({ nativeBrowserName: "brave", hostBrowser: true });
-  const url = "https://example.com/native-new-window";
-  try {
-    await expect(
-      fixture.runtime.launch({ url }),
-    ).resolves.toEqual({ text: `opened ${url}` });
-    expect(readFileSync(fixture.nativeArgv, "utf8").trim()).toBe(`--new-window ${url}`);
-    expect(fixture.assets.browserCalls()).toBe(0);
-  } finally {
-    await fixture.runtime.stop();
-  }
-});
-
-test("browser tool fails clearly for host browsers while computer launch remains available", async () => {
-  const fixture = await startControlRuntime({ nativeBrowserName: "brave", hostBrowser: true });
-  try {
-    await expect(fixture.runtime.browser!(
-      { name: "snapshot", args: {} },
-      async () => { throw new Error("unexpected input"); },
-      new AbortController().signal,
-    )).rejects.toThrow("host browser has no owned CDP pipe");
-    await expect(fixture.runtime.browser!(
-      { name: "request_takeover", args: { reason: "Please log in" } },
-      async () => { throw new Error("unexpected input"); },
-      new AbortController().signal,
-    )).rejects.toThrow("host browser has no owned CDP pipe");
-    expect(fixture.assets.browserCalls()).toBe(0);
-  } finally {
-    await fixture.runtime.stop();
-  }
-});
-
-test("open_url rejects an env-wrapped snap browser and uses the portable one", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false, snapOnly: true, hostBrowser: true });
-  const url = "https://example.com/env-snap";
-  try {
-    // Ubuntu/GNOME launch entries commonly route through env with an assignment,
-    // so argv[0] alone is not the browser: the target after the assignment is.
-    const applications = path.join(root!, "profiles", "computer", "data", "applications");
-    writeFileSync(path.join(applications, "chromium.desktop"), [
-      "[Desktop Entry]",
-      "Type=Application",
-      `Exec=env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/applications/firefox_firefox.desktop ${path.join(root!, "bin", "snap")} run firefox %U`,
-      "",
-    ].join("\n"));
-
-    await expect(
-      fixture.runtime.launch({ url }),
-    ).resolves.toEqual({ text: `opened ${url}` });
-    expect(existsSync(fixture.snapMarker)).toBeFalse();
-    expect(fixture.assets.browserLaunches()).toHaveLength(1);
-    expect(readFakeSwayCommands(fixture.controlDir)).toContainEqual(
-      expect.stringMatching(
-        new RegExp(`^\\[con_id=\\d+\\] move container to workspace bot-${SURFACE_ID}$`),
-      ),
-    );
-  } finally {
-    await fixture.runtime.stop();
-  }
-});
-
-test("open_url honors desktop INI whitespace and ignores other groups for an env-wrapped browser", async () => {
-  const fixture = await startControlRuntime({ nativeBrowserName: "brave", hostBrowser: true });
-  const url = "https://example.com/env-native";
-  try {
-    const applications = path.join(root!, "profiles", "computer", "data", "applications");
-    writeFileSync(path.join(applications, "brave-browser.desktop"), [
-      "# Desktop settings may have whitespace around their keys and groups.",
-      "  [Desktop Entry]  ",
-      " Type = Application ",
-      ` Exec = env BROWSER_FIXTURE=1 ${path.join(root!, "bin", "brave")} --fixture-ini %U `,
-      "[Desktop Action Unused]",
-      "Type=Link",
-      "Exec=/missing-browser",
-      "",
-    ].join("\r\n"));
-
-    await expect(
-      fixture.runtime.launch({ url }),
-    ).resolves.toEqual({ text: `opened ${url}` });
-    expect(fixture.assets.browserCalls()).toBe(0);
-    expect(readFileSync(fixture.nativeArgv, "utf8").trim()).toBe(`--fixture-ini --new-window ${url}`);
-  } finally {
-    await fixture.runtime.stop();
-  }
-});
-
-test("open_url does not interpret env options or PATH assignments", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false, hostBrowser: true });
+test("open_app refuses host browsers by name, desktop id and desktop command without running them", async () => {
+  const fixture = await startControlRuntime();
   const applications = path.join(root!, "profiles", "computer", "data", "applications");
-  const bin = path.join(root!, "bin");
-  const snapMarker = path.join(root!, "env-snap");
-  const targetMarker = path.join(root!, "env-target");
-  executable(bin, "snap-shim", `#!/bin/sh\nprintf '1\\n' >> ${JSON.stringify(snapMarker)}\n`);
-  const target = executable(bin, "brave-shim", `#!/bin/sh\nprintf '1\\n' >> ${JSON.stringify(targetMarker)}\n`);
+  writeFileSync(path.join(applications, "web.desktop"), [
+    "[Desktop Entry]", "Type=Application", "Name=Web",
+    `Exec=env BROWSER_FIXTURE=1 ${path.join(root!, "bin", "brave")} %U`, "",
+  ].join("\n"));
   try {
-    // env -S/--split-string inserts tokens before the rest of argv, so env would
-    // run snap even though a browser path follows. Interpreting the option would
-    // accept the wrong command, so the entry must be skipped entirely.
-    writeFileSync(path.join(applications, "chromium.desktop"), [
-      "[Desktop Entry]",
-      "Type=Application",
-      `Exec=env --split-string=/snap/bin/firefox ${target} %U`,
-      "",
-    ].join("\n"));
-    await expect(
-      fixture.runtime.launch({ url: "https://example.com/split-string" }),
-    ).resolves.toEqual({ text: "opened https://example.com/split-string" });
-    expect(existsSync(targetMarker)).toBeFalse();
-    expect(existsSync(snapMarker)).toBeFalse();
-    expect(fixture.assets.browserLaunches()).toHaveLength(1);
-
-    // A PATH assignment changes which binary env runs, so it is unsupported too.
-    writeFileSync(path.join(applications, "chromium.desktop"), [
-      "[Desktop Entry]",
-      "Type=Application",
-      `Exec=env PATH=/snap/bin ${target} %U`,
-      "",
-    ].join("\n"));
-    await expect(
-      fixture.runtime.launch({ url: "https://example.com/env-path" }),
-    ).resolves.toEqual({ text: "opened https://example.com/env-path" });
-    expect(existsSync(targetMarker)).toBeFalse();
-    expect(fixture.assets.browserLaunches()).toHaveLength(2);
-    expect(fixture.assets.browserLaunches().map((launch) => launch.argv.at(-1))).toEqual([
-      "https://example.com/split-string",
-      "https://example.com/env-path",
-    ]);
+    for (const app of ["brave", path.join(root!, "bin", "brave"), "brave-browser.desktop", "firefox", "google-chrome-stable", "web.desktop"]) {
+      await expect(fixture.runtime.launch({ app }), app).rejects.toThrow(
+        `open_app cannot start ${app}: Bots use only the bundled browser. Use open_url to open a page in it, or the browser tool to operate it.`,
+      );
+    }
+    expect(existsSync(fixture.hostBrowserMarker)).toBeFalse();
+    expect(readFakeSwayCommands(fixture.controlDir).filter((command) => command.includes("move container"))).toEqual([]);
   } finally {
     await fixture.runtime.stop();
   }
-}, 30_000);
+});
 
-test("open_url opens the portable browser on a host with no native browser", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false });
+test("every browser path in the Screen environment ends at the pack", async () => {
+  const fixture = await startControlRuntime();
+  const env = fixture.runtime.sessionEnv;
+  const shimDir = path.join(root!, "profiles", "computer", "browser-shims");
+  try {
+    // The Service shims lead both the Screen PATH and Sway's own PATH (`swaymsg exec`).
+    expect(env.PATH!.split(":")[0]).toBe(shimDir);
+    expect(fixture.swayPath().split(":")[0]).toBe(shimDir);
+    expect(env.BROWSER).toBe(path.join(shimDir, "omarchy-bot-browser"));
+    // Guard before running anything: `brave` must resolve to the shim, never a host binary.
+    expect(Bun.which("brave", { PATH: env.PATH! })).toBe(path.join(shimDir, "brave"));
+    const xdgMime = Bun.which("xdg-mime", { PATH: env.PATH! });
+    if (xdgMime !== null) {
+      for (const type of ["x-scheme-handler/http", "x-scheme-handler/https", "text/html"]) {
+        const query = Bun.spawnSync([xdgMime, "query", "default", type], { env, stdout: "pipe", stderr: "pipe" });
+        expect(query.stdout.toString().trim(), type).toBe("omarchy-bot-browser.desktop");
+      }
+    }
+    const shim = Bun.spawn(["/bin/sh", "-c", "brave https://x.example/"], { env, stdout: "ignore", stderr: "ignore" });
+    try {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && !existsSync(path.join(root!, "assets", "browser.log"))) await Bun.sleep(20);
+      expect(fixture.assets.browserLaunches().map((launch) => launch.argv.slice(1))).toEqual([[
+        `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "omarchy-bot-browser")}`,
+        "--ozone-platform=wayland", "--disable-gpu", "--no-first-run",
+        "--no-default-browser-check", "--disable-sync", "--password-store=basic",
+        "--new-window", "https://x.example/",
+      ]]);
+    } finally {
+      shim.kill("SIGKILL");
+      await shim.exited;
+    }
+    expect(existsSync(fixture.hostBrowserMarker)).toBeFalse();
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("open_url opens the pack with its private profile and the CDP pipe", async () => {
+  const fixture = await startControlRuntime();
   const url = "https://example.com/portable";
   try {
     await expect(
@@ -1583,7 +1381,7 @@ test("open_url opens the portable browser on a host with no native browser", asy
     const [launch] = fixture.assets.browserLaunches();
     expect(launch!.argv).toEqual([
       path.join(root!, "assets", "portable-browser"),
-      `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "chromium")}`,
+      `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "omarchy-bot-browser")}`,
       "--ozone-platform=wayland", "--disable-gpu", "--no-first-run",
       "--no-default-browser-check", "--disable-sync", "--password-store=basic",
       "--remote-debugging-pipe",
@@ -1598,60 +1396,25 @@ test("open_url opens the portable browser on a host with no native browser", asy
   }
 });
 
-test.each([false, true])("open_url gives one actionable missing-pack error with host opt-in %s", async hostBrowser => {
-  const fixture = await startControlRuntime({ hostBrowser, ...(hostBrowser ? { nativeBrowser: false, snapOnly: true } : {}) });
+test("open_url, the browser tool and request_takeover report a missing pack with no fallback", async () => {
+  const fixture = await startControlRuntime();
   const missing = new PortableBotComputerAssets({ profileDir: path.join(root!, "unused-profile") });
   fixture.assets.ensureBrowser = () => missing.ensureBrowser();
   try {
-    await expect(fixture.runtime.launch({ url: "https://example.com/missing-pack" })).rejects.toThrow("No installed browser pack. Run omarchy-bot update --archive <path> --checksum <path> --browser-pack <file-or-https-url>, or set OMARCHY_BOT_BROWSER=host to use a host browser.");
+    await expect(fixture.runtime.launch({ url: "https://example.com/missing-pack" })).rejects.toThrow(BROWSER_PACK_MISSING);
+    for (const action of [{ name: "snapshot", args: {} }, { name: "request_takeover", args: { reason: "Please log in" } }]) {
+      await expect(fixture.runtime.browser!(
+        action as Parameters<NonNullable<BotScreenRuntime["browser"]>>[0],
+        async () => { throw new Error("unexpected input"); },
+        new AbortController().signal,
+      )).rejects.toThrow(BROWSER_PACK_MISSING);
+    }
+    expect(existsSync(fixture.hostBrowserMarker)).toBeFalse();
   } finally { await fixture.runtime.stop(); }
 });
 
-test("open_url skips snap-confined browsers without executing them", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false, snapOnly: true, hostBrowser: true });
-  const url = "https://example.com/snap";
-  try {
-    // Three shapes: a `snap run` desktop entry (installed by the fixture), an
-    // Ubuntu wrapper that execs the snap command, and a /snap/bin symlink.
-    const bin = path.join(root!, "bin");
-    const wrapper = executable(bin, "brave-snap-wrapper", [
-      "#!/bin/sh",
-      'exec snap run brave "$@"',
-      "",
-    ].join("\n"));
-    const snapSymlink = path.join(bin, "chromium-snap-link");
-    symlinkSync(path.join(bin, "snap"), snapSymlink);
-    const applications = path.join(root!, "profiles", "computer", "data", "applications");
-    writeFileSync(path.join(applications, "chromium.desktop"), [
-      "[Desktop Entry]",
-      "Type=Application",
-      `Exec="${wrapper}" %U`,
-      "",
-    ].join("\n"));
-    writeFileSync(path.join(applications, "google-chrome.desktop"), [
-      "[Desktop Entry]",
-      "Type=Application",
-      `Exec="${snapSymlink}" %U`,
-      "",
-    ].join("\n"));
-
-    await expect(
-      fixture.runtime.launch({ url }),
-    ).resolves.toEqual({ text: `opened ${url}` });
-    expect(existsSync(fixture.snapMarker)).toBeFalse();
-    expect(fixture.assets.browserLaunches()).toHaveLength(1);
-    expect(readFakeSwayCommands(fixture.controlDir)).toContainEqual(
-      expect.stringMatching(
-        new RegExp(`^\\[con_id=\\d+\\] move container to workspace bot-${SURFACE_ID}$`),
-      ),
-    );
-  } finally {
-    await fixture.runtime.stop();
-  }
-});
-
 test("repeated open_url calls across Screens share one browser profile and route each window", async () => {
-  const fixture = await startControlRuntime({ nativeBrowser: false });
+  const fixture = await startControlRuntime();
   const second = await fixture.adapter.start({
     surfaceId: SURFACE_B,
     geometryGeneration: 7,
@@ -1674,8 +1437,8 @@ test("repeated open_url calls across Screens share one browser profile and route
       launch.argv.find((argument) => argument.startsWith("--user-data-dir="))
     );
     expect(profileDirs).toEqual([
-      `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "chromium")}`,
-      `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "chromium")}`,
+      `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "omarchy-bot-browser")}`,
+      `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "omarchy-bot-browser")}`,
     ]);
     expect(launches.map((launch) => launch.argv.at(-1))).toEqual([
       "https://example.com/first",

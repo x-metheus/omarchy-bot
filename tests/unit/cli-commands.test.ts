@@ -137,8 +137,10 @@ test("doctor accepts a healthy install and diagnoses damaged markers, fonts and 
   expect(setup.log.at(-1)).toContain("browser pack:");
   chmodSync(browser, 0o755);
   rmSync(setup.layout.browserPackDir, { recursive: true });
+  // There is no host-browser exemption: a missing pack always fails doctor (Computer ADR 0013).
   setup.env.OMARCHY_BOT_BROWSER = "host";
-  expect(await run(["doctor"], setup.env, setup.io)).toBe(0);
+  expect(await run(["doctor"], setup.env, setup.io)).toBe(1);
+  expect(setup.log.at(-1)).toContain("browser pack:");
   delete setup.env.OMARCHY_BOT_BROWSER;
   for (const [file, contents] of Object.entries(files).filter(([file]) => file.startsWith(setup.layout.browserPackDir))) {
     mkdirSync(join(file, ".."), { recursive: true }); writeFileSync(file, contents, { mode: 0o755 });

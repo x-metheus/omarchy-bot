@@ -161,6 +161,8 @@ test("the Bot Screen PATH is the runtime bin, the browser pack, and system dirs 
     try {
       const entries = computer.childEnv.PATH!.split(":");
       expect(entries).toEqual([
+        // Browser Supply's host-browser shims lead the Screen PATH (Computer ADR 0013).
+        path.join(root!, "profiles", "computer", "browser-shims"),
         bundle.binDir,
         path.resolve(browserPackDir),
         "/usr/bin",
@@ -442,7 +444,10 @@ test("takes every runtime tool from the bundle and exports its launchers and DIS
     expect(computer.captureHelper).toBe(bundle.binaries.captureHelperBin);
     expect(computer.botDesktop).toBe(bundle.binaries.botDesktopBin);
     expect(computer.wlrRandr).toBe(bundle.binaries.wlrRandrBin);
-    expect(computer.childEnv.PATH!.split(":")[0]).toBe(bundle.binDir);
+    expect(computer.childEnv.PATH!.split(":").slice(0, 2)).toEqual([
+      path.join(root, "profiles", "computer", "browser-shims"),
+      bundle.binDir,
+    ]);
     expect(computer.childEnv.DISPLAY).toBe(":99");
     expect(computer.childEnv.XKB_CONFIG_ROOT!).toBe(path.join(bundle.bundleRoot, "share", "X11", "xkb"));
   } finally {

@@ -13,6 +13,7 @@ import { ScreenProjectionService } from "../modules/computer/screenProjection.ts
 import { ScreenInputLease } from "../modules/computer/screenInputLease.ts";
 import { SwayBotScreenRuntimeAdapter } from "../modules/computer/swayBotScreenRuntime.ts";
 import { PortableSwayRuntimeSupply } from "../modules/computer/swayRuntimeSupply.ts";
+import { ignoredBrowserSelectionNotice } from "../modules/computer/browserSupply.ts";
 import type { BotComputerAssetSupply } from "../modules/computer/botComputerAssets.ts";
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
@@ -82,6 +83,8 @@ export async function main(options: MainOptions = {}): Promise<{
       agents: agentsDir,
     },
   );
+  const browserSelectionNotice = ignoredBrowserSelectionNotice(process.env);
+  if (browserSelectionNotice !== undefined) console.warn(browserSelectionNotice);
   const productionScreenAdapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
