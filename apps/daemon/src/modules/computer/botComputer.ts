@@ -45,7 +45,7 @@ import {
   PortableBotComputerAssets,
   type BotComputerAssetSupply,
 } from "./botComputerAssets.ts";
-import { listApplicationToplevels, SwayIpcClient } from "./swayIpc.ts";
+import { listApplicationToplevels, SwayIpcClient, type SwayWindowSubscription } from "./swayIpc.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
 import { BrowserSupply } from "./browserSupply.ts";
 
@@ -116,6 +116,9 @@ export interface BotComputer {
   applicationProcesses: Set<ApplicationProcess>;
   applicationSequence: number;
   browser?: BrowserRuntime;
+  browserHandler?: { close(): void };
+  /** The Screen adapter's long-lived compositor window subscription, when one is open. */
+  windowEvents?: SwayWindowSubscription;
   /** Lazily verifies the runtime fonts and exports fontconfig to graphical children. */
   ensureFonts(): Promise<void>;
   running(): boolean;
@@ -442,6 +445,11 @@ export class BotComputerRuntime {
       return undefined;
     }
     await this.#browser.prepare();
+    // A pack browser that survived a Service restart still holds the profile
+    // singleton, but the CDP pipe that could drive it is gone. Replace it before
+    // this generation is handed out, so the Browser Tool works on its next call
+    // (Computer ADR 0013). Only this Bot Computer's own pack processes are matched.
+    await this.#browser.stopOrphanPacks();
     const childEnv = this.#browser.environment(bundleEnvironment(
       sessionEnvironment({
         runtimeDir,
@@ -667,6 +675,9 @@ export class BotComputerRuntime {
   async #stopComputer(computer: LiveComputer): Promise<void> {
     if (this.#computer !== computer) return;
     this.#computer = undefined;
+    // Window events drive Screen routing; close them before applications and the browser pipe go.
+    computer.windowEvents?.close();
+    computer.browserHandler?.close();
     computer.browser?.close();
     // Closing windows lets applications save profile data before their child processes are stopped.
     const ipc = new SwayIpcClient(computer.sockets.swaySock);

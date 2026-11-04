@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { BotComputerRuntime } from "../../apps/daemon/src/modules/computer/botComputer.ts";
+import { BotComputerRuntime, type BotComputer } from "../../apps/daemon/src/modules/computer/botComputer.ts";
+import type { BotComputerAssetSupply } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 import type { SwayRuntimeBinaries } from "../../apps/daemon/src/modules/computer/swayRuntimeSupply.ts";
 import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./helpers/fakeSwayIpc.ts";
 
@@ -603,5 +604,75 @@ test("a recorded identity whose pid was reused is never signalled", async () => 
   } finally {
     if (bystander.exitCode === null) bystander.kill("SIGKILL");
     await bystander.exited;
+  }
+}, 30_000);
+
+/**
+ * A Bot Computer asset supply whose pack binary is a copy of a real shell, so a
+ * real process can stand in for the pack browser: `/proc/<pid>/exe` is that path.
+ */
+function installFakePack(root: string): { packBinary: string; assetSupply: BotComputerAssetSupply } {
+  const shell = Bun.which("bash", { PATH: "/usr/bin:/bin" })!;
+  const packBinary = path.join(root, "pack", "portable-browser");
+  mkdirSync(path.dirname(packBinary), { recursive: true });
+  copyFileSync(shell, packBinary);
+  chmodSync(packBinary, 0o755);
+  return {
+    packBinary,
+    assetSupply: {
+      ensureFonts: async () => ({ fontConfigFile: path.join(root, "fonts.conf") }),
+      ensureBrowser: async () => ({ browserBin: packBinary, executable: packBinary }),
+    },
+  };
+}
+
+/** A stand-in pack browser started with a per-test script and `--user-data-dir`. */
+function spawnFakePack(packBinary: string, script: string, userDataDir: string) {
+  return Bun.spawn([packBinary, "-c", script, "sh", `--user-data-dir=${userDataDir}`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+}
+
+/** Whether a spawned child is still running after `waitMs`; a signalled one settles `exited`. */
+async function stillRunning(child: { exited: Promise<number> }, waitMs = 300): Promise<boolean> {
+  return await Promise.race([
+    child.exited.then(() => false),
+    Bun.sleep(waitMs).then(() => true),
+  ]);
+}
+
+test("reattach stops the pack browser a restart left behind and leaves other processes alone", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-computer-pack-orphan-"));
+  const bin = installFakeComputerBins(path.join(root, "bin"));
+  const pack = installFakePack(root);
+  const options = { ...computerOptions(bin), assetSupply: pack.assetSupply };
+  const first = new BotComputerRuntime(options);
+  const started = await first.ensure();
+  const userDataDir = path.join(root, "profiles", "computer", "config", "omarchy-bot-browser");
+  expect(existsSync(userDataDir)).toBeTrue();
+  // The previous Service left this pack browser behind: its CDP pipe is gone and
+  // it holds the profile singleton.
+  const survivor = spawnFakePack(pack.packBinary, "trap '' TERM; while :; do sleep 1; done", userDataDir);
+  // A non-pack process carrying this profile, and another Bot Computer's pack.
+  const bystander = Bun.spawn(["/bin/sh", "-c", "sleep 30 & wait", "sh", `--user-data-dir=${userDataDir}`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const foreign = spawnFakePack(pack.packBinary, "sleep 30 & wait", path.join(root, "other", "omarchy-bot-browser"));
+  let reattached: BotComputer | undefined;
+  try {
+    reattached = await new BotComputerRuntime(options).reattach();
+    expect(reattached?.generation).toBe(started.generation);
+    expect(await stillRunning(survivor, 2_000)).toBeFalse();
+    expect(await stillRunning(bystander)).toBeTrue();
+    expect(await stillRunning(foreign)).toBeTrue();
+  } finally {
+    for (const child of [survivor, bystander, foreign]) {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+    }
+    if (reattached !== undefined) await reattached.stop();
+    else await first.stop().catch(() => {});
   }
 }, 30_000);

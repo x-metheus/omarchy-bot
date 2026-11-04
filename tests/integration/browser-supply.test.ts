@@ -323,6 +323,91 @@ test("a pack launch the Service spawned is the pack, with its descendants, until
   expect(supply.isPackBrowser(descendant)).toBeFalse();
 });
 
+/**
+ * A Bot Computer whose pack binary is a copy of a real shell, so a real process
+ * can stand in for the pack browser: `/proc/<pid>/exe` then is that path.
+ */
+function fixturePackBinary(base: string): { packBinary: string; assets: BotComputerAssetSupply } {
+  const shell = Bun.which("bash", { PATH: "/usr/bin:/bin" })!;
+  const packBinary = path.join(base, "pack", "portable-browser");
+  mkdirSync(path.dirname(packBinary), { recursive: true });
+  copyFileSync(shell, packBinary);
+  chmodSync(packBinary, 0o755);
+  return {
+    packBinary,
+    assets: {
+      ensureFonts: async () => ({ fontConfigFile: path.join(base, "fonts.conf") }),
+      ensureBrowser: async () => ({ browserBin: packBinary, executable: packBinary }),
+    },
+  };
+}
+
+/** A stand-in pack browser started with `--user-data-dir` and a per-test script. */
+function spawnFakePack(packBinary: string, script: string, userDataDir: string) {
+  return Bun.spawn([packBinary, "-c", script, "sh", `--user-data-dir=${userDataDir}`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+}
+
+async function settled(child: { exited: Promise<number> }, waitMs: number): Promise<"exited" | "alive"> {
+  return await Promise.race([
+    child.exited.then(() => "exited" as const),
+    Bun.sleep(waitMs).then(() => "alive" as const),
+  ]);
+}
+
+test("orphans are this Bot Computer's pack processes that no held pipe covers", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-browser-supply-"));
+  const { packBinary, assets } = fixturePackBinary(root);
+  const supply = new BrowserSupply({ assets, profileDir: path.join(root, "profile", "computer") });
+  // Nothing is the pack before the pack executable is resolved, so nothing is an orphan.
+  expect(supply.orphanPacks()).toEqual([]);
+  await supply.ensurePack();
+
+  const pipeLess = spawnFakePack(packBinary, "sleep 30 & wait", supply.profilePath);
+  // Same binary, another Bot Computer's profile: never this Service's to stop.
+  const foreign = spawnFakePack(packBinary, "sleep 30 & wait", path.join(root, "other", "omarchy-bot-browser"));
+  // A non-pack process that happens to carry this profile: identity decides, not the argument.
+  const notThePack = Bun.spawn(["/bin/sh", "-c", "sleep 30 & wait", "sh", `--user-data-dir=${supply.profilePath}`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  children.push(pipeLess, foreign, notThePack);
+  const pipeLessChild = await childOf(pipeLess.pid);
+  expect(supply.isPackBrowser(pipeLessChild)).toBeTrue();
+
+  const orphans = () => supply.orphanPacks().map((orphan) => orphan.pid).sort();
+  expect(orphans()).toEqual([pipeLess.pid, pipeLessChild].sort());
+
+  // The pid tree of a launch whose CDP pipe the Service holds is not an orphan.
+  supply.trackLaunch(pipeLess.pid, processIdentity(pipeLess.pid));
+  expect(supply.orphanPacks()).toEqual([]);
+  supply.forgetLaunch(pipeLess.pid);
+  expect(orphans()).toEqual([pipeLess.pid, pipeLessChild].sort());
+});
+
+test("stopping orphans ends a SIGTERM-resistant pack and leaves every other process alone", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-browser-supply-"));
+  const { packBinary, assets } = fixturePackBinary(root);
+  const supply = new BrowserSupply({ assets, profileDir: path.join(root, "profile", "computer") });
+  await supply.ensurePack();
+
+  const resistant = spawnFakePack(packBinary, "trap '' TERM; while :; do sleep 1; done", supply.profilePath);
+  const foreign = spawnFakePack(packBinary, "sleep 30 & wait", path.join(root, "other", "omarchy-bot-browser"));
+  const notThePack = Bun.spawn(["/bin/sh", "-c", "sleep 30 & wait", "sh", `--user-data-dir=${supply.profilePath}`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  children.push(resistant, foreign, notThePack);
+
+  expect(await supply.stopOrphanPacks(200)).toContain(resistant.pid);
+  expect(await settled(resistant, 2_000)).toBe("exited");
+  expect(await settled(foreign, 300)).toBe("alive");
+  expect(await settled(notThePack, 300)).toBe("alive");
+  expect(supply.orphanPacks()).toEqual([]);
+});
+
 test("a missing pack is reported with the install command and no host browser runs", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-browser-supply-"));
   const host = fixtureHost(root);

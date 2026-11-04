@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SwayBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/swayBotScreenRuntime.ts";
@@ -315,13 +315,16 @@ await Promise.withResolvers<void>().promise;
     directory: path.join(root, "assets"),
     browserScript: (logPath) => `#!${process.execPath}
 import { readFileSync, writeFileSync } from "node:fs";
+import { serveControlBrowserCdp } from ${JSON.stringify(path.resolve(import.meta.dir, "helpers/controlBrowserCdp.ts"))};
 const treePath = ${JSON.stringify(path.join(controlDir, "tree.json"))};
 const tree = JSON.parse(readFileSync(treePath, "utf8"));
 const ids = [];
+let sharedPid;
 const collect = (node) => {
   if (Array.isArray(node)) return node.forEach(collect);
   if (node === null || typeof node !== "object") return;
   if (typeof node.id === "number") ids.push(node.id);
+  if (node.app_id === "chromium") sharedPid ??= node.pid;
   collect(node.nodes);
   collect(node.floating_nodes);
 };
@@ -332,7 +335,7 @@ workspace.nodes.push({
   type: "con",
   name: "Portable Browser",
   app_id: "chromium",
-  pid: process.pid,
+  pid: sharedPid ?? process.pid,
   focused: true,
   shell: "xdg_shell",
   rect: { x: 0, y: 0, width: 640, height: 480 },
@@ -346,6 +349,8 @@ writeFileSync(${JSON.stringify(logPath)}, JSON.stringify({
   home: process.env.HOME ?? null,
   configHome: process.env.XDG_CONFIG_HOME ?? null,
 }) + "\\n", { flag: "a" });
+if (sharedPid !== undefined) process.exit(0);
+serveControlBrowserCdp(treePath);
 await Promise.withResolvers<void>().promise;
 `,
   });
@@ -651,6 +656,8 @@ test("a paste the private helper cannot perform fails the Screen input", async (
 
 test("shared runtime launches applications into the requesting Screen workspace", async () => {
   const fixture = await startControlRuntime();
+  const browserCalls = fixture.assets.browserCalls();
+  fixture.assets.ensureBrowser = () => { throw new Error("browser pack unavailable"); };
   try {
     const shot = await fixture.runtime.capture();
     expect(shot.bytes.slice(0, 8)).toEqual(
@@ -661,6 +668,8 @@ test("shared runtime launches applications into the requesting Screen workspace"
     await expect(
       fixture.runtime.launch({ app: fixture.application }),
     ).resolves.toEqual({ text: `launched ${fixture.application}` });
+    expect(fixture.assets.browserCalls()).toBe(browserCalls);
+    expect(existsSync(path.join(root!, "assets", "browser.log"))).toBe(false);
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
       "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",
@@ -906,7 +915,7 @@ process.exit(0);
     expect(commands).not.toContain(
       `[con_id=${appWindow}] move container to workspace bot-${SURFACE_ID}`,
     );
-    expect(commands).toContain(`[con_id=${browserWindow}] focus`);
+    expect(commands).not.toContain(`[con_id=${browserWindow}] focus`);
     expect(commands).not.toContain(`[con_id=${appWindow}] focus`);
     const launchedSurface = (await fixture.runtime.listWindows()).map((window) => window.id);
     expect(launchedSurface).toContain(String(browserWindow));
@@ -1080,7 +1089,7 @@ process.exit(0);
       `[con_id=${browserWindow!.id}] move container to workspace bot-${SURFACE_B}`,
     );
     const forwardedCommands = commands.slice(commandsBeforeForward.length);
-    expect(forwardedCommands).toContain(`[con_id=${forwardedId}] focus`);
+    expect(forwardedCommands).not.toContain(`[con_id=${forwardedId}] focus`);
     expect(forwardedCommands).not.toContain(`[con_id=${browserWindow!.id}] focus`);
     expect((await fixture.runtime.listWindows()).map((window) => window.id))
       .toEqual([browserWindow!.id]);
@@ -1297,7 +1306,7 @@ test("open_url uses the browser pack even on a host whose default browser is bra
   const fixture = await startControlRuntime();
   const url = "https://example.com/pack-default";
   try {
-    await expect(fixture.runtime.launch({ url })).resolves.toEqual({ text: `opened ${url}` });
+    expect(await fixture.runtime.launch({ url })).toEqual({ text: `opened ${url}` });
     expect(fixture.assets.browserLaunches()).toHaveLength(1);
     expect(fixture.assets.fontCalls()).toBe(1);
     expect(existsSync(fixture.hostBrowserMarker)).toBeFalse();
@@ -1342,20 +1351,23 @@ test("every browser path in the Screen environment ends at the pack", async () =
         expect(query.stdout.toString().trim(), type).toBe("omarchy-bot-browser.desktop");
       }
     }
+    await fixture.runtime.setInputAuthority(1, "web");
     const shim = Bun.spawn(["/bin/sh", "-c", "brave https://x.example/"], { env, stdout: "ignore", stderr: "ignore" });
     try {
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline && !existsSync(path.join(root!, "assets", "browser.log"))) await Bun.sleep(20);
+      expect(await shim.exited).toBe(0);
       expect(fixture.assets.browserLaunches().map((launch) => launch.argv.slice(1))).toEqual([[
         `--user-data-dir=${path.join(root!, "profiles", "computer", "config", "omarchy-bot-browser")}`,
         "--ozone-platform=wayland", "--disable-gpu", "--no-first-run",
         "--no-default-browser-check", "--disable-sync", "--password-store=basic",
-        "--new-window", "https://x.example/",
+        "--remote-debugging-pipe", "--new-window", "https://x.example/",
       ]]);
     } finally {
-      shim.kill("SIGKILL");
+      if (shim.exitCode === null) shim.kill("SIGKILL");
       await shim.exited;
     }
+    await fixture.runtime.releaseInput(1);
     expect(existsSync(fixture.hostBrowserMarker)).toBeFalse();
   } finally {
     await fixture.runtime.stop();
@@ -1371,11 +1383,10 @@ test("open_url opens the pack with its private profile and the CDP pipe", async 
     ).resolves.toEqual({ text: `opened ${url}` });
     expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
       `workspace bot-${SURFACE_ID}`,
+      expect.stringMatching(new RegExp(`^\\[con_id=\\d+\\] move scratchpad$`)),
       expect.stringMatching(
         new RegExp(`^\\[con_id=\\d+\\] move container to workspace bot-${SURFACE_ID}$`),
       ),
-      `workspace bot-${SURFACE_ID}`,
-      expect.stringMatching(new RegExp(`^\\[con_id=\\d+\\] focus$`)),
       `[app_id="^dev[.]omarchy[.]BotDesktop$" workspace="^bot-${SURFACE_ID}$"] move scratchpad`,
     ]);
     const [launch] = fixture.assets.browserLaunches();
@@ -1460,3 +1471,162 @@ test("repeated open_url calls across Screens share one browser profile and route
   }
 });
 
+/** The fake pack binary: a bun script at `<root>/pack/<name>`. */
+function packBinary(name: string, body: string): string {
+  const directory = path.join(root!, "pack");
+  mkdirSync(directory, { recursive: true });
+  return executable(directory, name, `#!${process.execPath}\n${body}`);
+}
+
+/** A copy of a real shell, so a live process can be the pack by `/proc/<pid>/exe`. */
+function packIdentity(): string {
+  const shell = Bun.which("bash", { PATH: "/usr/bin:/bin" });
+  if (shell === null) throw new Error("the fixture needs bash");
+  const target = path.join(root!, "pack", "pack-identity");
+  mkdirSync(path.dirname(target), { recursive: true });
+  copyFileSync(shell, target);
+  chmodSync(target, 0o755);
+  return target;
+}
+
+/** Whether a spawned child ended within `waitMs`; a signalled child settles `exited`. */
+async function settled(child: { exited: Promise<number> }, waitMs = 2_000): Promise<"exited" | "alive"> {
+  return await Promise.race([
+    child.exited.then(() => "exited" as const),
+    Bun.sleep(waitMs).then(() => "alive" as const),
+  ]);
+}
+
+/** Polls `read` until it has a value, so a wait for a process state never becomes a sleep. */
+async function waitFor<T>(read: () => T | undefined, message: string, timeoutMs = 5_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = read();
+    if (value !== undefined) return value;
+    await Bun.sleep(20);
+  }
+  throw new Error(`timed out waiting for ${message}`);
+}
+
+/**
+ * Pids whose command line names `--user-data-dir=<profile>`: the pack launches
+ * that hold the profile, as opposed to the windows they map.
+ */
+function profileHolders(profile: string): number[] {
+  const argument = `--user-data-dir=${profile}`;
+  const holders: number[] = [];
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    let cmdline: string;
+    try { cmdline = readFileSync(`/proc/${entry}/cmdline`, "utf8"); } catch { continue; }
+    if (cmdline.split("\0").includes(argument)) holders.push(Number(entry));
+  }
+  return holders;
+}
+
+test("a browser tool call replaces the pipe-less pack that holds the profile singleton", async () => {
+  const fixture = await startControlRuntime();
+  const identity = packIdentity();
+  // The replacement pack is the fixture's stamp-capable browser. `identity` is only
+  // the executable the orphan sweep recognises as the pack, so the pipe-less process
+  // holding the profile below is the one it must stop.
+  const { browserBin } = await fixture.assets.ensureBrowser();
+  fixture.assets.ensureBrowser = async () => ({ browserBin, executable: identity });
+  const profile = path.join(root!, "profiles", "computer", "config", "omarchy-bot-browser");
+  mkdirSync(profile, { recursive: true });
+  // What a Service restart leaves behind: a pack holding the profile with no CDP pipe.
+  const pipeLess = Bun.spawn([identity, "-c", "sleep 60 & wait", "sh", `--user-data-dir=${profile}`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    const result = await fixture.runtime.browser!(
+      { name: "tabs", args: {} } as Parameters<NonNullable<BotScreenRuntime["browser"]>>[0],
+      async () => { throw new Error("unexpected input"); },
+      new AbortController().signal,
+    );
+    // The orphan was replaced by the piped pack, and the tool lists its page.
+    expect(result.text).toMatch(/control-page-\d+/);
+    expect(await settled(pipeLess)).toBe("exited");
+  } finally {
+    pipeLess.kill("SIGKILL");
+    await pipeLess.exited;
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("a pack that exits during startup reports its stderr at once instead of waiting out the timeout", async () => {
+  const fixture = await startControlRuntime();
+  fixture.assets.ensureBrowser = async () => ({
+    browserBin: packBinary("doomed-pack", `
+process.stderr.write("boom\\n");
+process.exit(1);
+`),
+  });
+  try {
+    const started = Date.now();
+    const outcome = await fixture.runtime.launch({ url: "https://example.com/doomed" }).then(
+      () => "launched",
+      (error: unknown) => error,
+    );
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/^The browser exited during startup \(code 1\): boom$/);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("a forwarding child that exits after the running pack claims its window is not a startup failure", async () => {
+  const fixture = await startControlRuntime();
+  const profile = path.join(root!, "profiles", "computer", "config", "omarchy-bot-browser");
+  try {
+    await expect(fixture.runtime.launch({ url: "https://example.com/running" }))
+      .resolves.toEqual({ text: "opened https://example.com/running" });
+    const running = (await fixture.runtime.listWindows()).filter((window) => window.title === "Portable Browser");
+    expect(running).toHaveLength(1);
+    const packPid = running[0]!.pid!;
+    // Chromium hands the URL to the running pack and this launch exits by design.
+    // Observe the exit while the launch is still pending: a fast-fail that ignored
+    // pipe ownership would reject this launch instead of letting it resolve.
+    const forwarded = fixture.runtime.launch({ url: "https://example.com/handoff" })
+      .then((value) => ({ value }), (error: Error) => ({ error }));
+    expect(await waitFor(() => {
+      const holders = profileHolders(profile);
+      return holders.length === 1 ? holders : undefined;
+    }, "the forwarding child to exit")).toEqual([packPid]);
+    expect(await forwarded).toEqual({ value: { text: "opened https://example.com/handoff" } });
+    expect(fixture.assets.browserLaunches()).toHaveLength(2);
+    const packWindows = (await fixture.runtime.listWindows()).filter((window) => window.pid === packPid);
+    expect(packWindows.map((window) => window.title)).toEqual(["Portable Browser", "Portable Browser"]);
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
+
+test("a second open_url leaves the pack launched by the first one running", async () => {
+  const fixture = await startControlRuntime();
+  const { browserBin } = await fixture.assets.ensureBrowser();
+  fixture.assets.ensureBrowser = async () => ({
+    browserBin,
+    // The pack identity makes the orphan sweep able to see this pack at all.
+    executable: packIdentity(),
+  });
+  try {
+    await expect(fixture.runtime.launch({ url: "https://example.com/first" }))
+      .resolves.toEqual({ text: "opened https://example.com/first" });
+    const running = (await fixture.runtime.listWindows()).filter((window) => window.title === "Portable Browser");
+    expect(running).toHaveLength(1);
+    const packPid = running[0]!.pid!;
+    // Every piped launch sweeps orphan packs first, and this Service's own live pack
+    // holds the CDP pipe, so the sweep must leave it alone: the second open_url hands
+    // off to it and answers normally instead of replacing it.
+    const second = await fixture.runtime.launch({ url: "https://example.com/second" }).catch(
+      (error: unknown) => error,
+    );
+    expect(() => process.kill(packPid, 0)).not.toThrow();
+    expect(second).toEqual({ text: "opened https://example.com/second" });
+  } finally {
+    await fixture.runtime.stop();
+  }
+}, 20_000);
