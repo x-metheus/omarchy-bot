@@ -7,10 +7,10 @@ Diagnosed by Claude Code on 2026-11-03 from a user report and the Pi Bot Screen 
 | 01 | [Chat stalls on the first letter while streaming](issues/01-chat-stream-stall.md) | resolved |
 | 02 | [One slow capture permanently ends the live Bot Screen](issues/02-projection-capture-resilience.md) | resolved |
 | 03 | [Bot Screen launches leak host apps and steal other Surfaces' windows](issues/03-screen-launch-isolation.md) | resolved |
-| 04 | [Bots use only the pack browser (Browser Supply)](issues/04-browser-supply-pack-only.md) | open |
-| 05 | [One large page breaks the Browser Tool for every Screen](issues/05-oversized-cdp-frame.md) | open |
-| 06 | [Kill the pack browser left over from a daemon restart](issues/06-orphan-pack-browser-after-restart.md) | open, blocked by 04 |
-| 07 | [Pop-ups open on the opener Bot's own Screen](issues/07-popups-follow-opener.md) | open, blocked by 04, needs design |
+| 04 | [Bots use only the pack browser (Browser Supply)](issues/04-browser-supply-pack-only.md) | resolved |
+| 05 | [One large page breaks the Browser Tool for every Screen](issues/05-oversized-cdp-frame.md) | resolved |
+| 06 | [Kill the pack browser left over from a daemon restart](issues/06-orphan-pack-browser-after-restart.md) | resolved |
+| 07 | [Pop-ups open on the opener Bot's own Screen](issues/07-popups-follow-opener.md) | resolved |
 
 None of these tickets blocks another. Tickets 02 and 03 both live in `apps/daemon/src/modules/computer/`, but each changes different files: 02 changes `screenProjection.ts`, and 03 changes `swayBotScreenRuntime.ts` and `botComputer.ts`.
 
