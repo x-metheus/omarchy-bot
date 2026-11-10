@@ -1,9 +1,0 @@
-# Preserve native Agent capabilities and approvals
-
-_The session-deletion portion of the capability inventory is superseded by [system ADR 0006](../../../adr/0006-bot-deletion-is-local-only.md). The remaining native-capability and approval decisions remain current._
-
-Omarchy Bot preserves each Agent's native capabilities and approval behavior instead of adding a separate permission policy, filtering tools, or generating speculative capability contracts. Omarchy Bot coordinates Bots and presents native events; it does not become another authorization layer or claim behavior the adapter cannot exercise.
-
-Consequences: the omarchy-bot Agent tool permission gate and per-Bot permission policy are absent. Multi-Bot desktop coordination remains separate because it prevents concurrent input rather than changing an Agent's capabilities.
-
-The probe protocol returns one compact `AgentCapabilityInventory` owned by the adapter. It is the sole policy source for support decisions and covers native steering, abort, Thread actions (rename, delete, fork, and compact where available), accepted attachment modalities, and native event families. The attachment service validates every send against the selected Bot's probed inventory before invoking the adapter; unsupported modalities receive a contextual rejection and are neither transformed nor forwarded. UI actions follow the same inventory. The inventory describes observed support from the official interface and conformance probes—it is not an allowlist, does not grant tool use, and never causes an unsupported operation or event family to be simulated.

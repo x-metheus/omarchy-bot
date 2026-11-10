@@ -1,5 +1,0 @@
-# User-created Bots reference Agent backends
-
-A Bot is a persistent assistant with its own identity and configuration, while an Agent is a supported execution backend such as Pi or Claude. We decided that each Bot keeps an immutable Agent reference and that multiple Bots may use the same Agent, rather than treating enabled Agent runtimes as visible Bots. This matches the user's assistant-oriented mental model: the Sidebar contains user-created or conservatively preserved assistants, never the Agent inventory itself.
-
-Consequences: Bot IDs cannot alias Agent IDs, and Agent installation/readiness belongs to a separate registry. Migration creates Bots only for legacy rows proven to contain user-owned conversation, profile, or configuration data. Enabled Agent inventory is not a Bot source: rows known to be inventory are removed, ambiguous rows are preserved, and provenance (`user_created`, `legacy_conversation`, or `legacy_inventory`) records why each decision was safe. Threads and native-session mappings follow preserved user-owned Bots without loss.

@@ -10,7 +10,7 @@ Create named Bots, work together in Threads, and see their desktop work in Bot S
 [![Runtime: Bun 1.4+](https://img.shields.io/badge/Bun-1.4%2B-183D32?style=flat-square)](#development)
 [![License: MIT](https://img.shields.io/badge/License-MIT-183D32?style=flat-square)](LICENSE)
 
-[Install](#installation) · [Develop](#development) · [How it works](#product-model) · [Design docs](#design-sources)
+[Install](#installation) · [Develop](#development) · [How it works](#product-model) · [Development workflow](#development-sources)
 
 </div>
 
@@ -200,7 +200,7 @@ CLI environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `XDG_CONFIG_HO
 - **Viewing is not execution.** Closing a viewer does not stop the Screen's applications. WayVNC supplies on-demand, view-only RFB projection; Computer Broker remains the input authority.
 - **Work files outlive a Bot.** Deleting a Bot removes its Service-owned data and targeted Screen runtime/workspace, not Shared Workspace files, Agent-owned Native Sessions, or the shared Bot Computer profile.
 
-The accepted [product specification](docs/workspace-redesign.md), [shared Bot Computer decision](docs/adr/0009-share-work-files-isolate-bot-screens.md), and [domain context map](CONTEXT-MAP.md) define the boundaries.
+[Project documentation](docs/README.md) indexes the development workflow and related code and tests.
 
 ### Dictation
 
@@ -227,6 +227,8 @@ The Web UI reads native capabilities through one seven-capability `shell` interf
 On macOS, Web Control maps ⌘ to Ctrl and ⌥ to Super. Settings → Keyboard → “Send ⌘ as Super” changes Command for this device; Option still sends Super. The shell stores the preference independently of the paired Service, so unpairing does not reset it. The Vite memory shell detects the browser platform and persists the preference in that harness origin’s localStorage; the native app adapter owns its install’s storage. Linux and Windows keep their existing key handling. ⌘V and Ctrl+V retain the local plain-text paste path rather than forwarding a remote V key.
 
 ## Development
+
+Development follows [Agent Skills](docs/development.md): choose the applicable workflow through `using-agent-skills`, define and approve feature specifications when required, plan the work, implement and verify small increments, then review and document the result. [Project documentation](docs/README.md) includes the code map; the [development guide](docs/development.md#skill-resources-and-maintenance) records the installed skills and shared references.
 
 From a local checkout:
 
@@ -685,17 +687,17 @@ docs/                      Product design, ADRs, research, inventories
 
 The daemon is the only SQLite writer. Agent SDKs and native protocols run behind isolated workers. The browser talks only to the daemon.
 
-## Design sources
+## Development sources
 
 | Start here | What it defines |
 | :--- | :--- |
-| [Product and interaction specification](docs/workspace-redesign.md) | Accepted product behavior and ownership boundaries |
-| [Agent integration](docs/agents-integration.md) | Adapter contracts and capability inventories |
-| [Technology selection](docs/technology-selection.md) | Runtime and frontend choices |
-| [Context map](CONTEXT-MAP.md) | Domain vocabulary and documentation routing |
-| [Architecture decisions](docs/adr/) · [Domain contexts](docs/contexts/) | System-wide and context-specific decisions |
-| [Service ADR 0013](docs/adr/0013-run-a-standalone-linux-service.md) · [Pairing ADR 0014](docs/adr/0014-require-paired-device-tokens.md) · [Bot Computer ADR 0011](docs/contexts/computer-control/adr/0011-bundle-one-sway-bot-computer.md) | Standalone Service and install-only plugin, paired device tokens and the remote-access contract, one bundled Sway Bot Computer |
-| [Research](docs/research/) | Focused primary-source investigations |
+| [Project documentation](docs/README.md) | Documentation entry point and code and test routing |
+| [Development workflow](docs/development.md) | Agent Skills workflow, project artifact locations, verification commands, and skill maintenance |
+| [Agent instructions](AGENTS.md) | Starting instructions for coding agents |
+| [Workflow router](.agents/skills/using-agent-skills/SKILL.md) | Which development skills apply to a task |
+| [Definition of Done](.agents/references/definition-of-done.md) | Shared completion criteria, applied with the project's commands and task requirements |
+
+Feature specifications, plans, task checklists, quality requirements, and architecture decisions live in `docs/`, using the [project artifact locations](docs/development.md#project-artifacts).
 
 ## License
 
