@@ -22,7 +22,7 @@ Replace the Pi agent worker (`workers/pi`, `pi-coding-agent` 0.84.4, and the age
 - **TurnService keeps its public API.** Routes, mailbox, and clients keep calling `TurnService`. Inside, it calls either the worker path or `BotRuntime`. The cutover task removes the worker branch.
 - **Tools call Service modules directly.** In-process extensions call `ComputerBroker`, `SidecarBroker`, `PluginsService`, and `MailboxService` without the tool channel. The computer worker and sidecar protocols stay.
 - **One approval flow.** It reuses the `approvals` table with a forward migration, and pauses tools as durable tool tasks as the spec describes.
-- **The credential store** is a new Service table, protected like device tokens, and used for model keys and MCP OAuth.
+- **The credential store** is a private file in the Service state directory, protected like the pairing Host secret, and used for model keys and MCP OAuth.
 - **Migrations** follow `persistence/db.ts` conventions: forward-only, named, and covered by `bot-migrations.test.ts`.
 
 ## Dependency graph
@@ -46,7 +46,7 @@ all of 4–18 ── 19 cutover + deletion ── 20 remove worker + Agent UI �
 
 ### Phase 1: Foundation
 - [x] Task 1: Pinned packages, runtime module skeleton, Harness lifecycle, and boundary lint
-- [ ] Task 2: Credential store and model providers
+- [x] Task 2: Credential store and model providers
 - [ ] Task 3: First Turn on the new runtime, behind the switch
 
 ### Checkpoint A

@@ -126,6 +126,7 @@
       "name": "@omarchy-bot/testkit",
       "version": "0.1.0",
       "dependencies": {
+        "@earendil-works/pi-ai": "1.5.2",
         "@omarchy-bot/agent-contract": "workspace:*",
         "@omarchy-bot/domain": "workspace:*",
       },

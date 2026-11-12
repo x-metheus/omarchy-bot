@@ -38,9 +38,11 @@ bun test apps/daemon
 **Description:** Add a credential store table with the same protection as device tokens. Add `modules/runtime/models.ts`, which builds `pi-ai` models from stored providers: OpenAI-compatible or Anthropic Messages with a name, base URL, and key, or a built-in `pi-ai` provider with only a key. Add a Service-wide default model setting and an optional `model` on Bots. Add a fake provider for tests.
 
 **Acceptance criteria:**
-- [ ] Keys are stored only in the credential store and never appear in events, logs, or API responses
+- [x] Keys are stored only in the credential store and never appear in events, logs, or API responses
 - [ ] A Bot without a model uses the Service default; a set model is used from its next Turn
-- [ ] No provider has special-case code
+- [x] No provider has special-case code
+
+Criterion 2 is satisfied by the resolver (`resolveModelForBot` re-reads the Bot and the default on every call) and closes in Task 3, when a Turn uses it. No Turn path exists yet, so it is left open rather than ticked early.
 
 **Verification:** default commands; unit tests for provider building and key redaction; migration test.
 

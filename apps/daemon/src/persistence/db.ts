@@ -1003,6 +1003,13 @@ CREATE TABLE pairing_codes (
 );
 `,
   },
+  {
+    name: "0022-model-settings",
+    sql: `
+CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+ALTER TABLE bots ADD COLUMN model TEXT;
+`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });
