@@ -50,7 +50,7 @@ all of 4–18 ── 19 cutover + deletion ── 20 remove worker + Agent UI �
 - [x] Task 3: First Turn on the new runtime, behind the switch
 
 ### Checkpoint A
-- [ ] `bun run typecheck`, `bun run lint:boundaries`, `bun test apps/daemon` pass
+- [x] `bun run typecheck`, `bun run lint:boundaries`, `bun test apps/daemon` pass
 - [ ] With the switch on, a Direct Thread streams a reply from a fake model in the dev app
 - [ ] Review with the human
 
