@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
 
 let h: Harness;
 
@@ -49,7 +49,7 @@ async function until(fn: () => Promise<boolean>, timeoutMs = 10_000): Promise<vo
   }
 }
 
-test("daemon shutdown cancels active Turn timeouts before closing persistence", async () => {
+workerOnly("worker loss reports failed on shutdown; the durable runtime cancels instead", { timeout: 15_000 })("daemon shutdown cancels active Turn timeouts before closing persistence", async () => {
   const daemon = await startDaemon();
   try {
     daemon.svc.cfg.turnTimeoutMs = 100;
@@ -77,7 +77,7 @@ test("daemon shutdown cancels active Turn timeouts before closing persistence", 
   } finally {
     await daemon.stop();
   }
-}, 15_000);
+});
 
 describe("integration: agents API", () => {
   test("lists all nine agents with version/status/reason/guidance fields", async () => {
@@ -264,7 +264,7 @@ describe("integration: chat through a bot", () => {
     expect(steerMsg?.payload?.turnId).toBe(sent.turnId);
   });
 
-  test("steering a non-steerable (hanging) turn fails cleanly with a transcript note", async () => {
+  workerOnly("removes fake-worker steering and abort transcript mechanics")("steering a non-steerable (hanging) turn fails cleanly with a transcript note", async () => {
     const botId = await makeBot(h, "Hangs");
     const sent = await sendToBot(h, botId, "hang");
     await until(async () => (await api<{ activeTurn?: unknown }>(h, "GET", `/api/threads/${sent.threadId}`)).activeTurn !== undefined);

@@ -303,7 +303,11 @@ export class TurnService {
       let rejectAdmission!: (error: unknown) => void;
       const admission = new Promise<void>((resolve, reject) => { admitted = resolve; rejectAdmission = reject; });
       void admission.catch(() => {});
-      const start = this.runtime?.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, instructions: bot.instructions, ...(durableFollowUp ? { whenBusy: "followUp" as const, admitted } : {}), working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
+      const runtime = this.runtime;
+      const start = runtime && (async () => {
+        resolveWorkCwd(this.threads.getThread(result.threadId)!.cwd);
+        await runtime.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, instructions: bot.instructions, ...(durableFollowUp ? { whenBusy: "followUp" as const, admitted } : {}), working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
+      })();
       if (!start) { this.#durableTurns.delete(turnId); this.#setTurnStatus(turnId, "failed", "Durable runtime unavailable", true); rejectAdmission(new Error("Durable runtime unavailable")); }
       else {
         const tracked = start.then(() => this.#setTurnStatus(turnId, "completed", undefined, true), (err: unknown) => {

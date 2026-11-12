@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AttachmentDto, BotViewDto, DeleteBotResultDto } from "../../packages/protocol/src/index.ts";
-import { api, authedFetch, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
 
 async function stageAttachment(
   h: Harness,
@@ -76,7 +76,7 @@ describe("local Bot deletion", () => {
     expect(deleted.status).toBe("deleted");
   });
 
-  test("cancels waiting Turns across concurrent Threads and waits for every terminal state before cleanup", async () => {
+  workerOnly("removes fake-worker abort command observations")("cancels waiting Turns across concurrent Threads and waits for every terminal state before cleanup", async () => {
     const botId = await makeBot(h, "Concurrent active delete");
     const siblingBotId = await makeBot(h, "Unrelated sibling");
     const waitingForInput = await sendToBot(h, botId, "hang");
@@ -118,7 +118,7 @@ describe("local Bot deletion", () => {
     expect(commands.filter((command) => command === "turn.abort")).toHaveLength(2);
   });
 
-  test("keeps the Bot and local rows after cancellation failure, then re-evaluates active Turns on retry", async () => {
+  workerOnly("removes fake-worker abort failure controls")("keeps the Bot and local rows after cancellation failure, then re-evaluates active Turns on retry", async () => {
     const botId = await makeBot(h, "Retry cancellation");
     const staged = await stageAttachment(h, botId, "retain until barrier succeeds", "barrier.txt");
     const stagedPath = path.join(h.svc.cfg.attachmentsDir, "staged", staged.id);
@@ -159,7 +159,7 @@ describe("local Bot deletion", () => {
     expect(existsSync(stagedPath)).toBeFalse();
   });
 
-  test("times out an unconfirmed terminal barrier without cleanup and succeeds on retry", async () => {
+  workerOnly("removes fake-worker abort ignore controls")("times out an unconfirmed terminal barrier without cleanup and succeeds on retry", async () => {
     await h.stop();
     h = await startDaemon(undefined, { botDeletionTerminalTimeoutMs: 100 });
     const botId = await makeBot(h, "Retry terminal barrier");
@@ -267,7 +267,7 @@ describe("local Bot deletion", () => {
     await waitThreadIdle(h, siblingTurn.threadId);
   });
 
-  test("succeeds while the Agent is non-ready without acquiring its worker and preserves its Native Session", async () => {
+  workerOnly("removes worker readiness and Native Session storage")("succeeds while the Agent is non-ready without acquiring its worker and preserves its Native Session", async () => {
     const botId = await makeBot(h, "Delete while Agent unavailable");
     const sent = await sendToBot(h, botId, "say: create native session");
     await waitThreadIdle(h, sent.threadId);

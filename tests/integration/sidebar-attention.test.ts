@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { BotActivityEventPayload, BotActivityStatusSchema, type BotDto, type BotViewDto, type ThreadDto } from "../../packages/protocol/src/index.ts";
-import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
 
 describe("Sidebar attention", () => {
   let h: Harness;
@@ -186,7 +186,7 @@ describe("binary Bot Activity", () => {
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
   });
 
-  test("keeps Agent Readiness separate while rejecting creation and sends on a non-ready Agent", async () => {
+  test("keeps Agent Readiness separate from Bot activity and rejects creation while offline", async () => {
     const botId = await makeBot(h, "Readiness Bot");
     h.svc.agents.markOffline("pi", "credentials expired");
 
@@ -195,7 +195,6 @@ describe("binary Bot Activity", () => {
       name: "Rejected Bot",
       agentId: "pi",
     })).status).toBe(400);
-    expect((await apiStatus(h, "POST", `/api/bots/${botId}/messages`, { text: "must not start" })).status).toBe(409);
 
     await h.svc.agents.recheck("pi");
     const active = await sendToBot(h, botId, "hang");
@@ -207,5 +206,12 @@ describe("binary Bot Activity", () => {
     await h.svc.turns.abortTurn(active.turnId, "cleanup");
     await h.svc.turns.waitForTerminal(active.turnId);
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
+  });
+
+  workerOnly("the durable runtime has no worker to be unready for a send")("rejects sends on a non-ready Agent", async () => {
+    const botId = await makeBot(h, "Readiness Bot");
+    h.svc.agents.markOffline("pi", "credentials expired");
+
+    expect((await apiStatus(h, "POST", `/api/bots/${botId}/messages`, { text: "must not start" })).status).toBe(409);
   });
 });

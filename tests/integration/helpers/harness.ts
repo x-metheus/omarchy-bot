@@ -13,10 +13,10 @@ import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/c
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
 
 /** Mark worker-protocol tests for removal with the worker in Task 20. */
-export function workerOnly(reason: string) {
+export function workerOnly(reason: string, options?: { timeout?: number }) {
   if (reason.trim() === "") throw new Error("workerOnly requires a reason");
   return (name: string, fn: () => void | Promise<void>) =>
-    test.skipIf(process.env.OMARCHY_TEST_DURABLE === "1")(`${name} (Task 20: ${reason})`, fn);
+    test.skipIf(process.env.OMARCHY_TEST_DURABLE === "1")(`${name} (Task 20: ${reason})`, fn, options?.timeout);
 }
 
 export interface Harness {

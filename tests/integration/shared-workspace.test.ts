@@ -11,6 +11,7 @@ import {
   sendToThread,
   startDaemon,
   waitThreadIdle,
+  workerOnly,
   type Harness,
 } from "./helpers/harness.ts";
 
@@ -91,7 +92,7 @@ describe("Shared Workspace default cwd", () => {
     expect(statSync(workspace).isDirectory()).toBeTrue();
   });
 
-  test("prepares the Shared Workspace once and reuses existing files without Git", async () => {
+  workerOnly("removes worker-native session resume observations")("prepares the Shared Workspace once and reuses existing files without Git", async () => {
     // The daemon prepares the Shared Workspace while booting, so this fixture
     // starts from a workspace that already holds user files.
     const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-reuse-"));
@@ -122,7 +123,7 @@ describe("Shared Workspace default cwd", () => {
     expect(existsSync(path.join(workspace, ".git"))).toBeFalse();
   });
 
-  test("two Bots on the same Agent share the default cwd and keep distinct Native Sessions", async () => {
+  workerOnly("removes worker-native session IDs")("two Bots on the same Agent share the default cwd and keep distinct Native Sessions", async () => {
     h = await startDaemon();
     const workspace = sharedWorkspace(h);
     const firstBotId = await makeBot(h, "Shared files A");
@@ -171,7 +172,7 @@ describe("Shared Workspace default cwd", () => {
     expect(pluginCwd).not.toBe(sharedWorkspace(h));
   });
 
-  test("launching and restarting from other directories does not change the default cwd", async () => {
+  workerOnly("removes worker-native session resume observations")("launching and restarting from other directories does not change the default cwd", async () => {
     previousCwd = process.cwd();
     const launchDir = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-launch-"));
     const restartDir = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-relaunch-"));
@@ -260,7 +261,7 @@ describe("Shared Workspace default cwd", () => {
     expect(existsSync(path.join(h.home, ".omarchy-bot", "memory"))).toBeFalse();
   });
 
-  test("daemon recovery and Bot deletion preserve shared files, explicit cwd, and Native Sessions", async () => {
+  workerOnly("removes worker-native session IDs and resume observations", { timeout: 30_000 })("daemon recovery and Bot deletion preserve shared files, explicit cwd, and Native Sessions", async () => {
     h = await startDaemon();
     const workspace = sharedWorkspace(h);
     const explicitCwd = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-explicit-cwd-"));
@@ -327,7 +328,7 @@ describe("Shared Workspace default cwd", () => {
     } finally {
       rmSync(explicitCwd, { recursive: true, force: true });
     }
-  }, 30_000);
+  });
 
   test("an avatar recipe session uses the Shared Workspace instead of the launch directory", async () => {
     h = await startDaemon();

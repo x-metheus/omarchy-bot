@@ -8,7 +8,7 @@ import { handleAvatarRequest } from "../../apps/daemon/src/api/avatarRoutes.ts";
 import { AvatarService, type AvatarSupervisor } from "../../apps/daemon/src/modules/avatars/avatarService.ts";
 import { HttpError } from "../../apps/daemon/src/modules/bots/bots.ts";
 import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
-import { api, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
 
 let h: Harness;
 let avatars: AvatarService;
@@ -147,7 +147,7 @@ describe("bot profile editing", () => {
     }
   });
 
-  test("edits name and instructions, keeps Agent immutable, and supplies current instructions to future sessions", async () => {
+  workerOnly("removes the worker session command used to observe supplied instructions", { timeout: 20_000 })("edits name and instructions, keeps Agent immutable, and supplies current instructions to future sessions", async () => {
     const botId = await makeBot(h, "Before", "old instructions");
     const first = await sendToBot(h, botId, "say: keep this message");
     await waitThreadIdle(h, first.threadId);
@@ -195,7 +195,7 @@ describe("bot profile editing", () => {
 
     const messages = await api<{ text?: string }[]>(h, "GET", `/api/threads/${first.threadId}/messages`);
     expect(messages.some((message) => message.text === "keep this message")).toBeTrue();
-  }, 20_000);
+  });
 });
 
 describe("safe local avatar uploads", () => {

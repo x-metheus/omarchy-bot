@@ -20,6 +20,7 @@ import {
   sendToBot,
   startDaemon,
   waitThreadIdle,
+  workerOnly,
   type Harness,
 } from "./helpers/harness.ts";
 
@@ -131,7 +132,7 @@ describe("thread history", () => {
     expect(thread.title).toBe("Keep this title");
   });
 
-  test("capability declarations authorize thread operations while adapters only execute them", async () => {
+  workerOnly("removes the worker-native session ID passed to the rename adapter")("capability declarations authorize thread operations while adapters only execute them", async () => {
     const botId = await makeBot(h, "Native Thread Policy Bot");
     const sent = await sendToBot(h, botId, "Original native title");
     await waitThreadIdle(h, sent.threadId);
@@ -168,7 +169,7 @@ describe("thread history", () => {
     }
   });
 
-  test("an undeclared native resume is rejected before another message is persisted", async () => {
+  workerOnly("removes worker-native resume capability enforcement")("an undeclared native resume is rejected before another message is persisted", async () => {
     const botId = await makeBot(h, "Resume Policy Bot");
     const sent = await sendToBot(h, botId, "First native session");
     await waitThreadIdle(h, sent.threadId);

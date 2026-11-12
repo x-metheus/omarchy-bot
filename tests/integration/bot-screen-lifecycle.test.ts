@@ -12,6 +12,7 @@ import {
   sendToThread,
   startDaemon,
   waitThreadIdle,
+  workerOnly,
   type Harness,
 } from "./helpers/harness.ts";
 import { createScriptedSwayFixture, type ScriptedSwayFixture } from "./helpers/swayBotScreen.ts";
@@ -659,7 +660,7 @@ describe("Bot Screen lifecycle", () => {
     expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
   });
 
-  test("two Bots on one Agent keep independent desktops and input", async () => {
+  workerOnly("removes worker-native session IDs observed by this test")("two Bots on one Agent keep independent desktops and input", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const first = await bot(h, await makeBot(h, "Independent desktop A"));
