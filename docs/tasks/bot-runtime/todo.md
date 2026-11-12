@@ -84,7 +84,7 @@ A second message during a durable Turn is refused with 409 and writes nothing; r
 
 ## Task 4: Steering, follow-ups, abort, failed runs, and `maxTurns`
 
-**Description:** Map a client's Steering to `whenBusy: "steer"` and other messages sent while busy to follow-ups. Wire abort. Use `afterFailedRun: "continue"`, report run failures to the client as today, and apply a per-Bot `maxTurns`.
+**Description:** Map a client's Steering to `whenBusy: "steer"` and other messages sent while busy to follow-ups. Wire abort. Use `afterFailedRun: "continue"`, report run failures to the client as today, and apply `maxTurns` with a Service-wide default of 50 and a per-Bot override.
 
 **Acceptance criteria:**
 - [x] Steering mid-reply, including during a tool call, lands after the current tool round

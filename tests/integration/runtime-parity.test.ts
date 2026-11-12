@@ -355,23 +355,23 @@ test("durable turns configure the default tool-round limit", async () => {
       const sent = await sendToBot(h, botId, "hello");
       await waitThreadIdle(h, sent.threadId);
       expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
-      expect(limits).toEqual([undefined]);
+      expect(limits).toEqual([50]);
       const custom = await sendToBot(h, created.id, "custom");
       await waitThreadIdle(h, custom.threadId);
-      expect(limits).toEqual([undefined, 3]);
+      expect(limits).toEqual([50, 3]);
       const patched = await api<{ maxTurns: number | null }>(h, "PATCH", `/api/bots/${created.id}`, { maxTurns: 7 });
       expect(patched.maxTurns).toBe(7);
       const event = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.filter((item) => item.type === "bot.updated" && item.aggregateId === created.id).at(-1);
       expect((event?.payload as { maxTurns?: number }).maxTurns).toBe(7);
       const updated = await sendToThread(h, custom.threadId, "updated");
       await waitThreadIdle(h, updated.threadId);
-      expect(limits).toEqual([undefined, 3, 7]);
+      expect(limits).toEqual([50, 3, 7]);
       expect((await api<{ maxTurns: number | null }>(h, "PATCH", `/api/bots/${created.id}`, { maxTurns: null })).maxTurns).toBeNull();
       const resetEvent = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.filter((item) => item.type === "bot.updated" && item.aggregateId === created.id).at(-1);
       expect((resetEvent?.payload as { maxTurns: number | null }).maxTurns).toBeNull();
       const reset = await sendToThread(h, custom.threadId, "reset");
       await waitThreadIdle(h, reset.threadId);
-      expect(limits).toEqual([undefined, 3, 7, null]);
+      expect(limits).toEqual([50, 3, 7, 50]);
     } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
   });
 });

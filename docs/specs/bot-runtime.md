@@ -115,7 +115,7 @@ This keeps an upgrade of the experimental package to one module.
 - A message sent while a reply is running uses `whenBusy: "steer"` when the client sends Steering, and the default follow-up otherwise. This matches today's behavior.
 - Messages that the Bot should see without replying, such as Bot mail notices and Group Thread context, are submitted as `write` entries.
 - A failed run reports `runFailure` to the client. Use the `afterFailedRun: "continue"` setting so queued messages are not left stranded.
-- `maxTurns` is set per Bot as a safety limit on tool rounds.
+- `maxTurns` is a safety limit on tool rounds with a Service-wide default of 50. A Bot's own value overrides the default; an unset or null Bot value means 50. There is no unlimited setting.
 
 ### Compaction
 

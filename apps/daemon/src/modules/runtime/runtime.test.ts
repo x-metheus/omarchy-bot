@@ -3,7 +3,13 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Harness } from "@earendil-works/pi-durable";
+import { Harness, createRegistry, type ConversationId } from "@earendil-works/pi-durable";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { api, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
+import { setSetting } from "../../persistence/settings.ts";
+import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore } from "./credentials.ts";
 import { openBotRuntime } from "./runtime.ts";
 
@@ -79,3 +85,36 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
     } finally { await runtime.close(); }
   } finally { open.mockRestore(); warning.mockRestore(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test("configured conversation uses the Service limit for unset and null Bots and the Bot override otherwise", () => withFakeRuntimeProvider(Array.from({ length: 3 }, () => ({ segments: [{ type: "text" as const, text: "ok" }] })), {}, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Default limit");
+    const custom = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Custom limit", agentId: "pi", maxTurns: 3 });
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    async function limit(threadId: string): Promise<number | undefined> {
+      const storage = await openNodeSqliteStorage(path.join(h.home, "db.sqlite"), { prefix: "pi_" });
+      const harness = await Harness.open(storage, { registry: createRegistry(), models: createModels() }, BACKGROUND_CONTEXT);
+      try {
+        const indexed = h.svc.db.query<{ conversation_id: number }, [string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?").get(threadId);
+        if (!indexed) throw new Error("Conversation not indexed");
+        const conversation = await harness.conversation(indexed.conversation_id as ConversationId, BACKGROUND_CONTEXT);
+        if (!conversation) throw new Error("Conversation not found");
+        return (await conversation.agent(BACKGROUND_CONTEXT)).maxTurns;
+      } finally { await harness.close(BACKGROUND_CONTEXT); await storage.close(BACKGROUND_CONTEXT); }
+    }
+    const first = await sendToBot(h, botId, "default");
+    await waitThreadIdle(h, first.threadId);
+    expect(await limit(first.threadId)).toBe(50);
+    const second = await sendToBot(h, custom.id, "custom");
+    await waitThreadIdle(h, second.threadId);
+    expect(await limit(second.threadId)).toBe(3);
+    await api(h, "PATCH", `/api/bots/${custom.id}`, { maxTurns: null });
+    await sendToThread(h, second.threadId, "reset");
+    await waitThreadIdle(h, second.threadId);
+    expect(await limit(second.threadId)).toBe(50);
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));

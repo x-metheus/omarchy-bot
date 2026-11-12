@@ -13,6 +13,8 @@ import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationWatch, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
+export const DEFAULT_MAX_TURNS = 50;
+
 // Keep the root context in one place until operations have their own contexts.
 const context = BACKGROUND_CONTEXT;
 export class DurableRunAborted extends Error {
@@ -78,8 +80,8 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
           const conversation = await openThreadConversation(input.db, harness, input.threadId, input.botId, context);
           const bot = input.db.query<{ max_turns: number | null }, [string]>("SELECT max_turns FROM bots WHERE id = ?").get(input.botId);
           if (!bot) throw new Error("Bot not found; turn limit unavailable");
-          const maxTurns = bot.max_turns ?? ((await conversation.agent(context)).maxTurns === undefined ? undefined : null);
-          await conversation.configure({ model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions: input.instructions, ...(maxTurns === undefined ? {} : { maxTurns }) }, context);
+          const maxTurns = bot.max_turns ?? DEFAULT_MAX_TURNS;
+          await conversation.configure({ model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions: input.instructions, maxTurns }, context);
           const watch = await conversation.watch(context);
           let transcript: DurableTranscript | undefined = input.whenBusy ? undefined : new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, watch.value);
           let foreignTranscript: DurableTranscript | undefined;
