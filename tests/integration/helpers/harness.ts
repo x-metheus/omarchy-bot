@@ -1,3 +1,4 @@
+import { test } from "bun:test";
 import type { BotComputerAssetSupply } from "../../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 /**
  * Daemon harness for integration tests: boots the real daemon in-process with
@@ -10,6 +11,13 @@ import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
+
+/** Mark worker-protocol tests for removal with the worker in Task 20. */
+export function workerOnly(reason: string) {
+  if (reason.trim() === "") throw new Error("workerOnly requires a reason");
+  return (name: string, fn: () => void | Promise<void>) =>
+    test.skipIf(process.env.OMARCHY_TEST_DURABLE === "1")(`${name} (Task 20: ${reason})`, fn);
+}
 
 export interface Harness {
   baseUrl: string;
