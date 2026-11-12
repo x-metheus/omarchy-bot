@@ -9,7 +9,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { CredentialStore } from "./credentials.ts";
 import { createRuntimeModels } from "./models.ts";
-import { AssistantEntry, ConversationIdle, createRegistry, Harness, type Conversation, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
+import { AssistantEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationWatch, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 // Keep the root context in one place until operations have their own contexts.
@@ -19,14 +19,15 @@ export class DurableRunAborted extends Error {
 }
 
 export interface BotRuntime {
-  startTurn(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; threadId: string; botId: string; turnId: string; text: string; instructions: string; whenBusy?: "followUp"; requestId?: string; admitted?(): void; working(): void }): Promise<void>;
+  startTurn(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; threadId: string; botId: string; turnId: string; text: string; instructions: string; whenBusy?: "followUp"; admitted?(): void; working(): void }): Promise<void>;
+  recoverTurns(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; registered(turnId: string): void; settled(turnId: string, outcome: { status: "completed" | "cancelled" } | { status: "failed"; reason: string }): void }): { registered: Promise<void>; settled: Promise<void> };
   activeTurn(threadId: string): Promise<string | undefined>;
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
   close(): Promise<void>;
 }
 
-export async function openBotRuntime(dbPath: string, stateDir: string): Promise<BotRuntime> {
+export async function openBotRuntime(dbPath: string, stateDir: string, db?: Database): Promise<BotRuntime> {
   const credentials = new CredentialStore(stateDir);
   const storage = await openNodeSqliteStorage(dbPath, { prefix: "pi_" });
   let reportedCredentialsFailure = false;
@@ -40,22 +41,31 @@ export async function openBotRuntime(dbPath: string, stateDir: string): Promise<
         }
         return createModels();
       }
-    }, registry: createRegistry(), settings: { afterFailedRun: "continue" } }, context);
+    }, registry: createRegistry(), settings: { afterFailedRun: "continue", restartLimit: 5 } }, context);
     try {
+      if (db) {
+        const bots = db.query<{ bot_id: string }, []>("SELECT DISTINCT bot_id FROM turns WHERE status = 'working'").all();
+        for (const { bot_id } of bots) {
+          try {
+            const model = resolveModelForBot(db, credentials, bot_id);
+            selections.push({ providerId: model.provider, modelId: model.id });
+          } catch { /* Recovery will report an unavailable model on the Turn. */ }
+        }
+      }
       harness.resume();
     } catch (error) {
       await harness.close(context);
       throw error;
     }
     let closing: Promise<void> | undefined;
-    const active = new Map<string, { threadId: string; admitted: Promise<{ conversation: Conversation; submission: Submission }>; pending: Promise<SettledSubmissionRecord | undefined>[]; steers: Submission[]; inputs: Set<number> }>();
+    const active = new Map<string, { db: Database; threadId: string; admitted: Promise<{ conversation: Conversation; submission: Submission }>; pending: Promise<SettledSubmissionRecord | undefined>[]; steers: Submission[]; inputs: Set<number>; recovering?: boolean }>();
     return {
       async startTurn(input) {
         let ready!: (value: { conversation: Conversation; submission: Submission }) => void;
         let fail!: (error: unknown) => void;
         const admitted = new Promise<{ conversation: Conversation; submission: Submission }>((resolve, reject) => { ready = resolve; fail = reject; });
         void admitted.catch(() => {});
-        const turn = { threadId: input.threadId, admitted, pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>() };
+        const turn = { db: input.db, threadId: input.threadId, admitted, pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>() };
         active.set(input.turnId, turn);
         try {
           const model = resolveModelForBot(input.db, credentials, input.botId);
@@ -85,11 +95,12 @@ export async function openBotRuntime(dbPath: string, stateDir: string): Promise<
             input.working();
             let submission: Submission;
             try {
-              submission = await conversation.submit({ type: "input", content: input.text, ...(input.whenBusy ? { whenBusy: input.whenBusy, whenIdle: "reject" as const, requestId: input.requestId } : {}) }, context);
+              submission = await conversation.submit({ type: "input", content: input.text, requestId: input.turnId, ...(input.whenBusy ? { whenBusy: input.whenBusy, whenIdle: "reject" as const } : {}) }, context);
             } catch (error) {
               if (!(input.whenBusy && error instanceof ConversationIdle)) throw error;
-              submission = await conversation.submit({ type: "input", content: input.text, ...(input.requestId === undefined ? {} : { requestId: input.requestId }) }, context);
+              submission = await conversation.submit({ type: "input", content: input.text, requestId: input.turnId }, context);
             }
+            input.db.query("INSERT INTO pi_turn_submissions (turn_id, submission_id, kind, created_at) VALUES (?, ?, 'input', ?)").run(input.turnId, submission.id, new Date().toISOString());
             turn.inputs.add(submission.id);
             ready({ conversation, submission });
             input.admitted?.();
@@ -125,6 +136,127 @@ export async function openBotRuntime(dbPath: string, stateDir: string): Promise<
           active.delete(input.turnId);
         }
       },
+      recoverTurns(input) {
+        const jobs: Promise<void>[] = [];
+        const rows = input.db.query<{ id: string; thread_id: string; bot_id: string }, []>("SELECT id, thread_id, bot_id FROM turns WHERE status = 'working' ORDER BY started_at, id").all();
+        const registered = (async () => {
+          for (const row of rows) {
+            try {
+              const indexed = input.db.query<{ conversation_id: number }, [string, string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?").get(row.thread_id, row.bot_id);
+              if (!indexed) throw new Error("durable conversation not found");
+              const conversation = await openThreadConversation(input.db, harness, row.thread_id, row.bot_id, context);
+              const associations = input.db.query<{ submission_id: number; kind: string }, [string]>("SELECT submission_id, kind FROM pi_turn_submissions WHERE turn_id = ? ORDER BY submission_id").all(row.id);
+              const association = associations.find((item) => item.kind === "input");
+              let primary = association ? await harness.submission(association.submission_id as SubmissionId, context) : undefined;
+              if (!primary) {
+                const record = await harness.commit((tx) => tx.submissionByRequest(conversation.id, row.id), context);
+                if (record) {
+                  primary = await harness.submission(record.id, context);
+                  input.db.query("INSERT OR IGNORE INTO pi_turn_submissions (turn_id, submission_id, kind, created_at) VALUES (?, ?, 'input', ?)").run(row.id, record.id, new Date().toISOString());
+                }
+              }
+              if (!primary) throw new Error("durable submission not found");
+              const owned = primary;
+              const turn = { db: input.db, threadId: row.thread_id, admitted: Promise.resolve({ conversation, submission: owned }), pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>([owned.id]), recovering: true };
+              active.set(row.id, turn);
+              input.registered(row.id);
+              jobs.push((async () => {
+                let watch: ConversationWatch | undefined;
+                try {
+                  const steerIds = new Set(associations.filter((item) => item.kind === "steer").map((item) => item.submission_id));
+                  const inspected = await harness.inspect(context);
+                  for (const record of inspected.submissions) {
+                    if (record.conversationId === conversation.id && record.requestId?.startsWith(`${row.id}:steer:`)) steerIds.add(record.id);
+                  }
+                  // The Service persists the message id before admitting a steer, so even a settled
+                  // steer whose association write was interrupted has a public request lookup key.
+                  const messages = input.db.query<{ id: string }, [string, string]>("SELECT id FROM messages WHERE thread_id = ? AND kind = 'text' AND author_kind = 'user' AND json_valid(payload) AND json_extract(payload, '$.turnId') = ?").all(row.thread_id, row.id);
+                  for (const message of messages) {
+                    const record = await harness.commit((tx) => tx.submissionByRequest(conversation.id, `${row.id}:steer:${message.id}`), context);
+                    if (record) steerIds.add(record.id);
+                  }
+                  for (const id of steerIds) {
+                    const steer = await harness.submission(id as SubmissionId, context);
+                    if (!steer || turn.inputs.has(steer.id)) continue;
+                    turn.steers.push(steer);
+                    turn.inputs.add(steer.id);
+                    turn.pending.push(steer.wait(context));
+                    input.db.query("INSERT OR IGNORE INTO pi_turn_submissions (turn_id, submission_id, kind, created_at) VALUES (?, ?, 'steer', ?)").run(row.id, steer.id, new Date().toISOString());
+                  }
+                  turn.recovering = false;
+                  const status = await owned.status(context);
+                  let nextEntry: number | undefined;
+                  if (status.entry !== undefined) {
+                    // Only another Turn's initial input bounds this Turn. Steers share its transcript.
+                    const otherTurns = input.db.query<{ id: string; submission_id: number | null }, [string, string, string]>("SELECT t.id, s.submission_id FROM turns t LEFT JOIN pi_turn_submissions s ON s.turn_id = t.id AND s.kind = 'input' WHERE t.thread_id = ? AND t.bot_id = ? AND t.id != ?").all(row.thread_id, row.bot_id, row.id);
+                    for (const other of otherTurns) {
+                      const handle = other.submission_id === null ? undefined : await harness.submission(other.submission_id as SubmissionId, context);
+                      const record = handle ? await handle.status(context) : await harness.commit((tx) => tx.submissionByRequest(conversation.id, other.id), context);
+                      if (record?.type === "input" && record.entry !== undefined && record.entry > status.entry && (nextEntry === undefined || record.entry < nextEntry)) nextEntry = record.entry;
+                    }
+                  }
+                  watch = await conversation.watch(context, { ...(status.entry === undefined ? {} : { from: status.entry }), min: 100, max: 200 });
+                  const ownedWatch = watch;
+                  const removed = input.db.query<{ kind: string; count: number }, [string]>("SELECT kind, count(*) AS count FROM messages WHERE turn_id = ? AND kind IN ('response', 'thinking') GROUP BY kind").all(row.id);
+                  input.db.query("DELETE FROM messages WHERE turn_id = ? AND kind IN ('response', 'thinking')").run(row.id);
+                  for (const item of removed) input.events.append("thread", row.thread_id, `${item.kind}.removed`, { threadId: row.thread_id, turnId: row.id, count: item.count });
+                  const transcript = new DurableTranscript(input.threads, input.bots, input.events, row.thread_id, row.bot_id, row.id, { ...ownedWatch.value, entries: [] });
+                  let firstEntry = status.entry;
+                  const initialLive = ownedWatch.value.docs["pi.live"] as { run?: { inputs: readonly number[] } } | undefined;
+                  const initialDocs = initialLive?.run && !initialLive.run.inputs.some((id) => turn.inputs.has(id)) ? { ...ownedWatch.value.docs, "pi.live": {} } : ownedWatch.value.docs;
+                  if (firstEntry !== undefined) {
+                    let entryCursor: Cursor | undefined;
+                    do {
+                      const page = await conversation.entries({ order: "ascending", minEntryId: firstEntry }, 100, entryCursor, context);
+                      transcript.update({ ...ownedWatch.value, entries: page.items.filter((entry) => nextEntry === undefined || entry.id < nextEntry), docs: { ...ownedWatch.value.docs, "pi.live": {} } });
+                      entryCursor = page.next;
+                    } while (entryCursor);
+                    transcript.update({ ...ownedWatch.value, entries: [], docs: initialDocs });
+                  }
+                  ownedWatch.start(async (call) => {
+                    if (call.kind !== "value") return;
+                    const live = call.value.docs["pi.live"] as { run?: { inputs: readonly number[] } } | undefined;
+                    if (live?.run && !live.run.inputs.some((id) => turn.inputs.has(id))) return;
+                    firstEntry ??= (await owned.status(context)).entry;
+                    if (firstEntry === undefined) return;
+                    transcript.update({ ...call.value, entries: call.value.entries.filter((entry) => entry.id >= firstEntry! && (nextEntry === undefined || entry.id < nextEntry)) });
+                  });
+                  const settlements = [await owned.wait(context)];
+                  for (let i = 0; i < turn.pending.length; i++) {
+                    const item = await turn.pending[i];
+                    if (item) settlements.push(item);
+                  }
+                  let answered = false;
+                  for (const item of settlements) {
+                    if (item.status !== "done" || item.type !== "input") continue;
+                    const answer = await conversation.commit((tx) => tx.entry(AssistantEntry, item.answer), context);
+                    if (!answer) throw new Error("Durable turn answer not found");
+                    transcript.update({ ...ownedWatch.value, entries: [answer], docs: { ...ownedWatch.value.docs, "pi.live": {} } });
+                    answered = true;
+                  }
+                  if (answered) input.settled(row.id, { status: "completed" });
+                  else {
+                    const failed = settlements.find((item) => item.status === "unanswered");
+                    if (!failed || failed.status !== "unanswered") throw new Error("Durable turn did not complete");
+                    if (failed.reason === "aborted") input.settled(row.id, { status: "cancelled" });
+                    else {
+                      const live = ownedWatch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; detail?: string } } | undefined;
+                      const reason = (live?.runFailure?.inputs.includes(failed.id) ? live.runFailure.detail : undefined) ?? (typeof failed.detail === "string" ? failed.detail : failed.reason);
+                      input.settled(row.id, { status: "failed", reason });
+                    }
+                  }
+                } catch (error) { input.settled(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) }); }
+                finally { await watch?.stop(); active.delete(row.id); }
+              })());
+            } catch (error) {
+              active.delete(row.id);
+              input.settled(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) });
+            }
+          }
+        })();
+        const settled = registered.then(async () => { await Promise.allSettled(jobs); });
+        return { registered, settled };
+      },
       async activeTurn(threadId) {
         for (const [turnId, turn] of active) {
           if (turn.threadId !== threadId) continue;
@@ -145,7 +277,8 @@ export async function openBotRuntime(dbPath: string, stateDir: string): Promise<
           let wasSubmitted = false;
           try {
             const { conversation } = await turn.admitted;
-            const submission = await conversation.submit({ type: "input", content: text, whenBusy: "steer", whenIdle: "reject", requestId }, context);
+            const submission = await conversation.submit({ type: "input", content: text, whenBusy: "steer", whenIdle: "reject", requestId: `${turnId}:steer:${requestId}` }, context);
+            turn.db.query("INSERT INTO pi_turn_submissions (turn_id, submission_id, kind, created_at) VALUES (?, ?, 'steer', ?)").run(turnId, submission.id, new Date().toISOString());
             turn.inputs.add(submission.id);
             turn.steers.push(submission);
             wasSubmitted = true;
@@ -162,7 +295,7 @@ export async function openBotRuntime(dbPath: string, stateDir: string): Promise<
         if (turn) {
           const { conversation, submission } = await turn.admitted;
           const result = await submission.abort(context);
-          if (result === "already_placed" || (result === "settled" && turn.pending.length > 0)) await conversation.abort(context);
+          if (result === "already_placed" || (result === "settled" && (turn.pending.length > 0 || turn.recovering))) await conversation.abort(context);
         }
       },
       close() {

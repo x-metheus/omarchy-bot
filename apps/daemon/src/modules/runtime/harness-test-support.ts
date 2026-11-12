@@ -1,6 +1,6 @@
 // This test helper lives here to satisfy the pi-durable module boundary rule.
 // No production module imports this test-only helper.
-import { Harness, createRegistry, defineTool } from "@earendil-works/pi-durable";
+import { Harness, createRegistry, defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createFakeProvider, type FakeReply } from "../../../../../packages/testkit/src/fake-provider.ts";
 
@@ -102,4 +102,62 @@ export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: {
   } finally {
     Harness.open = originalOpen;
   }
+}
+
+/** Child-process-only fake provider and durable timer used by restart tests. */
+export function installDurableCrashProvider(): () => void {
+  const sleepTask = defineTask<{ at: number; text: string }, { phase: "wait" } | { phase: "deliver" }, null>({
+    name: "test.sleep", version: 1, initial: () => ({ phase: "wait" }),
+    phases: {
+      wait: (task, runtime, context) => runtime.sleepUntil(task.input.at, { phase: "deliver" }, context),
+      deliver: (task, runtime, context) => runtime.commit(async (tx) => {
+        await tx.appendEntry(runtime.conversationId, { kind: "write", data: { text: task.input.text, author: "test.sleep" } });
+        return { status: "terminal", outcome: { status: "completed", result: null } };
+      }, context),
+    },
+    abort: (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
+  });
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: "test-crash", tasks: [sleepTask], sections: [{ key: "test-crash-gate", async render() {
+    if (process.env.OMARCHY_TEST_CRASH_MODE === "1") {
+      console.log(JSON.stringify({ event: "before-request" }));
+      await new Promise<never>(() => {});
+    }
+    return undefined;
+  } }], tools: [
+    defineTool({
+      name: "sleep_until", description: "Schedule a test post", replay: "safe",
+      parameters: { type: "object", properties: { at: { type: "number" }, text: { type: "string" } }, required: ["at", "text"], additionalProperties: false },
+      async execute(args, api, context) {
+        const { at, text } = args as { at: number; text: string };
+        await api.createTask(sleepTask, { at, text }, { ownership: { kind: "conversation" } }, context);
+        return { output: [{ type: "text", text: "scheduled" }] };
+      },
+    }),
+    defineTool({
+      name: "hang", description: "Wait until killed", replay: "safe",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async execute() { console.log(JSON.stringify({ event: "hang" })); return await new Promise<never>(() => {}); },
+    }),
+  ] }));
+  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }], tokensPerSecond: 15, tokenSize: { min: 1, max: 1 } });
+  fake.setResponses(Array.from({ length: 100 }, () => ({ messages }) => {
+    const latest = messages.filter((message) => message.role === "user").at(-1);
+    const text = typeof latest?.content === "string" ? latest.content : "";
+    if (text === "hang") return fauxAssistantMessage([fauxToolCall("hang", {}, { id: "hang-call" })], { stopReason: "toolUse" });
+    if (text === "first-request") return fauxAssistantMessage("First request streaming text stays visible after interruption and the continuation completes.");
+    if (!JSON.stringify(messages).includes("scheduled")) return fauxAssistantMessage([fauxToolCall("sleep_until", { at: Number(process.env.OMARCHY_TEST_SLEEP_AT), text: "scheduled post" }, { id: "sleep-call" })], { stopReason: "toolUse" });
+    return fauxAssistantMessage("A long reply that keeps streaming across the restart and eventually completes.");
+  }));
+  const originalOpen = Harness.open;
+  Harness.open = (storage, options, context) => originalOpen.call(Harness, storage, {
+    ...options, registry,
+    models: () => {
+      const models = typeof options.models === "function" ? options.models() : options.models;
+      if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
+      models.setProvider(fake.provider);
+      return models;
+    },
+  }, context);
+  return () => { Harness.open = originalOpen; };
 }

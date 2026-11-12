@@ -1026,6 +1026,18 @@ CREATE TABLE pi_thread_conversations (
     name: "0024-bot-max-turns",
     sql: `ALTER TABLE bots ADD COLUMN max_turns INTEGER;`,
   },
+  {
+    name: "0025-durable-turn-submissions",
+    sql: `
+CREATE TABLE pi_turn_submissions (
+  turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+  submission_id INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('input', 'steer')),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (turn_id, submission_id)
+);
+`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });
@@ -1057,7 +1069,7 @@ export function openDb(cfg: Config): Database {
   }
   return db;
 }
-/** Active turns cannot survive a daemon restart; supervised Bot Screens are reconciled separately. */
+/** Recover interrupted worker turns; durable turns with an association are resumed by BotRuntime. */
 export function recoverOnStartup(db: Database): void {
   const now = new Date().toISOString();
   db.query(
@@ -1070,7 +1082,11 @@ export function recoverOnStartup(db: Database): void {
        )`,
   ).run(TOOL_CALL_INTERRUPTED_ERROR_SUMMARY);
   db.query(`DELETE FROM messages WHERE kind IN ('response', 'thinking') AND block_state = 'streaming'`).run();
-  db.query(`UPDATE turns SET status='failed', finished_at=?, outcome_reason='daemon restart' WHERE status NOT IN ('completed','cancelled','failed')`).run(now);
+  db.query(`UPDATE turns SET status='failed', finished_at=?, outcome_reason='daemon restart'
+    WHERE status NOT IN ('completed','cancelled','failed')
+      AND id NOT IN (SELECT turn_id FROM pi_turn_submissions)
+      AND NOT (status = 'working' AND COALESCE((SELECT value FROM service_settings WHERE key = 'runtime'), '') = 'durable'
+        AND EXISTS (SELECT 1 FROM pi_thread_conversations c WHERE c.thread_id = turns.thread_id AND c.bot_id = turns.bot_id))`).run(now);
   db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE state='cleaning'`)
     .run(JSON.stringify([{ stage: "database", resource: "daemon", message: "daemon restarted during permanent deletion" }]), now);
   db.query(`UPDATE agents SET status='offline', reason='daemon restarted during check', updated_at=? WHERE status='checking'`).run(now);

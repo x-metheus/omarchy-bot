@@ -106,9 +106,9 @@ A second message during a durable Turn is refused with 409 and writes nothing; r
 **Description:** On start, `resume()` continues unfinished replies and tasks, and ends replies that cannot continue with a visible reason. On shutdown, stop accepting input, abort running replies, and close the Harness. Set `restartLimit`. Turn prototype check 3 into a test.
 
 **Acceptance criteria:**
-- [ ] A Service killed mid-reply resumes or visibly fails that reply on next start, and no Turn is lost silently
-- [ ] A `sleepUntil` task posts once into the same conversation after a hard kill
-- [ ] A reply that crashes the process repeatedly stops at the restart limit
+- [x] A Service killed mid-reply resumes or visibly fails that reply on next start, and no Turn is lost silently — `restart.test.ts`: hard-kill recovery and missing submission failure
+- [x] A `sleepUntil` task posts once into the same conversation after a hard kill — `restart.test.ts`: sleeping task posts once
+- [x] A reply that crashes the process repeatedly stops at the restart limit — `restart.test.ts`: repeated hard kills stop at five interruptions
 
 **Verification:** default commands; restart tests against SQLite in a temporary file, killing a child Service process.
 

@@ -57,6 +57,7 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
   const open = spyOn(Harness, "open").mockImplementation((storage, options, context) => {
     const settings = typeof options.settings === "function" ? options.settings() : options.settings;
     expect(settings?.afterFailedRun).toBe("continue");
+    expect(settings?.restartLimit).toBe(5);
     if (typeof options.models === "function") {
       options.models();
       options.models();

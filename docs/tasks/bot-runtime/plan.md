@@ -56,7 +56,7 @@ all of 4–18 ── 19 cutover + deletion ── 20 remove worker + Agent UI �
 
 ### Phase 2: Turn behavior
 - [x] Task 4: Steering, follow-ups, abort, failed runs, and `maxTurns`
-- [ ] Task 5: Restart, `resume()`, and shutdown
+- [x] Task 5: Restart, `resume()`, and shutdown
 - [ ] Task 6: Compaction with author labels
 
 ### Checkpoint B

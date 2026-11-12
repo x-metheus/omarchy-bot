@@ -1,0 +1,17 @@
+import { installDurableCrashProvider } from "../../../apps/daemon/src/modules/runtime/harness-test-support.ts";
+import { CredentialStore } from "../../../apps/daemon/src/modules/runtime/credentials.ts";
+import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
+import { setSetting } from "../../../apps/daemon/src/persistence/settings.ts";
+import path from "node:path";
+
+installDurableCrashProvider();
+const state = process.env.OMARCHY_BOT_STATE!;
+new CredentialStore(state).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
+const daemon = await main({ useHostApplicationUnits: false, botScreenAdapter: new FakeBotScreenRuntimeAdapter(), botScreenRuntimeDir: path.join(process.env.OMARCHY_BOT_HOME!, "r") });
+setSetting(daemon.svc.db, "default_model", "fake/fake-model");
+setSetting(daemon.svc.db, "runtime", "durable");
+console.log(JSON.stringify({ event: "ready", port: daemon.port, pid: process.pid }));
+process.removeAllListeners("SIGTERM");
+process.on("SIGTERM", () => { void daemon.disconnectForRestart().then(() => process.exit(0)); });
+await new Promise(() => {});

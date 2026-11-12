@@ -3,6 +3,7 @@ import { rmSync } from "node:fs";
 import { withBlockingRuntimeTool, withFakeRuntimeProvider } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 import { CredentialStore } from "../../apps/daemon/src/modules/runtime/credentials.ts";
 import { deleteSetting, setSetting } from "../../apps/daemon/src/persistence/settings.ts";
+import { recoverOnStartup } from "../../apps/daemon/src/persistence/db.ts";
 import { api, apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "./helpers/harness.ts";
 
 const parityScript = { input: "parity-stream", thinking: "T", response: "R" };
@@ -97,6 +98,7 @@ test("durable steering is accepted during a reply", () => withFakeRuntimeProvide
     expect(steered.turnId).toBe(sent.turnId);
     await waitThreadIdle(h, sent.threadId);
     expect(h.svc.threads.turnRow(sent.turnId)?.steer_count).toBe(1);
+    expect(h.svc.db.query<{ kind: string }, [string]>("SELECT kind FROM pi_turn_submissions WHERE turn_id = ? ORDER BY submission_id").all(sent.turnId)).toEqual([{ kind: "input" }, { kind: "steer" }]);
     expect((await messages(h, sent.threadId)).some((message) => message.kind === "response" && message.text?.includes("redirected"))).toBeTrue();
   } finally {
     await h.stop();
@@ -498,4 +500,40 @@ test("a durable turn streams and completes with an empty Agent registry", () => 
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
   }
+}));
+
+test("startup preserves a working Turn with a durable submission association", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], {}, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Recovery association");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const sent = await sendToBot(h, botId, "hello");
+    await waitThreadIdle(h, sent.threadId);
+    h.svc.db.query("UPDATE turns SET status = 'working', finished_at = NULL WHERE id = ?").run(sent.turnId);
+    recoverOnStartup(h.svc.db);
+    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("working");
+    h.svc.db.query("UPDATE turns SET status = 'completed' WHERE id = ?").run(sent.turnId);
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("shutdown aborts and awaits a running durable turn", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "a long streamed reply" }] }], { tokensPerSecond: 10 }, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Shutdown durable");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    let observed!: () => void;
+    const streaming = new Promise<void>((resolve) => { observed = resolve; });
+    const unsubscribe = h.svc.events.subscribe((event) => {
+      if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed();
+    });
+    const sent = await sendToBot(h, botId, "shutdown");
+    await streaming;
+    unsubscribe();
+    await h.svc.turns.shutdown();
+    expect(h.svc.threads.turnRow(sent.turnId)).toMatchObject({ status: "cancelled", outcome_reason: "aborted" });
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));

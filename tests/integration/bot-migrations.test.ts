@@ -81,7 +81,7 @@ function deployedArchivelessDatabase(): { dbPath: string; home: string } {
 
 describe("integration: deployed schema convergence", () => {
   test("keeps Bot Screen and divergent-ledger migrations in dependency order", () => {
-    expect(MIGRATIONS.slice(-18).map((migration) => migration.name)).toEqual([
+    expect(MIGRATIONS.slice(-19).map((migration) => migration.name)).toEqual([
       "0010-bot-computer-surfaces",
       "0011-redacted-input-diagnostics",
       "0012-bot-screen-contract",
@@ -100,7 +100,16 @@ describe("integration: deployed schema convergence", () => {
       "0022-model-settings",
       "0023-pi-thread-conversations",
       "0024-bot-max-turns",
+      "0025-durable-turn-submissions",
     ]);
+  });
+
+  test("adds durable Turn submission associations to an existing database", () => {
+    const { db, dbPath, home } = databaseThrough("0024-bot-max-turns");
+    const migrated = finishMigrations(db, dbPath);
+    try {
+      expect(migrated.query<{ name: string }, []>("PRAGMA table_info(pi_turn_submissions)").all().map((column) => column.name)).toEqual(["turn_id", "submission_id", "kind", "created_at"]);
+    } finally { migrated.close(); rmSync(home, { recursive: true, force: true }); }
   });
 
   test("preserves archiveless local deletion and repairs Bot Screen state before recovery", async () => {
