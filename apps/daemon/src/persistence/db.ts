@@ -1010,6 +1010,18 @@ CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ALTER TABLE bots ADD COLUMN model TEXT;
 `,
   },
+  {
+    name: "0023-pi-thread-conversations",
+    sql: `
+CREATE TABLE pi_thread_conversations (
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  conversation_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (thread_id, bot_id)
+);
+`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });

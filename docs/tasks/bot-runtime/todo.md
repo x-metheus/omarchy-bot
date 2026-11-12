@@ -39,10 +39,10 @@ bun test apps/daemon
 
 **Acceptance criteria:**
 - [x] Keys are stored only in the credential store and never appear in events, logs, or API responses
-- [ ] A Bot without a model uses the Service default; a set model is used from its next Turn
+- [x] A Bot without a model uses the Service default; a set model is used from its next Turn
 - [x] No provider has special-case code
 
-Criterion 2 is satisfied by the resolver (`resolveModelForBot` re-reads the Bot and the default on every call) and closes in Task 3, when a Turn uses it. No Turn path exists yet, so it is left open rather than ticked early.
+Criterion 2 closed in Task 3: the durable path resolves the Bot's model on every Turn, and the parity suite proves a changed model applies on the next Turn.
 
 **Verification:** default commands; unit tests for provider building and key redaction; migration test.
 
@@ -59,9 +59,11 @@ Criterion 2 is satisfied by the resolver (`resolveModelForBot` re-reads the Bot 
 **Description:** Add the `runtime` Service setting, defaulting to `worker`. With `durable`, `TurnService.send` starts a Turn through `BotRuntime.startTurn`: one conversation per Thread, the Bot's model in its `pi.agent` document, and no tools yet. `transcript.ts` writes Service Messages from committed entries and emits today's Turn events, so clients need no change.
 
 **Acceptance criteria:**
-- [ ] With the switch on, a Direct Thread streams Response and Thinking blocks and finishes the Turn
-- [ ] For the same fake run, stored Messages and emitted events match the worker path's in order and content
-- [ ] With the switch off, behavior is unchanged
+- [x] With the switch on, a Direct Thread streams Response and Thinking blocks and finishes the Turn
+- [x] For the same fake run, stored Messages and emitted events match the worker path's in order and content
+- [x] With the switch off, behavior is unchanged
+
+A second message during a durable Turn is refused with 409 and writes nothing; real Steering is Task 4.
 
 **Verification:** default commands; an integration test runs one fake script through both paths and compares; manual check in `OMARCHY_BOT_DEV=1 bun run dev`.
 
@@ -74,7 +76,7 @@ Criterion 2 is satisfied by the resolver (`resolveModelForBot` re-reads the Bot 
 ---
 
 ## Checkpoint A: after Tasks 1–3
-- [ ] Default commands pass
+- [x] Default commands pass
 - [ ] A Direct Thread streams a reply with the switch on in the dev app
 - [ ] Review with the human before proceeding
 
@@ -385,6 +387,8 @@ Criterion 2 is satisfied by the resolver (`resolveModelForBot` re-reads the Bot 
 ## Task 19: Cutover and deletion
 
 **Description:** Make `durable` the only path: remove the switch and the worker branch from `TurnService`. Deleting a Thread deletes its conversation; deleting a Bot deletes all its conversations. Stop requiring Agent readiness to start a Turn.
+
+pi-durable 1.5.2 exposes no conversation deletion API. An index insertion failure can leave an unindexed conversation; Task 19 must also sweep such orphaned conversations when implementing deletion.
 
 **Acceptance criteria:**
 - [ ] Every existing Thread, mailbox, attachment, and lifecycle test passes on the runtime

@@ -1,4 +1,6 @@
 
+import type { BotRuntime } from "../runtime/runtime.ts";
+import { getSetting } from "../../persistence/settings.ts";
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import {
@@ -100,6 +102,7 @@ export class TurnService {
   #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
   #timeoutQueues = new Map<AgentId, Promise<void>>();
   #stopping = false;
+  #reportedRuntimeSetting = false;
 
   constructor(
     private readonly db: Database,
@@ -112,6 +115,7 @@ export class TurnService {
     private readonly cfg: { turnTimeoutMs: number; sharedWorkspaceDir: string },
     private readonly plugins: PluginsService,
     private readonly devices: SidecarBroker,
+    private readonly runtime?: BotRuntime,
   ) {}
 
   async shutdown(): Promise<void> {
@@ -126,7 +130,7 @@ export class TurnService {
     return r ? this.threads.turnToDto(r) : undefined;
   }
 
-  #setTurnStatus(turnId: string, next: TurnStatus, reason?: string): void {
+  #setTurnStatus(turnId: string, next: TurnStatus, reason?: string, durable = false): void {
     const t = this.threads.turnRow(turnId);
     if (!t) return;
     const from = t.status as TurnStatus;
@@ -143,7 +147,8 @@ export class TurnService {
       botId: t.bot_id,
       ...(reason !== undefined ? { reason } : {}),
     });
-    this.bots.recordActivityStatus(t.bot_id, t.thread_id, turnId);
+    if (durable) this.#recordDurableActivity(t.bot_id, t.thread_id, turnId);
+    else this.bots.recordActivityStatus(t.bot_id, t.thread_id, turnId);
     if (finished) {
       const terminal = this.#turnDto(turnId);
       const waiters = this.#terminalWaiters.get(turnId);
@@ -155,6 +160,11 @@ export class TurnService {
         }
       }
     }
+  }
+
+  #recordDurableActivity(botId: string, threadId: string, turnId: string): void {
+    const status = this.threads.activeTurnForBot(botId) === undefined ? "inactive" : "active";
+    this.events.append("bot", botId, "bot.activity", { status, threadId, turnId });
   }
 
   /**
@@ -169,6 +179,12 @@ export class TurnService {
     attachmentDraftToken?: string,
     opts: { cwd?: string; deviceId?: string } = {},
   ): Promise<SendResultDto> {
+    const runtimeSetting = getSetting(this.db, "runtime");
+    const durable = runtimeSetting === "durable";
+    if (runtimeSetting !== null && runtimeSetting !== "worker" && !durable && !this.#reportedRuntimeSetting) {
+      this.#reportedRuntimeSetting = true;
+      console.warn("Unrecognized runtime setting; using worker");
+    }
     if (this.#stopping) throw new HttpError(503, "Daemon is stopping; new work cannot start");
     const bot = this.db.query(`SELECT * FROM bots WHERE id = ?`).get(botId) as { id: string; agent_id: string; instructions: string } | undefined;
     if (!bot) throw new HttpError(404, `unknown bot ${botId}`);
@@ -178,12 +194,15 @@ export class TurnService {
       throw new HttpError(409, "bot deletion is in progress; new work cannot start");
     }
     const agentId = bot.agent_id as AgentId;
-    if (this.#timeoutQueues.has(agentId)) {
-      throw new HttpError(409, `agent '${agentId}' is stopping a timed-out session; the bot cannot chat right now`);
-    }
-    const capabilities = this.agents.capabilityInventory(agentId);
-    if (!this.agents.isReady(agentId) || capabilities === undefined) {
-      throw new HttpError(409, `agent '${agentId}' is not ready; the bot cannot chat right now`);
+    let capabilities: ReturnType<AgentsRegistry["capabilityInventory"]>;
+    if (!durable) {
+      if (this.#timeoutQueues.has(agentId)) {
+        throw new HttpError(409, `agent '${agentId}' is stopping a timed-out session; the bot cannot chat right now`);
+      }
+      capabilities = this.agents.capabilityInventory(agentId);
+      if (!this.agents.isReady(agentId) || capabilities === undefined) {
+        throw new HttpError(409, `agent '${agentId}' is not ready; the bot cannot chat right now`);
+      }
     }
 
     // Active turn on the thread -> steer instead of a new turn.
@@ -193,12 +212,13 @@ export class TurnService {
       if (!thread || thread.botId !== botId) throw new HttpError(404, `unknown thread ${existingThreadId} for bot ${botId}`);
       const active = this.threads.activeTurn(existingThreadId);
       if (active !== undefined) {
+        if (durable) throw new HttpError(409, "sending messages during an active durable turn is not supported");
         if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while steering an active turn");
         return this.#steer(active, text, agentId);
       }
       if (
-        this.threads.getNativeSession(existingThreadId) !== undefined
-        && !capabilities.nativeThreadActions.includes("resume")
+        !durable && this.threads.getNativeSession(existingThreadId) !== undefined
+        && !capabilities!.nativeThreadActions.includes("resume")
       ) {
         throw new HttpError(409, `session resume is not supported by ${agentId}`);
       }
@@ -240,8 +260,15 @@ export class TurnService {
     const userMsgDto = this.threads.getMessage(result.messageId)!;
     this.events.append("thread", result.threadId, "message.appended", userMsgDto);
     this.events.append("turn", turnId, "turn.created", { turnId, threadId: result.threadId, botId });
-    this.bots.recordActivityStatus(botId, result.threadId, turnId);
+    if (durable) this.#recordDurableActivity(botId, result.threadId, turnId);
+    else this.bots.recordActivityStatus(botId, result.threadId, turnId);
     this.bots.recordUserMessage(botId, result.threadId);
+    if (durable) {
+      const start = this.runtime?.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, instructions: bot.instructions, working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
+      if (!start) this.#setTurnStatus(turnId, "failed", "Durable runtime unavailable", true);
+      else void start.then(() => this.#setTurnStatus(turnId, "completed", undefined, true), (err: unknown) => this.#setTurnStatus(turnId, "failed", errorMessage(err), true));
+      return { threadId: result.threadId, messageId: result.messageId, turnId, action: "sent" };
+    }
     const start = this.#startTurn(turnId, result.threadId, botId, agentId, text, result.workerAttachments, opts.deviceId === undefined ? {} : { deviceId: opts.deviceId });
     this.#turnStarts.set(turnId, start);
     void start

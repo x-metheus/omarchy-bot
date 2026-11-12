@@ -81,7 +81,7 @@ function deployedArchivelessDatabase(): { dbPath: string; home: string } {
 
 describe("integration: deployed schema convergence", () => {
   test("keeps Bot Screen and divergent-ledger migrations in dependency order", () => {
-    expect(MIGRATIONS.slice(-16).map((migration) => migration.name)).toEqual([
+    expect(MIGRATIONS.slice(-17).map((migration) => migration.name)).toEqual([
       "0010-bot-computer-surfaces",
       "0011-redacted-input-diagnostics",
       "0012-bot-screen-contract",
@@ -98,6 +98,7 @@ describe("integration: deployed schema convergence", () => {
       "0020-drop-controller-epoch",
       "0021-paired-devices",
       "0022-model-settings",
+      "0023-pi-thread-conversations",
     ]);
   });
 

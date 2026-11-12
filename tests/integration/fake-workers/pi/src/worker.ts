@@ -11,6 +11,7 @@
  *                    immediately, applied after tool.completed, then completes
  *   ordered-transcript emits a mixed rich Turn and pauses at a real Steering boundary
  *   process-only     completes with Thinking, Tool, and Native Event records but no Response
+ *   parity-stream    emits one Thinking Block followed by one Response Block
  *   attachment-echo validates the daemon's managed worker paths and echoes metadata/content
  *   computer:<action> invokes the daemon-owned Bot Screen tool bridge
  *   browser:<action>[:<args JSON>] invokes the daemon-owned structural browser tool bridge
@@ -951,6 +952,13 @@ readJsonl(Bun.stdin.stream(), (raw) => {
           s.streaming = false;
           s.directive = undefined;
           s.steerReply = undefined;
+          respond(msg.requestId!, { accepted: true });
+          return;
+        }
+        if (text === "parity-stream") {
+          emitThinking(sessionId, command.turnId, "T");
+          emitResponse(sessionId, command.turnId, "R");
+          write({ type: "event", event: { type: "turn.completed", sessionId } });
           respond(msg.requestId!, { accepted: true });
           return;
         }
