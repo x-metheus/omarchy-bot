@@ -58,16 +58,15 @@ describe("integration: ordered Thinking blocks", () => {
     expect(completedAt - startedAt).toBeGreaterThanOrEqual(1_300);
   });
 
-  test("keeps multiple Thinking Blocks in exact order around Responses and Tool Calls", async () => {
+  test("keeps multiple Thinking Blocks in exact order around Responses", async () => {
     const botId = await makeBot(h, "Ordered Thinking Bot");
     const sent = await sendToBot(h, botId, "thinking-order");
     await waitThreadIdle(h, sent.threadId);
 
-    const records = (await messages(h, sent.threadId)).filter((message) => message.author.kind === "bot");
+    const records = (await messages(h, sent.threadId)).filter((message) => message.author.kind === "bot" && message.kind !== "tool");
     expect(records.map((message) => message.kind)).toEqual([
       "response",
       "thinking",
-      "tool",
       "thinking",
       "response",
     ]);
@@ -78,6 +77,14 @@ describe("integration: ordered Thinking blocks", () => {
       "Provider-authored summary.",
     ]);
     expect(thinking[0]!.thinking!.blockId).not.toBe(thinking[1]!.thinking!.blockId);
+  });
+
+  test("keeps the Tool Call between the Thinking Blocks", async () => {
+    const botId = await makeBot(h, "Thinking Tool Boundary Bot");
+    const sent = await sendToBot(h, botId, "thinking-order");
+    await waitThreadIdle(h, sent.threadId);
+    const records = (await messages(h, sent.threadId)).filter((message) => message.author.kind === "bot");
+    expect(records.map((message) => message.kind)).toEqual(["response", "thinking", "tool", "thinking", "response"]);
   });
 
   test("removes incomplete Thinking on cancellation, failure, and Agent worker loss", async () => {

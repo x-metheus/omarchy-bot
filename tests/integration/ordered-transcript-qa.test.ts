@@ -53,6 +53,37 @@ describe("integration: ordered rich transcript QA", () => {
     rmSync(h.home, { recursive: true, force: true });
   });
 
+  test("orders responses and Thinking around an accepted steer", async () => {
+    const botId = await makeBot(h, "Ordered Steering Bot");
+    const sent = await sendToBot(h, botId, "ordered-transcript");
+    const deadline = Date.now() + 10_000;
+    while (!(await messages(h, sent.threadId)).some((message) => message.text === "**Inspect** every ordered boundary.")) {
+      if (Date.now() > deadline) throw new Error("ordered Thinking did not arrive");
+      await Bun.sleep(25);
+    }
+    await Bun.sleep(1200);
+    const steered = await sendToThread(h, sent.threadId, "Keep the real boundary");
+    expect(steered.action).toBe("steered");
+    expect(steered.turnId).toBe(sent.turnId);
+    await waitThreadIdle(h, sent.threadId);
+    const transcript = (await messages(h, sent.threadId)).filter((message) => message.kind === "text" || message.kind === "response" || message.kind === "thinking");
+    expect(transcript.slice(0, 7).map(orderedProjection)).toEqual([
+      { kind: "text", author: "user", turnId: undefined },
+      { kind: "response", state: "completed" },
+      { kind: "thinking", state: "completed" },
+      { kind: "text", author: "user", turnId: sent.turnId },
+      { kind: "response", state: "completed" },
+      { kind: "response", state: "completed" },
+      { kind: "thinking", state: "completed" },
+    ]);
+    expect(transcript[1]?.text).toContain("## Release notes");
+    expect(transcript.slice(2, 7).map((message) => message.text)).toEqual([
+      "**Inspect** every ordered boundary.", "Keep the real boundary",
+      "Steering received: Keep the real boundary", "Adjacent response remains in the same visual reply.",
+      "Check the final interleaving.",
+    ]);
+  }, 20_000);
+
   test("preserves mixed Agent blocks and Steering in exact occurrence order across restart", async () => {
     const botId = await makeBot(h, "Ordered Transcript Bot");
     const sent = await sendToBot(h, botId, "ordered-transcript");

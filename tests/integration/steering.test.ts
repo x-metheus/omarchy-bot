@@ -83,6 +83,104 @@ function workerCommandCount(command: string): number {
 }
 
 describe("integration: native turn steering", () => {
+  test("an active turn accepts steering and orders the redirected response after the user message", async () => {
+    const botId = await makeBot(h, "Steering behavior");
+    const first = await sendToBot(h, botId, "say: first turn");
+    await waitThreadIdle(h, first.threadId);
+    const active = await sendToThread(h, first.threadId, "steer-echo");
+    expect(active.action).toBe("sent");
+    expect(active.turnId).not.toBe(first.turnId);
+    await Bun.sleep(1500);
+    expect(rowForTurn(active.turnId).status).toBe("working");
+    const steered = await sendToThread(h, first.threadId, "redirect at boundary");
+    expect(steered.action).toBe("steered");
+    expect(steered.turnId).toBe(active.turnId);
+    expect(steered.threadId).toBe(first.threadId);
+    await waitThreadIdle(h, first.threadId);
+    const transcript = await messages(first.threadId);
+    const activeSend = transcript.find((message) => message.author.kind === "user" && message.text === "steer-echo");
+    const steeringMessage = transcript.find((message) => message.id === steered.messageId);
+    const reply = transcript.find((message) => message.kind === "response" && message.text?.includes("steered: redirect at boundary"));
+    expect(steeringMessage).toMatchObject({ author: { kind: "user" }, text: "redirect at boundary", payload: { turnId: active.turnId } });
+    expect(activeSend).toBeDefined();
+    expect(reply).toBeDefined();
+    expect(activeSend!.seq).toBeLessThan(steeringMessage!.seq);
+    expect(steeringMessage!.seq).toBeLessThan(reply!.seq);
+    expect(rowForTurn(active.turnId).status).toBe("completed");
+    expect(rowForTurn(active.turnId).steer_count).toBe(1);
+  }, 15_000);
+
+  test("a rejected steer is inline and leaves the original turn running", async () => {
+    const botId = await makeBot(h, "Rejected steering");
+    const sent = await sendToBot(h, botId, "hang");
+    await until(async () => (await messages(sent.threadId)).some((message) => message.kind === "response"));
+    const before = rowForTurn(sent.turnId);
+
+    const rejected = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "do not restart" });
+    expect(rejected.status).toBe(409);
+    expect(rejected.body).toEqual({ error: "steer unavailable: fake hang is not steerable" });
+
+    const after = rowForTurn(sent.turnId);
+    expect(after.status).toBe("working");
+    expect(after.steer_count).toBe(0);
+    expect(after.worker_session_id).toBe(before.worker_session_id);
+    expect(after.native_session_id).toBe(before.native_session_id);
+    const turnCount = h.svc.db.query(`SELECT COUNT(*) AS count FROM turns WHERE thread_id = ?`).get(sent.threadId) as { count: number };
+    expect(turnCount.count).toBe(1);
+
+    const transcript = await messages(sent.threadId);
+    const redirect = transcript.find((message) => message.author.kind === "user" && message.text === "do not restart");
+    const inlineError = transcript.find((message) => message.author.kind === "system" && message.text === "steer unavailable: fake hang is not steerable");
+    expect(redirect?.payload?.turnId).toBe(sent.turnId);
+    expect(inlineError).toBeDefined();
+    expect(redirect!.seq).toBeLessThan(inlineError!.seq);
+
+    await abort(sent.turnId);
+    await waitThreadIdle(h, sent.threadId);
+  });
+
+  test("undeclared steering is rejected before persistence or worker dispatch", async () => {
+    setCapabilities({
+      steering: false,
+      abort: false,
+      nativeThreadActions: ["resume", "history", "close"],
+      nativeEventFamilies: [],
+    });
+    await h.svc.agents.recheck("pi");
+
+    let turnId: string | undefined;
+    let threadId: string | undefined;
+    try {
+      const botId = await makeBot(h, "Unsupported turn controls");
+      const sent = await sendToBot(h, botId, "hang");
+      turnId = sent.turnId;
+      threadId = sent.threadId;
+      await until(async () => (await messages(sent.threadId)).some((message) => message.kind === "response"));
+
+      const beforeMessages = await messages(sent.threadId);
+      const steerCommands = workerCommandCount("message.steer");
+
+      const steer = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "not persisted" });
+      expect(steer).toEqual({
+        status: 409,
+        body: { error: "steering is not supported by pi" },
+      });
+      expect(await messages(sent.threadId)).toEqual(beforeMessages);
+      expect(workerCommandCount("message.steer")).toBe(steerCommands);
+
+    } finally {
+      setCapabilities({
+        steering: true,
+        abort: true,
+        nativeThreadActions: ["resume", "history", "close"],
+        nativeEventFamilies: [],
+      });
+      await h.svc.agents.recheck("pi");
+      if (turnId !== undefined) await abort(turnId);
+      if (threadId !== undefined) await waitThreadIdle(h, threadId);
+    }
+  });
+
   test("idle send starts a new turn, then active send steers the same worker and native session after a safe boundary", async () => {
     const botId = await makeBot(h, "Steering boundaries");
     const first = await sendToBot(h, botId, "say: first turn");
@@ -156,13 +254,15 @@ describe("integration: native turn steering", () => {
         payload.toolCall === null ||
         typeof payload.toolCall !== "object"
       ) return false;
-      return "id" in payload.toolCall && payload.toolCall.id === "steer-boundary";
+      return "threadId" in payload && payload.threadId === first.threadId && "id" in payload.toolCall && payload.toolCall.id === "steer-boundary";
     });
     const redirectedDelta = logged.find((event) => {
       const payload = event.payload;
       return event.type === "response.updated"
         && payload !== null
         && typeof payload === "object"
+        && "threadId" in payload
+        && payload.threadId === first.threadId
         && "text" in payload
         && typeof payload.text === "string"
         && payload.text.includes("steered: redirect at boundary");
@@ -174,75 +274,5 @@ describe("integration: native turn steering", () => {
     expect(boundaryEvent!.cursor).toBeLessThan(redirectedDelta!.cursor);
   });
 
-  test("a rejected steer is inline and leaves the original turn running", async () => {
-    const botId = await makeBot(h, "Rejected steering");
-    const sent = await sendToBot(h, botId, "hang");
-    await until(() => (rowForTurn(sent.turnId).worker_session_id?.length ?? 0) > 0);
-    const before = rowForTurn(sent.turnId);
-
-    const rejected = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "do not restart" });
-    expect(rejected.status).toBe(409);
-    expect(rejected.body).toEqual({ error: "steer unavailable: fake hang is not steerable" });
-
-    const after = rowForTurn(sent.turnId);
-    expect(after.status).toBe("working");
-    expect(after.steer_count).toBe(0);
-    expect(after.worker_session_id).toBe(before.worker_session_id);
-    expect(after.native_session_id).toBe(before.native_session_id);
-    const turnCount = h.svc.db.query(`SELECT COUNT(*) AS count FROM turns WHERE thread_id = ?`).get(sent.threadId) as { count: number };
-    expect(turnCount.count).toBe(1);
-
-    const transcript = await messages(sent.threadId);
-    const redirect = transcript.find((message) => message.author.kind === "user" && message.text === "do not restart");
-    const inlineError = transcript.find((message) => message.author.kind === "system" && message.text === "steer unavailable: fake hang is not steerable");
-    expect(redirect?.payload?.turnId).toBe(sent.turnId);
-    expect(inlineError).toBeDefined();
-    expect(redirect!.seq).toBeLessThan(inlineError!.seq);
-
-    await abort(sent.turnId);
-    await waitThreadIdle(h, sent.threadId);
-  });
-
-  test("undeclared steering is rejected before persistence or worker dispatch", async () => {
-    setCapabilities({
-      steering: false,
-      abort: false,
-      nativeThreadActions: ["resume", "history", "close"],
-      nativeEventFamilies: [],
-    });
-    await h.svc.agents.recheck("pi");
-
-    let turnId: string | undefined;
-    let threadId: string | undefined;
-    try {
-      const botId = await makeBot(h, "Unsupported turn controls");
-      const sent = await sendToBot(h, botId, "hang");
-      turnId = sent.turnId;
-      threadId = sent.threadId;
-      await until(() => (rowForTurn(sent.turnId).worker_session_id?.length ?? 0) > 0);
-
-      const beforeMessages = await messages(sent.threadId);
-      const steerCommands = workerCommandCount("message.steer");
-
-      const steer = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "not persisted" });
-      expect(steer).toEqual({
-        status: 409,
-        body: { error: "steering is not supported by pi" },
-      });
-      expect(await messages(sent.threadId)).toEqual(beforeMessages);
-      expect(workerCommandCount("message.steer")).toBe(steerCommands);
-
-    } finally {
-      setCapabilities({
-        steering: true,
-        abort: true,
-        nativeThreadActions: ["resume", "history", "close"],
-        nativeEventFamilies: [],
-      });
-      await h.svc.agents.recheck("pi");
-      if (turnId !== undefined) await abort(turnId);
-      if (threadId !== undefined) await waitThreadIdle(h, threadId);
-    }
-  });
 
 });
