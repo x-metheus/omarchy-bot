@@ -1,5 +1,5 @@
 
-import type { BotRuntime } from "../runtime/runtime.ts";
+import { DurableRunAborted, type BotRuntime } from "../runtime/runtime.ts";
 import { getSetting } from "../../persistence/settings.ts";
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
@@ -99,6 +99,8 @@ export class TurnService {
   #mailbox: MailboxService | undefined;
   #computer: ComputerBroker | undefined;
   #turnStarts = new Map<string, Promise<TurnContext>>();
+  #durableTurns = new Set<string>();
+  #durableAbortReasons = new Map<string, string>();
   #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
   #timeoutQueues = new Map<AgentId, Promise<void>>();
   #stopping = false;
@@ -177,7 +179,7 @@ export class TurnService {
     text: string,
     attachmentIds: string[] = [],
     attachmentDraftToken?: string,
-    opts: { cwd?: string; deviceId?: string } = {},
+    opts: { cwd?: string; deviceId?: string; whenBusy?: "steer" | "followUp" } = {},
   ): Promise<SendResultDto> {
     const runtimeSetting = getSetting(this.db, "runtime");
     const durable = runtimeSetting === "durable";
@@ -206,15 +208,25 @@ export class TurnService {
     }
 
     // Active turn on the thread -> steer instead of a new turn.
+    let durableFollowUp = false;
     const existingThreadId = threadId ?? undefined;
     if (existingThreadId !== undefined) {
       const thread = this.threads.getThread(existingThreadId);
       if (!thread || thread.botId !== botId) throw new HttpError(404, `unknown thread ${existingThreadId} for bot ${botId}`);
       const active = this.threads.activeTurn(existingThreadId);
       if (active !== undefined) {
-        if (durable) throw new HttpError(409, "sending messages during an active durable turn is not supported");
-        if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while steering an active turn");
-        return this.#steer(active, text, agentId);
+        if (durable && opts.whenBusy === "followUp") {
+          if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while a durable turn is active");
+          durableFollowUp = true;
+        } else if (durable) {
+          if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while steering an active turn");
+          const activeId = await this.runtime?.activeTurn(existingThreadId);
+          const current = activeId === undefined ? active : this.#turnDto(activeId) ?? active;
+          return this.#steerDurable(current, text);
+        } else {
+          if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while steering an active turn");
+          return this.#steer(active, text, agentId);
+        }
       }
       if (
         !durable && this.threads.getNativeSession(existingThreadId) !== undefined
@@ -264,9 +276,22 @@ export class TurnService {
     else this.bots.recordActivityStatus(botId, result.threadId, turnId);
     this.bots.recordUserMessage(botId, result.threadId);
     if (durable) {
-      const start = this.runtime?.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, instructions: bot.instructions, working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
-      if (!start) this.#setTurnStatus(turnId, "failed", "Durable runtime unavailable", true);
-      else void start.then(() => this.#setTurnStatus(turnId, "completed", undefined, true), (err: unknown) => this.#setTurnStatus(turnId, "failed", errorMessage(err), true));
+      this.#durableTurns.add(turnId);
+      let admitted!: () => void;
+      let rejectAdmission!: (error: unknown) => void;
+      const admission = new Promise<void>((resolve, reject) => { admitted = resolve; rejectAdmission = reject; });
+      void admission.catch(() => {});
+      const start = this.runtime?.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, instructions: bot.instructions, ...(durableFollowUp ? { whenBusy: "followUp" as const, requestId: result.messageId, admitted } : {}), working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
+      if (!start) { this.#durableTurns.delete(turnId); this.#setTurnStatus(turnId, "failed", "Durable runtime unavailable", true); rejectAdmission(new Error("Durable runtime unavailable")); }
+      else void start.then(() => this.#setTurnStatus(turnId, "completed", undefined, true), (err: unknown) => {
+        rejectAdmission(err);
+        const abortReason = this.#durableAbortReasons.get(turnId) ?? (err instanceof DurableRunAborted ? "aborted" : undefined);
+        if (abortReason === undefined) this.#removeIncompleteAgentBlocks(result.threadId, turnId);
+        this.#setTurnStatus(turnId, abortReason === undefined ? "failed" : "cancelled", abortReason ?? errorMessage(err), true);
+      }).finally(() => { this.#durableTurns.delete(turnId); this.#durableAbortReasons.delete(turnId); });
+      if (durableFollowUp) {
+        try { await admission; } catch (error) { throw new HttpError(409, `follow-up unavailable: ${errorMessage(error)}`); }
+      }
       return { threadId: result.threadId, messageId: result.messageId, turnId, action: "sent" };
     }
     const start = this.#startTurn(turnId, result.threadId, botId, agentId, text, result.workerAttachments, opts.deviceId === undefined ? {} : { deviceId: opts.deviceId });
@@ -478,6 +503,24 @@ export class TurnService {
     } finally {
       if (!leaseTransferred) pluginLease?.release();
     }
+  }
+
+  async #steerDurable(turn: TurnDto, text: string): Promise<SendResultDto> {
+    const userMsg = this.threads.appendMessage(turn.threadId, {
+      author: { kind: "user" }, kind: "text", text, payload: { turnId: turn.id },
+    });
+    this.bots.recordUserMessage(turn.botId, turn.threadId);
+    try {
+      if (!this.runtime) throw new Error("Durable runtime unavailable");
+      await this.runtime.steer(turn.id, text, userMsg.id);
+      this.db.query(`UPDATE turns SET steer_count = steer_count + 1 WHERE id = ?`).run(turn.id);
+      this.events.append("turn", turn.id, "turn.steered", { turnId: turn.id, threadId: turn.threadId, messageId: userMsg.id });
+    } catch (err) {
+      const reason = errorMessage(err);
+      this.#emitSystemNote(turn.threadId, `steer unavailable: ${reason}`);
+      throw new HttpError(409, `steer unavailable: ${reason}`);
+    }
+    return { threadId: turn.threadId, messageId: userMsg.id, turnId: turn.id, action: "steered" };
   }
 
   async #steer(turn: TurnDto, text: string, agentId: AgentId): Promise<SendResultDto> {
@@ -896,21 +939,7 @@ export class TurnService {
     // stops accepting tool calls.
     ctx.toolChannel.close();
     ctx.closeSession();
-    const removedIncompleteBlocks = this.threads.removeIncompleteAgentBlocks(ctx.turnId);
-    if (removedIncompleteBlocks.responses > 0) {
-      this.events.append("thread", ctx.threadId, "response.removed", {
-        threadId: ctx.threadId,
-        turnId: ctx.turnId,
-        count: removedIncompleteBlocks.responses,
-      });
-    }
-    if (removedIncompleteBlocks.thinking > 0) {
-      this.events.append("thread", ctx.threadId, "thinking.removed", {
-        threadId: ctx.threadId,
-        turnId: ctx.turnId,
-        count: removedIncompleteBlocks.thinking,
-      });
-    }
+    this.#removeIncompleteAgentBlocks(ctx.threadId, ctx.turnId);
     const interruptedToolCalls = this.threads.finalizeIncompleteToolCalls(ctx.turnId);
     for (const message of interruptedToolCalls) {
       this.events.append("thread", ctx.threadId, "tool.updated", {
@@ -930,6 +959,12 @@ export class TurnService {
     }
 
     this.#setTurnStatus(ctx.turnId, outcome, reason);
+  }
+
+  #removeIncompleteAgentBlocks(threadId: string, turnId: string): void {
+    const removed = this.threads.removeIncompleteAgentBlocks(turnId);
+    if (removed.responses > 0) this.events.append("thread", threadId, "response.removed", { threadId, turnId, count: removed.responses });
+    if (removed.thinking > 0) this.events.append("thread", threadId, "thinking.removed", { threadId, turnId, count: removed.thinking });
   }
 
   #emitSystemNote(threadId: string, text: string): void {
@@ -1007,6 +1042,12 @@ export class TurnService {
   async abortTurn(turnId: string, reason: string): Promise<void> {
     const t = this.threads.turnRow(turnId);
     if (!t || isTerminalTurn(t.status as TurnStatus)) return;
+    if (this.#durableTurns.has(turnId) && this.runtime) {
+      this.#durableAbortReasons.set(turnId, reason);
+      try { await this.runtime.abortTurn(turnId); }
+      catch (error) { this.#durableAbortReasons.delete(turnId); throw new HttpError(409, `turn abort failed: ${errorMessage(error)}`); }
+      return;
+    }
     const bot = this.db.query(`SELECT agent_id FROM bots WHERE id = ?`).get(t.bot_id) as { agent_id: AgentId } | undefined;
     const agentId = bot?.agent_id;
     if (agentId === undefined || !this.agents.capabilityInventory(agentId)?.abort) {

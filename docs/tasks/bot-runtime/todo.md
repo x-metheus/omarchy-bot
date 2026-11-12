@@ -78,7 +78,7 @@ A second message during a durable Turn is refused with 409 and writes nothing; r
 ## Checkpoint A: after Tasks 1–3
 - [x] Default commands pass
 - [ ] A Direct Thread streams a reply with the switch on in the dev app
-- [ ] Review with the human before proceeding
+- [x] Review with the human before proceeding
 
 ---
 
@@ -87,9 +87,9 @@ A second message during a durable Turn is refused with 409 and writes nothing; r
 **Description:** Map a client's Steering to `whenBusy: "steer"` and other messages sent while busy to follow-ups. Wire abort. Use `afterFailedRun: "continue"`, report run failures to the client as today, and apply a per-Bot `maxTurns`.
 
 **Acceptance criteria:**
-- [ ] Steering mid-reply, including during a tool call, lands after the current tool round
-- [ ] Abort ends the reply, recorded as aborted
-- [ ] A failed run shows its reason, and queued messages still run
+- [x] Steering mid-reply, including during a tool call, lands after the current tool round
+- [x] Abort ends the reply, recorded as aborted
+- [x] A failed run shows its reason, and queued messages still run
 
 **Verification:** default commands; existing steering and Thread tests pass with the switch on.
 

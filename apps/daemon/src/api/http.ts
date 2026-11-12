@@ -333,7 +333,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
         body.text.trim(),
         body.attachmentIds ?? [],
         body.attachmentDraftToken,
-        body.deviceId === undefined ? {} : { deviceId: body.deviceId },
+        { ...(body.deviceId === undefined ? {} : { deviceId: body.deviceId }), ...(body.whenBusy === undefined ? {} : { whenBusy: body.whenBusy }) },
       );
       return json(result, 202);
     }
@@ -356,7 +356,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
         body.text.trim(),
         body.attachmentIds ?? [],
         body.attachmentDraftToken,
-        body.deviceId === undefined ? {} : { deviceId: body.deviceId },
+        { ...(body.deviceId === undefined ? {} : { deviceId: body.deviceId }), ...(body.whenBusy === undefined ? {} : { whenBusy: body.whenBusy }) },
       );
       return json(result, 202);
     }

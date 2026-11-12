@@ -1022,6 +1022,10 @@ CREATE TABLE pi_thread_conversations (
 );
 `,
   },
+  {
+    name: "0024-bot-max-turns",
+    sql: `ALTER TABLE bots ADD COLUMN max_turns INTEGER;`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });

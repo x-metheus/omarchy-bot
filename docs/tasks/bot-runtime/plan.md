@@ -52,10 +52,10 @@ all of 4–18 ── 19 cutover + deletion ── 20 remove worker + Agent UI �
 ### Checkpoint A
 - [x] `bun run typecheck`, `bun run lint:boundaries`, `bun test apps/daemon` pass
 - [ ] With the switch on, a Direct Thread streams a reply from a fake model in the dev app
-- [ ] Review with the human
+- [x] Review with the human
 
 ### Phase 2: Turn behavior
-- [ ] Task 4: Steering, follow-ups, abort, failed runs, and `maxTurns`
+- [x] Task 4: Steering, follow-ups, abort, failed runs, and `maxTurns`
 - [ ] Task 5: Restart, `resume()`, and shutdown
 - [ ] Task 6: Compaction with author labels
 

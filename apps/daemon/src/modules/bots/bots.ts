@@ -23,7 +23,7 @@ interface BotRow {
   id: string; name: string; instructions: string; agent_id: string;
   avatar_kind: string; avatar_recipe: string; avatar_file: string | null;
   pinned: number;
-  show_tool_calls: number; show_thinking: number;
+  show_tool_calls: number; show_thinking: number; max_turns: number | null;
   created_at: string; updated_at: string;
 }
 interface BotStateRow {
@@ -67,7 +67,7 @@ export class BotsService {
     return this.db.query(`SELECT * FROM bot_state WHERE bot_id = ?`).get(botId) as BotStateRow | undefined;
   }
 
-  create(input: { name: string; instructions?: string | undefined; agentId: AgentId }): BotDto {
+  create(input: { name: string; instructions?: string | undefined; agentId: AgentId; maxTurns?: number | null | undefined }): BotDto {
     const readiness = this.agents.get(input.agentId);
     if (!readiness) throw new HttpError(400, `unknown agent '${input.agentId}'`);
     if (readiness.status !== "ready") {
@@ -82,8 +82,8 @@ export class BotsService {
     const now = new Date().toISOString();
     const tx = this.db.transaction(() => {
       this.db
-        .query(`INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at) VALUES (?, ?, ?, ?, 'generated', ?, ?, ?)`)
-        .run(id, input.name, input.instructions ?? "", input.agentId, defaultAvatarRecipe(id), now, now);
+        .query(`INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at, max_turns) VALUES (?, ?, ?, ?, 'generated', ?, ?, ?, ?)`)
+        .run(id, input.name, input.instructions ?? "", input.agentId, defaultAvatarRecipe(id), now, now, input.maxTurns ?? null);
       this.db.query(`INSERT INTO bot_state (bot_id) VALUES (?)`).run(id);
       this.db.query(`INSERT INTO bot_surfaces (surface_id, bot_id, transitioned_at) VALUES (?, ?, ?)`).run(surfaceId, id, now);
     });
@@ -109,6 +109,7 @@ export class BotsService {
       pinned: Boolean(r.pinned),
       showToolCalls: Boolean(r.show_tool_calls),
       showThinking: Boolean(r.show_thinking),
+      maxTurns: r.max_turns,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };
@@ -178,6 +179,7 @@ export class BotsService {
           instructions = COALESCE(?, instructions),
           show_tool_calls = COALESCE(?, show_tool_calls),
           show_thinking = COALESCE(?, show_thinking),
+          max_turns = CASE WHEN ? THEN ? ELSE max_turns END,
           updated_at = ?
       WHERE id = ?
     `).run(
@@ -185,6 +187,8 @@ export class BotsService {
       body.instructions ?? null,
       body.showToolCalls === undefined ? null : body.showToolCalls ? 1 : 0,
       body.showThinking === undefined ? null : body.showThinking ? 1 : 0,
+      body.maxTurns === undefined ? 0 : 1,
+      body.maxTurns ?? null,
       new Date().toISOString(),
       id,
     );
@@ -194,6 +198,7 @@ export class BotsService {
       instructions: updated.instructions,
       showToolCalls: updated.showToolCalls,
       showThinking: updated.showThinking,
+      maxTurns: updated.maxTurns ?? null,
     };
     this.events.append("bot", id, "bot.updated", payload);
     return updated;

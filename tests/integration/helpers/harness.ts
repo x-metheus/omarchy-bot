@@ -107,6 +107,10 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   );
 
   // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
+  const durableSuite = process.env.OMARCHY_TEST_DURABLE === "1";
+  const restoreRuntime = durableSuite
+    ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider()
+    : undefined;
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
   const daemon = options.useProductionBotScreen
     ? await main({
@@ -122,13 +126,20 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
         botScreenCapacity: options.botScreenCapacity ?? 8,
       });
   const { stop, disconnectForRestart, port, svc } = daemon;
+  if (durableSuite) {
+    const { CredentialStore } = await import("../../../apps/daemon/src/modules/runtime/credentials.ts");
+    const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
+    new CredentialStore(svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(svc.db, "default_model", "fake/fake-model");
+    setSetting(svc.db, "runtime", "durable");
+  }
   const base: Harness = {
     baseUrl: `http://127.0.0.1:${port}`,
     port,
     token: "",
     home,
     svc,
-    stop,
+    stop: async () => { try { await stop(); } finally { restoreRuntime?.(); } },
     disconnectForRestart,
   };
   base.token = await pairForToken(base.baseUrl, state);

@@ -81,7 +81,7 @@ function deployedArchivelessDatabase(): { dbPath: string; home: string } {
 
 describe("integration: deployed schema convergence", () => {
   test("keeps Bot Screen and divergent-ledger migrations in dependency order", () => {
-    expect(MIGRATIONS.slice(-17).map((migration) => migration.name)).toEqual([
+    expect(MIGRATIONS.slice(-18).map((migration) => migration.name)).toEqual([
       "0010-bot-computer-surfaces",
       "0011-redacted-input-diagnostics",
       "0012-bot-screen-contract",
@@ -99,6 +99,7 @@ describe("integration: deployed schema convergence", () => {
       "0021-paired-devices",
       "0022-model-settings",
       "0023-pi-thread-conversations",
+      "0024-bot-max-turns",
     ]);
   });
 
@@ -931,6 +932,20 @@ describe("integration: archived Bot cutover", () => {
   });
 });
 
+test("max turns migration preserves existing Bots with an unset limit", () => {
+  const { db, dbPath, home } = databaseThrough("0023-pi-thread-conversations");
+  db.exec("INSERT INTO agents (id, display_name, status, updated_at) VALUES ('pi', 'Pi', 'ready', 'now')");
+  db.exec("INSERT INTO bots (id, name, instructions, agent_id, avatar_recipe, created_at, updated_at, provenance) VALUES ('existing', 'Existing', '', 'pi', '{}', 'now', 'now', 'user_created')");
+  const before = db.query<Record<string, unknown>, []>("SELECT * FROM bots WHERE id = 'existing'").get()!;
+  const migrated = finishMigrations(db, dbPath);
+  try {
+    const { max_turns, ...rest } = migrated.query<Record<string, unknown>, []>("SELECT * FROM bots WHERE id = 'existing'").get()!;
+    expect(max_turns).toBeNull();
+    expect(rest).toEqual(before);
+    expect(migrated.query("SELECT name FROM schema_migrations WHERE name = '0024-bot-max-turns'").get()).toBeTruthy();
+  } finally { migrated.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
 test("model settings migration preserves existing Bots and adds a nullable override", () => {
   const { db, dbPath, home } = databaseThrough("0021-paired-devices");
   db.exec("INSERT INTO agents (id, display_name, status, updated_at) VALUES ('pi', 'Pi', 'ready', 'now')");
@@ -940,7 +955,8 @@ test("model settings migration preserves existing Bots and adds a nullable overr
   try {
     const columns = migrated.query<{ name: string; notnull: number }, []>("PRAGMA table_info(bots)").all();
     expect(columns.find((column) => column.name === "model")?.notnull).toBe(0);
-    const { model, ...otherColumns } = migrated.query<Record<string, unknown>, []>("SELECT * FROM bots WHERE id = 'existing'").get()!;
+    const { model, max_turns, ...otherColumns } = migrated.query<Record<string, unknown>, []>("SELECT * FROM bots WHERE id = 'existing'").get()!;
+    expect(max_turns).toBeNull();
     expect(model).toBeNull();
     expect(otherColumns).toEqual(before);
     migrated.query("INSERT INTO service_settings (key, value) VALUES (?, ?)").run("default_model", "provider/model");

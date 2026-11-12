@@ -96,6 +96,7 @@ export const BotDto = z.object({
   pinned: z.boolean(),
   showToolCalls: z.boolean(),
   showThinking: z.boolean(),
+  maxTurns: z.number().int().min(1).nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -109,6 +110,7 @@ export const BotUpdatedEventPayload = z.object({
   instructions: z.string(),
   showToolCalls: z.boolean(),
   showThinking: z.boolean(),
+  maxTurns: z.number().int().min(1).nullable().optional(),
 });
 export type BotUpdatedEventPayload = z.infer<typeof BotUpdatedEventPayload>;
 
@@ -555,6 +557,7 @@ export const CreateBotBody = z.object({
   name: z.string().trim().min(1).max(80),
   instructions: z.string().max(8000).default(""),
   agentId: z.enum(AGENT_IDS),
+  maxTurns: z.number().int().min(1).nullable().optional(),
 });
 export type CreateBotBodyDto = z.infer<typeof CreateBotBody>;
 
@@ -563,6 +566,7 @@ export const PatchBotBody = z.object({
   instructions: z.string().max(8000).optional(),
   showToolCalls: z.boolean().optional(),
   showThinking: z.boolean().optional(),
+  maxTurns: z.number().int().min(1).nullable().optional(),
 });
 export type PatchBotBodyDto = z.infer<typeof PatchBotBody>;
 
@@ -608,6 +612,7 @@ export const SendMessageBody = z.object({
   attachmentIds: z.array(z.string()).optional(),
   attachmentDraftToken: AttachmentDraftToken.optional(),
   clientTag: z.string().optional(),
+  whenBusy: z.enum(["steer", "followUp"]).optional(),
   deviceId: z.string().refine(isDeviceId, "invalid Local Sidecar device identity").optional(),
 }).superRefine((body, ctx) => {
   if ((body.attachmentIds?.length ?? 0) > 0 && body.attachmentDraftToken === undefined) {

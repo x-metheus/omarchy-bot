@@ -1,10 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
-import { withFakeRuntimeProvider } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
+import { withBlockingRuntimeTool, withFakeRuntimeProvider } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 import { CredentialStore } from "../../apps/daemon/src/modules/runtime/credentials.ts";
-import type { BotRuntime } from "../../apps/daemon/src/modules/runtime/runtime.ts";
 import { deleteSetting, setSetting } from "../../apps/daemon/src/persistence/settings.ts";
-import { apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "./helpers/harness.ts";
+import { api, apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "./helpers/harness.ts";
 
 const parityScript = { input: "parity-stream", thinking: "T", response: "R" };
 const script = [{ segments: [{ type: "thinking" as const, text: parityScript.thinking }, { type: "text" as const, text: parityScript.response }] }];
@@ -80,42 +79,317 @@ test("durable and worker turns produce the same transcript and events; switch of
   }
 }));
 
-test("a second durable send returns 409 without persisting anything", async () => {
+test("durable steering is accepted during a reply", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "a long streamed reply" }] }, { segments: [{ type: "text", text: "redirected" }] }], { tokensPerSecond: 10 }, async () => {
   const h = await startDaemon();
-  let finish!: () => void;
-  const pending = new Promise<void>((resolve) => { finish = resolve; });
-  const runtime = (h.svc.turns as unknown as { runtime: BotRuntime }).runtime;
-  const start = spyOn(runtime, "startTurn").mockReturnValue(pending);
   try {
-    const botId = await makeBot(h, "Active durable");
+    const botId = await makeBot(h, "Steer durable");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
+    let observed!: () => void;
+    const streaming = new Promise<void>((resolve) => { observed = resolve; });
+    const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
     const sent = await sendToBot(h, botId, "first");
-    const beforeMessages = await messages(h, sent.threadId);
-    const beforeTurn = h.svc.threads.turnRow(sent.turnId);
-    const beforeTurns = h.svc.db.query<{ count: number }, [string]>("SELECT count(*) AS count FROM turns WHERE thread_id = ?").get(sent.threadId)?.count;
-    const beforeEvents = h.svc.events.replay(0, h.svc.events.oldestCursor()).events;
-    const cursor = beforeEvents.at(-1)?.cursor ?? 0;
-    const result = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "second" });
-    expect(result.status).toBe(409);
-    const afterMessages = await messages(h, sent.threadId);
-    const afterEvents = h.svc.events.replay(0, h.svc.events.oldestCursor()).events;
-    expect(beforeMessages).toHaveLength(1);
-    expect(afterMessages).toHaveLength(1);
-    expect(afterMessages).toEqual(beforeMessages);
-    expect(beforeTurns).toBe(1);
-    expect(h.svc.db.query<{ count: number }, [string]>("SELECT count(*) AS count FROM turns WHERE thread_id = ?").get(sent.threadId)?.count).toBe(1);
-    expect(h.svc.threads.turnRow(sent.turnId)).toEqual(beforeTurn);
-    expect(afterEvents).toHaveLength(beforeEvents.length);
-    expect(afterEvents).toEqual(beforeEvents);
-    expect(h.svc.events.replay(cursor, h.svc.events.oldestCursor()).events.filter((event) => event.type === "message.appended")).toHaveLength(0);
+    await streaming;
+    unsubscribe();
+    const steered = await sendToThread(h, sent.threadId, "redirect");
+    expect(steered.action).toBe("steered");
+    expect(steered.turnId).toBe(sent.turnId);
+    await waitThreadIdle(h, sent.threadId);
+    expect(h.svc.threads.turnRow(sent.turnId)?.steer_count).toBe(1);
+    expect((await messages(h, sent.threadId)).some((message) => message.kind === "response" && message.text?.includes("redirected"))).toBeTrue();
   } finally {
-    finish();
-    await Promise.resolve();
-    start.mockRestore();
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
   }
+}));
+
+test("durable steering during a tool call lands after the tool result", () => withBlockingRuntimeTool(async (tool) => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Tool steering durable");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const first = await sendToBot(h, botId, "first");
+    await tool.started;
+    const steered = await sendToThread(h, first.threadId, "redirect after tool");
+    expect(steered.action).toBe("steered");
+    tool.release();
+    await waitThreadIdle(h, first.threadId);
+    const context = tool.seen();
+    expect(context).toContain("tool finished");
+    expect(context).toContain("redirect after tool");
+    expect(context.indexOf("tool finished")).toBeLessThan(context.indexOf("redirect after tool"));
+    expect((await messages(h, first.threadId)).some((message) => message.kind === "response" && message.text === "after tool")).toBeTrue();
+  } finally { tool.release(); await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("steering targets the running durable turn when a follow-up is queued", () => withBlockingRuntimeTool(async (tool) => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Queued steering durable");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const first = await sendToBot(h, botId, "first");
+    await tool.started;
+    const second = await api<{ turnId: string }>(h, "POST", `/api/threads/${first.threadId}/messages`, { text: "second", whenBusy: "followUp" });
+    const steer = await sendToThread(h, first.threadId, "redirect after tool");
+    expect(steer.turnId).toBe(first.turnId);
+    expect(steer.turnId).not.toBe(second.turnId);
+    tool.release();
+    await waitThreadIdle(h, first.threadId);
+    expect(tool.seen()).toContain("redirect after tool");
+  } finally { tool.release(); await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("a durable follow-up runs as its own turn after the first reply", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "first reply is long" }] }, { segments: [{ type: "text", text: "second reply" }] }], { tokensPerSecond: 10 }, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Follow-up durable");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    let observed!: () => void;
+    const streaming = new Promise<void>((resolve) => { observed = resolve; });
+    const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
+    const first = await sendToBot(h, botId, "first");
+    await streaming;
+    unsubscribe();
+    const second = await api<{ action: string; turnId: string }>(h, "POST", `/api/threads/${first.threadId}/messages`, { text: "second", whenBusy: "followUp" });
+    expect(second.action).toBe("sent");
+    expect(second.turnId).not.toBe(first.turnId);
+    await waitThreadIdle(h, first.threadId);
+    expect(h.svc.threads.turnRow(first.turnId)?.status).toBe("completed");
+    expect(h.svc.threads.turnRow(second.turnId)?.status).toBe("completed");
+    const replies = (await messages(h, first.threadId)).filter((message) => message.kind === "response");
+    expect(replies.map((message) => message.text)).toEqual(["first reply is long", "second reply"]);
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("a queued durable follow-up runs after a model failure", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "before failure" }], failure: "queued failure" }, { segments: [{ type: "text", text: "recovered" }] }], { tokensPerSecond: 10 }, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Failure queue durable");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    let observed!: () => void;
+    const streaming = new Promise<void>((resolve) => { observed = resolve; });
+    const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
+    const first = await sendToBot(h, botId, "first");
+    await streaming;
+    unsubscribe();
+    const second = await api<{ action: string; turnId: string }>(h, "POST", `/api/threads/${first.threadId}/messages`, { text: "second", whenBusy: "followUp" });
+    await waitThreadIdle(h, first.threadId);
+    expect(h.svc.threads.turnRow(first.turnId)).toMatchObject({ status: "failed", outcome_reason: "queued failure" });
+    expect(h.svc.threads.turnRow(second.turnId)?.status).toBe("completed");
+    expect((await messages(h, first.threadId)).some((message) => message.kind === "response" && message.text === "recovered")).toBeTrue();
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("a durable follow-up that loses the idle race starts normally", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "first reply is long" }] }, { segments: [{ type: "text", text: "second reply" }] }], { tokensPerSecond: 10 }, async () => {
+  const h = await startDaemon();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    const botId = await makeBot(h, "Follow-up idle race");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    let observed!: () => void;
+    const streaming = new Promise<void>((resolve) => { observed = resolve; });
+    const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
+    const first = await sendToBot(h, botId, "first");
+    await streaming;
+    unsubscribe();
+    const runtime = (h.svc.turns as unknown as { runtime: import("../../apps/daemon/src/modules/runtime/runtime.ts").BotRuntime }).runtime;
+    const original = runtime.startTurn.bind(runtime);
+    let queued!: () => void;
+    const started = new Promise<void>((resolve) => { queued = resolve; });
+    const spy = spyOn(runtime, "startTurn").mockImplementation(async (input) => {
+      if (input.whenBusy) { queued(); await gate; }
+      return original(input);
+    });
+    try {
+      const followUp = api<{ action: string; turnId: string }>(h, "POST", `/api/threads/${first.threadId}/messages`, { text: "second", whenBusy: "followUp" });
+      await started;
+      await h.svc.turns.waitForTerminal(first.turnId);
+      release();
+      const second = await followUp;
+      expect(second.action).toBe("sent");
+      await h.svc.turns.waitForTerminal(second.turnId);
+      expect(h.svc.threads.turnRow(second.turnId)?.status).toBe("completed");
+      expect((await messages(h, first.threadId)).some((message) => message.kind === "response" && message.text === "second reply")).toBeTrue();
+    } finally { release(); spy.mockRestore(); }
+  } finally { release(); await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("failed durable run removes streaming blocks and preserves completed thinking", () => withFakeRuntimeProvider([{ segments: [{ type: "thinking", text: "finished thought" }, { type: "text", text: "partial failure response" }], failure: "stream failed" }], { tokensPerSecond: 10 }, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Failed streaming");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const sent = await sendToBot(h, botId, "fail while streaming");
+    await waitThreadIdle(h, sent.threadId);
+    expect(h.svc.threads.turnRow(sent.turnId)).toMatchObject({ status: "failed", outcome_reason: "stream failed" });
+    expect(h.svc.db.query<{ count: number }, [string]>("SELECT count(*) AS count FROM messages WHERE turn_id = ? AND block_state = 'streaming'").get(sent.turnId)?.count).toBe(0);
+    expect((await messages(h, sent.threadId)).some((message) => message.kind === "thinking" && message.text === "finished thought" && message.thinking?.state === "completed")).toBeTrue();
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("same-turn steering can recover from a failed durable run", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "before failure" }], failure: "failed primary" }, { segments: [{ type: "text", text: "recovered response" }] }], { tokensPerSecond: 10 }, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Steer recovery");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    let observed!: () => void;
+    const streaming = new Promise<void>((resolve) => { observed = resolve; });
+    const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
+    const first = await sendToBot(h, botId, "first");
+    await streaming;
+    unsubscribe();
+    expect((await sendToThread(h, first.threadId, "recover")).action).toBe("steered");
+    await waitThreadIdle(h, first.threadId);
+    expect(h.svc.threads.turnRow(first.turnId)?.status).toBe("completed");
+    expect((await messages(h, first.threadId)).some((message) => message.kind === "response" && message.text === "recovered response")).toBeTrue();
+    expect(h.svc.db.query<{ count: number }, [string]>("SELECT count(*) AS count FROM messages WHERE turn_id = ? AND block_state = 'streaming'").get(first.turnId)?.count).toBe(0);
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("aborting an active durable turn also cancels its queued follow-up", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "first reply is long" }] }], { tokensPerSecond: 10 }, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Abort active with queue");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    let observed!: () => void;
+    const streaming = new Promise<void>((resolve) => { observed = resolve; });
+    const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
+    const first = await sendToBot(h, botId, "first");
+    await streaming;
+    unsubscribe();
+    const second = await api<{ turnId: string }>(h, "POST", `/api/threads/${first.threadId}/messages`, { text: "second", whenBusy: "followUp" });
+    await h.svc.turns.abortTurn(first.turnId, "cancel active");
+    await h.svc.turns.waitForTerminal(first.turnId);
+    await h.svc.turns.waitForTerminal(second.turnId);
+    expect(h.svc.threads.turnRow(first.turnId)).toMatchObject({ status: "cancelled", outcome_reason: "cancel active" });
+    expect(h.svc.threads.turnRow(second.turnId)).toMatchObject({ status: "cancelled", outcome_reason: "aborted" });
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("aborting a queued durable follow-up leaves the active reply running", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "first reply is long" }] }], { tokensPerSecond: 10 }, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Abort queued durable");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    let observed!: () => void;
+    const streaming = new Promise<void>((resolve) => { observed = resolve; });
+    const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
+    const first = await sendToBot(h, botId, "first");
+    await streaming;
+    unsubscribe();
+    const second = await api<{ turnId: string }>(h, "POST", `/api/threads/${first.threadId}/messages`, { text: "second", whenBusy: "followUp" });
+    await h.svc.turns.abortTurn(second.turnId, "cancel queued");
+    await waitThreadIdle(h, first.threadId);
+    expect(h.svc.threads.turnRow(second.turnId)).toMatchObject({ status: "cancelled", outcome_reason: "cancel queued" });
+    expect(h.svc.threads.turnRow(first.turnId)?.status).toBe("completed");
+    expect((await messages(h, first.threadId)).some((message) => message.kind === "response" && message.text === "first reply is long")).toBeTrue();
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("aborting a durable turn records cancellation and keeps the partial reply", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "a long streamed reply" }] }], { tokensPerSecond: 10 }, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Abort durable");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    let observed!: () => void;
+    const streaming = new Promise<void>((resolve) => { observed = resolve; });
+    const unsubscribe = h.svc.events.subscribe((event) => {
+      if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed();
+    });
+    const sent = await sendToBot(h, botId, "abort");
+    await streaming;
+    unsubscribe();
+    await h.svc.turns.abortTurn(sent.turnId, "test abort");
+    await waitThreadIdle(h, sent.threadId);
+    expect(h.svc.threads.turnRow(sent.turnId)).toMatchObject({ status: "cancelled", outcome_reason: "test abort" });
+    const partial = (await messages(h, sent.threadId)).find((message) => message.kind === "response")?.text;
+    expect(partial).toBeTruthy();
+    await Bun.sleep(2500);
+    expect((await messages(h, sent.threadId)).find((message) => message.kind === "response")?.text).toBe(partial);
+    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("cancelled");
+  } finally {
+    await h.stop();
+    rmSync(h.home, { recursive: true, force: true });
+  }
+}));
+
+test("durable turns configure the default tool-round limit", async () => {
+  const limits: (number | null | undefined)[] = [];
+  await withFakeRuntimeProvider(Array.from({ length: 4 }, () => ({ segments: [{ type: "text" as const, text: "ok" }] })), { onMaxTurns: (limit) => limits.push(limit) }, async () => {
+    const h = await startDaemon();
+    try {
+      const botId = await makeBot(h, "Limited durable");
+      const created = await api<{ id: string; maxTurns: number | null }>(h, "POST", "/api/bots", { name: "Custom limit", agentId: "pi", maxTurns: 3 });
+      expect(created.maxTurns).toBe(3);
+      for (const value of [0, -1, 1.5, "2"]) {
+        expect((await apiStatus(h, "PATCH", `/api/bots/${created.id}`, { maxTurns: value })).status).toBe(400);
+        expect((await apiStatus(h, "POST", "/api/bots", { name: "Invalid limit", agentId: "pi", maxTurns: value })).status).toBe(400);
+      }
+      new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      setSetting(h.svc.db, "default_model", "fake/fake-model");
+      setSetting(h.svc.db, "runtime", "durable");
+      const sent = await sendToBot(h, botId, "hello");
+      await waitThreadIdle(h, sent.threadId);
+      expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+      expect(limits).toEqual([undefined]);
+      const custom = await sendToBot(h, created.id, "custom");
+      await waitThreadIdle(h, custom.threadId);
+      expect(limits).toEqual([undefined, 3]);
+      const patched = await api<{ maxTurns: number | null }>(h, "PATCH", `/api/bots/${created.id}`, { maxTurns: 7 });
+      expect(patched.maxTurns).toBe(7);
+      const event = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.filter((item) => item.type === "bot.updated" && item.aggregateId === created.id).at(-1);
+      expect((event?.payload as { maxTurns?: number }).maxTurns).toBe(7);
+      const updated = await sendToThread(h, custom.threadId, "updated");
+      await waitThreadIdle(h, updated.threadId);
+      expect(limits).toEqual([undefined, 3, 7]);
+      expect((await api<{ maxTurns: number | null }>(h, "PATCH", `/api/bots/${created.id}`, { maxTurns: null })).maxTurns).toBeNull();
+      const resetEvent = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.filter((item) => item.type === "bot.updated" && item.aggregateId === created.id).at(-1);
+      expect((resetEvent?.payload as { maxTurns: number | null }).maxTurns).toBeNull();
+      const reset = await sendToThread(h, custom.threadId, "reset");
+      await waitThreadIdle(h, reset.threadId);
+      expect(limits).toEqual([undefined, 3, 7, null]);
+    } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+  });
 });
+
+test("durable turn reports the model failure reason", () => withFakeRuntimeProvider([{ segments: [], failure: "scripted model failure" }], {}, async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Failed durable");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const sent = await sendToBot(h, botId, "fail");
+    await waitThreadIdle(h, sent.threadId);
+    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("failed");
+    expect(h.svc.threads.turnRow(sent.turnId)?.outcome_reason).toContain("scripted model failure");
+  } finally {
+    await h.stop();
+    rmSync(h.home, { recursive: true, force: true });
+  }
+}));
 
 test("durable turn fails closed when its selected provider has no credentials", async () => {
   const h = await startDaemon();

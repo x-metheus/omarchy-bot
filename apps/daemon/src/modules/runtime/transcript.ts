@@ -4,27 +4,36 @@ import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
 
 type Segment = { type: "thinking"; thinking: string } | { type: "text"; text: string };
+type Block = { type: Segment["type"]; text: string; id: string; complete: boolean };
 
 /** Project committed generation updates into the existing Service transcript. */
 export class DurableTranscript {
-  private readonly initialEntries: Set<number>;
-  private readonly blocks: { type: Segment["type"]; text: string; id: string; complete: boolean }[] = [];
+  private readonly seenEntries: Set<number>;
+  private blocks: Block[] = [];
+  private generation = 0;
   constructor(private readonly threads: ThreadsService, private readonly bots: BotsService, private readonly events: EventLog, private readonly threadId: string, private readonly botId: string, private readonly turnId: string, initial: ConversationView) {
-    this.initialEntries = new Set(initial.entries.map((entry) => entry.id));
+    this.seenEntries = new Set(initial.entries.map((entry) => entry.id));
   }
 
   update(view: ConversationView): void {
-    const entry = view.entries.find((candidate) => !this.initialEntries.has(candidate.id) && AssistantEntry.is(candidate));
-    const message = entry?.model?.find((item) => item.role === "assistant")
-      ?? (view.docs["pi.live"] as LiveState | undefined)?.generation?.message;
-    if (!message || message.role !== "assistant") return;
-    const segments = message.content.filter((part): part is Segment => part.type === "thinking" || part.type === "text");
+    for (const entry of view.entries) {
+      if (this.seenEntries.has(entry.id) || !AssistantEntry.is(entry)) continue;
+      const message = entry.model?.find((item) => item.role === "assistant");
+      if (message) this.updateMessage(message.content, true);
+      this.seenEntries.add(entry.id);
+    }
+    const message = (view.docs["pi.live"] as LiveState | undefined)?.generation?.message;
+    if (message?.role === "assistant") this.updateMessage(message.content, false);
+  }
+
+  private updateMessage(content: readonly unknown[], complete: boolean): void {
+    const segments = content.filter((part): part is Segment => typeof part === "object" && part !== null && "type" in part && (part.type === "thinking" || part.type === "text"));
     for (let index = 0; index < segments.length; index++) {
       const segment = segments[index]!;
       const text = segment.type === "thinking" ? segment.thinking : segment.text;
       let block = this.blocks[index];
       if (!block) {
-        const id = `${this.turnId}-${segment.type}-${index}`;
+        const id = `${this.turnId}-${this.generation}-${segment.type}-${index}`;
         block = { id, type: segment.type, text: "", complete: false };
         this.blocks.push(block);
         const startedAt = new Date().toISOString();
@@ -37,7 +46,7 @@ export class DurableTranscript {
         block.text = text;
         if (updated) this.events.append("thread", this.threadId, block.type === "thinking" ? "thinking.updated" : "response.updated", updated);
       }
-      if (!block.complete && (entry !== undefined || index < segments.length - 1)) {
+      if (!block.complete && (complete || index < segments.length - 1)) {
         const completedAt = new Date().toISOString();
         const updated = block.type === "thinking" ? this.threads.completeThinking(this.threadId, this.turnId, block.id, completedAt) : this.threads.completeResponse(this.threadId, this.turnId, block.id, completedAt);
         block.complete = true;
@@ -47,5 +56,6 @@ export class DurableTranscript {
         }
       }
     }
+    if (complete) { this.blocks = []; this.generation++; }
   }
 }

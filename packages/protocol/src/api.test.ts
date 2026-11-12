@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { MessageDto, ToolCallSummaryDto } from "./api.ts";
+import { MessageDto, SendMessageBody, ToolCallSummaryDto } from "./api.ts";
+
+test("send message preserves and validates the requested busy mode", () => {
+  expect(SendMessageBody.parse({ text: "hello", whenBusy: "steer" }).whenBusy).toBe("steer");
+  expect(SendMessageBody.parse({ text: "hello", whenBusy: "followUp" }).whenBusy).toBe("followUp");
+  expect(SendMessageBody.safeParse({ text: "hello", whenBusy: "other" }).success).toBeFalse();
+});
 
 const base = {
   id: "message-response",
