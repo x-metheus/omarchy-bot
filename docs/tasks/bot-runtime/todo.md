@@ -146,8 +146,19 @@ The author-label formatting helper is in place; write-site wiring lands with the
 ---
 
 ## Checkpoint B: after Tasks 4–6
+The durable fake provider and harness reproduce the worker scripts so existing integration files run with the switch on. Worker-only internals are marked for removal with Task 20. Mailbox, attachments, and other failures caused by tools not yet built in process move to Checkpoint C; user-visible assertions stay intact.
+
+- [x] The durable harness reproduces the worker scripts
+- [x] The shared integration files run with the switch on
+- [x] Worker-only internals are marked for Task 20 removal
 - [ ] Existing Thread and lifecycle integration tests pass with the switch on
+  - Open decisions on abort's partial reply and SIGTERM's restart status remain; tool-dependent failures are tracked in Checkpoint C.
 - [ ] Killing the Service mid-reply resumes or visibly fails the reply
+
+**Open decisions:**
+
+- **Abort and the partial reply:** `tests/integration/response-blocks.test.ts:81` expects an incomplete Response to be removed after `abortTurn`; `tests/integration/runtime-parity.test.ts:330` expects the partial Response to remain. The durable runtime currently retains it. **Recommendation for the human:** remove the incomplete block, as the worker does, and change the parity expectation: [the spec](../../specs/bot-runtime.md) promises that blocks match today's ordered transcript (ADR 0007's guarantee).
+- **SIGTERM and the restart status:** `apps/daemon/src/modules/runtime/restart.test.ts:225` expects `{ status: "cancelled", outcome_reason: "aborted" }` after SIGTERM; `tests/integration/response-blocks.test.ts:110` expects `{ status: "failed", reason: "daemon restart" }` after `disconnectForRestart`, the same path SIGTERM calls in `apps/daemon/src/bootstrap/main.ts:304` (handler), registered for SIGTERM at `apps/daemon/src/bootstrap/main.ts:352`. The durable runtime currently reports cancellation. **Recommendation for the human:** report failure with the daemon restart reason, because Checkpoint B requires a killed Service's reply to resume or visibly fail.
 
 ---
 
@@ -264,6 +275,8 @@ The author-label formatting helper is in place; write-site wiring lands with the
 ---
 
 ## Checkpoint C: after Tasks 7–12
+Mailbox, attachments, and every failure caused by tools not yet built in process move here from Checkpoint B, including tool-call projection, native events, capability inventory, the `process-only` fixture, computer and browser tools, and sidecar tools.
+
 - [ ] Computer, browser, mailbox, and sidecar integration tests pass with the switch on
 - [ ] A write outside the allowed folders asks, survives a restart, and writes once
 - [ ] Review with the human before proceeding

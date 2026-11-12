@@ -60,7 +60,13 @@ all of 4–18 ── 19 cutover + deletion ── 20 remove worker + Agent UI �
 - [ ] Task 6: Compaction with author labels
 
 ### Checkpoint B
+The durable fake provider and harness reproduce the worker scripts so existing integration files run with the switch on. Worker-only internals are marked for removal with Task 20. Mailbox, attachments, and other failures caused by tools not yet built in process move to Checkpoint C; user-visible assertions stay intact.
+
+- [x] The durable harness reproduces the worker scripts
+- [x] The shared integration files run with the switch on
+- [x] Worker-only internals are marked for Task 20 removal
 - [ ] Existing Thread and lifecycle integration tests pass with the switch on
+  - Open decisions on abort's partial reply and SIGTERM's restart status remain; tool-dependent failures are tracked in Checkpoint C.
 - [ ] Killing the Service mid-reply resumes or visibly fails the reply
 
 ### Phase 3: Prompt and tools
@@ -72,6 +78,8 @@ all of 4–18 ── 19 cutover + deletion ── 20 remove worker + Agent UI �
 - [ ] Task 12: Bot mail, Local Sidecar, and plugin tools in process
 
 ### Checkpoint C
+Mailbox, attachments, and every failure caused by tools not yet built in process move here from Checkpoint B, including tool-call projection, native events, capability inventory, the `process-only` fixture, computer and browser tools, and sidecar tools.
+
 - [ ] Agent computer, browser, mailbox, and sidecar integration tests pass with the switch on
 - [ ] A write outside the allowed folders asks, survives a restart, and writes once
 - [ ] Review with the human
