@@ -45,7 +45,7 @@ all of 4–18 ── 19 cutover + deletion ── 20 remove worker + Agent UI �
 ## Task list
 
 ### Phase 1: Foundation
-- [ ] Task 1: Pinned packages, runtime module skeleton, Harness lifecycle, and boundary lint
+- [x] Task 1: Pinned packages, runtime module skeleton, Harness lifecycle, and boundary lint
 - [ ] Task 2: Credential store and model providers
 - [ ] Task 3: First Turn on the new runtime, behind the switch
 

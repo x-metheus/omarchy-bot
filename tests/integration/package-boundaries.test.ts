@@ -69,6 +69,22 @@ test("the Omarchy plugin never imports Service source or the CLI as a module", (
   expect(violations).toEqual([]);
 });
 
+test("durable runtime dependencies are imported only by the runtime module", () => {
+  const violations: string[] = [];
+  for (const directory of ["apps", "packages", "workers", "scripts"]) {
+    for (const file of sourceFiles(directory)) {
+      if (file.startsWith("apps/daemon/src/modules/runtime/")) continue;
+      for (const specifier of moduleImports(file)) {
+        const target = repositoryPath(file, specifier);
+        if (/^@earendil-works\/(?:pi-durable|chord)(?:\/|$)/.test(target)) {
+          violations.push(`${file} imports ${specifier}`);
+        }
+      }
+    }
+  }
+  expect(violations).toEqual([]);
+});
+
 test("application packaging uses the Rust Sidecar without a TypeScript runtime", () => {
   const violations: string[] = [];
   if (existsSync(path.join(root, "apps/sidecar"))) violations.push("TypeScript Sidecar source remains");

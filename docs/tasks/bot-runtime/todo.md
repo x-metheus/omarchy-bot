@@ -19,9 +19,9 @@ bun test apps/daemon
 **Description:** Add `@earendil-works/pi-ai`, `pi-durable`, and `pi-mcp` at exactly 1.5.2 to `apps/daemon`. Create `modules/runtime/runtime.ts`, which opens one Harness on Service start with SQLite storage in the Service database under the `pi_` prefix, calls `resume()`, and closes it on shutdown. Extend the boundary test so pi-durable can be imported only from `modules/runtime`.
 
 **Acceptance criteria:**
-- [ ] The three packages are pinned exactly, and `pi-coding-agent` and `pi-agent-core` are not in the daemon's dependency tree
-- [ ] Starting the Service creates `pi_` tables in its database; stopping closes the Harness cleanly
-- [ ] `lint:boundaries` fails on a pi-durable import outside `modules/runtime`
+- [x] The three packages are pinned exactly, and `pi-coding-agent` and `pi-agent-core` are not in the daemon's dependency tree
+- [x] Starting the Service creates `pi_` tables in its database; stopping closes the Harness cleanly
+- [x] `lint:boundaries` fails on a pi-durable import outside `modules/runtime`
 
 **Verification:** default commands; a test opens the Harness on a temporary database and lists `pi_` tables.
 

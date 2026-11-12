@@ -6,6 +6,7 @@ import { AgentsRegistry } from "../modules/agents/registry.ts";
 import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
+import { openBotRuntime } from "../modules/runtime/runtime.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker, type ComputerSurfaceOwner } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
@@ -56,6 +57,7 @@ export async function main(options: MainOptions = {}): Promise<{
   if (options.botScreenRuntimeDir !== undefined) cfg.botScreenRuntimeDir = options.botScreenRuntimeDir;
   const db = openDb(cfg);
   recoverOnStartup(db);
+  const runtime = await openBotRuntime(cfg.dbPath);
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
@@ -314,6 +316,7 @@ export async function main(options: MainOptions = {}): Promise<{
     devices.close();
     mailbox.pauseDispatch();
     await turns.shutdown().catch(reportStopFailure("turns"));
+    await runtime.close().catch(reportStopFailure("runtime"));
     computer.shutdown();
     await projections.shutdown().catch(reportStopFailure("projections"));
     await screens.shutdown().catch(reportStopFailure("screens"));
@@ -333,6 +336,7 @@ export async function main(options: MainOptions = {}): Promise<{
     devices.close();
     mailbox.pauseDispatch();
     await turns.shutdown();
+    await runtime.close();
     computer.shutdown();
     await projections.shutdown();
     screens.detach();
