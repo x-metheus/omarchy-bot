@@ -119,13 +119,11 @@ This keeps an upgrade of the experimental package to one module.
 
 ### Compaction
 
-pi-durable's automatic compaction is enabled, with background compaction on. Defaults come from pi-durable, and `modelOverrides` handles small-context models. A user-visible notice in the transcript shows when compaction happened. Older entries stay in storage for memory and search.
+pi-durable's automatic compaction is enabled, with background compaction on. Defaults come from pi-durable, and `modelOverrides` supports policies for small-context models once their budgets are decided. A user-visible notice in the transcript shows when compaction happened. Older entries stay in storage for memory and search.
 
-**Keeping authors through compaction.** The prototype (check 8) found that a summary can lose who said what, even when author labels are in the message text. So:
+**Keeping authors through compaction.** The `beforeCompact` hook uses the conversation's model to write a structured digest of the entries being compacted, using their author metadata and model messages. The digest identifies who said what, decisions, and open items, preserving prior summary context. If that model call fails or produces an incomplete summary, the hook defers to pi-durable's own summarizer. Entries kept verbatim are not summarized again.
 
-- Every entry that is not the user's own message in a Direct Thread, such as Bot mail and Group Thread entries, carries its author label in its visible text.
-- The compaction instructions tell the model to keep author attribution for each statement it keeps.
-- A test compacts a labeled multi-author conversation and checks the summary still attributes correctly. Adding labels to the instructions passed in one trial, so this test must run on each default model before launch. If it fails, the summary switches to a structured digest that lists authors explicitly.
+Non-user entries such as Bot mail and Group Thread entries carry their author label in visible text. A formatting helper is available; these entry write sites are implemented with the corresponding features. A fake-model attribution test checks the digest path, and each default model needs a manual run before launch.
 
 ### Models and providers
 

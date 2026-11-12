@@ -106,7 +106,7 @@ all of 4–18 ── 19 cutover + deletion ── 20 remove worker + Agent UI �
 | A hang in Service JavaScript freezes everything now that the worker is gone | High | Time limits and abort on every tool; shell, computer, browser, and MCP stdio in child processes; a test per extension that abort works |
 | Approval tasks use pi-durable restart retries | Medium | Clean shutdown uses none; the limit and the behavior are tested in Task 9 |
 | Transcript order differs from today's (ADR 0007's guarantee) | High | Task 3 compares Messages from the same fake run on both paths |
-| Compaction loses authors | Medium | Task 6 test on each default model before launch; structured digest as fallback |
+| Compaction loses authors | Medium | Task 6 attribution test and structured digest; test each default model before launch |
 | Session migration loses context | Medium | Native mapping, labeled-text fallback, transcript seed as last resort, each tested with real files |
 | Large TurnService change | Medium | The switch keeps the old path until Task 19; Tasks 3–5 add the new path beside it |
 | OAuth token import fails | Low | Signing in again is accepted |

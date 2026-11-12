@@ -9,7 +9,8 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { CredentialStore } from "./credentials.ts";
 import { createRuntimeModels } from "./models.ts";
-import { AssistantEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationWatch, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
+import { compactionExtension, compactionSettings } from "./compaction.ts";
+import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationWatch, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 // Keep the root context in one place until operations have their own contexts.
@@ -33,6 +34,8 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
   let reportedCredentialsFailure = false;
   const selections: { providerId: string; modelId: string }[] = [];
   try {
+    const registry = createRegistry();
+    registry.install(compactionExtension);
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         if (!reportedCredentialsFailure) {
@@ -41,7 +44,7 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
         }
         return createModels();
       }
-    }, registry: createRegistry(), settings: { afterFailedRun: "continue", restartLimit: 5 } }, context);
+    }, registry, settings: { afterFailedRun: "continue", restartLimit: 5, compaction: compactionSettings } }, context);
     try {
       if (db) {
         const bots = db.query<{ bot_id: string }, []>("SELECT DISTINCT bot_id FROM turns WHERE status = 'working'").all();
@@ -79,10 +82,15 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
           await conversation.configure({ model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions: input.instructions, ...(maxTurns === undefined ? {} : { maxTurns }) }, context);
           const watch = await conversation.watch(context);
           let transcript: DurableTranscript | undefined = input.whenBusy ? undefined : new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, watch.value);
+          let foreignTranscript: DurableTranscript | undefined;
           watch.start(async (call) => {
             if (call.kind !== "value") return;
             const live = call.value.docs["pi.live"] as { run?: { inputs: readonly number[] } } | undefined;
-            if (!live?.run?.inputs.some((id) => turn.inputs.has(id))) return;
+            if (!live?.run?.inputs.some((id) => turn.inputs.has(id))) {
+              const projector = transcript ?? (foreignTranscript ??= new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, { ...call.value, entries: call.value.entries.filter((entry) => !CompactionEntry.is(entry)), docs: {} }));
+              await projector.reconcileCompactions(call.value, conversation);
+              return;
+            }
             if (!transcript) {
               const { submission } = await turn.admitted;
               const status = await submission.status(context);
@@ -204,6 +212,7 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
                   let firstEntry = status.entry;
                   const initialLive = ownedWatch.value.docs["pi.live"] as { run?: { inputs: readonly number[] } } | undefined;
                   const initialDocs = initialLive?.run && !initialLive.run.inputs.some((id) => turn.inputs.has(id)) ? { ...ownedWatch.value.docs, "pi.live": {} } : ownedWatch.value.docs;
+                  await transcript.reconcileCompactions(ownedWatch.value, conversation);
                   if (firstEntry !== undefined) {
                     let entryCursor: Cursor | undefined;
                     do {
@@ -216,7 +225,10 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
                   ownedWatch.start(async (call) => {
                     if (call.kind !== "value") return;
                     const live = call.value.docs["pi.live"] as { run?: { inputs: readonly number[] } } | undefined;
-                    if (live?.run && !live.run.inputs.some((id) => turn.inputs.has(id))) return;
+                    if (live?.run && !live.run.inputs.some((id) => turn.inputs.has(id))) {
+                      await transcript.reconcileCompactions(call.value, conversation);
+                      return;
+                    }
                     firstEntry ??= (await owned.status(context)).entry;
                     if (firstEntry === undefined) return;
                     transcript.update({ ...call.value, entries: call.value.entries.filter((entry) => entry.id >= firstEntry! && (nextEntry === undefined || entry.id < nextEntry)) });

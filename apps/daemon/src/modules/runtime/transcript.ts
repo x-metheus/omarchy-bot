@@ -1,4 +1,5 @@
-import { AssistantEntry, type ConversationView, type LiveState } from "@earendil-works/pi-durable";
+import { AssistantEntry, CompactionEntry, type Conversation, type ConversationView, type Cursor, type EntryId, type LiveState } from "@earendil-works/pi-durable";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
@@ -9,15 +10,48 @@ type Block = { type: Segment["type"]; text: string; id: string; complete: boolea
 /** Project committed generation updates into the existing Service transcript. */
 export class DurableTranscript {
   private readonly seenEntries: Set<number>;
+  private readonly noticedCompactions: Set<number>;
   private blocks: Block[] = [];
   private generation = 0;
   constructor(private readonly threads: ThreadsService, private readonly bots: BotsService, private readonly events: EventLog, private readonly threadId: string, private readonly botId: string, private readonly turnId: string, initial: ConversationView) {
-    this.seenEntries = new Set(initial.entries.map((entry) => entry.id));
+    this.seenEntries = new Set(initial.entries.filter((entry) => !CompactionEntry.is(entry)).map((entry) => entry.id));
+    this.noticedCompactions = new Set(threads.listMessages(threadId).flatMap((message) => {
+      const payload = message.payload;
+      return payload && typeof payload === "object" && "durableCompactionEntry" in payload && typeof payload.durableCompactionEntry === "number" ? [payload.durableCompactionEntry] : [];
+    }));
+    this.update({ ...initial, docs: {} });
+  }
+
+  updateCompactions(view: ConversationView): void {
+    this.update({ ...view, entries: view.entries.filter(CompactionEntry.is), docs: {} });
+  }
+
+  async reconcileCompactions(view: ConversationView, conversation: Conversation): Promise<void> {
+    const lastNotice = Math.max(0, ...this.noticedCompactions);
+    let cursor: Cursor | undefined;
+    do {
+      const page = await conversation.entries({ order: "ascending", ...(lastNotice ? { minEntryId: lastNotice as EntryId } : {}) }, 100, cursor, BACKGROUND_CONTEXT);
+      this.update({ ...view, entries: page.items.filter(CompactionEntry.is), docs: {} });
+      cursor = page.next;
+    } while (cursor);
   }
 
   update(view: ConversationView): void {
     for (const entry of view.entries) {
-      if (this.seenEntries.has(entry.id) || !AssistantEntry.is(entry)) continue;
+      if (this.seenEntries.has(entry.id)) continue;
+      if (CompactionEntry.is(entry)) {
+        const alreadyNoticed = this.threads.listMessages(this.threadId).some((message) => {
+          const payload = message.payload;
+          return payload && typeof payload === "object" && "durableCompactionEntry" in payload && payload.durableCompactionEntry === entry.id;
+        });
+        if (!this.noticedCompactions.has(entry.id) && !alreadyNoticed) {
+          this.threads.appendMessage(this.threadId, { author: { kind: "system" }, kind: "text", text: "Earlier conversation history was compacted.", turnId: this.turnId, payload: { durableCompactionEntry: entry.id } });
+        }
+        this.noticedCompactions.add(entry.id);
+        this.seenEntries.add(entry.id);
+        continue;
+      }
+      if (!AssistantEntry.is(entry)) continue;
       const message = entry.model?.find((item) => item.role === "assistant");
       if (message) this.updateMessage(message.content, true);
       this.seenEntries.add(entry.id);

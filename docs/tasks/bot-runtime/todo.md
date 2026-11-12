@@ -122,14 +122,20 @@ A second message during a durable Turn is refused with 409 and writes nothing; r
 
 ## Task 6: Compaction with author labels
 
-**Description:** Turn on automatic and background compaction with `modelOverrides` for small-context models. Show a transcript notice when compaction happens. Put author labels in the visible text of non-user entries, and add the author-preservation compaction instructions.
+**Description:** Enable automatic and background compaction, with typed `modelOverrides` plumbing. The `beforeCompact` hook calls the conversation's model to write a structured digest with author attribution, decisions, and open items; on failure pi-durable writes its own summary. Show a transcript notice and provide author-label formatting for non-user entries.
 
 **Acceptance criteria:**
-- [ ] A long conversation compacts and keeps working, and the notice appears
-- [ ] Older entries stay in storage
-- [ ] A test compacts a labeled multi-author conversation and checks attribution; a manual run on each default model is recorded
+- [x] A labeled multi-author conversation compacts into an attributed structured digest; the Turn continues after both success and built-in fallback
+- [x] A transcript notice appears and older entries stay in storage
+- [x] Exact provider/model overrides are supported and isolated by model
+- [ ] Bot mail and Group Thread durable entry write sites use visible author labels
+- [ ] A manual run on each default model is recorded
 
-**Verification:** default commands; the attribution test with a fake model in CI, and a real-model run recorded in the task notes.
+Per-model `modelOverrides` budgets are not set: no small-context model or values are named in the spec or plan, and inventing them is forbidden. The plumbing and its test are in place; naming the models and values needs a human decision.
+
+The author-label formatting helper is in place; write-site wiring lands with the Bot mail / Group Thread tasks.
+
+**Verification:** default commands; attribution and fallback tests use a fake model in CI; a real-model run is recorded in the task notes.
 
 **Dependencies:** Task 3
 
