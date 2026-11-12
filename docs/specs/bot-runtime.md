@@ -5,7 +5,7 @@ Status: approved 2026-11-10
 Decision record: [ADR 0016](../adr/0016-build-bots-on-pi-durable.md)
 Replaces: `.scratch/bot-runtime/spec.md` (written for `pi-agent-core` 0.84.4)
 
-> Run the [prototype](#prototype) once this spec is approved. Its results may change parts of this design, so write no implementation tickets until it passes.
+> The [prototype](#prototype) ran on 2026-11-12 and passed. Its findings are folded into this spec.
 
 ## Objective
 
@@ -45,8 +45,8 @@ This spec covers the runtime: running Turns, storage, tools, models, and file ac
 ## Tech stack
 
 - Bun 1.4+, TypeScript, ES modules, Bun workspaces (unchanged).
-- `@earendil-works/pi-ai`, `@earendil-works/pi-durable`, and `@earendil-works/pi-mcp`, each pinned to one exact version: the latest release when the prototype starts and when implementation starts. On 2026-11-10 that is 1.5.1 for all three. The three move together, because they are released together. `pi-durable` is marked experimental, so it is never on a range, and moving to a newer release is a deliberate upgrade that reruns the prototype checks.
-- pi-durable SQLite storage through `node:sqlite`, which Bun 1.4.4 provides. The prototype confirms this works end to end.
+- `@earendil-works/pi-ai`, `@earendil-works/pi-durable`, and `@earendil-works/pi-mcp`, each pinned to one exact version: the latest release when the prototype starts and when implementation starts. On 2026-11-12 that is 1.5.2 for all three, and `pi-durable` 1.5.2 itself pins `pi-ai` 1.5.2 exactly. The three move together, because they are released together. `pi-durable` is marked experimental, so it is never on a range, and moving to a newer release is a deliberate upgrade that reruns the prototype checks.
+- pi-durable SQLite storage through `node:sqlite`. Bun 1.4.4 runs it end to end (prototype check 1), so Bun 1.4.4 is the minimum.
 - Removed: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-agent-core`, `pi-mcp-adapter`, and loading of the user's global Pi packages.
 
 ## Design
@@ -94,14 +94,18 @@ This keeps an upgrade of the experimental package to one module.
 
 ### Storage
 
-- **Location:** pi-durable tables live in the Service's SQLite database under the `pi_` prefix. The Service is their only writer. The Service still owns Bots, Threads, Messages, and attachments in its own tables.
+- **Location:** pi-durable tables live in the Service's SQLite database under the `pi_` prefix, next to the Service's own tables. The prototype confirmed they coexist in a copy of a real database. The Service is their only writer. The Service still owns Bots, Threads, Messages, and attachments in its own tables.
 - **Transcript:** the Service's Message records stay the source the clients read today. The runtime module writes them from committed pi-durable entries, so the order and content of blocks match today's ordered transcript (ADR 0007's guarantee).
 - **Deletion:** deleting a Thread deletes its conversation and entries. Deleting a Bot deletes all its conversations. App-owned storage makes this a real deletion, unlike the old Agent-owned sessions.
 - **Migration on a Thread's first Turn after upgrade:**
   1. Read the Thread's old Pi session file, read-only.
   2. Write the latest compaction summary and the messages after it into a new conversation.
-  3. If that fails, seed the conversation from the Service transcript and log it.
-  4. Either way, the Thread continues.
+  3. Map each old message to its native pi-durable entry: user messages, assistant messages with their Tool Calls, and tool results keep their roles. Old thinking is not replayed to the model. A message that cannot be mapped is written as labeled text, such as "[old tool result: name]", and counted in the log.
+  4. Session metadata and non-message entries (model changes, labels, custom entries) are dropped. The Bot's model comes from the Service, not the old session.
+  5. If the whole migration fails, seed the conversation from the Service transcript and log it.
+  6. Either way, the Thread continues.
+
+  The prototype (check 4) proved a real session continues when everything is flattened to labeled text. Native mapping is the target because it keeps Tool Call structure for the model; the labeled-text fallback is what the prototype proved.
 
   Old session files stay until their Thread or Bot is deleted, and deletion removes only the exact recorded path.
 
@@ -116,6 +120,12 @@ This keeps an upgrade of the experimental package to one module.
 ### Compaction
 
 pi-durable's automatic compaction is enabled, with background compaction on. Defaults come from pi-durable, and `modelOverrides` handles small-context models. A user-visible notice in the transcript shows when compaction happened. Older entries stay in storage for memory and search.
+
+**Keeping authors through compaction.** The prototype (check 8) found that a summary can lose who said what, even when author labels are in the message text. So:
+
+- Every entry that is not the user's own message in a Direct Thread, such as Bot mail and Group Thread entries, carries its author label in its visible text.
+- The compaction instructions tell the model to keep author attribution for each statement it keeps.
+- A test compacts a labeled multi-author conversation and checks the summary still attributes correctly. Adding labels to the instructions passed in one trial, so this test must run on each default model before launch. If it fails, the summary switches to a structured digest that lists authors explicitly.
 
 ### Models and providers
 
@@ -178,9 +188,11 @@ Path checks resolve symbolic links and `..` before comparing.
 
 **Approval flow:** the runtime owns one approval flow, and file access is its first user.
 
-- A tool that needs approval records a pending request in Service storage and waits for your answer.
-- Clients show it on the Thread and in notifications.
-- If the Service restarts while a request is pending, the request survives. The interrupted tool call is retried on `resume()` and finds the stored request instead of asking twice.
+- **How it pauses:** pi-durable 1.5.2's `beforeTool` cannot wait for a person. So `beforeTool` only decides whether approval is needed. A tool that needs it runs as a durable tool task marked safe to replay. The task records a pending approval in Service storage, then waits for its answer with durable sleeps, checking the record each time it wakes, as the prototype did. Waking it as soon as the answer arrives is an implementation improvement, not yet proven.
+- **Clients** show the request on the Thread and in notifications.
+- **Restarts:** the request survives. On `resume()` the task runs again, finds the stored request, and keeps waiting instead of asking twice. Each Service crash while it waits uses one of pi-durable's restarts for that run (5 by default). A Service shutdown is a clean stop and does not use one.
+- **Effects must be safe to repeat:** an approved tool may run again after a crash, so every tool that changes something after approval records its execution and checks it before acting. A file write, for example, uses an execution record and an exclusive create, and checks existing content. "Done once" is a property of each tool, not a general exactly-once guarantee from pi-durable.
+- **Expiry:** an unanswered request expires after 7 days, and the tool returns a "no answer" error to the Bot.
 - The proactive-Bots spec reuses this flow for ask-before-act.
 
 ### Prompt and Skills
@@ -194,7 +206,11 @@ Path checks resolve symbolic links and `..` before comparing.
 - **Client:** `pi-mcp` for connections (stdio and Streamable HTTP) and OAuth (`@earendil-works/pi-mcp/oauth`).
 - **Configuration:** `<workspace>/.mcp.json` only.
 - **Tool shape:** the Bot sees one `mcp` tool with search, describe, and call, as today, so many services do not fill the prompt. Servers connect on first use.
-- **Sign-in:** tokens are stored in the app credential store. Where `pi-mcp-adapter`'s stored tokens can be read and converted, they are imported once. Otherwise the Services panel shows that service as needing sign-in again. The prototype finds out which.
+- **Sign-in:** `pi-mcp` stores no credentials and opens no browser, so the Service owns sign-in:
+  - an `McpOAuthStateStore` backed by the app credential store, holding client registration, tokens, and pending sign-in state
+  - a loopback callback listener on `127.0.0.1` for the browser redirect
+  - a sign-in action in the Services panel that opens the authorization URL on the user's device
+- **Token import:** `pi-mcp-adapter` keeps OAuth tokens in the system keyring (Secret Service on Linux). On first start, the Service reads them once, read-only, and converts the fields, including expiry from seconds to milliseconds. A token that cannot be converted or no longer works is dropped, and that service shows as needing sign-in again. Signing in again is acceptable.
 - **Panel:** the Services panel's status and control behavior is unchanged.
 - **Not in v1:** sampling, elicitation, and MCP app UI panels.
 
@@ -355,6 +371,21 @@ This runs outside product code, with a real provider key and a small model allow
 
 A failed check is solved within pi-durable, through a workaround in the runtime module, an adapter, or an upstream fix. This spec is updated to match before tickets are written.
 
+### Results (2026-11-12)
+
+The prototype is in `prototypes/bot-runtime/` on branch `proto/bot-runtime`, with evidence for each check in its README.
+
+| # | Result | Notes |
+| --- | --- | --- |
+| 1 | Pass | Bun 1.4.4 runs `node:sqlite`; no `pi-coding-agent` or `pi-agent-core` in the tree |
+| 2 | Pass | Recall reached the request; no recall text in `pi_` entries |
+| 3 | Pass | Reminder posted once into the same conversation after a hard kill |
+| 4 | Pass | Real session continued, with old messages flattened to labeled text; see [Storage](#storage) |
+| 5 | Pass | Tested with a small page, not the real web client. A Service restart while a client is disconnected is untested. |
+| 6 | Pass with a workaround | `beforeTool` cannot wait; see the [approval flow](#file-access) |
+| 7 | Done | A real MCP tool call passed. OAuth sign-in stopped at the human step and was accepted as done; see [MCP](#mcp). |
+| 8 | Pass | Steering during a tool call and compaction work; compaction can lose authors, see [Compaction](#compaction) |
+
 ## Open questions
 
-None that block approval. The prototype answers the MCP token import question.
+None that block implementation tickets.

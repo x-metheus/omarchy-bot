@@ -246,6 +246,7 @@ Tools in the memory extension. The Bot's identity is taken from the conversation
 - **Purge steps:** a local SQLite test found deleted text stayed in the database file until FTS5 `optimize` ran with `secure_delete=ON`, or `optimize` with `VACUUM`. Forgetting must run these. The `pi_` tables share the same database file, so `secure_delete` is set for the whole database.
 - **Conversation reset:** a study found agents act on revoked values even when told to forget them. So each Thread where the forgotten fact actually appeared gets a new conversation after a forget, and the old conversation's entries are deleted.
   - The new conversation is seeded from the Service transcript, the same way as the runtime's [migration fallback](bot-runtime.md#storage).
+  - The new conversation does not remember earlier dialogue, tool results, or Thinking. The seed carries a summary of the Thread, and `conversation_search` reaches the rest; nothing may assume the reset conversation remembers more.
   - Continuity loss must be measured.
   - Ephemeral recall limits how often a reset is needed.
 - **Truthful wording:** "Removed from memory, search, and what I see from now on. Old Thread text stays until you delete the Thread. Your model provider may have received it under its own policy."
@@ -402,4 +403,4 @@ export interface BotMemory {
 ## Open questions
 
 - Should Review use the Bot's own model, or one Service-wide review model? The spec records the model per Fact but does not choose.
-- How much continuity does a conversation reset after a forget actually lose? Measure it before launch.
+- How much does a conversation reset after a forget cost in practice? The prototype showed what is lost: the new conversation's active context keeps only its seed (8 entries down to 1 in the test), and earlier dialogue, tool results, and Thinking leave it. (The prototype kept the old entries; this spec deletes them after a forget, so only the Service transcript remains.) Measure the effect on answers before launch.

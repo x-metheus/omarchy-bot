@@ -265,7 +265,7 @@ Models tend to produce text even when told to stay quiet, so silence must not de
 
 - **Catch-up:** before a Group Turn's input, the runtime module submits the Messages after the Bot's cursor as `write` entries in the member's conversation. These are user text and other Bots' Response Blocks only.
 - **Excluded:** Thinking, Tool Calls, system notes, and the Bot's own output, which its conversation already has.
-- **Labels:** every entry is structured and escaped, with an author kind and name, so body text cannot forge an entry or a user role. Only the Turn's own input is a user message, and only when a user Message caused the wake.
+- **Labels:** every entry is structured and escaped, with an author kind and name in its visible text, so body text cannot forge an entry or a user role, and compaction keeps authors as the [runtime spec](bot-runtime.md#compaction) requires. Only the Turn's own input is a user message, and only when a user Message caused the wake.
 - **The cursor** advances in the transaction that claims a wake for a Turn. It also moves past a Message delivered by Steering.
 - **Bounds:** catch-up is bounded, initially at 64 KiB. When older entries are dropped, it says so explicitly. A newly added member starts with the same bounded recent history.
 - **The system prompt** gains the Bot's own name and ID, the Reply Rules, and how to bring in other members: not without a concrete request for them.
@@ -376,6 +376,7 @@ export function parseReplyDecision(raw: string): "reply" | "pass" {
   - Reply Rules and Personality present in the prompt, including with empty Job and Personality
   - concurrent Turns, and one conversation per member
   - catch-up contents, including exclusion of Thinking and Tool Calls, and escaping of forged authors
+  - attribution after compaction of a group conversation
   - attachments: staging, rejection when no reached Bot can read one, per-Bot delivery, name-only delivery, catch-up delivery, waiting on a busy Bot, and removal with the Group Thread
   - wake ordering, collapsing, cancellation by a new user Message, wakes from old Turns, and failed-source behavior
   - restart reconciliation with no duplicate Turn
@@ -437,4 +438,4 @@ export function parseReplyDecision(raw: string): "reply" | "pass" {
 
 ## Open questions
 
-- Should catch-up use `write` entries, as this spec says, or be folded into the Turn's input? The runtime prototype should confirm that `write` entries keep their author labels through compaction.
+None. The runtime prototype found that stored `write` entries keep their authors, but a compaction summary can lose who said what. Catch-up stays as `write` entries, with author labels in visible text, under the runtime spec's [author rules for compaction](bot-runtime.md#compaction).
