@@ -361,18 +361,51 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** Add the web extension as the spec describes: `web_fetch` reads a URL as text, extracting with `@mozilla/readability` on `linkedom` and converting with `turndown` (approved 2026-11-24, pinned exactly, imported only by the web extension), and refuses internal addresses unless Settings exempts a range; `web_search` uses Exa's free MCP endpoint through `pi-mcp` by default, with an optional Exa key. Report rate limits as rate limits.
 
 **Acceptance criteria:**
-- [ ] Internal addresses are refused with an error naming the range and the setting
-- [ ] HTTP 429 and the `ai.exa/rateLimited` flag are reported as rate limits, never as empty results
-- [ ] Results are marked as outside content for the memory trust rules
-- [ ] Downloads over 5 MB stop with a clear error; extraction runs in a worker thread with a time limit, and a slow or huge page does not block the Service
+- [x] Internal addresses are refused with an error naming the range and the setting
+  - `web_fetch refuses loopback before connecting and names the range and setting` (asserts the full refusal and zero requests)
+  - `web_fetch accepts 127.0.0.0/8 when Settings exempts it` (updates the setting and fetches successfully on the next call)
+- [x] HTTP 429 and the `ai.exa/rateLimited` flag are reported as rate limits, never as empty results
+  - `web_search reports HTTP 429 as a rate limit` (asserts the rate-limit message and rules out the empty-result message)
+  - `web_search reports HTTP 429 without waiting for a stalled body` (returns a rate limit before the search deadline)
+  - `web_search reports HTTP 429 on SSE resume without retrying` (returns a rate limit after one resume attempt)
+  - `web_search detects the rate-limit flag in an HTTP error body` (bare and `true` flags produce the rate-limit message)
+  - `web_search recognizes a JSON-RPC rate-limit message or error data at HTTP 200` (checks message and data flags)
+  - `web_search detects an HTTP 200 standalone marker in an unsupported content type` (bare and `true` flags produce the rate-limit message)
+- [x] Results are marked as outside content for the memory trust rules
+  - `WEB_TOOL_NAMES lists exactly the registered outside-content tools` (checks both registered names and the classifier)
+  - `web_fetch preserves the full HTML citation and appends a sanitized outside-content notice` (checks the notice and sanitized source)
+  - `web_fetch preserves plain text and Markdown before a notice with the sanitized final URL` (checks both pass-through result types)
+  - `web_search joins Exa results and appends an outside-content notice naming Exa` (checks the notice and Exa source)
+- [x] Downloads over 5 MB stop with a clear error; extraction runs in a worker thread with a time limit, and a slow or huge page does not block the Service
+  - `web_fetch refuses a Content-Length above 5 MB before inspecting the content type` (asserts the 5 MB error from the header)
+  - `web_fetch stops a stream with no Content-Length when it exceeds 5 MB` (asserts the same error from the stream)
+  - `web_fetch returns an error when the extraction worker times out` (asserts the configured timeout error)
+  - `a 10 ms timer fires while web_fetch waits for the extraction worker` (schedules a timer at worker dispatch and checks it fires before the large HTML result returns)
 
 **Verification:** default commands; tests against a local HTTP stub.
+
+- `bun test apps/daemon` — 187 passed, 1 skipped, 0 failed across 16 files.
+- `bun run lint:boundaries` — 6 passed, 0 failed.
+- `bun run typecheck` — the sole diagnostic was the pre-existing `TS2769` at `tests/integration/daemon.test.ts:289`.
+- `bun test apps/daemon/src/modules/runtime/extensions/web.test.ts apps/daemon/src/modules/runtime/credentials.test.ts` — 64 passed, 0 failed across 2 files. The web tests use `Bun.serve` loopback stubs with no live network.
 
 **Dependencies:** Task 3
 
 **Files likely touched:** `apps/daemon/src/modules/runtime/extensions/web.ts`, `apps/daemon/src/modules/runtime/extensions/web.test.ts`, Settings schema
 
 **Estimated scope:** Small
+
+**Decisions:**
+
+- `web_exempt_ranges` is a JSON array of CIDR strings. Exemptions are off by default and read on each fetch. Malformed JSON yields an empty list and invalid entries are ignored. Task 16 owns the Settings UI.
+- The address guard checks IP literals and DNS results on every manual redirect hop, with a maximum of five redirects. Refusals name the canonical range and setting. Each request dials a checked address directly with proxies disabled and the origin's `Host` header and TLS identity preserved, preventing a second DNS lookup between check and connect. The guard is scoped to preventing accidental access to internal addresses.
+- The 5 MB cap applies to both `Content-Length` and streamed bytes. Fetch honors the response charset, extracts `text/html`, passes through `text/plain` and `text/markdown`, and errors on other content types.
+- The extraction worker has a 10-second hard limit by default and is terminated when extraction ends. The worker normalizes HTML without a body and excludes `script`, `style`, `noscript`, `template`, `svg`, `[hidden]`, and `[aria-hidden="true"]` from fallback text.
+- Exa is the sole implementation of the search provider interface. It calls `web_search_exa` through `pi-mcp` with a 20-second timeout and sends the optional key only in the `x-api-key` header, keeping it out of URLs and logs.
+- `CredentialStore` trims the Exa key and writes it under `webSearchKeys` in the same atomic `0600` `model-credentials.json` file, preserving unknown sections. The setter is Service-side. Task 22 moves the key to the OS secret store.
+- HTTP 429 is classified immediately, including on SSE resume, with no retry. The `ai.exa/rateLimited` scanner runs only on error channels and recognizes bare flags and unquoted `true`. Empty results and outages have distinct messages. Rate limits and outages suggest the browser tool.
+- `WEB_TOOL_NAMES` and `isExternalContentTool` are exported for the memory trust rules, and both tools append an outside-content notice to successful results. The memory module owns applying the taint.
+- The unrelated `bun run typecheck` error `TS2769` at `tests/integration/daemon.test.ts:289` predates Task 15. The file is byte-identical to HEAD and the commit before Task 15.
 
 ---
 
