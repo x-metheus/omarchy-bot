@@ -1038,6 +1038,30 @@ CREATE TABLE pi_turn_submissions (
 );
 `,
   },
+  {
+    // Migration 0004 dropped the legacy worker approvals table. Durable tool tasks key requests by pi task id.
+    name: "0026-durable-approvals",
+    sql: `
+CREATE TABLE approvals (
+  id TEXT PRIMARY KEY,
+  task_id INTEGER NOT NULL UNIQUE,
+  call_id TEXT NOT NULL,
+  conversation_id INTEGER NOT NULL,
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+  tool TEXT NOT NULL CHECK (tool IN ('read', 'write', 'edit')),
+  path TEXT NOT NULL,
+  folder TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'allowed_once', 'allowed_folder', 'denied', 'expired', 'cancelled')),
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  answered_at TEXT
+);
+CREATE INDEX idx_approvals_pending ON approvals(thread_id, bot_id) WHERE status = 'pending';
+`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });

@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import path from "node:path";
-import { getSetting } from "../../persistence/settings.ts";
+import { getSetting, setSetting } from "../../persistence/settings.ts";
 import type { PlatformPaths } from "./paths.ts";
 
 /** JSON array of absolute folder paths in service_settings. */
@@ -32,4 +32,12 @@ export function readSettingsAllowedFolders(db: Database | undefined): readonly s
     }
   }
   return [...folders];
+}
+
+/** Add one absolute folder to the Settings list; invalid stored entries are dropped. */
+export function addSettingsAllowedFolder(db: Database, folder: string): void {
+  if (!path.isAbsolute(folder) || folder.includes("\0")) throw new Error(`Allowed folder must be an absolute path: ${folder}`);
+  const folders = new Set(readSettingsAllowedFolders(db));
+  folders.add(path.resolve(folder));
+  setSetting(db, ALLOWED_FOLDERS_SETTING, JSON.stringify([...folders]));
 }

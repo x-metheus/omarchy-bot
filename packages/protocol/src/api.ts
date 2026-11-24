@@ -639,3 +639,27 @@ export const SendResultDto = z.object({
   action: z.enum(["sent", "steered"]),
 });
 export type SendResultDto = z.infer<typeof SendResultDto>;
+
+// ----- approvals -----
+
+export const ApprovalStatusSchema = z.enum(["pending", "allowed_once", "allowed_folder", "denied", "expired", "cancelled"]);
+export type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
+
+/** A Bot's request to use a file outside the allowed folders. `folder` is what "Always allow this folder" adds. */
+export const ApprovalDto = z.object({
+  id: z.string(),
+  threadId: z.string(),
+  botId: z.string(),
+  turnId: z.string().nullable(),
+  tool: z.enum(["read", "write", "edit"]),
+  path: z.string(),
+  folder: z.string(),
+  status: ApprovalStatusSchema,
+  createdAt: z.string(),
+  expiresAt: z.string(),
+  answeredAt: z.string().nullable(),
+});
+export type ApprovalDto = z.infer<typeof ApprovalDto>;
+
+export const ApprovalAnswerBody = z.object({ answer: z.enum(["allow_once", "allow_folder", "deny"]) }).strict();
+export type ApprovalAnswerBodyDto = z.infer<typeof ApprovalAnswerBody>;

@@ -81,7 +81,7 @@ function deployedArchivelessDatabase(): { dbPath: string; home: string } {
 
 describe("integration: deployed schema convergence", () => {
   test("keeps Bot Screen and divergent-ledger migrations in dependency order", () => {
-    expect(MIGRATIONS.slice(-19).map((migration) => migration.name)).toEqual([
+    expect(MIGRATIONS.slice(-20).map((migration) => migration.name)).toEqual([
       "0010-bot-computer-surfaces",
       "0011-redacted-input-diagnostics",
       "0012-bot-screen-contract",
@@ -101,7 +101,19 @@ describe("integration: deployed schema convergence", () => {
       "0023-pi-thread-conversations",
       "0024-bot-max-turns",
       "0025-durable-turn-submissions",
+      "0026-durable-approvals",
     ]);
+  });
+
+  test("adds durable approval records to an existing database", () => {
+    const { db, dbPath, home } = databaseThrough("0025-durable-turn-submissions");
+    const migrated = finishMigrations(db, dbPath);
+    try {
+      expect(migrated.query<{ name: string }, []>("PRAGMA table_info(approvals)").all().map((column) => column.name)).toEqual([
+        "id", "task_id", "call_id", "conversation_id", "thread_id", "bot_id", "turn_id", "tool", "path", "folder", "status", "created_at", "expires_at", "answered_at",
+      ]);
+      expect(migrated.query<{ table: string; on_delete: string }, []>("PRAGMA foreign_key_list(approvals)").all().map((key) => `${key.table}:${key.on_delete}`).sort()).toEqual(["bots:CASCADE", "threads:CASCADE", "turns:SET NULL"]);
+    } finally { migrated.close(); rmSync(home, { recursive: true, force: true }); }
   });
 
   test("adds durable Turn submission associations to an existing database", () => {
