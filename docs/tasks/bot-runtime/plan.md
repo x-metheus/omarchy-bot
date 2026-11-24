@@ -91,7 +91,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ### Phase 4: MCP, web, and workspace
 - [ ] Task 13: MCP through `pi-mcp`
-- [ ] Task 22: Secret store, secrets tool, and a clean shell environment
+- [ ] Task 22: Secret store, secrets tool, and a clean shell environment (merged on the fallback file; keychain backend pending)
 - [ ] Task 14: MCP OAuth sign-in and token import
 - [ ] Task 15: `web_fetch` and `web_search`
 - [ ] Task 16: Provider import, Settings providers screen, and per-Bot model
