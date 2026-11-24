@@ -86,12 +86,20 @@ export const SurfaceIdDto = z.custom<SurfaceId>(
 );
 // ----- Bots -----
 
+const modelReferenceMessage = "Model must use provider/model format with a non-empty provider and model ID";
+const BotModelOverride = z.string().min(1, modelReferenceMessage).refine((value) => {
+  const separator = value.indexOf("/");
+  return separator > 0 && separator < value.length - 1;
+}, modelReferenceMessage).nullable().optional();
+
 export const BotDto = z.object({
   id: z.string(),
   surfaceId: SurfaceIdDto,
   name: z.string(),
   instructions: z.string(),
   agentId: z.enum(AGENT_IDS),
+  /** Null uses the Service default. */
+  model: z.string().nullable(),
   avatar: AvatarDto,
   pinned: z.boolean(),
   showToolCalls: z.boolean(),
@@ -111,6 +119,7 @@ export const BotUpdatedEventPayload = z.object({
   showToolCalls: z.boolean(),
   showThinking: z.boolean(),
   maxTurns: z.number().int().min(1).nullable().optional(),
+  model: BotModelOverride,
 });
 export type BotUpdatedEventPayload = z.infer<typeof BotUpdatedEventPayload>;
 
@@ -567,6 +576,7 @@ export const PatchBotBody = z.object({
   showToolCalls: z.boolean().optional(),
   showThinking: z.boolean().optional(),
   maxTurns: z.number().int().min(1).nullable().optional(),
+  model: BotModelOverride,
 });
 export type PatchBotBodyDto = z.infer<typeof PatchBotBody>;
 
