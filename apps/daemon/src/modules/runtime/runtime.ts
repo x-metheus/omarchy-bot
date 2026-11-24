@@ -14,6 +14,7 @@ import { ApprovalStore } from "./approvals.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
+import { createMcpExtension, type McpExtensionDeps } from "./extensions/mcp.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
@@ -43,9 +44,13 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
   return !entry.model?.some((message) => message.role === "assistant" && message.stopReason === "aborted");
 }
 
-export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: { events?: Pick<EventLog, "append"> } = {}): Promise<BotRuntime> {
+export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: {
+  events?: Pick<EventLog, "append">;
+  mcp?: McpExtensionDeps["servers"];
+} = {}): Promise<BotRuntime> {
   const credentials = new CredentialStore(paths.stateDir);
   const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
+  const mcp = options.mcp ? createMcpExtension({ servers: options.mcp }) : undefined;
   let reportedCredentialsFailure = false;
   const selections: { providerId: string; modelId: string }[] = [];
   const conversationBots = new Map<ConversationId, string>();
@@ -62,6 +67,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         return row ? { threadId: row.thread_id, botId: row.bot_id } : undefined;
       },
     } : undefined));
+    if (mcp) registry.install(mcp);
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         if (!reportedCredentialsFailure) {
@@ -91,6 +97,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       // Recovery maps the owners before the scheduler can replay their tool calls.
       if (recoveringBots.length === 0) resumeScheduler();
     } catch (error) {
+      await mcp?.close();
       await harness.close(context);
       throw error;
     }
@@ -388,6 +395,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       close() {
         closing ??= (async () => {
           try {
+            await mcp?.close();
             await harness.close(context);
           } finally {
             await storage.close(context);

@@ -58,13 +58,16 @@ export async function main(options: MainOptions = {}): Promise<{
   const db = openDb(cfg);
   recoverOnStartup(db);
   const events = new EventLog(db);
-  const runtime = await openBotRuntime(cfg, db, { events });
+  let plugins!: PluginsService;
+  const runtime = await openBotRuntime(cfg, db, {
+    events,
+    mcp: () => plugins?.mcp.effectiveServers() ?? { revision: "", servers: {} },
+  });
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
   let mailbox!: MailboxService;
-  let plugins!: PluginsService;
   const supervisor: Supervisor = new Supervisor(
     {
       onAgentEvent: (agentId, event) => {
