@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { expect, spyOn, test } from "bun:test";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { inspect } from "node:util";
@@ -1027,7 +1027,7 @@ test("a late Downloads alias to home grants only explicit Settings folders", asy
   } finally { dirs.close(); }
 });
 
-test("credential identity refuses an allowed file via its ancestor alias and hard link", async () => {
+test("credential and fallback secret identities refuse allowed aliases and hard links", async () => {
   const dirs = directories();
   try {
     const protectedFile = path.join(dirs.extra, "credential-target.json");
@@ -1036,12 +1036,20 @@ test("credential identity refuses an allowed file via its ancestor alias and har
     symlinkSync(dirs.extra, path.join(dirs.sharedWorkspaceDir, "alias"), "junction");
     const hardLink = path.join(dirs.extra, "credential-alias.json");
     linkSync(protectedFile, hardLink);
-    const { settlement, results } = await withTurn(dirs, [write("alias/credential-target.json"), write(hardLink)]);
+    const fallback = path.join(dirs.dataDir, "secrets", "secret-values.json");
+    mkdirSync(path.dirname(fallback));
+    writeFileSync(fallback, "private fallback values");
+    const fallbackLink = path.join(dirs.extra, "secret-link.json");
+    const fallbackAlias = path.join(dirs.extra, "renamed.json");
+    linkSync(fallback, fallbackLink);
+    renameSync(fallbackLink, fallbackAlias);
+    const { settlement, results } = await withTurn(dirs, [write("alias/credential-target.json"), write(hardLink), write("alias/renamed.json")]);
     expect(settlement.status).toBe("done");
-    expect(results.map(({ isError }) => isError)).toEqual([true, true]);
+    expect(results.map(({ isError }) => isError)).toEqual([true, true, true]);
     for (const result of results) expect(result.text.includes("credential store")).toBe(true);
     expect(readFileSync(protectedFile, "utf8")).toBe("private credentials");
     expect(readFileSync(hardLink, "utf8")).toBe("private credentials");
+    expect(readFileSync(fallbackAlias, "utf8")).toBe("private fallback values");
   } finally { dirs.close(); }
 });
 

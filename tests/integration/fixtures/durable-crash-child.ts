@@ -1,12 +1,14 @@
 import { installDurableCrashProvider } from "../../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 import { CredentialStore } from "../../../apps/daemon/src/modules/runtime/credentials.ts";
+import { SecretStore } from "../../../apps/daemon/src/modules/runtime/secrets.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import { setSetting } from "../../../apps/daemon/src/persistence/settings.ts";
 import path from "node:path";
 
 installDurableCrashProvider();
 const state = process.env.OMARCHY_BOT_STATE!;
-new CredentialStore(state).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+const credentials = await CredentialStore.open(state, new SecretStore(process.env.OMARCHY_BOT_HOME!));
+await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
 const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
 const daemon = await main({ useHostApplicationUnits: false, botScreenAdapter: new FakeBotScreenRuntimeAdapter(), botScreenRuntimeDir: path.join(process.env.OMARCHY_BOT_HOME!, "r") });
 setSetting(daemon.svc.db, "default_model", "fake/fake-model");

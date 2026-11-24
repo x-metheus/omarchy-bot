@@ -247,21 +247,41 @@ test("a failed backend save preserves the indexed metadata", () => withDataDir(a
   expect(readdirSync(dataDir)).toEqual([]);
 }));
 
-test("a failed backend delete leaves the secret unlisted and can be retried by name", () => withDataDir(async (dataDir) => {
+test("a failed individual backend delete leaves the Bot secret listed until retry succeeds", () => withDataDir(async (dataDir) => {
   const value = "sensitive-sentinel-value";
   const backend = new MemoryKeychain();
   const store = new SecretStore(dataDir, backend);
-  const app = store.forApp();
-  await app.save("token", "Existing credential", value);
+  const bot = store.forBot("one");
+  await bot.save("token", "Existing credential", value);
   backend.deleteError = new Error(`keychain delete failed for ${value}`);
-  const error = await app.delete("token").catch((error: unknown) => error);
-  expect(await app.list()).toEqual([]);
-  expect(await store.getAppSecretForRuntime("token")).toBeUndefined();
+  const error = await bot.delete("token").catch((error: unknown) => error);
+  expect(await bot.list()).toEqual([{ name: "token", description: "Existing credential" }]);
+  expect(await store.getBotSecretForRuntime("one", "token")).toBe(value);
   expect(String(error)).toBe("Error: Unable to delete secret");
   expect(inspect(error, { showHidden: true })).not.toContain(value);
   delete backend.deleteError;
-  await app.delete("token");
+  await bot.delete("token");
+  expect(await bot.list()).toEqual([]);
+  expect(await store.deleteAll("one")).toBe(0);
   expect(backend.values.size).toBe(0);
+}));
+
+test("redactKnown hides the diagnostic when an indexed value cannot be read", () => withDataDir(async (dataDir) => {
+  const value = "unreadable-secret-sentinel";
+  const backend = new MemoryKeychain();
+  const store = new SecretStore(dataDir, backend);
+  await store.forApp().save("token", "App credential", value);
+  backend.readError = new Error(`Unable to read ${value}`);
+  expect(await store.redactKnown(`Provider rejected ${value}`, "one")).toBe("[redacted]");
+}));
+
+test("redactKnown reads just app and owning Bot values and hides unsafe placeholders", () => withDataDir(async (dataDir) => {
+  const store = new SecretStore(dataDir, new MemoryKeychain());
+  await store.forApp().save("credential", "App credential", "app-value");
+  await store.forBot("one").save("short", "Bot token", "credential");
+  await store.forBot("two").save("token", "Other Bot credential", "other-value");
+  expect(await store.redactKnown("app-value credential other-value", "one"))
+    .toBe("[redacted] {{secret:short}} other-value");
 }));
 
 test("opening with a keychain migrates all indexed fallback values once", () => withDataDir(async (dataDir) => {

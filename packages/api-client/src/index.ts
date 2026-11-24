@@ -163,6 +163,10 @@ export class ApiClient {
     return health;
   }
 
+  secretStorageStatus(): Promise<{ backend: "keychain" | "file" }> {
+    return this.req("/api/secrets/status");
+  }
+
   // ----- agents -----
   listAgents(): Promise<AgentDto[]> {
     return this.req("/api/agents");

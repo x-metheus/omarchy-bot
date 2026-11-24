@@ -12,7 +12,7 @@ import { createBashTool, createEditTool, createReadTool, createWriteTool, type B
 import { isHomeDirectory, type PlatformPaths } from "../../workspace/paths.ts";
 import type { ApprovalStore } from "../approvals.ts";
 import { MODEL_CREDENTIALS_FILENAME } from "../credentials.ts";
-import { fillSecretPlaceholders, redactSecretValues, secretPlaceholderNames } from "../secrets.ts";
+import { fallbackSecretValuesPath, fillSecretPlaceholders, redactSecretValues, secretPlaceholderNames } from "../secrets.ts";
 import type { BotSecretAccess } from "./secrets.ts";
 
 // Two minutes lets routine shell work finish while bounding commands that omit a timeout.
@@ -107,9 +107,9 @@ function policy(paths: PlatformPaths, settingsFolders: readonly string[], botId:
     const resolved = canonicalPath(absolute);
     return absolute === resolved ? [absolute] : [absolute, resolved];
   };
-  const credentialFile = path.join(paths.stateDir, MODEL_CREDENTIALS_FILENAME);
-  const credentials = protectedPath(credentialFile);
-  const credentialIdentity = fileStat(credentialFile);
+  const credentialFiles = [path.join(paths.stateDir, MODEL_CREDENTIALS_FILENAME), fallbackSecretValuesPath(paths.dataDir)];
+  const credentials = credentialFiles.flatMap(protectedPath);
+  const credentialIdentities = credentialFiles.map(fileStat);
   const serviceData = protectedPath(paths.dataDir);
   const serviceState = protectedPath(paths.stateDir);
   const botsRoot = path.join(paths.sharedWorkspaceDir, "bots");
@@ -147,7 +147,7 @@ function policy(paths: PlatformPaths, settingsFolders: readonly string[], botId:
     const denied = (why: string) => err<string, FileAccessError>(new FileAccessError("permission_denied", `Access refused: ${why}: ${input}`, input));
     const containsProtected = (name: string, root: string) => includesDescendants && withinProtectedDirectory(name, root);
     const overlapsProtected = (root: string, name: string) => withinProtectedDirectory(root, name) || containsProtected(name, root);
-    if (hasIdentity(resolved, credentialIdentity) ||
+    if (credentialIdentities.some((identity) => hasIdentity(resolved, identity)) ||
       credentials.some((root) => names.some((name) => path.relative(root, name) === "" || containsProtected(name, root)))) return denied("credential store");
     if (serviceData.some((root) => names.some((name) => overlapsProtected(root, name)))) return denied("Service data directory");
     if (serviceState.some((root) => names.some((name) => overlapsProtected(root, name)))) return denied("Service state directory");

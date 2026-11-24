@@ -33,6 +33,10 @@ const privateDirectoryMode = 0o700;
 const pending = new Map<string, Promise<unknown>>();
 const activeBackends = new Map<string, SecretBackend["kind"]>();
 
+export function fallbackSecretValuesPath(dataDir: string): string {
+  return path.join(dataDir, "secrets", "secret-values.json");
+}
+
 /** The caller supplies the resolved Service data directory and can inject a keychain backend. */
 // The OS backend and its runtime wiring are deferred to the next slice.
 export class SecretStore {
@@ -49,8 +53,8 @@ export class SecretStore {
     mkdirSync(dataDir, { recursive: true, mode: privateDirectoryMode });
     const resolvedDataDir = realpathSync(dataDir);
     this.#indexFile = path.join(resolvedDataDir, "secret-index.json");
-    this.#fallbackDirectory = path.join(resolvedDataDir, "secrets");
-    this.#fallbackFile = path.join(this.#fallbackDirectory, "secret-values.json");
+    this.#fallbackFile = fallbackSecretValuesPath(resolvedDataDir);
+    this.#fallbackDirectory = path.dirname(this.#fallbackFile);
     this.#legacyFallbackFile = path.join(resolvedDataDir, "secret-values.json");
     this.#namespace = createHash("sha256").update(resolvedDataDir).digest("hex");
     this.#backend = keychain ?? new FileSecretBackend(this.#fallbackFile, this.#namespace);
@@ -73,6 +77,30 @@ export class SecretStore {
   /** Service-only accessor for filling a Bot's secret placeholders. */
   getBotSecretForRuntime(botId: string, name: string): Promise<string | undefined> {
     return this.#getForRuntime(`bot:${botId}`, name);
+  }
+
+  /** Service-only redaction of app and owning Bot values in a failure diagnostic. */
+  async redactKnown(text: string, botId: string): Promise<string> {
+    try {
+      return await this.#run(async () => {
+        const botScope = `bot:${botId}`;
+        const known: [string, string][] = [];
+        for (const { scope, name } of readIndex(this.#indexFile)) {
+          if (scope !== "app" && scope !== botScope) continue;
+          const value = await this.#backend.get(this.#accountKey(scope, name));
+          if (!value) return "[redacted]";
+          known.push([name, value]);
+        }
+        const containsSecret = (candidate: string) => known.some(([, value]) => candidate.includes(value));
+        const redacted = redactSecretValues(text, known, (name) => {
+          const placeholder = `{{secret:${name}}}`;
+          return containsSecret(placeholder) ? "[redacted]" : placeholder;
+        });
+        return containsSecret(redacted) ? "[redacted]" : redacted;
+      });
+    } catch {
+      return "[redacted]";
+    }
   }
 
   /** Remove one Bot's indexed secrets and return the number removed. */
@@ -114,10 +142,6 @@ export class SecretStore {
     const accounts = new Map(name === undefined
       ? matching.map((entry) => [entry.name, this.#accountKey(scope, entry.name)])
       : [[name, this.#accountKey(scope, name)]]);
-    // An individual delete can retry by name after its metadata is gone.
-    if (name !== undefined && matching.length > 0) {
-      writePrivateJson(this.#indexFile, entries.filter((entry) => !matches(entry)));
-    }
     const deleted = new Set<string>();
     for (const [secretName, account] of accounts) {
       try {
@@ -127,7 +151,7 @@ export class SecretStore {
         // Continue deleting the other accounts.
       }
     }
-    if (name === undefined && deleted.size > 0) {
+    if (matching.some((entry) => deleted.has(entry.name))) {
       writePrivateJson(this.#indexFile, entries.filter((entry) => !matches(entry) || !deleted.has(entry.name)));
     }
     if (deleted.size !== accounts.size) throw new Error("Unable to delete secret");
@@ -231,10 +255,14 @@ export function fillSecretPlaceholders(
   return { text: filled, used };
 }
 
-export function redactSecretValues(text: string, used: ReadonlyMap<string, string>): string {
+export function redactSecretValues(
+  text: string,
+  used: Iterable<readonly [string, string]>,
+  placeholderForName: (name: string) => string = (name) => `{{secret:${name}}}`,
+): string {
   const placeholders = new Map<string, string>();
   for (const [name, value] of used) {
-    if (value && !placeholders.has(value)) placeholders.set(value, `{{secret:${name}}}`);
+    if (value && !placeholders.has(value)) placeholders.set(value, placeholderForName(name));
   }
   if (placeholders.size === 0) return text;
 

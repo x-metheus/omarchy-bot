@@ -5,7 +5,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { createModels, createProvider, type MutableModels, type Provider } from "@earendil-works/pi-ai/models";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { getSetting } from "../../persistence/settings.ts";
-import { CredentialStore, type StoredProvider } from "./credentials.ts";
+import type { CredentialStore, StoredProvider } from "./credentials.ts";
 
 export const DEFAULT_MODEL_SETTING = "default_model";
 // Generic endpoints cannot be assumed to support images or reasoning.
@@ -35,7 +35,7 @@ function buildProvider(record: StoredProvider, requestedIds: string[] = []): Pro
   return createProvider({ id: record.id, name: record.name, baseUrl: record.baseUrl!, auth, models, api: api === "openai-completions" ? openAICompletionsApi() : anthropicMessagesApi() });
 }
 
-/** Construct a fresh pi-ai collection using credentials currently on disk. */
+/** Construct a fresh pi-ai collection using the Service's loaded credentials. */
 export function createRuntimeModels(store: CredentialStore, selections: readonly { providerId: string; modelId: string }[] = []): MutableModels {
   type PiCredentials = NonNullable<NonNullable<Parameters<typeof createModels>[0]>["credentials"]>;
   const chains = new Map<string, Promise<unknown>>();
@@ -59,7 +59,7 @@ export function createRuntimeModels(store: CredentialStore, selections: readonly
         const updated = await fn(current);
         if (!updated) return current;
         if (!record || updated.type !== "api_key" || !updated.key || updated.env) throw new Error("Unsupported model credential update");
-        store.add({ ...record, apiKey: updated.key });
+        await store.add({ ...record, apiKey: updated.key });
         return updated;
       });
       chains.set(id, next);
@@ -67,7 +67,10 @@ export function createRuntimeModels(store: CredentialStore, selections: readonly
     },
     async delete(id, options) {
       const previous = chains.get(id) ?? Promise.resolve();
-      const next = previous.catch(() => {}).then(() => { options?.signal?.throwIfAborted(); store.remove(id); });
+      const next = previous.catch(() => {}).then(() => {
+        options?.signal?.throwIfAborted();
+        return store.remove(id);
+      });
       chains.set(id, next);
       try { await next; } finally { if (chains.get(id) === next) chains.delete(id); }
     },

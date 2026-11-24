@@ -8,6 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
+import { MODEL_CREDENTIALS_FILENAME, type StoredProvider } from "../../../apps/daemon/src/modules/runtime/credentials.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
@@ -40,6 +41,7 @@ export interface HarnessOptions {
   botComputerAssetSupply?: BotComputerAssetSupply;
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
+  legacyModelCredentials?: readonly StoredProvider[];
   /** Worker tree override; defaults to the shared fake workers. */
   workersDir?: string;
 }
@@ -97,6 +99,9 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   const state = path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(home, { recursive: true });
   mkdirSync(state, { recursive: true });
+  if (options.legacyModelCredentials) {
+    writeFileSync(path.join(state, MODEL_CREDENTIALS_FILENAME), JSON.stringify(options.legacyModelCredentials), { mode: 0o600 });
+  }
   // Fake conformance record so the fake pi worker probes to `ready`.
   const conf = path.join(home, "conformance");
   mkdirSync(conf, { recursive: true });
@@ -135,9 +140,8 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
       });
   const { stop, disconnectForRestart, port, svc } = daemon;
   if (durableSuite) {
-    const { CredentialStore } = await import("../../../apps/daemon/src/modules/runtime/credentials.ts");
     const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
-    new CredentialStore(svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    if (!svc.credentials.getForRuntime("fake")) await svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(svc.db, "default_model", "fake/fake-model");
     setSetting(svc.db, "runtime", "durable");
   }

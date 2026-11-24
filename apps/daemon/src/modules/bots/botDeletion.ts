@@ -6,6 +6,7 @@ import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { AvatarService } from "../avatars/avatarService.ts";
 import type { BotScreenManager } from "../computer/botScreenManager.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import type { SecretStore } from "../runtime/secrets.ts";
 import { removePrivateFolder } from "../workspace/sharedWorkspace.ts";
 import { HttpError } from "./bots.ts";
 
@@ -50,14 +51,17 @@ export class BotDeletionService {
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
-    private readonly attachments: AttachmentsService,
-    private readonly avatars: AvatarService,
+    private readonly attachments: Pick<AttachmentsService, "deleteOwnedFiles">,
+    private readonly avatars: Pick<AvatarService, "deleteUploadedFile">,
     private readonly turns: BotTurnAborter,
     private readonly threads: BotThreadTurns,
-    private readonly screens: BotScreenManager,
+    private readonly screens: Pick<BotScreenManager, "destroy">,
     private readonly workspaceDir: string,
-    private readonly terminalWaitTimeoutMs = 30_000,
-    private readonly projections?: BotScreenProjectionCleanup,
+    private readonly options: {
+      secrets: Pick<SecretStore, "deleteAll">;
+      terminalWaitTimeoutMs?: number;
+      projections?: BotScreenProjectionCleanup;
+    },
   ) {}
 
   async delete(botId: string): Promise<DeleteBotResultDto> {
@@ -91,7 +95,7 @@ export class BotDeletionService {
       }
 
       const terminalResults = await Promise.allSettled(
-        activeTurnIds.map((turnId) => this.turns.waitForTerminal(turnId, this.terminalWaitTimeoutMs)),
+        activeTurnIds.map((turnId) => this.turns.waitForTerminal(turnId, this.options.terminalWaitTimeoutMs ?? 30_000)),
       );
       const terminalFailures = terminalResults.flatMap((result, index) =>
         result.status === "rejected"
@@ -130,12 +134,13 @@ export class BotDeletionService {
 
     let attachmentFilesRemoved = 0;
     let avatarRemoved = false;
+    let secretsRemoved = 0;
     let privateFolderRemoved = false;
     let computerArtifactsRemoved = 0;
     const failures: DeleteBotFailureDto[] = [];
 
     try {
-      await this.projections?.closeSurface(bot.surface_id as SurfaceId);
+      await this.options.projections?.closeSurface(bot.surface_id as SurfaceId);
     } catch (error) {
       failures.push({ stage: "surface", resource: bot.surface_id, message: errorMessage(error) });
     }
@@ -172,6 +177,14 @@ export class BotDeletionService {
 
     if (failures.length === 0) {
       try {
+        secretsRemoved = await this.options.secrets.deleteAll(botId);
+      } catch (error) {
+        failures.push({ stage: "secrets", resource: botId, message: errorMessage(error) });
+      }
+    }
+
+    if (failures.length === 0) {
+      try {
         privateFolderRemoved = removePrivateFolder(botId, this.workspaceDir);
       } catch (error) {
         failures.push({ stage: "private_folder", resource: botId, message: errorMessage(error) });
@@ -189,6 +202,7 @@ export class BotDeletionService {
           turns: 0,
           attachments: attachmentFilesRemoved,
           avatar: avatarRemoved,
+          secrets: secretsRemoved,
           privateFolder: privateFolderRemoved,
           computerArtifacts: computerArtifactsRemoved,
           surface: false,
@@ -209,6 +223,7 @@ export class BotDeletionService {
         turns: turnCount,
         attachments: attachmentCount,
         avatar: avatarRemoved,
+        secrets: secretsRemoved,
         privateFolder: privateFolderRemoved,
         computerArtifacts: computerArtifacts.length,
         surface: true,
@@ -281,6 +296,7 @@ export class BotDeletionService {
         turns: 0,
         attachments: 0,
         avatar: false,
+        secrets: 0,
         privateFolder: false,
         computerArtifacts: 0,
         surface: false,

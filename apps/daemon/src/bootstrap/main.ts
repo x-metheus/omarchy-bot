@@ -240,8 +240,7 @@ export async function main(options: MainOptions = {}): Promise<{
     threads,
     screens,
     cfg.sharedWorkspaceDir,
-    cfg.botDeletionTerminalTimeoutMs,
-    projections,
+    { secrets: runtime.secrets, terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs, projections },
   );
   await screens.recover();
 
@@ -255,6 +254,8 @@ export async function main(options: MainOptions = {}): Promise<{
 
   const svc: DaemonServices = {
     ...(runtime.approvals ? { approvals: runtime.approvals } : {}),
+    credentials: runtime.credentials,
+    secretsBackend: runtime.secrets.kind,
     cfg,
     db,
     events,

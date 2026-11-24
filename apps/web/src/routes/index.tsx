@@ -655,7 +655,7 @@ function HomeScreen(): JSX.Element {
           deleteError
           ?? `${currentPendingDeleteBot?.status === "active"
             ? `${currentPendingDeleteBot.name} has active work. Deleting it will stop all of this Bot’s current work. `
-            : ""}Deleting ${currentPendingDeleteBot?.name ?? "this Bot"} permanently removes its Omarchy Bot conversations, messages, managed attachments, uploaded avatar data, local drafts, and its private folder. Agent-owned Native Sessions may remain. This cannot be undone.`
+            : ""}Deleting ${currentPendingDeleteBot?.name ?? "this Bot"} permanently removes its Omarchy Bot conversations, messages, managed attachments, uploaded avatar data, local drafts, its private folder, and its private secrets. Agent-owned Native Sessions may remain. This cannot be undone.`
         }
         cancelLabel="Cancel"
         actionLabel={deleteError === undefined ? "Delete permanently" : "Try again"}

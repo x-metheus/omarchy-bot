@@ -578,7 +578,7 @@ export const DeleteBotBody = z.object({}).strict();
 export type DeleteBotBodyDto = z.infer<typeof DeleteBotBody>;
 
 export const DeleteBotFailureDto = z.object({
-  stage: z.enum(["turn_cancellation", "terminal_wait", "attachment", "avatar", "surface", "private_folder", "database"]),
+  stage: z.enum(["turn_cancellation", "terminal_wait", "attachment", "avatar", "surface", "secrets", "private_folder", "database"]),
   resource: z.string(),
   message: z.string(),
 }).strict();
@@ -594,6 +594,7 @@ export const DeleteBotResultDto = z.object({
     turns: z.number().int().nonnegative(),
     attachments: z.number().int().nonnegative(),
     avatar: z.boolean(),
+    secrets: z.number().int().nonnegative().default(0),
     privateFolder: z.boolean(),
     computerArtifacts: z.number().int().nonnegative(),
     surface: z.boolean(),
