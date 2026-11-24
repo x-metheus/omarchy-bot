@@ -168,7 +168,7 @@ export async function main(options: MainOptions = {}): Promise<{
   deviceLiveness.unref?.();
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices, runtime);
   mailbox = new MailboxService(db, events, threads, agents, turns, runtime);
-  runtime.bindServices({ mailbox, sidecars: devices });
+  runtime.bindServices({ mailbox, sidecars: devices, plugins });
   const recoveringMail = mailbox.recoverAcceptedMail();
   if (recoveringMail) await recoveringMail;
   else turns.recoverTurns();

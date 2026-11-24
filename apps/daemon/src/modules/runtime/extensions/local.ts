@@ -5,7 +5,7 @@ import { AGENT_LOCAL_TOOL, LOCAL_SCHEMA } from "@omarchy-bot/agent-contract";
 import { LOCAL_RESULT_TEXT_MAX } from "@omarchy-bot/protocol";
 import { resolveActiveTurnIdentity } from "../active-turn.ts";
 import type { RuntimeServices } from "../runtime.ts";
-import { rejectAmbiguousModelCallId } from "./model-call.ts";
+import { rejectAmbiguousModelCallId, type DispatchedCallIds } from "./model-call.ts";
 
 const DEFAULT_LOCAL_DEADLINE_MS = 120_000;
 
@@ -15,10 +15,10 @@ export function createLocalExtension(
   db: Database | undefined,
   getSidecars: () => RuntimeServices["sidecars"] | undefined,
   active: ReadonlyMap<string, LocalTurn>,
+  dispatched: DispatchedCallIds,
   deadlineMs = DEFAULT_LOCAL_DEADLINE_MS,
 ) {
   const { name, description, systemPrompt } = AGENT_LOCAL_TOOL;
-  const dispatched = new WeakMap<LocalTurn, Set<string>>();
   const tool = defineTool({
     name,
     description,
@@ -49,20 +49,15 @@ export function createLocalExtension(
         const turn = active.get(turnId);
         checkCancellation();
         if (!turn) throw new Error("local: Service Turn is not active");
-        let callIds = dispatched.get(turn);
-        if (!callIds) {
-          callIds = new Set();
-          dispatched.set(turn, callIds);
-        }
-        if (callIds.has(api.callId)) throw new Error("local: tool call was already dispatched");
-        callIds.add(api.callId);
         const { deviceId } = turn;
-        const execution = Promise.resolve().then(() => sidecars.execute(
-          args, { botId, turnId, ...(deviceId === undefined ? {} : { deviceId }) }, signal, {
+        const execution = Promise.resolve().then(() => {
+          checkCancellation();
+          dispatched.reserve(turnId, api.callId);
+          return sidecars.execute(args, { botId, turnId, ...(deviceId === undefined ? {} : { deviceId }) }, signal, {
             checkCancellation,
             onRenameSubmitted: () => { renameSubmitted = true; },
-          },
-        ));
+          });
+        });
         const result = await awaitWithContext(execution, callContext).catch((error: unknown) => {
           // A submitted rename can still commit after cancellation wins the wait.
           if (renameSubmitted && signal.aborted) return execution;

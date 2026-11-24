@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import type { PluginsService } from "../plugins/plugins.ts";
 import type { SidecarBroker } from "../devices/sidecarBroker.ts";
 import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
 import type { PlatformPaths } from "../workspace/paths.ts";
@@ -18,6 +19,8 @@ import { compactionExtension, compactionSettings, formatAuthorText } from "./com
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
 import { createLocalExtension } from "./extensions/local.ts";
 import { createMailExtension } from "./extensions/mail.ts";
+import { DispatchedCallIds } from "./extensions/model-call.ts";
+import { createPluginsExtension } from "./extensions/plugins.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { AssistantEntry, ConversationIdle, createRegistry, Harness, InboxDoc, type AgentChange, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type LiveState, type SettledSubmissionRecord, type SubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
@@ -37,6 +40,7 @@ export interface RuntimeServices {
     enqueue(context: { botId: string; turnId: string; toolCallId: string }, targetBotId: string, text: string): AgentBotMessageToolOutput;
   };
   sidecars: Pick<SidecarBroker, "execute">;
+  plugins: Pick<PluginsService, "callManage">;
 }
 
 interface DurableTurnStart {
@@ -256,12 +260,18 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   }
   const conversationBots = new Map<ConversationId, string>();
   const active = new Map<string, ActiveTurn>();
+  const dispatched = new DispatchedCallIds();
+  function releaseTurn(turnId: string): void {
+    active.delete(turnId);
+    dispatched.deleteTurn(turnId);
+  }
   let services: RuntimeServices | undefined;
   try {
     const registry = createRegistry();
     registry.install(compactionExtension);
-    registry.install(createLocalExtension(db, () => services?.sidecars, active));
+    registry.install(createLocalExtension(db, () => services?.sidecars, active, dispatched));
     registry.install(createMailExtension(db, () => services?.mailbox, active, undefined, writeService));
+    registry.install(createPluginsExtension(db, () => services?.plugins, active, dispatched));
     const approvals = db && options.events ? new ApprovalStore(db, options.events) : undefined;
     registry.install(createFilesShellExtension(process.platform, db && approvals ? {
       store: approvals,
@@ -435,7 +445,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         try { await watch?.stop(); }
         finally {
           await bookkeeping;
-          active.delete(input.turnId);
+          releaseTurn(input.turnId);
         }
       }
     }
@@ -569,10 +579,13 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
                     }
                   }
                 } catch (error) { await settleTurn(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) }); }
-                finally { await watch?.stop(); active.delete(row.id); }
+                finally {
+                  try { await watch?.stop(); }
+                  finally { releaseTurn(row.id); }
+                }
               })());
             } catch (error) {
-              active.delete(row.id);
+              releaseTurn(row.id);
               await settleTurn(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) });
             }
           }

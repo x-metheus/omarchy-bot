@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Harness, createRegistry, type ConversationId } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AGENT_LOCAL_TOOL } from "@omarchy-bot/agent-contract";
@@ -211,6 +212,90 @@ test("the model request contains the app prompt, Shared Workspace Skills, and Lo
       rmSync(home, { recursive: true, force: true });
     }
   });
+});
+
+test("a catalog Skill installed with manage_plugins appears in the next durable Turn's model system prompt", async () => {
+  const name = "catalog-release-review";
+  const description = "Review release evidence from the catalog fixture";
+  const source = "catalog-skill.invalid";
+  const id = `${source}/${name}`;
+  const publisher = "https://plugin-catalog.invalid";
+  const relativePath = `.agents/skills/${name}/SKILL.md`;
+  const document = `---\nname: ${name}\ndescription: ${description}\n---\nVerify the release evidence.\n`;
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  const detailUrl = `${publisher}/api/plugins/catalog/detail/normalised?${new URLSearchParams({ id })}`;
+  const indexUrl = `https://${source}/.well-known/agent-skills/index.json`;
+  const documentUrl = `https://${source}/.well-known/agent-skills/${name}/SKILL.md`;
+  globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.origin !== publisher && url.hostname !== source) return originalFetch(input, init);
+    requests.push(url.href);
+    if (url.href === detailUrl) return Response.json({ id, source, slug: name, content: document });
+    if (url.href === indexUrl) return Response.json({ skills: [{ name, files: ["SKILL.md"] }] });
+    if (url.href === documentUrl) return new Response(document);
+    if (url.href === `${publisher}/api/plugins/providers`) return Response.json([]);
+    return new Response("Unexpected catalog fixture request", { status: 404 });
+  }, { preconnect: originalFetch.preconnect });
+
+  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }] });
+  const prompts: string[] = [];
+  let installResult: unknown;
+  fake.setResponses([
+    ({ messages }) => {
+      prompts.push(getCurrentSystemPrompt(messages));
+      return fauxAssistantMessage(fauxToolCall("manage_plugins", { action: "install_skill", id }, { id: "catalog-install" }), { stopReason: "toolUse" });
+    },
+    ({ messages }) => {
+      prompts.push(getCurrentSystemPrompt(messages));
+      installResult = messages.at(-1);
+      return fauxAssistantMessage("The Skill is installed.");
+    },
+    ({ messages }) => {
+      prompts.push(getCurrentSystemPrompt(messages));
+      return fauxAssistantMessage("The catalog Skill is available.");
+    },
+  ]);
+  const originalOpen = Harness.open;
+  const open = spyOn(Harness, "open").mockImplementation((storage, options, context) => originalOpen.call(Harness, storage, {
+    ...options,
+    models: () => {
+      const models = typeof options.models === "function" ? options.models() : options.models;
+      if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
+      models.setProvider(fake.provider);
+      return models;
+    },
+  }, context));
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  try {
+    h = await startDaemon();
+    h.svc.plugins.configure(publisher);
+    const botId = await makeBot(h, "Catalog Skill Bot");
+    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const first = await sendToBot(h, botId, "Install the catalog Skill.");
+    await waitThreadIdle(h, first.threadId);
+    expect(installResult).toMatchObject({ role: "toolResult", toolName: "manage_plugins", isError: false });
+    expect(requests.filter((url) => url !== `${publisher}/api/plugins/providers`)).toEqual([detailUrl, indexUrl, documentUrl]);
+    expect(readFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, relativePath), "utf8")).toBe(document);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).not.toContain(name);
+
+    const next = await sendToThread(h, first.threadId, "Which Skills are available?");
+    expect(next.turnId).not.toBe(first.turnId);
+    await waitThreadIdle(h, next.threadId);
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain(`${name}: ${description} (${relativePath})`);
+    const turn = h.svc.db.query<{ status: string }, [string]>("SELECT status FROM turns WHERE id = ?");
+    expect(turn.get(first.turnId)?.status).toBe("completed");
+    expect(turn.get(next.turnId)?.status).toBe("completed");
+  } finally {
+    open.mockRestore();
+    globalThis.fetch = originalFetch;
+    await h?.stop();
+    if (h) rmSync(h.home, { recursive: true, force: true });
+  }
 });
 
 for (const mode of ["worker", "durable"] as const) {

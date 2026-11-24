@@ -13,6 +13,7 @@ import { DeviceServerFrameSchema, type DeviceLocalJobFrame, type DeviceServerFra
 import { SidecarBroker } from "../../devices/sidecarBroker.ts";
 import type { RuntimeServices } from "../runtime.ts";
 import { createLocalExtension } from "./local.ts";
+import { DispatchedCallIds } from "./model-call.ts";
 
 const deviceId = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const job = { action: "run", command: "echo local" } as const;
@@ -38,7 +39,7 @@ async function runLocalCall(options: {
     ["turn-active", { inputs: new Set<number>(), deviceId }],
     ["turn-follow-up", { inputs: new Set<number>(), deviceId: "other-device" }],
   ]);
-  registry.install(createLocalExtension(db, () => options.sidecars, active, options.deadlineMs));
+  registry.install(createLocalExtension(db, () => options.sidecars, active, new DispatchedCallIds(), options.deadlineMs));
   const models = createModels();
   models.setProvider(fake.provider);
   const harness = await Harness.open(storage, { registry, models }, context);
@@ -115,7 +116,7 @@ test("local rejects both calls with the same ID in one assistant response", asyn
   expect(results).toMatchObject([error, error]);
 });
 
-test("local rejects a dispatched call ID reused in a later round of the same Turn", async () => {
+test("local rejects a dispatched call ID reused in a later assistant response of the same Turn", async () => {
   const { sidecars, calls } = recordingBroker();
   const { settlement, results } = await runLocalCall({ sidecars, callRounds: [
     [fauxToolCall("local", job, { id: "reused-call" })],
