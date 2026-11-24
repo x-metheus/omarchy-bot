@@ -23,7 +23,9 @@ export const GUARDED_FILE_METHODS = [
 ] as const satisfies readonly (keyof NodeExecutionEnv)[];
 const guardedMethods = new Set<PropertyKey>(GUARDED_FILE_METHODS);
 
-class FileAccessError extends FileError {}
+class FileAccessError extends FileError {
+  constructor(code: FileError["code"], message: string, path: string, readonly outside = false) { super(code, message, path); }
+}
 
 function resolveInput(cwd: string, input: string): string {
   if (input === "~") return path.resolve(homedir());
@@ -93,7 +95,7 @@ export function resolveImplicitDownloads(paths: PlatformPaths): string | undefin
   return undefined;
 }
 
-function policy(paths: PlatformPaths, settingsFolders: readonly string[], botId: string | undefined) {
+function policy(paths: PlatformPaths, settingsFolders: readonly string[], botId: string | undefined, grants: readonly string[] = []) {
   const protectedPath = (value: string) => {
     const absolute = path.resolve(value);
     const resolved = canonicalPath(absolute);
@@ -146,20 +148,46 @@ function policy(paths: PlatformPaths, settingsFolders: readonly string[], botId:
     if (names.some((name) => crossesPrivateFolder(name) || bots.some((root) => containsProtected(name, root)))) {
       return denied("another Bot's private folder");
     }
-    if (!allowed.some((root) => withinExactPath(root, resolved))) return denied("outside the allowed folders");
+    if (!allowed.some((root) => withinExactPath(root, resolved)) && !grants.includes(resolved)) {
+      return err(new FileAccessError("permission_denied", `Access refused: outside the allowed folders: ${input}`, input, true));
+    }
     return ok(resolved);
   };
 }
 
+export type FileAccess =
+  | { kind: "allowed"; path: string }
+  | { kind: "outside"; path: string }
+  | { kind: "refused"; message: string };
+
+/** Decide a file tool path without touching it: allowed, outside the allowed folders (may be approved), or refused. */
+export function classifyFileAccess(
+  paths: PlatformPaths,
+  settingsFolders: readonly string[],
+  botId: string | undefined,
+  cwd: string,
+  input: string,
+): FileAccess {
+  let guard: ReturnType<typeof policy>;
+  try { guard = policy(paths, settingsFolders, botId); }
+  catch { return { kind: "refused", message: "Cannot resolve the protected file locations" }; }
+  const checked = guard(cwd, input);
+  if (checked.ok) return { kind: "allowed", path: checked.value };
+  if (!checked.error.outside) return { kind: "refused", message: checked.error.message };
+  return { kind: "outside", path: canonicalPath(resolveInput(cwd, input)) };
+}
+
+/** `grants` are canonical file paths an approval allows for one call; refused locations stay refused. */
 export function createFilesEnvironment(
   paths: PlatformPaths,
   settingsFolders: readonly string[],
   cwd = paths.sharedWorkspaceDir,
   botId?: string,
+  grants: readonly string[] = [],
 ): NodeExecutionEnv {
   let guard: ReturnType<typeof policy>;
   try {
-    guard = policy(paths, settingsFolders, botId);
+    guard = policy(paths, settingsFolders, botId, grants);
   } catch {
     guard = (_cwd, input) => err(new FileAccessError("invalid", "Cannot resolve the protected file locations", input));
   }

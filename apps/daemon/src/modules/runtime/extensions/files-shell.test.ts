@@ -13,7 +13,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { setSetting } from "../../../persistence/settings.ts";
 import { ALLOWED_FOLDERS_SETTING, readSettingsAllowedFolders } from "../../workspace/allowedFolders.ts";
 import { platformPaths, type PlatformPaths } from "../../workspace/paths.ts";
-import { createFilesEnvironment, createFilesShellExtension, DEFAULT_BASH_TIMEOUT_SECONDS, GUARDED_FILE_METHODS, hasDirectoryAncestor, MAX_BASH_TIMEOUT_SECONDS } from "./files-shell.ts";
+import { classifyFileAccess, createFilesEnvironment, createFilesShellExtension, DEFAULT_BASH_TIMEOUT_SECONDS, GUARDED_FILE_METHODS, hasDirectoryAncestor, MAX_BASH_TIMEOUT_SECONDS } from "./files-shell.ts";
 
 function directories() {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "bot-files-shell-")));
@@ -154,6 +154,37 @@ for (const [label, reason, prepare] of blockedTargets) {
     } finally { dirs.close(); }
   });
 }
+
+test("classification separates approvable outside paths from always-refused locations", () => {
+  const dirs = directories();
+  try {
+    const classify = (input: string) => classifyFileAccess(dirs.paths, dirs.allowed, "own-bot", dirs.sharedWorkspaceDir, input);
+    symlinkSync(dirs.outside, path.join(dirs.sharedWorkspaceDir, "link"), "dir");
+    expect(classify("draft.txt")).toEqual({ kind: "allowed", path: path.join(dirs.sharedWorkspaceDir, "draft.txt") });
+    expect(classify(path.join(dirs.outside, "new.txt"))).toEqual({ kind: "outside", path: path.join(dirs.outside, "new.txt") });
+    // The request names the canonical target, not the alias the Bot used.
+    expect(classify("link/missing/file.txt")).toEqual({ kind: "outside", path: path.join(dirs.outside, "missing", "file.txt") });
+    for (const [input, reason] of [[path.join(dirs.dataDir, "x"), "Service data directory"], [path.join(dirs.stateDir, "x"), "Service state directory"], [path.join(dirs.foreign, "x"), "another Bot's private folder"]] as const) {
+      expect(classify(input)).toEqual({ kind: "refused", message: expect.stringContaining(reason) });
+    }
+  } finally { dirs.close(); }
+});
+
+test("a grant allows exactly one outside file and never a refused location", async () => {
+  const dirs = directories();
+  try {
+    const granted = path.join(dirs.outside, "granted.txt");
+    const refused = path.join(dirs.dataDir, "granted.txt");
+    const env = createFilesEnvironment(dirs.paths, dirs.allowed, dirs.sharedWorkspaceDir, "own-bot", [granted, refused]);
+    expect((await env.writeFile(granted, "approved", context)).ok).toBe(true);
+    expect(readFileSync(granted, "utf8")).toBe("approved");
+    const sibling = await env.writeFile(path.join(dirs.outside, "sibling.txt"), "no", context);
+    expect(sibling.ok ? undefined : sibling.error.message).toContain("outside the allowed folders");
+    const data = await env.writeFile(refused, "no", context);
+    expect(data.ok ? undefined : data.error.message).toContain("Service data directory");
+    expect(existsSync(path.join(dirs.outside, "sibling.txt")) || existsSync(refused)).toBe(false);
+  } finally { dirs.close(); }
+});
 
 test("an unmapped conversation can use the Workspace but cannot use any Bot private folder", async () => {
   const dirs = directories();
