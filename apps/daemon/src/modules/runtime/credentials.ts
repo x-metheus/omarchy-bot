@@ -56,24 +56,30 @@ function hasSafeFields(record: ProviderRecord, safe: (value: string) => boolean)
   return safe(record.id) && safe(record.name) && (record.baseUrl === undefined || safe(record.baseUrl));
 }
 
+export function projectProviderModels(models: unknown[], safe: (value: string) => boolean): StoredModel[] {
+  return models.flatMap((model) => {
+    if (!model || typeof model !== "object") return [];
+    const { id, name, contextWindow, maxTokens, reasoning, input, cost } = model as Partial<StoredModel>;
+    if (typeof id !== "string" || !safe(id) || (typeof name === "string" && !safe(name))) return [];
+    return [{
+      id,
+      ...(typeof name === "string" ? { name } : {}),
+      ...(typeof contextWindow === "number" ? { contextWindow } : {}),
+      ...(typeof maxTokens === "number" ? { maxTokens } : {}),
+      ...(typeof reasoning === "boolean" ? { reasoning } : {}),
+      ...(Array.isArray(input) && input.every((value) => value === "text" || value === "image") ? { input: [...input] } : {}),
+      ...(cost && typeof cost.input === "number" && typeof cost.output === "number" && typeof cost.cacheRead === "number" && typeof cost.cacheWrite === "number"
+        ? { cost: { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite } } : {}),
+    }];
+  });
+}
+
 function providerRecord(record: ProviderRecord, safe: (value: string) => boolean): ProviderRecord {
   const { id, name, protocol, baseUrl, models } = record;
   return {
     id, name, protocol,
     ...(baseUrl === undefined ? {} : { baseUrl }),
-    ...(models === undefined ? {} : {
-      models: models.filter(({ id, name }) => safe(id) && (typeof name !== "string" || safe(name)))
-        .map(({ id, name, contextWindow, maxTokens, reasoning, input, cost }) => ({
-          id,
-          ...(typeof name === "string" ? { name } : {}),
-          ...(typeof contextWindow === "number" ? { contextWindow } : {}),
-          ...(typeof maxTokens === "number" ? { maxTokens } : {}),
-          ...(typeof reasoning === "boolean" ? { reasoning } : {}),
-          ...(Array.isArray(input) && input.every((value) => value === "text" || value === "image") ? { input: [...input] } : {}),
-          ...(cost && typeof cost.input === "number" && typeof cost.output === "number" && typeof cost.cacheRead === "number" && typeof cost.cacheWrite === "number"
-            ? { cost: { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite } } : {}),
-        })),
-    }),
+    ...(models === undefined ? {} : { models: projectProviderModels(models, safe) }),
   };
 }
 

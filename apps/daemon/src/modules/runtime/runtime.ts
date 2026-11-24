@@ -18,6 +18,7 @@ import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownl
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
+import { importPiProviders } from "./providerImport.ts";
 import { SecretStore } from "./secrets.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -81,6 +82,10 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     reportCredentialsFailure();
     return new CredentialStore(secretStore);
   });
+  if (db && !reportedCredentialsFailure) {
+    try { await importPiProviders({ db, credentials, homeDir: paths.homeDir }); }
+    catch { console.warn("Unable to import Pi model providers; continuing startup"); }
+  }
   const conversationBots = new Map<ConversationId, string>();
   const secrets: BotSecretAccess = { store: secretStore, botId: (id) => conversationBots.get(id) };
   const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });

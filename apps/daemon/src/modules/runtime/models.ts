@@ -16,7 +16,20 @@ function buildProvider(record: StoredProvider, requestedIds: string[] = []): Pro
   const builtin = registry.find((p) => p.id === record.id);
   if (record.protocol === "built-in") {
     if (!builtin) throw new Error("Unknown built-in model provider");
-    return builtin;
+    if (!record.models?.length) return builtin;
+    const stock = builtin.getModels();
+    const nativeRoute = stock[0];
+    if (!nativeRoute) return builtin;
+    const stockIds = new Set(stock.map(({ id }) => id));
+    const extraModels = record.models.filter(({ id }) => !stockIds.has(id)).map((model): Model<string> => ({
+      ...DEFAULT_MODEL_METADATA, ...model, name: model.name ?? model.id,
+      api: nativeRoute.api, provider: builtin.id, baseUrl: nativeRoute.baseUrl,
+    }));
+    return {
+      ...builtin,
+      getModels: () => [...builtin.getModels(), ...extraModels],
+      getAllModels: () => [...(builtin.getAllModels?.() ?? builtin.getModels()), ...extraModels],
+    };
   }
   try {
     if (!record.baseUrl || !new URL(record.baseUrl).host) throw new Error();
