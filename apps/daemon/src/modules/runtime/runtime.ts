@@ -16,6 +16,8 @@ import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
+import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
+import { SecretStore } from "./secrets.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
@@ -45,10 +47,11 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
 
 export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: { events?: Pick<EventLog, "append"> } = {}): Promise<BotRuntime> {
   const credentials = new CredentialStore(paths.stateDir);
+  const conversationBots = new Map<ConversationId, string>();
+  const secrets: BotSecretAccess = { store: new SecretStore(paths.dataDir), botId: (id) => conversationBots.get(id) };
   const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
   let reportedCredentialsFailure = false;
   const selections: { providerId: string; modelId: string }[] = [];
-  const conversationBots = new Map<ConversationId, string>();
   try {
     const registry = createRegistry();
     registry.install(compactionExtension);
@@ -61,7 +64,8 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         const row = db.query<{ thread_id: string; bot_id: string }, [number]>("SELECT thread_id, bot_id FROM pi_thread_conversations WHERE conversation_id = ?").get(conversationId);
         return row ? { threadId: row.thread_id, botId: row.bot_id } : undefined;
       },
-    } : undefined));
+    } : undefined, secrets));
+    registry.install(createSecretsExtension(secrets));
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         if (!reportedCredentialsFailure) {

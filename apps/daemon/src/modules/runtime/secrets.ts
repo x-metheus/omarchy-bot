@@ -33,7 +33,8 @@ const privateDirectoryMode = 0o700;
 const pending = new Map<string, Promise<unknown>>();
 const activeBackends = new Map<string, SecretBackend["kind"]>();
 
-/** The caller supplies an available keychain, if any, and the resolved Service data directory. */
+/** The caller supplies the resolved Service data directory and can inject a keychain backend. */
+// The OS backend and its runtime wiring are deferred to the next slice.
 export class SecretStore {
   readonly kind: SecretBackend["kind"];
   readonly #backend: SecretBackend;
@@ -211,6 +212,10 @@ export class SecretStore {
   }
 }
 
+export function secretPlaceholderNames(text: string): string[] {
+  return Array.from(text.matchAll(secretPlaceholderPattern), ([, name]) => name!);
+}
+
 /** Fill exact placeholders and collect the values used by this call for redaction. */
 export function fillSecretPlaceholders(
   text: string,
@@ -236,8 +241,15 @@ export function redactSecretValues(text: string, used: ReadonlyMap<string, strin
   const alternatives = [...placeholders.keys()]
     .sort((a, b) => b.length - a.length)
     .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  // Match only the original text. Generated placeholders are opaque, even if they contain a used value.
-  return text.replace(new RegExp(alternatives.join("|"), "g"), (value) => placeholders.get(value)!);
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(alternatives.join("|"), "g");
+  } catch {
+    // A regex compilation error can include the input pattern, which contains the secret values.
+    throw new Error("Unable to redact secret values.");
+  }
+  // Match only the original text, even if a generated placeholder contains a used value.
+  return text.replace(pattern, (value) => placeholders.get(value)!);
 }
 
 function tupleAccountKey(scope: string, name: string): string {
