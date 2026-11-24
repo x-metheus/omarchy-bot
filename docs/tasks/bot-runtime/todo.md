@@ -455,7 +455,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ### Evidence
 
-- `bun run typecheck` reported one pre-existing failure, TS2769 at `tests/integration/daemon.test.ts(289,59)`, reproduced on HEAD before this work.
+- `bun run typecheck` reported one pre-existing failure, TS2769 at `tests/integration/daemon.test.ts(289,59)`, from Task 9; it was fixed on main in `5a92a12`, and typecheck passes after the merge. With the switch on, `permanent-deletion.test.ts` still fails the Bot-owned cleanup case on the missing computer screenshot artifact, a Checkpoint B item that Task 11 owns.
 - `bun run lint:boundaries` passed 4 tests with 0 failures. `bun test apps/daemon` passed 167 tests with 1 pre-existing skip and 0 failures. The `sessionMigration` unit suite passed 39 tests.
 - `bun test tests/integration/session-migration.test.ts` passed 3 tests, and the same command with `OMARCHY_TEST_DURABLE=1` passed 3. The suite also covers `a new durable Thread without a legacy session sends only its first user message and logs no migration`.
 - `bun test tests/integration/old-session-deletion.test.ts` passed 12 tests, and the same command with `OMARCHY_TEST_DURABLE=1` passed 12. `bun test tests/integration/permanent-deletion.test.ts` passed 8 tests.

@@ -102,7 +102,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 - [ ] Settings can add an OpenAI-compatible provider and a built-in `pi-ai` provider, and each completes a Turn
 
 ### Phase 5: Migration and cutover
-- [ ] Task 18: Old session migration on a Thread's first Turn
+- [x] Task 18: Old session migration on a Thread's first Turn
 - [ ] Task 19: Cutover and deletion
 - [ ] Task 20: Remove the Pi worker, agent protocol, and Agent UI
 - [ ] Task 21: Real scenarios, end-to-end tests, and docs
