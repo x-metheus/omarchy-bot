@@ -390,6 +390,80 @@ await server.connect(new StdioServerTransport());
   }
 });
 
+test("markNeedsAuth preserves an existing connected MCP server", async () => {
+  const token = "fixture-connected-token";
+  const fixture = await startOAuthMcpServer({ fixedAuthorization: `Bearer ${token}` });
+  const mcp = createMcpExtension({
+    servers: () => ({ revision: "fixture", secrets: [], servers: {
+      remote: { disabled: false, transport: { type: "http", url: fixture.url } },
+      off: { disabled: true, transport: { type: "http", url: fixture.url } },
+    } }),
+    authProvider: () => ({ token: async () => token }),
+  });
+  try {
+    const connected = await mcp.check("remote");
+    expect(connected).toMatchObject({ status: "connected", toolCount: 1 });
+    expect(mcp.markNeedsAuth("remote")).toEqual(connected);
+    expect(mcp.markNeedsAuth("off")).toMatchObject({ status: "disabled", toolCount: 0 });
+    expect(mcp.markNeedsAuth("missing")).toBeUndefined();
+    expect(mcp.status()).toMatchObject([connected, { name: "off", status: "disabled" }]);
+  } finally {
+    await mcp.close();
+    await fixture.close();
+  }
+});
+
+test("markNeedsAuth leaves retirement queued behind an active MCP call after a URL change", async () => {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const retired = Promise.withResolvers<void>();
+  const events: string[] = [];
+  const fixture = new McpServer({ name: "fixture", version: "1" });
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    enableJsonResponse: true,
+    sessionIdGenerator: () => crypto.randomUUID(),
+    onsessionclosed() {
+      events.push("session closed");
+      retired.resolve();
+    },
+  });
+  fixture.registerTool("wait", {}, async () => {
+    started.resolve();
+    await release.promise;
+    events.push("tool finished");
+    return { content: [{ type: "text", text: "finished" }] };
+  });
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => transport.handleRequest(request) });
+  let url = new URL("/old", server.url).href;
+  const mcp = createMcpExtension({ servers: () => ({ revision: url, secrets: [], servers: {
+    remote: { disabled: false, transport: { type: "http", url } },
+  } }) });
+  try {
+    await fixture.connect(transport);
+    const call = executeMcp(mcp, { action: "call", service: "remote", tool: "wait" });
+    await started.promise;
+    url = new URL("/replacement", server.url).href;
+    const [retiring] = mcp.status();
+    expect(retiring).toMatchObject({ status: "not-connected", configurationRevision: url });
+    const marked = mcp.markNeedsAuth("remote");
+    expect(events).toEqual([]);
+
+    release.resolve();
+    expect(await call).toEqual({ isError: false, output: [{ type: "text", text: "finished" }] });
+    await retired.promise;
+    expect(events).toEqual(["tool finished", "session closed"]);
+    expect(marked).toEqual(retiring);
+    expect(mcp.status()[0]).toEqual(retiring);
+  } finally {
+    release.resolve();
+    try { await mcp.close(); }
+    finally {
+      await server.stop(true);
+      await fixture.close();
+    }
+  }
+});
+
 test("MCP check reports stdio status without spawning or replacing the process", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-check-"));
   const launches = path.join(root, "launches");

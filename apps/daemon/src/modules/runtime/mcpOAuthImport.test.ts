@@ -6,6 +6,8 @@ import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ToolExecutionApi } from "@earendil-works/pi-durable";
 import { OAuthIssuerMismatchError } from "@earendil-works/pi-mcp/oauth";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { EffectiveMcpServers } from "../plugins/nativeMcp.ts";
 import { createMcpExtension } from "./extensions/mcp.ts";
 import { McpOAuthManager, mcpOAuthSecretName, SecretMcpOAuthStateStore } from "./mcpOAuth.ts";
@@ -56,6 +58,7 @@ function importInput(secrets: SecretStore, entry: unknown) {
     snapshot: (): Pick<EffectiveMcpServers, "servers" | "configurationError"> => ({ servers: serversAt(exampleUrl) }),
     reader: { available: true, read: mock(async (_name: string) => entry) },
     check: mock(async (_name: string) => true),
+    reportRejected: mock((_name: string) => {}),
     now: () => sampleTime,
   };
 }
@@ -101,7 +104,8 @@ test.each([
 ])("adapter import requires sign-in for %s with zero writes", (_label, entry) => withSecrets(async (secrets, backend) => {
   const input = importInput(secrets, entry);
   expect(await importMcpOAuthTokens(input)).toEqual({ imported: [], needsSignIn: [name], skipped: [] });
-  expect(input.check.mock.calls).toEqual([[name]]);
+  expect(input.check).not.toHaveBeenCalled();
+  expect(input.reportRejected.mock.calls).toEqual([[name]]);
   expect(backend.writtenAccounts).toHaveLength(0);
 }));
 
@@ -123,7 +127,8 @@ test("adapter import requires sign-in when configured metadata would bypass the 
     ...server, transport: { ...server.transport, oauth: { authServerMetadataUrl: `${exampleIssuer}/metadata` } },
   } } });
   expect(await importMcpOAuthTokens({ ...input, snapshot })).toEqual({ imported: [], needsSignIn: [name], skipped: [] });
-  expect(input.check.mock.calls).toEqual([[name]]);
+  expect(input.check).not.toHaveBeenCalled();
+  expect(input.reportRejected.mock.calls).toEqual([[name]]);
   expect(backend.writtenAccounts).toHaveLength(0);
 
   const unbound = importInput(secrets, { tokens: { accessToken } });
@@ -204,6 +209,7 @@ test("adapter import keeps successful imports and retries only the server whose 
   };
   expect(await importMcpOAuthTokensOnce(onceInput)).toEqual({ imported: [name], needsSignIn: ["first"], skipped: [] });
   expect(input.check.mock.calls).toEqual([[name], ["first"]]);
+  expect(input.reportRejected).not.toHaveBeenCalled();
   expect(marker.set).not.toHaveBeenCalled();
 
   input.reader.read.mockClear();
@@ -211,6 +217,7 @@ test("adapter import keeps successful imports and retries only the server whose 
   expect(await importMcpOAuthTokensOnce(onceInput)).toEqual({ imported: ["first"], needsSignIn: [], skipped: [name] });
   expect(input.reader.read.mock.calls).toEqual([["first"]]);
   expect(input.check.mock.calls).toEqual([["first"]]);
+  expect(input.reportRejected).not.toHaveBeenCalled();
   expect(marker.set).toHaveBeenCalledWith("1");
 }));
 
@@ -225,6 +232,33 @@ test("adapter import leaves the marker unset and reads nothing when the snapshot
   expect(backend.writtenAccounts).toHaveLength(0);
 }));
 
+test("adapter import retries a server after its configuration error is fixed", () => withSecrets(async (secrets) => {
+  const input = importInput(secrets, { tokens: { accessToken } });
+  const marker = createMarker();
+  const healthy = serversAt(exampleUrl);
+  const repairedUrl = "https://repaired.example.test/mcp";
+  let repaired = false;
+  const snapshot = (): ReturnType<typeof input.snapshot> => ({ servers: {
+    ...healthy,
+    broken: repaired ? serversAt(repairedUrl)[name] : { configurationError: "Fixture configuration conflict." },
+  } });
+  const healthyStore = new SecretMcpOAuthStateStore({ secrets, name, server: exampleUrl });
+  const repairedStore = new SecretMcpOAuthStateStore({ secrets, name: "broken", server: repairedUrl });
+  const onceInput = { ...input, marker, snapshot };
+
+  expect(await importMcpOAuthTokensOnce(onceInput)).toEqual({ imported: [name], needsSignIn: [], skipped: ["broken"] });
+  expect((await healthyStore.load())?.tokens?.access_token === accessToken).toBe(true);
+  expect(input.reader.read.mock.calls).toEqual([[name]]);
+  expect(await repairedStore.load()).toBeUndefined();
+  expect(marker.set).not.toHaveBeenCalled();
+
+  repaired = true;
+  expect(await importMcpOAuthTokensOnce(onceInput)).toEqual({ imported: ["broken"], needsSignIn: [], skipped: [name] });
+  expect((await repairedStore.load())?.tokens?.access_token === accessToken).toBe(true);
+  expect(input.reader.read.mock.calls).toEqual([[name], ["broken"]]);
+  expect(marker.set).toHaveBeenCalledWith("1");
+}));
+
 test("adapter import rethrows a complete reader failure and leaves the marker unset", () => withSecrets(async (secrets, backend) => {
   const input = importInput(secrets, undefined);
   const marker = createMarker();
@@ -234,7 +268,37 @@ test("adapter import rethrows a complete reader failure and leaves the marker un
   await expect(importMcpOAuthTokensOnce({ ...input, snapshot, marker })).rejects.toBe(readerError);
   expect(marker.set).not.toHaveBeenCalled();
   expect(input.check.mock.calls).toEqual([[name]]);
+  expect(input.reportRejected).not.toHaveBeenCalled();
   expect(backend.writtenAccounts).toHaveLength(0);
+}));
+
+test("adapter import checks anonymous MCP connectivity after a reader failure", () => withSecrets(async (secrets, backend) => {
+  const fixture = new McpServer({ name: "anonymous-fixture", version: "1" });
+  const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true, sessionIdGenerator: () => crypto.randomUUID() });
+  fixture.registerTool("read", {}, () => ({ content: [{ type: "text", text: "read" }] }));
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    return request.headers.has("authorization") ? new Response(null, { status: 400 }) : transport.handleRequest(request);
+  } });
+  const snapshot = () => ({ revision: "anonymous", secrets: [], servers: serversAt(server.url.href) });
+  const mcp = createMcpExtension({ servers: snapshot });
+  const input = importInput(secrets, undefined);
+  input.reader.read.mockImplementation(async () => { throw new Error("Fixture reader unavailable."); });
+  input.check.mockImplementation(async (service) => (await mcp.check(service))?.status === "connected");
+  input.reportRejected.mockImplementation((service) => { mcp.markNeedsAuth(service); });
+  try {
+    await fixture.connect(transport);
+    expect(await importMcpOAuthTokens({ ...input, snapshot })).toEqual({ imported: [], needsSignIn: [name], skipped: [] });
+    expect(input.check.mock.calls).toEqual([[name]]);
+    expect(mcp.status()).toMatchObject([{ name, status: "connected", toolCount: 1 }]);
+    expect(input.reportRejected).not.toHaveBeenCalled();
+    expect(backend.writtenAccounts).toHaveLength(0);
+  } finally {
+    try { await mcp.close(); }
+    finally {
+      await server.stop(true);
+      await fixture.close();
+    }
+  }
 }));
 
 test("a failed connection check clears the imported credentials and leaves the marker unset", () => withSecrets(async (secrets) => {
@@ -246,6 +310,7 @@ test("a failed connection check clears the imported credentials and leaves the m
   const checkError = new Error("Fixture check failed.");
   input.check.mockImplementation(async () => { throw checkError; });
   await expect(importMcpOAuthTokensOnce({ ...input, marker })).rejects.toBe(checkError);
+  expect(input.reportRejected.mock.calls).toEqual([[name]]);
   expect(marker.set).not.toHaveBeenCalled();
   const saved = await new SecretMcpOAuthStateStore({ secrets, name, server: exampleUrl }).load();
   expect(saved).toEqual({ serverUrl: exampleUrl, clientInformation: { client_id: "fixture-client" } });
@@ -283,6 +348,7 @@ function setupOAuthMcp(fixture: Awaited<ReturnType<typeof startOAuthMcpServer>>,
       snapshot: () => ({ servers: serversAt(fixture.url) }),
       reader,
       check: async (service) => (await mcp.check(service))?.status === "connected",
+      reportRejected: (service: string) => mcp.markNeedsAuth(service),
     }),
     async callTool() {
       const result = await mcp.tools![0]!.execute({ action: "call", service: name, tool: "read_fixture" },
@@ -352,7 +418,7 @@ test("adapter import uses the read-only reader and the manager's app OAuth accou
 
 test("adapter import clears a rejected token, keeps discovery, and retries a later import", () => withOAuthMcp(async (ctx) => {
   const store = new SecretMcpOAuthStateStore({ secrets: ctx.secrets, name, server: ctx.fixture.url });
-  const tokensPresentDuringCheck: boolean[] = [];
+  const tokensPresentDuringValidationAndReport: Promise<boolean>[] = [];
   let discovered: Awaited<ReturnType<SecretMcpOAuthStateStore["load"]>>;
   const read = mock(async (_name: string) => ({ tokens: { accessToken, refreshToken } }));
   const input = {
@@ -360,19 +426,23 @@ test("adapter import clears a rejected token, keeps discovery, and retries a lat
     snapshot: () => ({ servers: serversAt(ctx.fixture.url) }),
     reader: { available: true, read },
     async check(service: string) {
-      tokensPresentDuringCheck.push((await store.load())?.tokens !== undefined);
+      tokensPresentDuringValidationAndReport.push(store.load().then((state) => state?.tokens !== undefined));
       const status = (await ctx.mcp.check(service))?.status;
-      if (tokensPresentDuringCheck.length === 1) {
+      if (tokensPresentDuringValidationAndReport.length === 1) {
         discovered = await store.load();
         expect(discovered?.tokens?.access_token === accessToken).toBe(true);
         expect(discovered?.discovery?.authorizationServerUrl).toBe(ctx.fixture.origin);
       }
       return status === "connected";
     },
+    reportRejected(service: string) {
+      tokensPresentDuringValidationAndReport.push(store.load().then((state) => state?.tokens !== undefined));
+      ctx.mcp.markNeedsAuth(service);
+    },
   };
   const needsSignIn = { imported: [], needsSignIn: [name], skipped: [] };
   expect(await importMcpOAuthTokens(input)).toEqual(needsSignIn);
-  expect(tokensPresentDuringCheck).toEqual([true, false]);
+  expect(await Promise.all(tokensPresentDuringValidationAndReport)).toEqual([true, false]);
   expect(ctx.fixture.observedAuthorization.has(`Bearer ${accessToken}`)).toBe(true);
   expect(ctx.mcp.status()[0]?.status).toBe("needs-auth");
   const saved = await store.load();
@@ -387,13 +457,15 @@ test("adapter import clears a rejected token, keeps discovery, and retries a lat
 
 test("adapter import reports an expired entry as needs-auth and leaves a missing entry unchecked", () => withOAuthMcp(async (ctx) => {
   const check = mock(async (service: string) => (await ctx.mcp.check(service))?.status === "connected");
+  const reportRejected = mock((service: string) => ctx.mcp.markNeedsAuth(service));
   const snapshot = () => ({ servers: { ...serversAt(ctx.fixture.url), absent: serversAt(ctx.fixture.url)[name] } });
   const report = await importMcpOAuthTokens({
-    secrets: ctx.secrets, snapshot, check, now: () => sampleTime,
+    secrets: ctx.secrets, snapshot, check, reportRejected, now: () => sampleTime,
     reader: { available: true, read: async (service) => service === name ? { tokens: { accessToken, expiresAt: 1 } } : undefined },
   });
   expect(report).toEqual({ imported: [], needsSignIn: [name], skipped: ["absent"] });
-  expect(check.mock.calls).toEqual([[name]]);
+  expect(check).not.toHaveBeenCalled();
+  expect(reportRejected.mock.calls).toEqual([[name]]);
   expect(ctx.mcp.status().map(({ name, status }) => [name, status])).toEqual([[name, "needs-auth"], ["absent", "not-connected"]]);
   expect(ctx.backend.writtenAccounts).toHaveLength(0);
 }));

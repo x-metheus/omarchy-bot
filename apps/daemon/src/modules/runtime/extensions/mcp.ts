@@ -249,6 +249,20 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
     return { ...effective, servers };
   }
 
+  function statusEntry(name: string, server: EffectiveMcpServer, { revision: configurationRevision, configurationError }: Pick<EffectiveMcpServers, "revision" | "configurationError">): NativeMcpStatus {
+    const disabled = server.disabled === true;
+    if (disabled || configurationError) {
+      return { name, configurationRevision, status: disabled ? "disabled" : "failed", toolCount: 0, disabled };
+    }
+    const connection = connections.get(name);
+    const toolCount = !connection?.retiring && connection?.client.connectionState === "connected" ? connection.toolCount : undefined;
+    let status: NativeMcpStatus["status"] = "not-connected";
+    if (toolCount !== undefined) status = "connected";
+    else if ("configurationError" in server) status = "failed";
+    else status = failures.get(name)?.status ?? status;
+    return { name, configurationRevision, status, toolCount: toolCount ?? 0, disabled };
+  }
+
   function withService<T>(
     action: McpArguments["action"], name: string, server: EffectiveMcpServer, cwd: string | undefined, context: Context,
     snapshot: { revision: string; secrets: string[] },
@@ -442,24 +456,23 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
         return mcp.status().find((entry) => entry.name === name);
       });
     },
+    markNeedsAuth(name: string): NativeMcpStatus | undefined {
+      if (closing) return undefined;
+      const effective = refreshServers(readServers());
+      const server = effective?.servers.get(name);
+      if (!effective || !server) return undefined;
+      const entry = statusEntry(name, server, effective);
+      const connection = connections.get(name);
+      if (entry.disabled || effective.configurationError || "configurationError" in server ||
+        connection?.retiring || connection?.client.connectionState === "connected") return entry;
+      failures.set(name, { revision: effective.revision, status: "needs-auth" });
+      return { ...entry, status: "needs-auth" };
+    },
     status(): NativeMcpStatus[] {
       if (closing) return [];
       const effective = refreshServers(readServers());
       if (!effective) return [];
-      const { revision: configurationRevision, configurationError } = effective;
-      return [...effective.servers].map(([name, server]) => {
-        const disabled = server.disabled === true;
-        if (disabled || configurationError) {
-          return { name, configurationRevision, status: disabled ? "disabled" : "failed", toolCount: 0, disabled };
-        }
-        const connection = connections.get(name);
-        const toolCount = !connection?.retiring && connection?.client.connectionState === "connected" ? connection.toolCount : undefined;
-        let status: NativeMcpStatus["status"] = "not-connected";
-        if (toolCount !== undefined) status = "connected";
-        else if ("configurationError" in server) status = "failed";
-        else status = failures.get(name)?.status ?? status;
-        return { name, configurationRevision, status, toolCount: toolCount ?? 0, disabled };
-      });
+      return [...effective.servers].map(([name, server]) => statusEntry(name, server, effective));
     },
     retainedTokenSetCountForTest(): number {
       return issuedTokensByName.size;

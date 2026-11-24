@@ -14,6 +14,7 @@ import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore, MODEL_CREDENTIALS_FILENAME } from "./credentials.ts";
 import { SecretStore } from "./secrets.ts";
 import { createRuntimeModels } from "./models.ts";
+import { importMcpOAuthTokens } from "./mcpOAuthImport.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { openBotRuntime, type BotRuntime } from "./runtime.ts";
 import { openThreadConversation } from "./conversations.ts";
@@ -31,6 +32,7 @@ test("runtime creates durable tables and can close and reopen", async () => {
       const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
       try {
         expect(runtime.mcpStatus()).toEqual([]);
+        expect(runtime.mcpMarkNeedsAuth("missing")).toBeUndefined();
         const db = new Database(dbPath, { readonly: true });
         try {
           const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'pi_*'").all();
@@ -91,6 +93,54 @@ await server.connect(new StdioServerTransport());
   } finally {
     await runtime.close();
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a plain 403 during OAuth import leaves the MCP service needing sign-in", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-rejected-import-"));
+  const stateDir = path.join(directory, "state");
+  const sharedWorkspaceDir = path.join(directory, "workspace");
+  const accessToken = "rejected-fixture-token";
+  const observedAuthorization: (string | null)[] = [];
+  const fixture = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    observedAuthorization.push(request.headers.get("authorization"));
+    return new Response(null, { status: 403 });
+  } });
+  let runtime: BotRuntime | undefined;
+  try {
+    mkdirSync(stateDir);
+    mkdirSync(sharedWorkspaceDir);
+    const store = new NativeMcpStore(sharedWorkspaceDir, path.join(directory, "private"));
+    const snapshot = () => store.effectiveServers();
+    const { name } = store.save(null, { name: "remote", enabled: true, transport: { type: "http", url: fixture.url.href } });
+    const botRuntime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+      homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+      mcp: { servers: snapshot },
+    });
+    runtime = botRuntime;
+    const report = await importMcpOAuthTokens({
+      secrets: botRuntime.secrets,
+      snapshot,
+      reader: { available: true, read: async () => ({ tokens: { accessToken } }) },
+      async check(server) {
+        const result = await botRuntime.mcpControl({ action: "connect", server });
+        expect(result).toMatchObject({ servers: [{ name, status: "failed" }], result: { error: "connect_failed" } });
+        return result.servers.some((entry) => entry.name === server && entry.status === "connected");
+      },
+      reportRejected: (server) => botRuntime.mcpMarkNeedsAuth(server),
+    });
+    expect(report).toEqual({ imported: [], needsSignIn: [name], skipped: [] });
+    const statuses = botRuntime.mcpStatus();
+    expect(statuses).toMatchObject([{ name, status: "needs-auth", toolCount: 0 }]);
+    store.updateStatus(statuses);
+    expect(store.list()).toMatchObject([{ name, status: "needs-auth", toolCount: 0 }]);
+    expect(Bun.deepEquals(observedAuthorization, [`Bearer ${accessToken}`])).toBe(true);
+  } finally {
+    try { await runtime?.close(); }
+    finally {
+      await fixture.stop(true);
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 

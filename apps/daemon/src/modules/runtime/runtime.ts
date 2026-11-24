@@ -60,6 +60,7 @@ export interface BotRuntime {
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
   mcpStatus(): NativeMcpStatus[];
+  mcpMarkNeedsAuth(name: string): NativeMcpStatus | undefined;
   mcpControl(input: McpControlInput): Promise<NativeMcpControlResult>;
   close(): Promise<void>;
   /** Requests to use files outside the allowed folders; absent without Service storage and events. */
@@ -492,6 +493,9 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       },
       mcpStatus() {
         return mcp?.status() ?? [];
+      },
+      mcpMarkNeedsAuth(name) {
+        return mcp?.markNeedsAuth(name);
       },
       async mcpControl({ action, server, redirectUrl, authorizationId, expiresAt }) {
         const status = () => mcp?.status() ?? [];

@@ -22,6 +22,7 @@ interface ImportInput {
   snapshot: () => Pick<EffectiveMcpServers, "servers" | "configurationError">;
   reader: PiMcpAdapterTokenReader;
   check(name: string): Promise<boolean>;
+  reportRejected(name: string): void;
   now?: () => number;
 }
 
@@ -79,12 +80,13 @@ function convertEntry(entry: unknown, serverUrl: string, now: number): McpOAuthS
   return state;
 }
 
-async function runImport({ secrets, snapshot, reader, check, now = Date.now }: ImportInput) {
+async function runImport({ secrets, snapshot, reader, check, reportRejected, now = Date.now }: ImportInput) {
   const report: ImportReport = { imported: [], needsSignIn: [], skipped: [] };
   const { servers, configurationError } = snapshot();
   if (configurationError !== undefined) return { report, canMarkComplete: false };
   let readSucceeded = false;
   let readFailure: { error: unknown } | undefined;
+  const failedReads: string[] = [];
   for (const [name, { disabled, transport }] of Object.entries(servers)) {
     if (disabled || transport?.type !== "http" ||
         Object.keys(transport.headers ?? {}).some((key) => key.toLowerCase() === "authorization")) {
@@ -103,7 +105,7 @@ async function runImport({ secrets, snapshot, reader, check, now = Date.now }: I
         readSucceeded = true;
       } catch (error) {
         readFailure ??= { error };
-        return "needsSignIn";
+        return "readFailed";
       }
       if (entry === undefined) return "skipped";
       const state = convertEntry(entry, serverUrl, now());
@@ -112,7 +114,13 @@ async function runImport({ secrets, snapshot, reader, check, now = Date.now }: I
       await store.save(state);
       return state;
     });
+    if (staged === "readFailed") {
+      failedReads.push(name);
+      report.needsSignIn.push(name);
+      continue;
+    }
     if (typeof staged === "string") {
+      if (staged === "needsSignIn") reportRejected(name);
       report[staged].push(name);
       continue;
     }
@@ -132,13 +140,14 @@ async function runImport({ secrets, snapshot, reader, check, now = Date.now }: I
           delete current.tokensExpireAt;
           await store.save(current);
         });
+        reportRejected(name);
       }
     }
     report[connected ? "imported" : "needsSignIn"].push(name);
   }
-  // Publish connection status after any rejected credentials have been cleared.
-  await Promise.all(report.needsSignIn.map(async (name) => check(name)));
-  return { report, canMarkComplete: !readFailure, allReadsFailed: readSucceeded ? undefined : readFailure };
+  await Promise.all(failedReads.map((name) => check(name)));
+  const canMarkComplete = !readFailure && !Object.values(servers).some((server) => "configurationError" in server);
+  return { report, canMarkComplete, allReadsFailed: readSucceeded ? undefined : readFailure };
 }
 
 export async function importMcpOAuthTokens(input: ImportInput): Promise<ImportReport> {

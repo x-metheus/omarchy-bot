@@ -187,6 +187,7 @@ export async function main(options: MainOptions = {}): Promise<{
       snapshot: mcpServers,
       check: (name) => runtime.mcpControl({ action: "connect", server: name })
         .then(({ servers }) => servers.some((server) => server.name === name && server.status === "connected")),
+      reportRejected: (name) => runtime.mcpMarkNeedsAuth(name),
       marker: {
         get: () => getSetting(db, markerKey) ?? undefined,
         set: (value) => setSetting(db, markerKey, value),
