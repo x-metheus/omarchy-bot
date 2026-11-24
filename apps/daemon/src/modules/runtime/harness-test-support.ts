@@ -57,8 +57,7 @@ export function installDurableSuiteProvider(): () => void {
     });
     return conversation;
   }
-  const registry = createRegistry();
-  registry.install({ name: "test-steering", tools: [defineTool({
+  const steering = defineExtension({ name: "test-steering", tools: [defineTool({
     name: "steer_boundary", description: "Test steering boundary", parameters: { type: "object", properties: {}, additionalProperties: false },
     async execute(_args, api, context) {
       if (!steered.delete(api.conversationId)) {
@@ -75,9 +74,11 @@ export function installDurableSuiteProvider(): () => void {
   })] });
   const originalOpen = Harness.open;
   Harness.open = async (storage, options, context) => {
+    const registry: unknown = options.registry;
+    if (typeof registry !== "object" || registry === null || !("install" in registry) || typeof registry.install !== "function") throw new Error("Expected a mutable registry");
+    registry.install(steering);
     const harness = await originalOpen.call(Harness, storage, {
       ...options,
-      registry,
       models: () => {
         const models = typeof options.models === "function" ? options.models() : options.models;
         if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");

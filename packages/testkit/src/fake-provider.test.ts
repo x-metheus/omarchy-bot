@@ -10,6 +10,24 @@ function suite() {
   return (text: string, signal?: AbortSignal) => models.streamSimple(fake.getModel(), { messages: [{ role: "user", content: text, timestamp: Date.now() }] }, signal ? { signal } : undefined);
 }
 
+test("durable computer directives follow the worker action and argument syntax", async () => {
+  const run = suite();
+  const directives = [
+    ["computer:click:any:label", "click", { x: 4, y: 5 }],
+    ["computer:type:one:two", "type", { text: "one:two" }],
+    ["computer:open_app:app:name", "open_app", { app: "app:name" }],
+    ["computer:open_url:https://example.org:8443/path", "open_url", { url: "https://example.org:8443/path" }],
+    ["computer:list_windows", "list_windows", {}],
+    ["computer:screenshot", "screenshot", {}],
+    ["computer:unknown", "observe", {}],
+  ] as const;
+  for (const [directive, action, args] of directives) {
+    const reply = await run(directive).result();
+    expect(reply.stopReason).toBe("toolUse");
+    expect(reply.content).toMatchObject([{ type: "toolCall", name: "computer", arguments: { action, args } }]);
+  }
+});
+
 test("durable scripts preserve text and thinking block order", async () => {
   const run = suite();
   expect((await run("parity-stream").result()).content).toEqual([{ type: "thinking", thinking: "T" }, { type: "text", text: "R" }]);

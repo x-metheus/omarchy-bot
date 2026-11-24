@@ -21,15 +21,39 @@ function userTexts(context: TranscriptContext): string[] {
   return context.messages.flatMap((message) => message.role === "user" ? [typeof message.content === "string" ? message.content : message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")] : []);
 }
 
-/**
- * The durable suite's text/thinking fixtures. Tool-call and native-event transcript
- * projection, capability inventory, process-only, computer/browser, attachments,
- * and mailbox fixtures belong to Checkpoint C: those in-process tools are not built.
- * Task 20 worker-only cases cover session IDs/resume/open failures, steering command
- * mechanics, abort controls, worker/process-loss events, and Agent readiness.
- */
+function computerFixture(context: TranscriptContext) {
+  const text = userTexts(context).at(-1) ?? "";
+  if (!text.startsWith("computer:")) return undefined;
+  const [, command = "observe", ...tail] = text.split(":");
+  if (command === "crash-agent") return undefined;
+  const value = tail.join(":");
+  let action = command;
+  let args: Record<string, string | number> = {};
+  switch (command) {
+    case "click": args = { x: 4, y: 5 }; break;
+    case "type": args = { text: value }; break;
+    case "open_app": args = { app: value }; break;
+    case "open_url": args = { url: value }; break;
+    case "list_windows": case "screenshot": break;
+    default: action = "observe";
+  }
+  const lastUser = context.messages.findLastIndex((message) => message.role === "user");
+  const result = context.messages.slice(lastUser + 1).findLast((message) => message.role === "toolResult" && message.toolName === "computer");
+  if (result?.role === "toolResult") {
+    if (result.isError) {
+      const errorMessage = result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n");
+      return fauxAssistantMessage([], { stopReason: "error", errorMessage });
+    }
+    return fauxAssistantMessage(JSON.stringify(result.details));
+  }
+  return fauxAssistantMessage([fauxToolCall("computer", { action, args })], { stopReason: "toolUse" });
+}
+
+/** The durable suite's text, thinking, steering, and computer fixtures. */
 export function createDurableSuiteFakeProvider() {
   const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }], tokensPerSecond: 20, tokenSize: { min: 1, max: 1 } });
+  // The worker emits the entire computer response at once.
+  const computer = fauxProvider({ provider: "fake" });
   const failedSessions = new Set<string>();
   fake.setResponses(Array.from({ length: 1000 }, () => (context: TranscriptContext, options) => {
     const texts = userTexts(context);
@@ -62,6 +86,12 @@ export function createDurableSuiteFakeProvider() {
   }));
   const base = fake.provider;
   const streamSimple: typeof base.streamSimple = (model, context, options) => {
+    const reply = computerFixture(context);
+    if (reply !== undefined) {
+      computer.appendResponses([reply]);
+      fake.state.callCount++;
+      return computer.provider.streamSimple(model, context, options);
+    }
     const text = userTexts(context).at(-1);
     const hanging = text === "hang" || text === "thinking-hang";
     const interrupted = hanging || text === "thinking-fail" || text === "thinking-crash" || text === "partial-fail" || text === "partial-crash";

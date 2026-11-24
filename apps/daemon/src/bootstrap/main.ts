@@ -58,7 +58,6 @@ export async function main(options: MainOptions = {}): Promise<{
   const db = openDb(cfg);
   recoverOnStartup(db);
   const events = new EventLog(db);
-  const runtime = await openBotRuntime(cfg, db, { events });
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
@@ -166,21 +165,18 @@ export async function main(options: MainOptions = {}): Promise<{
   const pairingHostSecret = pairing.ensureHostSecret(cfg.stateDir);
   const deviceLiveness = setInterval(() => devices.expire(), 5_000);
   deviceLiveness.unref?.();
-  const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices, runtime);
-  turns.recoverTurns();
-  mailbox = new MailboxService(db, events, threads, agents, turns);
   const lease = new ScreenInputLease({
-    grant: async (surfaceId, epoch, generation, kind) => {
-      const source = await screens.projectionSource(ownerFor(surfaceId));
+    grant: async (surfaceId, epoch, generation, kind, signal) => {
+      const source = await screens.projectionSource(ownerFor(surfaceId), signal);
       if (source === undefined) throw new Error("Bot Screen is unavailable");
       // A grant for a replaced runtime must not arm the new compositor.
       if (generation !== undefined && source.runtimeGeneration !== generation) {
         throw new Error(`stale runtime generation ${generation}`);
       }
-      return source.setInputAuthority(epoch, kind);
+      return source.setInputAuthority(epoch, kind, signal);
     },
-    deliver: async (surfaceId, epoch, event, sequence = 1, generation) => {
-      const source = await screens.projectionSource(ownerFor(surfaceId));
+    deliver: async (surfaceId, epoch, event, sequence = 1, generation, signal) => {
+      const source = await screens.projectionSource(ownerFor(surfaceId), signal);
       if (source === undefined) throw new Error("Bot Screen is unavailable");
       if (generation !== undefined && source.runtimeGeneration !== generation) {
         throw new Error(`stale runtime generation ${generation}`);
@@ -192,7 +188,7 @@ export async function main(options: MainOptions = {}): Promise<{
         controllerEpoch: epoch,
         ...event,
         sequence,
-      });
+      }, signal);
     },
     release: async (surfaceId, epoch, held, nextSequence = 1, generation) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));
@@ -206,21 +202,24 @@ export async function main(options: MainOptions = {}): Promise<{
         geometryGeneration: source.geometryGeneration,
         controllerEpoch: epoch,
       };
-      for (const keyCode of held.keys) {
-        await source.input({ ...context, sequence: sequence++, type: "key", keyCode, state: "released" });
+      try {
+        for (const keyCode of held.keys) {
+          await source.input({ ...context, sequence: sequence++, type: "key", keyCode, state: "released" });
+        }
+        for (const button of held.buttons) {
+          await source.input({
+            ...context,
+            sequence: sequence++,
+            type: "button",
+            x: 0,
+            y: 0,
+            button,
+            state: "released",
+          });
+        }
+      } finally {
+        await source.releaseInput(epoch);
       }
-      for (const button of held.buttons) {
-        await source.input({
-          ...context,
-          sequence: sequence++,
-          type: "button",
-          x: 0,
-          y: 0,
-          button,
-          state: "released",
-        });
-      }
-      await source.releaseInput(epoch);
     },
     capture: (surfaceId) => screens.capture(ownerFor(surfaceId)),
   });
@@ -231,6 +230,11 @@ export async function main(options: MainOptions = {}): Promise<{
     if (row === null) throw new Error("unknown Computer Surface");
     return { botId: row.bot_id, surfaceId };
   }
+  await screens.recover();
+  const runtime = await openBotRuntime(cfg, db, { events, computer });
+  const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices, runtime);
+  turns.recoverTurns();
+  mailbox = new MailboxService(db, events, threads, agents, turns);
   const botDeletions = new BotDeletionService(
     db,
     events,
@@ -243,7 +247,6 @@ export async function main(options: MainOptions = {}): Promise<{
     cfg.botDeletionTerminalTimeoutMs,
     projections,
   );
-  await screens.recover();
 
   agents.init();
   mailbox.reconcileStartup();

@@ -172,19 +172,20 @@ export class WaylandVirtualInput {
     return input;
   }
 
-  setInputAuthority(controllerEpoch: number): Promise<void> {
+  setInputAuthority(controllerEpoch: number, signal?: AbortSignal): Promise<void> {
     const requestSequence = ++this.#requestSequence;
     return this.#command(
       `authority ${requestSequence} ${this.#context} ${controllerEpoch}`,
       requestSequence,
+      signal,
     );
   }
 
-  input(event: BotScreenInputEvent): Promise<void> {
+  input(event: BotScreenInputEvent, signal?: AbortSignal): Promise<void> {
     const requestSequence = ++this.#requestSequence;
     const envelope = `${event.surfaceId} ${event.runtimeGeneration} ${event.geometryGeneration} ${event.controllerEpoch} ${event.sequence}`;
     if (event.type === "motion") {
-      return this.#command(`motion ${requestSequence} ${envelope} ${event.x} ${event.y}`, requestSequence);
+      return this.#command(`motion ${requestSequence} ${envelope} ${event.x} ${event.y}`, requestSequence, signal);
     }
     if (event.type === "button") {
       const button = event.button === "left" ? 272 : event.button === "right" ? 273 : 274;
@@ -193,23 +194,27 @@ export class WaylandVirtualInput {
           event.state === "pressed" ? 1 : 0
         }`,
         requestSequence,
+        signal,
       );
     }
     if (event.type === "scroll") {
       return this.#command(
         `scroll ${requestSequence} ${envelope} ${event.x} ${event.y} ${event.deltaX} ${event.deltaY}`,
         requestSequence,
+        signal,
       );
     }
     if (event.type === "key") {
       return this.#command(
         `key ${requestSequence} ${envelope} ${event.keyCode} ${event.state === "pressed" ? 1 : 0}`,
         requestSequence,
+        signal,
       );
     }
     return this.#command(
       `paste ${requestSequence} ${envelope} ${Buffer.from(event.text, "utf8").toString("base64")}`,
       requestSequence,
+      signal,
     );
   }
 
@@ -241,8 +246,9 @@ export class WaylandVirtualInput {
     await this.process.exited;
   }
 
-  #command(line: string, requestSequence: number): Promise<void> {
+  #command(line: string, requestSequence: number, signal?: AbortSignal): Promise<void> {
     const operation = this.#operations.then(async () => {
+      signal?.throwIfAborted();
       if (this.#terminalError !== undefined) throw this.#terminalError;
       if (this.#stopped || this.process.exitCode !== null) throw new Error("Bot Screen input helper is not running");
       let timeout: Timer | undefined;

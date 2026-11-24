@@ -14,8 +14,8 @@ export type HeldInput = Readonly<{
 
 /** Runtime delivery. The lease decides who may type; the adapter only delivers. */
 export interface ScreenInputDelivery {
-  grant(surfaceId: SurfaceId, epoch: number, generation?: number, kind?: "web" | "bot"): Promise<number>;
-  deliver(surfaceId: SurfaceId, epoch: number, event: BotScreenInputAction, sequence?: number, generation?: number): Promise<void>;
+  grant(surfaceId: SurfaceId, epoch: number, generation?: number, kind?: "web" | "bot", signal?: AbortSignal): Promise<number>;
+  deliver(surfaceId: SurfaceId, epoch: number, event: BotScreenInputAction, sequence?: number, generation?: number, signal?: AbortSignal): Promise<void>;
   release(surfaceId: SurfaceId, epoch: number, held: HeldInput, nextSequence?: number, generation?: number): Promise<void>;
   capture(surfaceId: SurfaceId): Promise<unknown>;
 }
@@ -48,6 +48,7 @@ interface SeatHolder {
   keys: Set<number>;
   buttons: Set<"left" | "middle" | "right">;
   sequence: number;
+  inFlight: Set<Promise<void>>;
 }
 
 export interface WebControlGrant {
@@ -317,7 +318,7 @@ export class ScreenInputLease {
       this.#held.resolve();
       let accepted: number;
       try {
-        accepted = await this.delivery.grant(target.surfaceId, epoch, target.runtimeGeneration, holder.kind);
+        accepted = await this.delivery.grant(target.surfaceId, epoch, target.runtimeGeneration, holder.kind, input.signal);
         if (accepted !== epoch) throw new Error(`stale controller epoch ${accepted}`);
         // The runtime may have been replaced while the grant was in flight.
         this.#requireGeneration(target);
@@ -328,7 +329,11 @@ export class ScreenInputLease {
       holder.granted = true;
       this.#epoch.set(target.surfaceId, epoch);
       try {
-        return await input.run((event) => this.#deliver(holder, event));
+        input.signal.throwIfAborted();
+        return await input.run((event) => {
+          input.signal.throwIfAborted();
+          return this.#deliver(holder, event, input.signal);
+        });
       } finally {
         await this.#drop(holder);
       }
@@ -337,21 +342,28 @@ export class ScreenInputLease {
     }
   }
 
-  async #deliver(holder: SeatHolder, event: BotScreenInputAction): Promise<void> {
+  async #deliver(holder: SeatHolder, event: BotScreenInputAction, signal?: AbortSignal): Promise<void> {
     if (this.#holder !== holder) throw new Error("stale controller epoch");
     // The runtime was replaced: the old holder's keys must not reach the new compositor.
     if (this.#generation.get(holder.surfaceId) !== holder.runtimeGeneration) {
       throw new Error(`stale runtime generation ${holder.runtimeGeneration}`);
     }
-    if (event.type === "key") {
-      if (event.state === "pressed") holder.keys.add(event.keyCode);
-      else holder.keys.delete(event.keyCode);
-    } else if (event.type === "button") {
-      if (event.state === "pressed") holder.buttons.add(event.button);
-      else holder.buttons.delete(event.button);
-    }
     const sequence = ++holder.sequence;
-    await this.delivery.deliver(holder.surfaceId, holder.epoch, event, sequence, holder.runtimeGeneration);
+    const acknowledged = this.delivery.deliver(holder.surfaceId, holder.epoch, event, sequence, holder.runtimeGeneration, signal).then(() => {
+      if (event.type === "key") {
+        if (event.state === "pressed") holder.keys.add(event.keyCode);
+        else holder.keys.delete(event.keyCode);
+      } else if (event.type === "button") {
+        if (event.state === "pressed") holder.buttons.add(event.button);
+        else holder.buttons.delete(event.button);
+      }
+    });
+    holder.inFlight.add(acknowledged);
+    try {
+      await acknowledged;
+    } finally {
+      holder.inFlight.delete(acknowledged);
+    }
   }
 
   #hold(
@@ -371,6 +383,7 @@ export class ScreenInputLease {
       keys: new Set(),
       buttons: new Set(),
       sequence: 0,
+      inFlight: new Set(),
     };
     this.#holder = holder;
     return holder;
@@ -386,11 +399,13 @@ export class ScreenInputLease {
     if (inFlight !== undefined) return inFlight;
     if (this.#holder !== holder) return Promise.resolve();
     this.#holder = undefined;
-    const held: HeldInput = holder.keys.size === 0 && holder.buttons.size === 0
-      ? EMPTY_HELD
-      : { keys: holder.keys, buttons: holder.buttons };
     const release = (async (): Promise<void> => {
       try {
+        // Web Control can be revoked while a delivered event awaits acknowledgement.
+        if (holder.inFlight.size > 0) await Promise.allSettled(holder.inFlight);
+        const held: HeldInput = holder.keys.size === 0 && holder.buttons.size === 0
+          ? EMPTY_HELD
+          : { keys: holder.keys, buttons: holder.buttons };
         await this.delivery.release(
           holder.surfaceId,
           holder.epoch,

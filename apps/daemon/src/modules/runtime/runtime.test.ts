@@ -8,7 +8,10 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
+import { until } from "../../../../../tests/integration/helpers/bot-screen-load-observe.ts";
+import { FakeBotScreenRuntimeAdapter } from "../computer/fakeBotScreenRuntime.ts";
 import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
+import { AGENT_COMPUTER_TOOL } from "@omarchy-bot/agent-contract";
 import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore } from "./credentials.ts";
@@ -124,7 +127,29 @@ test("configured conversation uses the Service limit for unset and null Bots and
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
 
-test("the model request contains only the app prompt and Shared Workspace Skills", () => {
+test("a steer placed at a final Harness boundary resolves its owning Omarchy turn for computer", async () => {
+  const previous = process.env.OMARCHY_TEST_DURABLE;
+  process.env.OMARCHY_TEST_DURABLE = "1";
+  const adapter = new FakeBotScreenRuntimeAdapter();
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  try {
+    const daemon = h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const botId = await makeBot(h, "Steered computer Bot");
+    const sent = await sendToBot(h, botId, `say: ${"initial reply ".repeat(3)}`);
+    await until(() => daemon.svc.db.query("SELECT 1 FROM messages WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming'").get(sent.turnId), 3_000, "initial reply did not start streaming");
+    const steered = await sendToThread(h, sent.threadId, "computer:click:first");
+    expect(steered).toMatchObject({ turnId: sent.turnId, action: "steered" });
+    await waitThreadIdle(h, sent.threadId);
+    expect(adapter.inputEvents).toHaveLength(3);
+    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+  } finally {
+    await h?.stop();
+    if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
+    else process.env.OMARCHY_TEST_DURABLE = previous;
+  }
+});
+
+test("the model request contains only the app prompt, Shared Workspace Skills, and computer guidelines", () => {
   const prompts: string[] = [];
   return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "bot-prompt-home-"));
@@ -189,7 +214,9 @@ test("the model request contains only the app prompt and Shared Workspace Skills
         allowedFolders,
         skills: [{ name: "Workspace Skill", description: "Workspace skill description sentinel", path: ".agents/skills/workspace/SKILL.md" }],
       });
-      expect(prompt).toBe(`<instructions>\n${appPrompt}\n</instructions>`);
+      const { summary, guidelines } = AGENT_COMPUTER_TOOL.systemPrompt;
+      const computerPrompt = [summary, ...guidelines.map((guideline) => `- ${guideline}`)].join("\n");
+      expect(prompt).toBe(`<computer>\n${computerPrompt}\n</computer>\n\n<instructions>\n${appPrompt}\n</instructions>`);
     } finally {
       await h?.stop();
       if (previousPiConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

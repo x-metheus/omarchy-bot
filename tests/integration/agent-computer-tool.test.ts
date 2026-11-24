@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import type { SurfaceId } from "../../packages/domain/src/index.ts";
 import type { MessageDto } from "../../packages/protocol/src/index.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
-import { api, authedFetch, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { BotScreenInputRejectedError } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
+import { ScreenInputLease } from "../../apps/daemon/src/modules/computer/screenInputLease.ts";
+import { api, authedFetch, makeBot, sendToBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
 import { createComputerTool } from "../../workers/pi/src/computer-tool.ts";
 import { until } from "./helpers/bot-screen-load-observe.ts";
 
@@ -308,6 +310,269 @@ describe("Bot-bound Pi computer tool", () => {
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
   });
 
+  test("an aborted input queued behind a snapshot never writes to the Screen", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const botId = await makeBot(h, "Queued input Bot");
+    const surfaceId = await botSurface(h, botId);
+    const owner = { botId, surfaceId };
+    const { computer, screens } = h.svc;
+    const controller = new AbortController();
+    const captured = Promise.withResolvers<void>();
+    const queued = Promise.withResolvers<void>();
+    const sourceFor = screens.projectionSource.bind(screens);
+    let snapshot: ReturnType<typeof computer.snapshot> | undefined;
+    adapter.blockFirstCapture(surfaceId);
+    const sourceSpy = spyOn(screens, "projectionSource").mockImplementation(async (...args) => {
+      const source = await sourceFor(...args);
+      if (!source) return source;
+      return { ...source, async input(...input) {
+        snapshot = computer.snapshot(owner);
+        await adapter.waitForBlockedCapture();
+        const writing = source.input(...input);
+        queued.resolve();
+        return writing;
+      } };
+    });
+    const action = computer.agentToolAct(owner, "queued-input", "queued-input-call", { name: "click", args: { x: 3, y: 4 } }, controller.signal);
+    const settled = action.catch((error: unknown) => error).finally(captured.resolve);
+    try {
+      await Promise.race([queued.promise, captured.promise]);
+      controller.abort(new Error("cancel queued Screen input"));
+      adapter.releaseBlockedCapture();
+      expect(await settled).toMatchObject({ message: "cancel queued Screen input" });
+      expect(adapter.inputEvents).toHaveLength(0);
+    } finally {
+      sourceSpy.mockRestore();
+      adapter.releaseBlockedCapture();
+      await snapshot;
+      await settled;
+    }
+  });
+
+  test("aborting a queued button press releases authority for the next Screen", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const botId = await makeBot(h, "Queued press Bot");
+    const owner = { botId, surfaceId: await botSurface(h, botId) };
+    const peerId = await makeBot(h, "Next press Bot");
+    const peer = { botId: peerId, surfaceId: await botSurface(h, peerId) };
+    const { computer, screens } = h.svc;
+    const controller = new AbortController();
+    const queued = Promise.withResolvers<void>();
+    const sourceFor = screens.projectionSource.bind(screens);
+    let snapshot: ReturnType<typeof computer.snapshot> | undefined;
+    const releases: string[] = [];
+    let rejectedReleases = 0;
+    const captureStarted = Promise.withResolvers<void>();
+    const rescueCapture = new AbortController();
+    const start = adapter.start.bind(adapter);
+    const startSpy = spyOn(adapter, "start").mockImplementation(async (provision) => {
+      const runtime = await start(provision);
+      const capture = runtime.capture.bind(runtime);
+      runtime.capture = (signal) => capture(signal ?? rescueCapture.signal);
+      return runtime;
+    });
+    adapter.stallNextCaptures(owner.surfaceId, 1);
+    adapter.onCaptureSpawn((surfaceId) => { if (surfaceId === owner.surfaceId) captureStarted.resolve(); });
+    const sourceSpy = spyOn(screens, "projectionSource").mockImplementation(async (...args) => {
+      const source = await sourceFor(...args);
+      if (!source) return source;
+      return { ...source, async input(event, signal) {
+        if (args[0].surfaceId === owner.surfaceId && event.type === "button") {
+          if (event.state === "released") {
+            rejectedReleases++;
+            throw new Error("helper rejected release of an unacknowledged button");
+          }
+          snapshot = computer.snapshot(owner);
+          await captureStarted.promise;
+          const writing = source.input(event, signal);
+          queued.resolve();
+          return writing;
+        }
+        await source.input(event, signal);
+      }, async releaseInput(epoch) {
+        releases.push(args[0].surfaceId);
+        await source.releaseInput(epoch);
+      } };
+    });
+    const click = { name: "click", args: { x: 3, y: 4 } } as const;
+    const first = computer.agentToolAct(owner, "press", "press-call", click, controller.signal).catch((error: unknown) => error);
+    try {
+      await Promise.race([queued.promise, first.then(() => { throw new Error("press did not queue"); })]);
+      expect(adapter.liveCaptureChildren(owner.surfaceId)).toBe(1);
+      controller.abort(new Error("queued press cancelled"));
+      const settled = await Promise.race([first, Bun.sleep(7_000).then(() => undefined)]);
+      expect(settled).toMatchObject({ message: "queued press cancelled" });
+      expect(adapter.captureAborts(owner.surfaceId)).toBe(1);
+      expect(adapter.liveCaptureChildren(owner.surfaceId)).toBe(0);
+      expect(await snapshot).toBeUndefined();
+      expect(releases).toEqual([owner.surfaceId]);
+      expect(rejectedReleases).toBe(0);
+      await computer.agentToolAct(peer, "peer-press", "peer-press-call", click, AbortSignal.timeout(2_000));
+      expect(adapter.inputEvents.map(({ surfaceId, event }) => [surfaceId, event.type])).toEqual([
+        [owner.surfaceId, "motion"], [peer.surfaceId, "motion"], [peer.surfaceId, "button"], [peer.surfaceId, "button"],
+      ]);
+      expect(await computer.snapshot(owner)).toMatchObject({ mediaType: "image/png", bytes: expect.any(Uint8Array) });
+    } finally {
+      sourceSpy.mockRestore();
+      startSpy.mockRestore();
+      rescueCapture.abort();
+      await snapshot;
+      await first;
+    }
+  }, 12_000);
+
+  test("a rejected synthetic release still releases Screen authority and lets a peer type", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const botId = await makeBot(h, "Acknowledged press Bot");
+    const owner = { botId, surfaceId: await botSurface(h, botId) };
+    const peerId = await makeBot(h, "Peer typing Bot");
+    const peer = { botId: peerId, surfaceId: await botSurface(h, peerId) };
+    const { computer, screens } = h.svc;
+    const controller = new AbortController();
+    const reason = new Error("acknowledged press cancelled");
+    const releaseError = new BotScreenInputRejectedError("helper rejected synthetic release");
+    const sourceFor = screens.projectionSource.bind(screens);
+    const cleanup: string[] = [];
+    const sourceSpy = spyOn(screens, "projectionSource").mockImplementation(async (...args) => {
+      const source = await sourceFor(...args);
+      if (!source || args[0].surfaceId !== owner.surfaceId) return source;
+      return { ...source, async input(event, signal) {
+        if (event.type === "button" && event.state === "released" && signal === undefined) {
+          cleanup.push("synthetic release rejected");
+          throw releaseError;
+        }
+        await source.input(event, signal);
+        if (event.type === "button" && event.state === "pressed") controller.abort(reason);
+      }, async releaseInput(epoch) {
+        await source.releaseInput(epoch);
+        cleanup.push("authority released");
+      } };
+    });
+    try {
+      const action = computer.agentToolAct(owner, "pressed", "pressed-call", { name: "click", args: { x: 3, y: 4 } }, controller.signal);
+      await expect(action).rejects.toBe(releaseError);
+      expect(adapter.inputEvents.some(({ surfaceId, event }) => surfaceId === owner.surfaceId && event.type === "button" && event.state === "pressed")).toBe(true);
+      expect(cleanup).toEqual(["synthetic release rejected", "authority released"]);
+      await computer.agentToolAct(peer, "peer-type", "peer-type-call", { name: "type", args: { text: "peer" } }, AbortSignal.timeout(2_000));
+      expect(adapter.inputEvents.at(-1)).toMatchObject({ surfaceId: peer.surfaceId, event: { type: "paste", text: "peer" } });
+    } finally { sourceSpy.mockRestore(); }
+  });
+
+  test("aborting a grant queued behind a snapshot settles Takeover and frees the seat", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const botId = await makeBot(h, "Queued grant Bot");
+    const surfaceId = await botSurface(h, botId);
+    const owner = { botId, surfaceId };
+    const peerId = await makeBot(h, "Peer input Bot");
+    const peer = { botId: peerId, surfaceId: await botSurface(h, peerId) };
+    const { computer, screens } = h.svc;
+    await screens.ensureReady(owner);
+    adapter.blockFirstCapture(surfaceId);
+    const snapshot = computer.snapshot(owner);
+    const controller = new AbortController();
+    let action: Promise<unknown> | undefined;
+    let takeover: Promise<unknown> | undefined;
+    const grantQueued = Promise.withResolvers<void>();
+    const sourceFor = screens.projectionSource.bind(screens);
+    const sourceSpy = spyOn(screens, "projectionSource").mockImplementation((...args) => {
+      if (args[0].surfaceId === surfaceId) grantQueued.resolve();
+      return sourceFor(...args);
+    });
+    try {
+      await adapter.waitForBlockedCapture();
+      action = computer.agentToolAct(owner, "queued-grant", "queued-grant-call", { name: "click", args: { x: 3, y: 4 } }, controller.signal).catch((error: unknown) => error);
+      await grantQueued.promise;
+      takeover = computer.takeOver(owner);
+      controller.abort(new Error("cancel queued Screen grant"));
+      const next = computer.agentToolAct(peer, "peer-grant", "peer-grant-call", { name: "click", args: { x: 3, y: 4 } }, AbortSignal.timeout(2_000));
+      const settled = await Promise.race([Promise.all([action, takeover, next]), Bun.sleep(1_500).then(() => undefined)]);
+      expect(settled?.[0]).toMatchObject({ message: "cancel queued Screen grant" });
+      expect(settled?.[1]).toEqual({ ok: false });
+      expect(adapter.inputEvents.map((input) => input.surfaceId)).toEqual([peer.surfaceId, peer.surfaceId, peer.surfaceId]);
+      expect(computer.state(owner).lastImageAt).toBeUndefined();
+    } finally {
+      sourceSpy.mockRestore();
+      adapter.releaseBlockedCapture();
+      await Promise.all([snapshot, action, takeover]);
+    }
+  });
+
+  test("a screenshot publishes idle before its image and abort before publication leaves no artifact", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const botId = await makeBot(h, "Screenshot publication Bot");
+    const surfaceId = await botSurface(h, botId);
+    const owner = { botId, surfaceId };
+    const harness = h;
+    const controller = new AbortController();
+    const events: Array<{ authority: string | undefined; image: string | undefined }> = [];
+    let abortBeforePublication = true;
+    const unsubscribe = h.svc.events.subscribe((event) => {
+      if (event.aggregateType !== "computer" || event.aggregateId !== surfaceId) return;
+      const authority = coordination(harness, surfaceId)?.authority_kind;
+      const image = harness.svc.computer.state(owner).lastImageAt;
+      events.push({ authority, image });
+      if (abortBeforePublication && authority === "idle") controller.abort(new Error("cancel before screenshot publication"));
+    });
+    try {
+      await expect(h.svc.computer.agentToolAct(owner, "aborted-shot", "aborted-call", { name: "screenshot", args: {} }, controller.signal)).rejects.toThrow("cancel before screenshot publication");
+      expect(artifactCount(h, surfaceId)).toBe(0);
+      expect(h.svc.computer.state(owner).lastImageAt).toBeUndefined();
+      abortBeforePublication = false;
+      events.length = 0;
+      const shot = await h.svc.computer.agentToolAct(owner, "successful-shot", "successful-call", { name: "screenshot", args: {} }, new AbortController().signal, true);
+      const artifact = h.svc.db.query<{ path: string }, [string]>("SELECT path FROM artifacts WHERE id = ?").get(shot.imageRef!);
+      expect(shot.inlineImage).toEqual({ type: "image", mimeType: "image/png", data: Buffer.from(await Bun.file(artifact!.path).arrayBuffer()).toString("base64") });
+      expect(shot.imageFile).toBeUndefined();
+      const idle = events.filter(({ authority }) => authority === "idle");
+      expect(idle[0]?.image).toBeUndefined();
+      expect(idle.at(-1)?.image).toEqual(expect.any(String));
+      expect(artifactCount(h, surfaceId)).toBe(1);
+    } finally { unsubscribe(); }
+  });
+
+  test.each([false, true])("Web Control claimed at screenshot idle survives tool cleanup (abort=%s)", async (abort) => {
+    h = await startDaemon();
+    const harness = h;
+    const botId = await makeBot(h, "Web Control during screenshot");
+    const owner = { botId, surfaceId: await botSurface(h, botId) };
+    const controller = new AbortController();
+    let lease: ScreenInputLease | undefined;
+    const beginAgentTool = ScreenInputLease.prototype.beginAgentTool;
+    const leaseSpy = spyOn(ScreenInputLease.prototype, "beginAgentTool").mockImplementation(function (this: ScreenInputLease, ...args) {
+      lease = this;
+      return beginAgentTool.apply(this, args);
+    });
+    let claimed = false;
+    const unsubscribe = h.svc.events.subscribe((event) => {
+      if (claimed || event.aggregateType !== "computer" || event.aggregateId !== owner.surfaceId
+        || coordination(harness, owner.surfaceId)?.authority_kind !== "idle") return;
+      claimed = true;
+      queueMicrotask(() => {
+        lease?.webControlClaimed(owner);
+        if (abort) controller.abort(new Error("screenshot aborted after Web Control claim"));
+      });
+    });
+    try {
+      const shot = h.svc.computer.agentToolAct(owner, "claim", "claim-call", { name: "screenshot", args: {} }, controller.signal);
+      if (abort) {
+        await expect(shot).rejects.toThrow(/aborted/i);
+        expect(artifactCount(h, owner.surfaceId)).toBe(0);
+      } else {
+        expect((await shot).imageRef).toBeDefined();
+      }
+      expect(claimed).toBe(true);
+      expect(coordination(h, owner.surfaceId)?.authority_kind).toBe("web");
+    } finally {
+      unsubscribe();
+      leaseSpy.mockRestore();
+    }
+  });
+
   test("persisted authority transitions are isolated by Surface", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
@@ -386,7 +651,8 @@ describe("Bot-bound Pi computer tool", () => {
     expect(adapter.inputEvents.map((record) => record.surfaceId)).toEqual([surfaceId, surfaceId, surfaceId]);
   });
 
-  test("Agent-worker loss during a held Takeover fails the turn and never reconstructs the waiter", async () => {
+  // The in-process runtime has no ToolChannel. Task 20 removes this case with the worker.
+  workerOnly("requires a separate worker to exit during native steering")("Agent-worker loss during a held Takeover fails the turn and never reconstructs the waiter", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const botId = await makeBot(h, "Restarted Takeover Bot");
@@ -440,7 +706,7 @@ describe("Bot-bound Pi computer tool", () => {
     expect(staleAuthority).toMatchObject({ authority_kind: "takeover" });
 
     const home = h.home;
-    await h.stop();
+    await h.disconnectForRestart();
     const staleDb = new Database(path.join(home, "db.sqlite"));
     staleDb
       .query(
@@ -461,7 +727,8 @@ describe("Bot-bound Pi computer tool", () => {
     });
   });
 
-  test("every stale or mismatched binding identity fails without touching either Screen", async () => {
+  // The in-process runtime has no ToolChannel. Task 20 removes this case with the worker.
+  workerOnly("forges worker ToolChannel bindings", { timeout: 15_000 })("every stale or mismatched binding identity fails without touching either Screen", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const firstBot = await makeBot(h, "Context owner Bot");
@@ -491,9 +758,10 @@ describe("Bot-bound Pi computer tool", () => {
       expect(row?.status).toBe("failed");
       expect(row?.outcome_reason).toBe(reasons[index]);
     }
-  }, 15_000);
+  });
 
-  test("Agent worker loss fails its active tool turn instead of reconstructing or rerouting it", async () => {
+  // The in-process runtime has no ToolChannel. Task 20 removes this case with the worker.
+  workerOnly("requires a separate worker to exit during tool dispatch", { timeout: 15_000 })("Agent worker loss fails its active tool turn instead of reconstructing or rerouting it", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const bot = await makeBot(h, "Crashed Agent worker Bot");
@@ -504,7 +772,7 @@ describe("Bot-bound Pi computer tool", () => {
     expect(adapter.actionsStarted).toBe(0);
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("failed");
     expect(h.svc.threads.turnRow(sent.turnId)?.outcome_reason).toContain("worker exited");
-  }, 15_000);
+  });
 
   test("assigned worker failure fails honestly and never reroutes", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();

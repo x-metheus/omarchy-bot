@@ -126,6 +126,10 @@ export class ApplicationUnits {
     await this.#stopPattern(applicationUnitName(surfaceId, generation, role), "Bot Screen");
   }
 
+  async stopComputerRole(generation: number, role: BotComputerUnitRole): Promise<void> {
+    await this.#stopPattern(botComputerUnitName(generation, role), "Bot Computer");
+  }
+
   async stopComputer(generation?: number): Promise<void> {
     const pattern = generation === undefined
       ? "omarchy-bot-computer-g*-*.service"

@@ -2,6 +2,8 @@ import type { Database } from "bun:sqlite";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import type { SurfaceId } from "@omarchy-bot/domain";
+import type { ComputerBroker } from "../computer/broker.ts";
 import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
 import type { PlatformPaths } from "../workspace/paths.ts";
 import { openThreadConversation } from "./conversations.ts";
@@ -14,6 +16,7 @@ import { ApprovalStore } from "./approvals.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
+import { createComputerExtension } from "./extensions/computer.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
@@ -75,7 +78,10 @@ function entryBefore(entry: EntryId | undefined): EntryId | undefined {
   return entry === undefined ? undefined : (entry - 1) as EntryId;
 }
 
-export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: { events?: Pick<EventLog, "append"> } = {}): Promise<BotRuntime> {
+export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: {
+  events?: Pick<EventLog, "append">;
+  computer?: Pick<ComputerBroker, "agentToolAct">;
+} = {}): Promise<BotRuntime> {
   const credentials = new CredentialStore(paths.stateDir);
   const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
   let reportedCredentialsFailure = false;
@@ -94,6 +100,21 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         return row ? { threadId: row.thread_id, botId: row.bot_id } : undefined;
       },
     } : undefined));
+    const computer = options.computer;
+    if (db && computer) {
+      const findOwner = db.query<{ botId: string; surfaceId: SurfaceId; turnId: string }, [number, number]>(`
+        SELECT turns.bot_id AS botId, bot_surfaces.surface_id AS surfaceId, turns.id AS turnId
+        FROM pi_thread_conversations
+        JOIN turns USING (thread_id, bot_id)
+        JOIN bot_surfaces ON bot_surfaces.bot_id = turns.bot_id
+        JOIN pi_turn_submissions ON pi_turn_submissions.turn_id = turns.id
+        WHERE conversation_id = ? AND submission_id = ? AND turns.status = 'working'
+      `);
+      registry.install(createComputerExtension({
+        broker: { agentToolAct: (owner, turnId, toolCallId, action, signal) => computer.agentToolAct(owner, turnId, toolCallId, action, signal, true) },
+        owner: (conversationId, submissionId) => findOwner.get(conversationId, submissionId) ?? undefined,
+      }));
+    }
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         if (!reportedCredentialsFailure) {

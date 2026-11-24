@@ -3,6 +3,10 @@ import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSy
 import path from "node:path";
 import { BotScreenInputRejectedError } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
+import { SwayIpcClient, listApplicationToplevels } from "../../apps/daemon/src/modules/computer/swayIpc.ts";
+import * as browserHandler from "../../apps/daemon/src/modules/computer/browserHandler.ts";
+import { BrowserSupply } from "../../apps/daemon/src/modules/computer/browserSupply.ts";
+import { ApplicationUnits, botComputerUnitName } from "../../apps/daemon/src/supervision/applicationUnits.ts";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 import { api, authedFetch, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
@@ -553,6 +557,176 @@ const startsPath =`));
     await runtime.stop();
   }
 });
+
+test("aborting before app spawn or while reading its window tree sends no further window commands", async () => {
+  fixture = await createScriptedSwayFixture();
+  const runtime = await fixture.adapter.start(provision());
+  const reason = new Error("app launch cancelled");
+  const commandSpy = spyOn(SwayIpcClient.prototype, "runCommand");
+  try {
+    fixture.blockActions();
+    const beforeSpawn = new AbortController();
+    const launch = runtime.launch({ app: fixture.application }, beforeSpawn.signal);
+    const rejection = launch.catch((error: unknown) => error);
+    await Promise.race([fixture.waitForActions(1), launch.then(() => { throw new Error("launch finished before spawn gate"); })]);
+    commandSpy.mockClear();
+    beforeSpawn.abort(reason);
+    fixture.releaseActions();
+    expect(await rejection).toBe(reason);
+    expect(commandSpy.mock.calls).toEqual([]);
+
+    const duringRouting = new AbortController();
+    let childPid: number | undefined;
+    const getTree = SwayIpcClient.prototype.getTree;
+    const treeSpy = spyOn(SwayIpcClient.prototype, "getTree").mockImplementation(async function (this: SwayIpcClient, ...args) {
+      const tree = await getTree.apply(this, args);
+      const child = listApplicationToplevels(tree).find((window) => window.appId === "fixture-application" && window.pid !== undefined);
+      if (child && childPid === undefined) {
+        childPid = child.pid;
+        commandSpy.mockClear();
+        duringRouting.abort(reason);
+      }
+      return tree;
+    });
+    try {
+      await expect(runtime.launch({ app: fixture.application }, duringRouting.signal)).rejects.toThrow(reason.message);
+      expect(childPid).toEqual(expect.any(Number));
+      expect(commandSpy.mock.calls).toEqual([]);
+      expect(() => process.kill(childPid!, 0)).toThrow();
+    } finally { treeSpy.mockRestore(); }
+  } finally {
+    fixture.releaseActions();
+    commandSpy.mockRestore();
+    await runtime.stop();
+  }
+}, 20_000);
+
+test("the browser handler aborts desktop hide and stops its launched child", async () => {
+  fixture = await createScriptedSwayFixture();
+  const handler = Promise.withResolvers<Parameters<typeof browserHandler.openBrowserHandler>[1]>();
+  const openHandler = browserHandler.openBrowserHandler;
+  const handlerSpy = spyOn(browserHandler, "openBrowserHandler").mockImplementation((dir, launch) => {
+    handler.resolve(launch);
+    return openHandler(dir, launch);
+  });
+  let runtime: Awaited<ReturnType<ScriptedSwayFixture["adapter"]["start"]>> | undefined;
+  try {
+    runtime = await fixture.adapter.start(provision());
+    await runtime.setInputAuthority(1, "web");
+    const launch = await handler.promise;
+    const browser = spyOn(BrowserSupply.prototype, "launchCommand").mockResolvedValue([fixture.application]);
+    const request = new AbortController();
+    const reason = new Error("browser handler disconnected during hide");
+    let childPid: number | undefined;
+    const runCommand = SwayIpcClient.prototype.runCommand;
+    const hide = spyOn(SwayIpcClient.prototype, "runCommand").mockImplementation(async function (this: SwayIpcClient, command, signal) {
+      if (command.includes("move scratchpad")) {
+        childPid = listApplicationToplevels(await this.getTree()).find(({ appId }) => appId === "fixture-application")?.pid;
+        request.abort(reason);
+      }
+      await runCommand.call(this, command, signal);
+    });
+    try {
+      await expect(launch(["https://example.org"], request.signal)).rejects.toBe(reason);
+      expect(childPid).toEqual(expect.any(Number));
+      expect(() => process.kill(childPid!, 0)).toThrow();
+    } finally {
+      hide.mockRestore();
+      browser.mockRestore();
+    }
+  } finally {
+    handlerSpy.mockRestore();
+    await runtime?.stop();
+  }
+}, 20_000);
+
+test("cancelling an application launch stops the exact transient unit after its launcher exits", async () => {
+  fixture = await createScriptedSwayFixture();
+  const runtime = await fixture.adapter.start(provision());
+  const request = new AbortController();
+  const reason = new Error("application unit launch cancelled");
+  const launcherCode = "process.exit(0)";
+  const issued: string[] = [];
+  let unit: string | undefined;
+  const stop = spyOn(ApplicationUnits.prototype, "stopComputerRole").mockImplementation(async (generation, role) => {
+    issued.push(`stop:${botComputerUnitName(generation, role)}`);
+  });
+  const command = spyOn(ApplicationUnits.prototype, "computerCommand").mockImplementation((generation, role) => {
+    unit = botComputerUnitName(generation, role);
+    issued.push(`start:${unit}`);
+    return [process.execPath, "-e", launcherCode, "--"];
+  });
+  const spawn = Bun.spawn.bind(Bun);
+  const launcher = spyOn(Bun, "spawn").mockImplementation(((argv: string[], options?: object) => {
+    const child = spawn(argv, options as Parameters<typeof Bun.spawn>[1]);
+    if (argv[2] === launcherCode) void child.exited.then(() => { issued.push("launcher exited"); request.abort(reason); });
+    return child;
+  }) as typeof Bun.spawn);
+  try {
+    await expect(runtime.launch({ app: fixture.application }, request.signal)).rejects.toBe(reason);
+    expect(unit).toMatch(new RegExp(`^omarchy-bot-computer-g${runtime.generation}-application-[0-9a-f-]{36}\\.service$`));
+    expect(issued).toEqual([`start:${unit}`, "launcher exited", `stop:${unit}`]);
+  } finally {
+    launcher.mockRestore();
+    command.mockRestore();
+    stop.mockRestore();
+    await runtime.stop();
+  }
+}, 20_000);
+
+test("an aborted launch after reattach stops only its own application unit", async () => {
+  fixture = await createScriptedSwayFixture();
+  const started = await fixture.adapter.start(provision());
+  const controller = new AbortController();
+  const reason = new Error("reattached launch cancelled");
+  const runningUnits = new Map<string, Bun.Subprocess>();
+  const startedUnits: string[] = [];
+  const stoppedUnits: string[] = [];
+  const launcherCode = "process.exit(0)";
+  let firstChild: Bun.Subprocess | undefined;
+  let recovered: Awaited<ReturnType<ScriptedSwayFixture["adapter"]["start"]>> | undefined;
+  const command = spyOn(ApplicationUnits.prototype, "computerCommand").mockImplementation((generation, role) => {
+    if (!role.startsWith("application-")) return [];
+    startedUnits.push(botComputerUnitName(generation, role));
+    return startedUnits.length === 1 ? ["/usr/bin/env"] : [process.execPath, "-e", launcherCode, "--"];
+  });
+  const stop = spyOn(ApplicationUnits.prototype, "stopComputerRole").mockImplementation(async (generation, role) => {
+    const unit = botComputerUnitName(generation, role);
+    stoppedUnits.push(unit);
+    const child = runningUnits.get(unit);
+    child?.kill();
+    await child?.exited;
+    runningUnits.delete(unit);
+  });
+  const spawn = Bun.spawn.bind(Bun);
+  const launcher = spyOn(Bun, "spawn").mockImplementation(((argv: string[], options?: object) => {
+    const child = spawn(argv, options as Parameters<typeof Bun.spawn>[1]);
+    if (argv[0] === "/usr/bin/env" && argv[1] === fixture!.application) {
+      firstChild = child;
+      runningUnits.set(startedUnits[0]!, child);
+    }
+    if (argv[2] === launcherCode) void child.exited.then(() => controller.abort(reason));
+    return child;
+  }) as typeof Bun.spawn);
+  try {
+    await started.launch({ app: fixture.application });
+    expect(firstChild?.exitCode).toBeNull();
+    recovered = await fixture.replacementAdapter().reconcile(provision());
+    expect(recovered?.generation).toBe(started.generation);
+    await expect(recovered!.launch({ app: fixture.application }, controller.signal)).rejects.toBe(reason);
+    expect(stoppedUnits).toEqual([startedUnits[1]!]);
+    expect(runningUnits.has(startedUnits[0]!)).toBe(true);
+    expect(firstChild?.exitCode).toBeNull();
+    expect(startedUnits[0]).not.toBe(startedUnits[1]);
+  } finally {
+    launcher.mockRestore();
+    stop.mockRestore();
+    command.mockRestore();
+    firstChild?.kill();
+    await firstChild?.exited;
+    await (recovered ?? started).stop();
+  }
+}, 20_000);
 
 test("an aborted capture ends its grim child before the capture settles", async () => {
   let grimHangMark = "";

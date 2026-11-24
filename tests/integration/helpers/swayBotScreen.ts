@@ -69,6 +69,7 @@ function executable(directory: string, name: string, body: string): string {
 
 export interface ScriptedSwayFixture {
   adapter: BotScreenRuntimeAdapter;
+  replacementAdapter(): SwayBotScreenRuntimeAdapter;
   runtimeRoot: string;
   profileRoot: string;
   starts: BotScreenProvision[];
@@ -247,7 +248,7 @@ appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(process.argv.slice(2))
 await Promise.withResolvers<void>().promise;
 `,
   });
-  const inner = new SwayBotScreenRuntimeAdapter({
+  const newAdapter = () => new SwayBotScreenRuntimeAdapter({
     runtimeRoot,
     profileRoot,
     applicationCwd,
@@ -329,6 +330,7 @@ Bun.listen({ unix: address.slice("--address=unix:path=".length), socket: { data(
     const suffix = liveProgress === 0 ? "" : ` · ${liveProgress}`;
     writeFakeSwayTree(controlDir, liveSwayTree(`${LIVE_UNICODE_TITLE}${suffix}`, [...activeSurfaces]));
   };
+  const inner = newAdapter();
   const adapter: BotScreenRuntimeAdapter = {
     start: async (provision) => {
       starts.push(provision);
@@ -365,6 +367,7 @@ Bun.listen({ unix: address.slice("--address=unix:path=".length), socket: { data(
   };
   return {
     adapter,
+    replacementAdapter: newAdapter,
     runtimeRoot,
     profileRoot,
     starts,

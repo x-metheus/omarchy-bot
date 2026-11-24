@@ -148,7 +148,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     home,
     svc,
     stop: async () => { try { await stop(); } finally { restoreRuntime?.(); } },
-    disconnectForRestart,
+    disconnectForRestart: async () => { try { await disconnectForRestart(); } finally { restoreRuntime?.(); } },
   };
   base.token = await pairForToken(base.baseUrl, state);
   if (options.waitForAgentReady !== false) {
