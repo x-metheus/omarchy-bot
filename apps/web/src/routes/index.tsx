@@ -48,6 +48,7 @@ const QUERY_KEYS: Tags = {
   threads: ["threads"],
   messages: ["messages"],
   turns: ["turns"],
+  approvals: ["approvals"],
   computer: ["computer"],
   plugins: ["plugins"],
   "plugin-commands": ["plugin-commands"],
