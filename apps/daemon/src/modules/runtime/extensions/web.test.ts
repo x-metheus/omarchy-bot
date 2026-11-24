@@ -576,7 +576,6 @@ test("web_search reports an HTTP 200 MCP tool error without a flag as a search f
 
 for (const [field, value] of [
   ["_meta", { "ai.exa/rateLimited": true }],
-  ["structuredContent", { "ai.exa/rateLimited": true }],
   ["providerMetadata", { flag: "ai.exa/rateLimited" }],
 ] as const) {
   test(`web_search detects an HTTP 200 MCP result flag in ${field} before reporting empty content`, async () => {
@@ -584,6 +583,13 @@ for (const [field, value] of [
     expectRateLimit(await webSearch(searchArgs, mcp.options));
   });
 }
+
+test("web_search detects an HTTP 200 MCP tool error flag in structuredContent", async () => {
+  using mcp = mcpStub(({ id }) => Response.json({
+    jsonrpc: "2.0", id, result: { isError: true, structuredContent: { "ai.exa/rateLimited": true } },
+  }));
+  expectRateLimit(await webSearch(searchArgs, mcp.options));
+});
 
 test("web_search detects an HTTP 200 MCP tool error flag in metadata", async () => {
   using mcp = mcpStub((request) => {
@@ -630,6 +636,16 @@ test("web_search preserves a JSON search result that quotes the rate-limit marke
   expect(text(result)).toBe(`Search results for "${searchQuery}":\n\n${quotedMarker}\n\n${outsideContentNotice}\nSource: Exa`);
 });
 
+test("web_search preserves successful results when structuredContent quotes the rate-limit marker", async () => {
+  using mcp = mcpStub((request) => {
+    const reply = mcpResult(request, exaText);
+    return Response.json({ ...reply, result: { ...reply.result, structuredContent: { snippet: quotedMarker } } });
+  });
+  const result = await webSearch(searchArgs, mcp.options);
+  expect(result.isError).toBeFalsy();
+  expect(text(result)).toBe(`Search results for "${searchQuery}":\n\n${exaText}\n\n${outsideContentNotice}\nSource: Exa`);
+});
+
 test("web_search preserves an SSE search result that quotes the rate-limit marker", async () => {
   using mcp = mcpStub((request) => response(`data: ${JSON.stringify(mcpResult(request, quotedMarker))}\n\n`, "text/event-stream"));
   const result = await webSearch(searchArgs, mcp.options);
@@ -664,9 +680,9 @@ test("web_search returns results when a raw MCP metadata string contains an expl
   expect(text(result)).toBe(`Search results for "${searchQuery}":\n\n${exaText}\n\n${outsideContentNotice}\nSource: Exa`);
 });
 
-test("web_search detects a true flag in a raw string inside nested MCP metadata arrays", async () => {
+test("web_search detects a true flag in a raw string inside nested MCP provider metadata arrays", async () => {
   using mcp = mcpStub(({ id }) => Response.json({
-    jsonrpc: "2.0", id, result: { structuredContent: [{ providerMetadata: ['{"ai.exa/rateLimited":true}'] }] },
+    jsonrpc: "2.0", id, result: { providerMetadata: [{ details: ['{"ai.exa/rateLimited":true}'] }] },
   }));
   expectRateLimit(await webSearch(searchArgs, mcp.options));
 });
@@ -686,7 +702,7 @@ test("web_search ignores markers inside non-boolean values assigned to the MCP m
 test("web_search reports empty content with a null rate-limit flag in MCP result metadata", async () => {
   using mcp = mcpStub((request) => {
     const reply = mcpResult(request);
-    return Response.json({ ...reply, result: { ...reply.result, structuredContent: { "ai.exa/rateLimited": null } } });
+    return Response.json({ ...reply, result: { ...reply.result, _meta: { "ai.exa/rateLimited": null } } });
   });
   const result = await webSearch(searchArgs, mcp.options);
   expect(result.isError).toBe(true);

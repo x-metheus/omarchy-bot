@@ -393,8 +393,9 @@ function createExaSearchProvider(endpoint: string, key: string | undefined, time
       const client = new McpClient({ name: "omarchy-web", version: "1.0.0", requestTimeoutMs: timeoutMs });
       try {
         await client.connect(transport);
-        const { content, isError, ...metadata } = await client.callTool("web_search_exa", { query, ...(numResults === undefined ? {} : { numResults }) }, { signal });
-        if (hasExaResultRateLimit(metadata)) throw new SearchRateLimitError();
+        const { content, structuredContent, isError, ...metadata } = await client.callTool("web_search_exa", { query, ...(numResults === undefined ? {} : { numResults }) }, { signal });
+        const rateLimitData = isError === true ? { ...metadata, structuredContent } : metadata;
+        if (hasExaResultRateLimit(rateLimitData)) throw new SearchRateLimitError();
         const textBlocks = content.flatMap((block) => block?.type === "text" && typeof block.text === "string" ? [block.text] : []);
         if (isError === true && textBlocks.some((text) => interpretExaRateLimitFlag(text) === true)) throw new SearchRateLimitError();
         if (isError) throw new Error("Exa returned a tool error.");
