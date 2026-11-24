@@ -78,7 +78,7 @@ describe("Shared Workspace default cwd", () => {
     }
   });
 
-  test("a Bot without an explicit Thread cwd works in the home-local Shared Workspace", async () => {
+  workerOnly("removes worker-native session.open observations")("a Bot without an explicit Thread cwd works in the home-local Shared Workspace", async () => {
     h = await startDaemon();
     const workspace = sharedWorkspace(h);
     const botId = await makeBot(h, "Workspace Bot");
@@ -140,7 +140,7 @@ describe("Shared Workspace default cwd", () => {
     expect(firstOpen.nativeSessionId).not.toBe(secondOpen.nativeSessionId);
   });
 
-  test("a new Thread inherits the Shared Workspace without creating another work-file directory", async () => {
+  workerOnly("removes worker-native session.open observations")("a new Thread inherits the Shared Workspace without creating another work-file directory", async () => {
     h = await startDaemon();
     const workspace = sharedWorkspace(h);
     const botId = await makeBot(h, "Multi-thread Bot");
@@ -157,7 +157,7 @@ describe("Shared Workspace default cwd", () => {
     expect(existsSync(`${workspace}-thread-${second.threadId}`)).toBeFalse();
   });
 
-  test("an explicit Thread cwd is preserved even when it equals a plugin directory", async () => {
+  workerOnly("removes worker-native session.open observations")("an explicit Thread cwd is preserved even when it equals a plugin directory", async () => {
     h = await startDaemon();
     const pluginCwd = path.resolve(import.meta.dir, "../../workers/pi");
     const botId = await makeBot(h, "Explicit cwd Bot");

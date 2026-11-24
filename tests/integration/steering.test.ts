@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
 
 interface MessageView {
   id: string;
@@ -139,7 +139,7 @@ describe("integration: native turn steering", () => {
     await waitThreadIdle(h, sent.threadId);
   });
 
-  test("undeclared steering is rejected before persistence or worker dispatch", async () => {
+  workerOnly("removes worker-native steering capability rejection")("undeclared steering is rejected before persistence or worker dispatch", async () => {
     setCapabilities({
       steering: false,
       abort: false,
