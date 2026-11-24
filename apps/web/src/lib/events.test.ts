@@ -1,16 +1,26 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
-import { MessageDto, ToolCallSummaryDto, type EventEnvelope } from "@omarchy-bot/protocol";
 import {
+  MessageDto,
+  ToolCallSummaryDto,
+  type ApprovalDto,
+  type ClientToServer,
+  type EventEnvelope,
+  type ServerToClient,
+} from "@omarchy-bot/protocol";
+import {
+  notifyForAttentionEvent,
   patchCachedMessage,
   patchCachedToolCall,
   route,
+  startEventPump,
   type ApplyTranscriptUpdate,
   type Invalidate,
   type QueryTag,
   type TranscriptUpdate,
 } from "./events.ts";
 import { createMessageStream, type MessageStream } from "./messageStream.ts";
+import { createMemoryShell, installShell } from "./shell.ts";
 
 const STARTED_AT = "2026-01-01T00:00:00.000Z";
 const COMPLETED_AT = "2026-01-01T00:00:05.000Z";
@@ -125,6 +135,264 @@ function createHarness(
     applyUpdate,
   };
 }
+
+const pendingApproval: ApprovalDto = {
+  id: "approval-1",
+  threadId: "thread-1",
+  botId: "bot-1",
+  turnId: "turn-1",
+  tool: "read",
+  path: "/shared/report.txt",
+  folder: "/shared",
+  status: "pending",
+  createdAt: STARTED_AT,
+  expiresAt: "2026-01-01T00:10:00.000Z",
+  answeredAt: null,
+};
+const resolvedApproval: ApprovalDto = {
+  ...pendingApproval,
+  status: "allowed_once",
+  answeredAt: COMPLETED_AT,
+};
+
+describe("route approval events", () => {
+  test("invalidates approvals for the thread in approval.requested", () => {
+    const harness = createHarness();
+
+    route(threadEvent("approval.requested", pendingApproval, { aggregateId: "thread-aggregate" }), harness.invalidate);
+
+    expect(harness.invalidations).toEqual([{ tag: "approvals", threadId: "thread-1" }]);
+  });
+
+  test("invalidates approvals for the thread in approval.resolved", () => {
+    const harness = createHarness();
+
+    route(threadEvent("approval.resolved", resolvedApproval, { aggregateId: "thread-aggregate" }), harness.invalidate);
+
+    expect(harness.invalidations).toEqual([{ tag: "approvals", threadId: "thread-1" }]);
+  });
+});
+
+describe("approval notifications", () => {
+  const calls: Array<{ title: string; options: NotificationOptions }> = [];
+  const originalNotification = Object.getOwnPropertyDescriptor(globalThis, "Notification");
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+
+  class NotificationStub {
+    static permission: NotificationPermission = "granted";
+    constructor(title: string, options: NotificationOptions) {
+      calls.push({ title, options });
+    }
+  }
+
+  beforeEach(() => {
+    calls.length = 0;
+    NotificationStub.permission = "granted";
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: NotificationStub });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: { hidden: false, hasFocus: () => true },
+    });
+  });
+
+  afterEach(() => {
+    if (originalNotification === undefined) Reflect.deleteProperty(globalThis, "Notification");
+    else Object.defineProperty(globalThis, "Notification", originalNotification);
+    if (originalDocument === undefined) Reflect.deleteProperty(globalThis, "document");
+    else Object.defineProperty(globalThis, "document", originalDocument);
+  });
+
+  test("names the Bot, action, and path with a unique tag for each approval.requested", () => {
+    const context = {
+      selectedBotId: "bot-2",
+      botName: (botId: string) => botId === "bot-1" ? "Research Bot" : undefined,
+    };
+    const approvals: ApprovalDto[] = [
+      pendingApproval,
+      { ...pendingApproval, id: "approval-2", tool: "write" },
+      { ...pendingApproval, id: "approval-3", tool: "edit" },
+    ];
+
+    for (const approval of approvals) {
+      notifyForAttentionEvent(threadEvent("approval.requested", approval), context);
+    }
+
+    expect(calls).toHaveLength(3);
+    for (const [index, approval] of approvals.entries()) {
+      const { title, options } = calls[index]!;
+      const text = `${title} ${options.body ?? ""}`;
+      expect(text).toContain("Research Bot");
+      expect(text).toContain(approval.tool);
+      expect(text).toContain(approval.path);
+      expect(options.tag).toBe(`omarchy-bot:bot-1:approval:${approval.id}`);
+    }
+  });
+
+  test("does not notify for approval.resolved", () => {
+    notifyForAttentionEvent(threadEvent("approval.resolved", resolvedApproval), {
+      selectedBotId: "bot-2",
+      botName: () => "Research Bot",
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  test("uses A Bot when the requesting Bot name is unknown", () => {
+    notifyForAttentionEvent(threadEvent("approval.requested", pendingApproval), {
+      botName: () => undefined,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(`${calls[0]!.title} ${calls[0]!.options.body ?? ""}`).toContain("A Bot");
+  });
+
+  test.each(["default", "denied"] as const)("suppresses approval.requested with %s Notification permission", (permission) => {
+    NotificationStub.permission = permission;
+
+    notifyForAttentionEvent(threadEvent("approval.requested", pendingApproval), { selectedBotId: "bot-2" });
+
+    expect(calls).toHaveLength(0);
+  });
+
+  test("suppresses approval.requested for the selected Bot in a focused, visible document", () => {
+    notifyForAttentionEvent(threadEvent("approval.requested", pendingApproval), { selectedBotId: pendingApproval.botId });
+
+    expect(calls).toHaveLength(0);
+  });
+
+  describe("startEventPump", () => {
+    const sockets: FakeWebSocket[] = [];
+    const approvalInvalidations: Array<string | undefined> = [];
+    let reconnect: (() => void) | undefined;
+    let stop: (() => void) | undefined;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const originalShell = globalThis.__OMARCHY_BOT_SHELL__;
+
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      readonly sent: ClientToServer[] = [];
+
+      constructor() { sockets.push(this); }
+      open(): void { this.onopen?.(); }
+      close(): void { this.onclose?.(); }
+      send(data: string): void { this.sent.push(JSON.parse(data) as ClientToServer); }
+      message(frame: ServerToClient): void {
+        this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(frame) }));
+      }
+      event(envelope: EventEnvelope): void { this.message({ type: "event", envelope }); }
+    }
+
+    beforeEach(() => {
+      sockets.length = 0;
+      approvalInvalidations.length = 0;
+      reconnect = undefined;
+      installShell(createMemoryShell({ storage: null, baseUrl: "https://client.example" }));
+      globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: { setTimeout: (callback: () => void) => { reconnect = callback; } },
+      });
+    });
+
+    afterEach(() => {
+      stop?.();
+      stop = undefined;
+      globalThis.WebSocket = originalWebSocket;
+      globalThis.__OMARCHY_BOT_SHELL__ = originalShell;
+      if (originalWindow === undefined) Reflect.deleteProperty(globalThis, "window");
+      else Object.defineProperty(globalThis, "window", originalWindow);
+    });
+
+    function start(): FakeWebSocket {
+      stop = startEventPump(
+        (tag, threadId) => { if (tag === "approvals") approvalInvalidations.push(threadId); },
+        () => {},
+        async () => true,
+        () => ({ selectedBotId: "bot-2" }),
+      );
+      const socket = sockets[0]!;
+      socket.open();
+      expect(socket.sent).toEqual([{ type: "hello" }]);
+      return socket;
+    }
+
+    function liveConnection(): FakeWebSocket {
+      const socket = start();
+      socket.event(threadEvent("thread.created", {}, { cursor: 1 }));
+      socket.message({ type: "hello", cursor: 1 });
+      return socket;
+    }
+
+    async function resume(previous: FakeWebSocket, lastCursor: number): Promise<FakeWebSocket> {
+      previous.close();
+      const retry = reconnect!;
+      reconnect = undefined;
+      retry();
+      await Promise.resolve();
+      const socket = sockets.at(-1)!;
+      expect(socket).not.toBe(previous);
+      socket.open();
+      expect(socket.sent).toEqual([{ type: "hello", lastCursor }]);
+      return socket;
+    }
+
+    test("keeps first-connect history quiet and notifies immediately for live approval requests", () => {
+      const socket = start();
+      socket.event(threadEvent("approval.requested", pendingApproval, { cursor: 1 }));
+      expect(approvalInvalidations).toEqual(["thread-1"]);
+      socket.message({ type: "hello", cursor: 1 });
+      expect(calls).toHaveLength(0);
+
+      socket.event(threadEvent("approval.requested", { ...pendingApproval, id: "approval-live" }, { cursor: 2 }));
+      expect(calls.map(({ options }) => options.tag)).toEqual(["omarchy-bot:bot-1:approval:approval-live"]);
+    });
+
+    test("notifies only for the completed turn in a mixed reconnect replay", async () => {
+      const socket = await resume(liveConnection(), 1);
+      socket.event(threadEvent("approval.requested", pendingApproval, { cursor: 2 }));
+      socket.event({
+        ...threadEvent("turn.status", {
+          turnId: "turn-1",
+          threadId: "thread-1",
+          botId: "bot-1",
+          from: "running",
+          to: "completed",
+        }, { cursor: 3, aggregateId: "turn-1" }),
+        aggregateType: "turn",
+      });
+
+      expect(calls.map(({ options }) => options.tag)).toEqual(["omarchy-bot:bot-1:completed"]);
+      socket.message({ type: "hello", cursor: 1 });
+      expect(calls).toHaveLength(1);
+    });
+
+    test("keeps reconnect replay quiet when the approval was resolved", async () => {
+      const socket = await resume(liveConnection(), 1);
+      socket.event(threadEvent("approval.requested", pendingApproval, { cursor: 2 }));
+      socket.event(threadEvent("approval.resolved", resolvedApproval, { cursor: 3 }));
+      expect(approvalInvalidations).toEqual(["thread-1", "thread-1"]);
+      socket.message({ type: "hello", cursor: 1 });
+
+      expect(calls).toHaveLength(0);
+    });
+
+    test("keeps reconnect replay quiet for a pending approval and notifies for the next live request", async () => {
+      const socket = await resume(liveConnection(), 1);
+      socket.event(threadEvent("approval.requested", pendingApproval, { cursor: 2 }));
+      expect(approvalInvalidations).toEqual(["thread-1"]);
+      expect(calls).toHaveLength(0);
+
+      socket.message({ type: "hello", cursor: 1 });
+      expect(calls).toHaveLength(0);
+
+      socket.event(threadEvent("approval.requested", { ...pendingApproval, id: "approval-live" }, { cursor: 3 }));
+      expect(calls.map(({ options }) => options.tag)).toEqual(["omarchy-bot:bot-1:approval:approval-live"]);
+    });
+  });
+});
 
 describe("route streaming payloads", () => {
   test("applies every consecutive response.updated payload without invalidating messages", () => {

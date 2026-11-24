@@ -1,4 +1,4 @@
-import type { ChangeEvent, CSSProperties, DragEvent, JSX, ReactNode } from "react";
+import type { ChangeEvent, CSSProperties, DragEvent, JSX, ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
@@ -33,6 +33,8 @@ import { VisuallyHidden } from "@astryxdesign/core/VisuallyHidden";
 import { useContainerReveal } from "@astryxdesign/core/hooks";
 import type {
   AgentDto,
+  ApprovalAnswerBodyDto,
+  ApprovalDto,
   AttachmentDto,
   BotViewDto,
   MessageDto,
@@ -41,6 +43,7 @@ import type {
 } from "@omarchy-bot/protocol";
 import { isTerminalTurn } from "@omarchy-bot/domain";
 import { api, apiErrorMessage, randomUuid, trimSendText } from "../lib/api.ts";
+import { firstSurvivingApprovalId } from "../lib/approvalFocus.ts";
 import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
 import { withDeviceToken } from "../lib/urls.ts";
 import { getShell } from "../lib/shell.ts";
@@ -51,6 +54,7 @@ import {
   type ThinkingAnnouncementState,
 } from "../lib/transcriptAnnouncements.ts";
 import { WorkingAvatarView } from "./AvatarView.tsx";
+import { PendingApprovalCard, type PendingApprovalCardData } from "./PendingApprovalCard.tsx";
 import { useTranscriptAttentionSurface } from "./TranscriptAttention.tsx";
 import styles from "../lib/styles.ts";
 
@@ -59,6 +63,11 @@ interface ChatPanelProps {
   thread?: ThreadDto;
   messages: MessageDto[];
   onMessageSent: (threadId: string) => void;
+  pendingApprovals: PendingApprovalCardData[];
+  approvalsError?: string;
+  onRetryApprovals: () => void;
+  onAnswerApproval: (approval: ApprovalDto, answer: ApprovalAnswerBodyDto["answer"]) => void;
+  historyTriggerRef: RefObject<HTMLButtonElement | null>;
   isAgentReady: boolean;
   supportsSteering: boolean;
   agentReadiness?: AgentDto;
@@ -461,6 +470,11 @@ export function ChatPanel({
   thread,
   messages,
   onMessageSent,
+  pendingApprovals,
+  approvalsError,
+  onRetryApprovals,
+  onAnswerApproval,
+  historyTriggerRef,
   isAgentReady,
   supportsSteering,
   agentReadiness,
@@ -483,6 +497,14 @@ export function ChatPanel({
   const [stagedAttachments, setStagedAttachments] = useState<AttachmentDto[]>([]);
   const [restoringAttachments, setRestoringAttachments] = useState(false);
   const composerInputRef = useRef<HTMLDivElement>(null);
+  const approvalCardsRef = useRef<HTMLElement>(null);
+  const answeringButtonRef = useRef<{
+    approvalId: string;
+    threadId: string;
+    followingIds: string[];
+    button: HTMLButtonElement;
+    wasBusy: boolean;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const previewUrlsRef = useRef(new Map<string, string>());
   const restoreGenerationRef = useRef(0);
@@ -717,15 +739,53 @@ export function ChatPanel({
       setWorkingAnnouncement(`${bot.name} is working`);
     }
   }, [bot, selectedThreadIsActive, workingSelectionKey]);
-  useEffect(() => {
-    const editable = composerInputRef.current?.querySelector<HTMLElement>('[contenteditable]');
-    if (editable === undefined || editable === null) return;
+  useLayoutEffect(() => {
+    const editable = composerInputRef.current?.querySelector<HTMLElement>("[contenteditable]");
+    if (!editable) return;
+    editable.setAttribute("data-testid", "composer-input");
     if (composerIsDisabled) {
       editable.setAttribute("aria-disabled", "true");
     } else {
       editable.removeAttribute("aria-disabled");
     }
   }, [composerIsDisabled]);
+
+  useLayoutEffect(() => {
+    // Disabling the focused button leaves focus on the body until the user moves it or the answer settles.
+    const forgetAnswerFocus = (event: FocusEvent): void => {
+      const answer = answeringButtonRef.current;
+      if (answer !== null && event.target !== answer.button) answeringButtonRef.current = null;
+    };
+    document.addEventListener("focusin", forgetAnswerFocus);
+    return () => document.removeEventListener("focusin", forgetAnswerFocus);
+  }, []);
+
+  useLayoutEffect(() => {
+    const answer = answeringButtonRef.current;
+    if (answer === null) return;
+    const activeElement = document.activeElement;
+    if (answer.threadId !== thread?.id || (activeElement !== answer.button && activeElement !== document.body)) {
+      answeringButtonRef.current = null;
+      return;
+    }
+    const card = pendingApprovals.find(({ approval }) => approval.id === answer.approvalId);
+    if (card !== undefined) {
+      if (card.isBusy) answer.wasBusy = true;
+      if (answer.wasBusy && card.error !== undefined && !card.isBusy) {
+        answeringButtonRef.current = null;
+        answer.button.focus();
+      }
+      return;
+    }
+
+    answeringButtonRef.current = null;
+    const nextApprovalId = firstSurvivingApprovalId(answer.followingIds, pendingApprovals.map(({ approval }) => approval.id));
+    const nextAction = nextApprovalId === undefined ? undefined : approvalCardsRef.current?.querySelector<HTMLButtonElement>(
+      `[data-approval-id="${CSS.escape(nextApprovalId)}"] [data-approval-first-action]:not(:disabled)`,
+    );
+    const editable = composerInputRef.current?.querySelector<HTMLElement>('[contenteditable="true"]');
+    (nextAction ?? editable ?? historyTriggerRef.current)?.focus();
+  }, [pendingApprovals, thread?.id, historyTriggerRef]);
 
   const grouped = useMemo(() => groupTranscriptRows(messages), [messages]);
   useEffect(() => {
@@ -1022,6 +1082,38 @@ export function ChatPanel({
 
   const composer = (
     <div {...stylex.props(styles.composerWrap)}>
+      {approvalsError !== undefined ? (
+        <Banner
+          status="error"
+          title="Approvals could not be loaded"
+          description={approvalsError}
+          container="section"
+          endContent={<Button label="Retry" variant="secondary" size="sm" onClick={onRetryApprovals} />}
+        />
+      ) : null}
+      {pendingApprovals.length > 0 ? (
+        <VStack gap={1} ref={approvalCardsRef}>
+          {pendingApprovals.map((card, index) => (
+            <PendingApprovalCard
+              key={card.approval.id}
+              {...card}
+              onAnswer={(answer, clickedButton) => {
+                const focused = document.activeElement;
+                if (focused instanceof HTMLButtonElement && clickedButton.closest("[data-approval-id]")?.contains(focused)) {
+                  answeringButtonRef.current = {
+                    approvalId: card.approval.id,
+                    threadId: card.approval.threadId,
+                    followingIds: pendingApprovals.slice(index + 1).map(({ approval }) => approval.id),
+                    button: focused,
+                    wasBusy: false,
+                  };
+                }
+                onAnswerApproval(card.approval, answer);
+              }}
+            />
+          ))}
+        </VStack>
+      ) : null}
       {visibleContextualError !== undefined ? (
         <Banner
           status="error"

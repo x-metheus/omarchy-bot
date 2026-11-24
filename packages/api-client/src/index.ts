@@ -11,6 +11,8 @@ import type {
 } from "@omarchy-bot/protocol";
 import type {
   AgentDto,
+  ApprovalAnswerBodyDto,
+  ApprovalDto,
   AttachmentDto,
   AttachmentDraftTokenDto,
   AvatarRecipeBodyDto,
@@ -324,6 +326,18 @@ export class ApiClient {
       throw new Error("localSidecarDeviceId must be a Local Sidecar device identity");
     }
     return { ...rest, deviceId };
+  }
+
+  // ----- approvals -----
+  listApprovals(threadId?: string): Promise<ApprovalDto[]> {
+    const query = threadId === undefined ? "" : `?threadId=${encodeURIComponent(threadId)}`;
+    return this.req(`/api/approvals${query}`);
+  }
+  answerApproval(id: string, body: ApprovalAnswerBodyDto): Promise<ApprovalDto> {
+    return this.req(`/api/approvals/${encodeURIComponent(id)}/answer`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   }
 
 

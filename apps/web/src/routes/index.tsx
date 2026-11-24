@@ -9,10 +9,10 @@ import { Layout, LayoutContent } from "@astryxdesign/core/Layout";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { MobileNav } from "@astryxdesign/core/MobileNav";
 import { VStack } from "@astryxdesign/core/VStack";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import type { BotViewDto } from "@omarchy-bot/protocol";
+import type { ApprovalAnswerBodyDto, ApprovalDto, BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage, isSupportedServiceProtocol, randomUuid, serviceHealthQuery } from "../lib/api.ts";
 import {
   requestDesktopNotificationPermission,
@@ -48,10 +48,14 @@ const QUERY_KEYS: Tags = {
   threads: ["threads"],
   messages: ["messages"],
   turns: ["turns"],
+  approvals: ["approvals"],
   computer: ["computer"],
   plugins: ["plugins"],
   "plugin-commands": ["plugin-commands"],
 };
+
+const ANSWER_APPROVAL_MUTATION_KEY = ["answer-approval"];
+type AnswerApprovalVariables = ApprovalAnswerBodyDto & Pick<ApprovalDto, "id" | "threadId" | "botId">;
 
 type RightRegionState =
   | { mode: "closed" }
@@ -95,6 +99,7 @@ function HomeScreen(): JSX.Element {
   const selectedBotRef = useRef<string | undefined>(selectedBotId);
   const botNamesRef = useRef<Record<string, string>>({});
   const mobileNavigationTriggerRef = useRef<HTMLButtonElement>(null);
+  const historyTriggerRef = useRef<HTMLButtonElement>(null);
   const computerTriggerRef = useRef<HTMLButtonElement>(null);
   const botSettingsTriggerRef = useRef<HTMLButtonElement>(null);
   selectedBotRef.current = selectedBotId;
@@ -201,7 +206,54 @@ function HomeScreen(): JSX.Element {
     enabled: thread !== undefined,
     refetchInterval: 15_000,
   });
-
+  const approvals = useQuery({
+    queryKey: ["approvals", thread?.id],
+    queryFn: () => api.listApprovals(thread!.id),
+    enabled: thread !== undefined,
+    refetchInterval: 15_000,
+  });
+  const answerApproval = useMutation({
+    mutationKey: ANSWER_APPROVAL_MUTATION_KEY,
+    mutationFn: async ({ id, answer }: AnswerApprovalVariables) => {
+      try {
+        return await api.answerApproval(id, { answer });
+      } catch (error) {
+        if (error instanceof Error && "status" in error && error.status === 409) return undefined;
+        throw error;
+      }
+    },
+    onSuccess: async (resolved, { id, threadId, botId }) => {
+      const queryKey = ["approvals", threadId];
+      qc.setQueryData<ApprovalDto[]>(queryKey, (pending) => pending?.filter((approval) => approval.id !== id));
+      const refreshApprovals = qc.invalidateQueries({ queryKey });
+      if (resolved === undefined) {
+        await refreshApprovals;
+        return;
+      }
+      await Promise.all([
+        refreshApprovals,
+        qc.invalidateQueries({ queryKey: ["messages", threadId] }),
+        qc.invalidateQueries({ queryKey: ["threads", botId] }),
+      ]);
+    },
+  });
+  const approvalAnswers = useMutationState({
+    filters: { mutationKey: ANSWER_APPROVAL_MUTATION_KEY, exact: true },
+    select: ({ state }) => ({
+      id: (state.variables as AnswerApprovalVariables | undefined)?.id,
+      status: state.status,
+      error: state.error,
+    }),
+  });
+  const pendingApprovals = (approvals.data ?? []).map((approval) => {
+    const attempt = approvalAnswers.findLast(({ id }) => id === approval.id);
+    return {
+      approval,
+      botName: botNamesRef.current[approval.botId],
+      isBusy: attempt?.status === "pending",
+      error: attempt?.status === "error" ? apiErrorMessage(attempt.error, "The approval could not be answered.") : undefined,
+    };
+  });
 
   const selectBot = useCallback(
     (botId: string): void => {
@@ -372,6 +424,13 @@ function HomeScreen(): JSX.Element {
               bot={bot}
               {...(thread !== undefined ? { thread } : {})}
               messages={messages.data ?? []}
+              pendingApprovals={pendingApprovals}
+              {...(approvals.error !== null
+                ? { approvalsError: apiErrorMessage(approvals.error, "Try loading this Thread’s approvals again.") }
+                : {})}
+              onRetryApprovals={() => void approvals.refetch()}
+              onAnswerApproval={({ id, threadId, botId }, answer) => answerApproval.mutate({ id, threadId, botId, answer })}
+              historyTriggerRef={historyTriggerRef}
               {...(thread !== undefined && messages.isPending ? { messagesLoading: true } : {})}
               {...(messages.error !== null
                 ? { messagesError: apiErrorMessage(messages.error, "Messages could not be loaded.") }
@@ -528,6 +587,7 @@ function HomeScreen(): JSX.Element {
               setRightRegion({ mode: "capabilities" });
             }}
             mobileNavigationTriggerRef={mobileNavigationTriggerRef}
+            historyTriggerRef={historyTriggerRef}
             computerTriggerRef={computerTriggerRef}
             botSettingsTriggerRef={botSettingsTriggerRef}
           />
