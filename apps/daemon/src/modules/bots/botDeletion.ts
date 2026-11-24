@@ -1,4 +1,5 @@
-import { rm } from "node:fs/promises";
+import { lstat, realpath, rm, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, sep } from "node:path";
 import type { Database } from "bun:sqlite";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import type { DeleteBotFailureDto, DeleteBotResultDto, TurnDto } from "@omarchy-bot/protocol";
@@ -42,9 +43,8 @@ function errorMessage(error: unknown): string {
 
 /**
  * Coordinates irreversible Bot-owned cleanup. Filesystem work finishes before
- * the SQLite delete transaction, so any local failure keeps a visible Bot
- * record that can be retried without claiming success. Agent workers and
- * Agent-owned Native Sessions are deliberately outside this boundary.
+ * the SQLite delete transaction. Required cleanup failures leave a Bot record
+ * for retry. Recorded old Pi session paths are cleaned up on a best-effort basis.
  */
 export class BotDeletionService {
   constructor(
@@ -183,6 +183,7 @@ export class BotDeletionService {
         status: "failed",
         botId,
         botName: bot.name,
+        oldSessionFilesRemoved: 0,
         removed: {
           threads: 0,
           messages: 0,
@@ -199,10 +200,12 @@ export class BotDeletionService {
       return failed;
     }
 
+    const oldSessionFilesRemoved = await this.#removeOldSessionFiles(botId);
     const deleted: DeleteBotResultDto = {
       status: "deleted",
       botId,
       botName: bot.name,
+      oldSessionFilesRemoved,
       removed: {
         threads: threadCount,
         messages: messageCount,
@@ -259,6 +262,66 @@ export class BotDeletionService {
     return deleted;
   }
 
+  async #removeOldSessionFiles(botId: string): Promise<number> {
+    const sessions = this.db.query<{ native_session_id: string }, [string]>(`
+      SELECT DISTINCT thread_sessions.native_session_id
+      FROM thread_sessions
+      JOIN threads ON threads.id = thread_sessions.thread_id
+      WHERE threads.bot_id = ? AND thread_sessions.native_session_id <> ''
+    `).all(botId);
+
+    const otherBotSession = this.db.query<{ owned: number }, [string, string]>(`
+      SELECT 1 AS owned
+      FROM thread_sessions
+      JOIN threads ON threads.id = thread_sessions.thread_id
+      WHERE thread_sessions.native_session_id = ? AND threads.bot_id <> ?
+      LIMIT 1
+    `);
+
+    let removed = 0;
+    for (const { native_session_id: path } of sessions) {
+      if (!isAbsolute(path)) continue;
+      if (path.split(sep === "\\" ? /[\\/]/ : "/").includes("..")) {
+        console.warn("OLD_SESSION_PARENT_TRAVERSAL");
+        continue;
+      }
+
+      let entry;
+      try {
+        const parent = dirname(path);
+        const resolvedParent = await realpath(parent).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOTDIR") return undefined;
+          throw error;
+        });
+        if (resolvedParent === undefined) continue;
+        if (resolvedParent !== parent) {
+          console.warn("OLD_SESSION_PARENT_MISMATCH");
+          continue;
+        }
+        entry = await lstat(path);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
+        if (code !== "ENOENT") console.warn(code);
+        continue;
+      }
+      if (entry.isDirectory()) {
+        console.warn("EISDIR");
+        continue;
+      }
+      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+      if (otherBotSession.get(path, botId) !== null) continue;
+
+      try {
+        await unlink(path);
+        removed += 1;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
+        if (code !== "ENOENT") console.warn(code);
+      }
+    }
+    return removed;
+  }
+
   #count(sql: string, botId: string): number {
     const row = this.db.query(sql).get(botId) as CountRow;
     return row.count;
@@ -275,6 +338,7 @@ export class BotDeletionService {
       status: "failed",
       botId,
       botName,
+      oldSessionFilesRemoved: 0,
       removed: {
         threads: 0,
         messages: 0,

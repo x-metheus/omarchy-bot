@@ -588,6 +588,7 @@ export const DeleteBotResultDto = z.object({
   status: z.enum(["deleted", "failed"]),
   botId: z.string(),
   botName: z.string(),
+  oldSessionFilesRemoved: z.number().int().nonnegative(),
   removed: z.object({
     threads: z.number().int().nonnegative(),
     messages: z.number().int().nonnegative(),
