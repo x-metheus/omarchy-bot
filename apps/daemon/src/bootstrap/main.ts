@@ -19,6 +19,7 @@ import type { BotComputerAssetSupply } from "../modules/computer/botComputerAsse
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
+import { cleanupWorkspace } from "../modules/workspace/cleanup.ts";
 import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { PluginsService } from "../modules/plugins/plugins.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
@@ -59,6 +60,12 @@ export async function main(options: MainOptions = {}): Promise<{
   recoverOnStartup(db);
   const events = new EventLog(db);
   const runtime = await openBotRuntime(cfg, db, { events });
+  const sharedWorkspaceDir = prepareSharedWorkspace(cfg.sharedWorkspaceDir);
+  try {
+    cleanupWorkspace({ workspaceDir: cfg.sharedWorkspaceDir, dataDir: cfg.dataDir });
+  } catch (error) {
+    console.warn("Workspace cleanup failed. It will retry on the next Service start.", error);
+  }
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
@@ -92,7 +99,7 @@ export async function main(options: MainOptions = {}): Promise<{
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
     capacity: cfg.botScreenCapacity,
-    applicationCwd: prepareSharedWorkspace(cfg.sharedWorkspaceDir),
+    applicationCwd: sharedWorkspaceDir,
     fontDir: process.env.OMARCHY_BOT_FONT_DIR ?? cfg.botComputerFontSupplyDir,
     browserPackDir: process.env.OMARCHY_BOT_BROWSER_PACK_DIR ?? cfg.botComputerBrowserPackDir,
     ...(options.botComputerAssetSupply === undefined ? {} : { assetSupply: options.botComputerAssetSupply }),

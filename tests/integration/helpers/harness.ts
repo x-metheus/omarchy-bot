@@ -97,6 +97,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   const state = path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(home, { recursive: true });
   mkdirSync(state, { recursive: true });
+  process.env.OMARCHY_BOT_STATE = state;
   // Fake conformance record so the fake pi worker probes to `ready`.
   const conf = path.join(home, "conformance");
   mkdirSync(conf, { recursive: true });
@@ -107,7 +108,6 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
 
   process.env.HOME = home;
   process.env.OMARCHY_BOT_HOME = home;
-  process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_BOT_WORKERS_DIR = options.workersDir ?? path.resolve(import.meta.dir, "../fake-workers");
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
