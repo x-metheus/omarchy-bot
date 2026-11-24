@@ -21,12 +21,7 @@ function userTexts(context: TranscriptContext): string[] {
   return context.messages.flatMap((message) => message.role === "user" ? [typeof message.content === "string" ? message.content : message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")] : []);
 }
 
-function computerFixture(context: TranscriptContext) {
-  const text = userTexts(context).at(-1) ?? "";
-  if (!text.startsWith("computer:")) return undefined;
-  const [, command = "observe", ...tail] = text.split(":");
-  if (command === "crash-agent") return undefined;
-  const value = tail.join(":");
+function computerFixtureArgs(command: string, value: string) {
   let action = command;
   let args: Record<string, string | number> = {};
   switch (command) {
@@ -37,8 +32,15 @@ function computerFixture(context: TranscriptContext) {
     case "list_windows": case "screenshot": break;
     default: action = "observe";
   }
+  return { action, args };
+}
+
+function graphicalToolFixture(context: TranscriptContext) {
+  const text = userTexts(context).at(-1) ?? "";
+  const [toolName, command, ...tail] = text.split(":");
+  if ((toolName !== "browser" && toolName !== "computer") || command === undefined || command === "crash-agent") return undefined;
   const lastUser = context.messages.findLastIndex((message) => message.role === "user");
-  const result = context.messages.slice(lastUser + 1).findLast((message) => message.role === "toolResult" && message.toolName === "computer");
+  const result = context.messages.slice(lastUser + 1).findLast((message) => message.role === "toolResult" && message.toolName === toolName);
   if (result?.role === "toolResult") {
     if (result.isError) {
       const errorMessage = result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n");
@@ -46,14 +48,18 @@ function computerFixture(context: TranscriptContext) {
     }
     return fauxAssistantMessage(JSON.stringify(result.details));
   }
-  return fauxAssistantMessage([fauxToolCall("computer", { action, args })], { stopReason: "toolUse" });
+  const value = tail.join(":");
+  const params = toolName === "browser"
+    ? { action: command, args: value.startsWith("{") ? JSON.parse(value) : {} }
+    : computerFixtureArgs(command, value);
+  return fauxAssistantMessage([fauxToolCall(toolName, params)], { stopReason: "toolUse" });
 }
 
-/** The durable suite's text, thinking, steering, and computer fixtures. */
+/** The durable suite's text, thinking, steering, and graphical tool fixtures. */
 export function createDurableSuiteFakeProvider() {
   const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }], tokensPerSecond: 20, tokenSize: { min: 1, max: 1 } });
-  // The worker emits the entire computer response at once.
-  const computer = fauxProvider({ provider: "fake" });
+  // The worker emits each graphical tool response at once.
+  const graphical = fauxProvider({ provider: "fake" });
   const failedSessions = new Set<string>();
   fake.setResponses(Array.from({ length: 1000 }, () => (context: TranscriptContext, options) => {
     const texts = userTexts(context);
@@ -86,11 +92,11 @@ export function createDurableSuiteFakeProvider() {
   }));
   const base = fake.provider;
   const streamSimple: typeof base.streamSimple = (model, context, options) => {
-    const reply = computerFixture(context);
+    const reply = graphicalToolFixture(context);
     if (reply !== undefined) {
-      computer.appendResponses([reply]);
+      graphical.appendResponses([reply]);
       fake.state.callCount++;
-      return computer.provider.streamSimple(model, context, options);
+      return graphical.provider.streamSimple(model, context, options);
     }
     const text = userTexts(context).at(-1);
     const hanging = text === "hang" || text === "thinking-hang";

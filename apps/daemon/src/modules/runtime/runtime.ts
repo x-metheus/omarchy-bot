@@ -17,6 +17,7 @@ import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
 import { createComputerExtension } from "./extensions/computer.ts";
+import { createBrowserExtension } from "./extensions/browser.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
@@ -80,7 +81,7 @@ function entryBefore(entry: EntryId | undefined): EntryId | undefined {
 
 export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: {
   events?: Pick<EventLog, "append">;
-  computer?: Pick<ComputerBroker, "agentToolAct">;
+  computer?: Pick<ComputerBroker, "agentToolAct" | "agentBrowserAct">;
 } = {}): Promise<BotRuntime> {
   const credentials = new CredentialStore(paths.stateDir);
   const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
@@ -110,10 +111,12 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         JOIN pi_turn_submissions ON pi_turn_submissions.turn_id = turns.id
         WHERE conversation_id = ? AND submission_id = ? AND turns.status = 'working'
       `);
+      const owner = (conversationId: ConversationId, submissionId: SubmissionId) => findOwner.get(conversationId, submissionId) ?? undefined;
       registry.install(createComputerExtension({
         broker: { agentToolAct: (owner, turnId, toolCallId, action, signal) => computer.agentToolAct(owner, turnId, toolCallId, action, signal, true) },
-        owner: (conversationId, submissionId) => findOwner.get(conversationId, submissionId) ?? undefined,
+        owner,
       }));
+      registry.install(createBrowserExtension({ broker: computer, owner }));
     }
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {

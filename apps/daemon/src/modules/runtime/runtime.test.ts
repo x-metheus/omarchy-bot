@@ -11,7 +11,7 @@ import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThre
 import { until } from "../../../../../tests/integration/helpers/bot-screen-load-observe.ts";
 import { FakeBotScreenRuntimeAdapter } from "../computer/fakeBotScreenRuntime.ts";
 import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
-import { AGENT_COMPUTER_TOOL } from "@omarchy-bot/agent-contract";
+import { AGENT_BROWSER_TOOL, AGENT_COMPUTER_TOOL } from "@omarchy-bot/agent-contract";
 import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore } from "./credentials.ts";
@@ -149,7 +149,7 @@ test("a steer placed at a final Harness boundary resolves its owning Omarchy tur
   }
 });
 
-test("the model request contains only the app prompt, Shared Workspace Skills, and computer guidelines", () => {
+test("the model request contains only the app prompt, Shared Workspace Skills, and computer and browser guidelines", () => {
   const prompts: string[] = [];
   return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "bot-prompt-home-"));
@@ -214,9 +214,10 @@ test("the model request contains only the app prompt, Shared Workspace Skills, a
         allowedFolders,
         skills: [{ name: "Workspace Skill", description: "Workspace skill description sentinel", path: ".agents/skills/workspace/SKILL.md" }],
       });
-      const { summary, guidelines } = AGENT_COMPUTER_TOOL.systemPrompt;
-      const computerPrompt = [summary, ...guidelines.map((guideline) => `- ${guideline}`)].join("\n");
-      expect(prompt).toBe(`<computer>\n${computerPrompt}\n</computer>\n\n<instructions>\n${appPrompt}\n</instructions>`);
+      const toolSections = [AGENT_COMPUTER_TOOL, AGENT_BROWSER_TOOL].map(({ name, systemPrompt: { summary, guidelines } }) =>
+        [`<${name}>`, summary, ...guidelines.map((guideline) => `- ${guideline}`), `</${name}>`].join("\n"),
+      );
+      expect(prompt).toBe([...toolSections, `<instructions>\n${appPrompt}\n</instructions>`].join("\n\n"));
     } finally {
       await h?.stop();
       if (previousPiConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

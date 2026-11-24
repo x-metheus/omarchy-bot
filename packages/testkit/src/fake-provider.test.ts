@@ -28,6 +28,23 @@ test("durable computer directives follow the worker action and argument syntax",
   }
 });
 
+test("durable browser directives follow the worker action, label, and JSON argument syntax", async () => {
+  const run = suite();
+  const directives = [
+    ["browser:snapshot", "snapshot", {}],
+    ["browser:snapshot:arbitrary:label", "snapshot", {}],
+    ['browser:navigate:{"url":"https://example.test:8443/path?next=https://example.test/done"}', "navigate", { url: "https://example.test:8443/path?next=https://example.test/done" }],
+    ['browser:type:{"ref":"e1-1","text":"Ada: Lovelace"}', "type", { ref: "e1-1", text: "Ada: Lovelace" }],
+    ['browser:click:{"ref":"e1-1"}', "click", { ref: "e1-1" }],
+    ['browser:request_takeover:{"reason":"Please log in: use your account"}', "request_takeover", { reason: "Please log in: use your account" }],
+  ] as const;
+  for (const [directive, action, args] of directives) {
+    const reply = await run(directive).result();
+    expect(reply.stopReason).toBe("toolUse");
+    expect(reply.content).toMatchObject([{ type: "toolCall", name: "browser", arguments: { action, args } }]);
+  }
+});
+
 test("durable scripts preserve text and thinking block order", async () => {
   const run = suite();
   expect((await run("parity-stream").result()).content).toEqual([{ type: "thinking", thinking: "T" }, { type: "text", text: "R" }]);
