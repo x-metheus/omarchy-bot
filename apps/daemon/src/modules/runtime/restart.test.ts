@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -13,8 +13,8 @@ const root = path.resolve(import.meta.dir, "../../../../..");
 const fixture = path.join(root, "tests/integration/fixtures/durable-crash-child.ts");
 
 type Child = ReturnType<typeof Bun.spawn>;
-async function boot(home: string, deadline: number, crashMode = false): Promise<{ child: Child; port: number; events: string[] }> {
-  const child = Bun.spawn(["bun", fixture], { env: { ...process.env, HOME: home, OMARCHY_BOT_HOME: home, OMARCHY_BOT_STATE: path.join(home, "state"), OMARCHY_BOT_PORT: "0", OMARCHY_BOT_WORKERS_DIR: path.join(root, "tests/integration/fake-workers"), OMARCHY_TEST_SLEEP_AT: String(deadline), OMARCHY_TEST_CRASH_MODE: crashMode ? "1" : "0" }, stdout: "pipe", stderr: "pipe" });
+async function boot(home: string, deadline: number, crashMode = false, extraEnv: Record<string, string> = {}): Promise<{ child: Child; port: number; events: string[] }> {
+  const child = Bun.spawn(["bun", fixture], { env: { ...process.env, HOME: home, OMARCHY_BOT_HOME: home, OMARCHY_BOT_STATE: path.join(home, "state"), OMARCHY_BOT_PORT: "0", OMARCHY_BOT_WORKERS_DIR: path.join(root, "tests/integration/fake-workers"), OMARCHY_TEST_SLEEP_AT: String(deadline), OMARCHY_TEST_CRASH_MODE: crashMode ? "1" : "0", ...extraEnv }, stdout: "pipe", stderr: "pipe" });
   const events: string[] = [];
   const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
   let ready!: (port: number) => void;
@@ -249,3 +249,74 @@ test("repeated hard kills stop a crashing reply at the restart limit", async () 
     expect(query<{ n: number }>(home, "SELECT count(*) AS n FROM messages WHERE turn_id = ? AND kind = 'response'", sent.turnId)?.n).toBe(0);
   } finally { if (child) await stop(child); rmSync(home, { recursive: true, force: true }); }
 }, 90000);
+
+async function answerApproval(port: number, home: string, id: string, answer: "allow_once" | "allow_folder" | "deny"): Promise<void> {
+  const base = `http://127.0.0.1:${port}`;
+  const token = await pairForToken(base, path.join(home, "state"));
+  const response = await fetch(`${base}/api/approvals/${id}/answer`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-command-id": crypto.randomUUID() }, body: JSON.stringify({ answer }) });
+  if (!response.ok) throw new Error(`answer approval: ${response.status} ${await response.text()}`);
+}
+function approvalSetup() {
+  // The default fixture puts the Shared Workspace under the Service data directory, which file tools always refuse.
+  const outside = mkdtempSync(path.join(os.tmpdir(), "approval-outside-"));
+  const userHome = path.join(outside, "home");
+  mkdirSync(userHome);
+  const target = path.join(outside, "elsewhere", "approved.txt");
+  mkdirSync(path.dirname(target));
+  return { outside, target, env: { HOME: userHome, OMARCHY_TEST_APPROVAL_PATH: target } };
+}
+async function pendingApproval(home: string, turnId: string) {
+  return waitFor(() => query<{ id: string; task_id: number; status: string }>(home, "SELECT id, task_id, status FROM approvals WHERE turn_id = ?", turnId) ?? undefined);
+}
+async function terminal(home: string, turnId: string) {
+  return waitFor(() => { const value = query<{ status: string; outcome_reason: string | null }>(home, "SELECT status, outcome_reason FROM turns WHERE id = ?", turnId); return value && ["completed", "failed", "cancelled"].includes(value.status) ? value : undefined; }, 30000);
+}
+
+// Prototype check 6: a write outside the allowed folders pauses, survives a crash, and writes once after approval.
+test("a pending approval survives a hard kill without asking twice and writes once after approval", async () => {
+  const home = setup(); const { outside, target, env } = approvalSetup(); let child: Child | undefined;
+  try {
+    const deadline = Date.now() + 60000;
+    const first = await boot(home, deadline, false, env); child = first.child;
+    const sent = await send(first.port, home, "approval-write");
+    const pending = await pendingApproval(home, sent.turnId);
+    expect(pending.status).toBe("pending");
+    expect(existsSync(target)).toBe(false);
+    await stop(child); child = undefined;
+    const second = await boot(home, deadline, false, env); child = second.child;
+    await answerApproval(second.port, home, pending.id, "allow_once");
+    expect(await terminal(home, sent.turnId)).toMatchObject({ status: "completed" });
+    expect(readFileSync(target, "utf8")).toBe("approved content\n");
+    expect(query<{ n: number }>(home, "SELECT count(*) AS n FROM approvals WHERE turn_id = ?", sent.turnId)?.n).toBe(1);
+    expect(query<{ n: number }>(home, "SELECT count(*) AS n FROM events WHERE type = 'approval.requested'")?.n).toBe(1);
+    expect(query<{ status: string }>(home, "SELECT status FROM approvals WHERE id = ?", pending.id)?.status).toBe("allowed_once");
+    // A later start has nothing to replay and leaves the file as written.
+    const written = statSync(target);
+    await stop(child); child = undefined;
+    const third = await boot(home, deadline, false, env); child = third.child;
+    await Bun.sleep(500);
+    expect(statSync(target)).toMatchObject({ ino: written.ino, size: written.size, mtimeMs: written.mtimeMs });
+  } finally { if (child) await stop(child); rmSync(home, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+}, 60000);
+
+test("a clean shutdown leaves a reply waiting for approval without using a restart", async () => {
+  const home = setup(); const { outside, target, env } = approvalSetup(); let child: Child | undefined;
+  try {
+    const deadline = Date.now() + 60000;
+    const first = await boot(home, deadline, false, env); child = first.child;
+    const sent = await send(first.port, home, "approval-write");
+    const pending = await pendingApproval(home, sent.turnId);
+    child.kill("SIGTERM");
+    await Promise.race([child.exited, Bun.sleep(10000).then(() => { throw new Error("shutdown did not finish"); })]);
+    child = undefined;
+    expect(query<{ status: string }>(home, "SELECT status FROM turns WHERE id = ?", sent.turnId)?.status).toBe("working");
+    expect(query<{ status: string }>(home, "SELECT status FROM approvals WHERE id = ?", pending.id)?.status).toBe("pending");
+    const restarts = () => query<{ restarts: number | null }>(home, "SELECT json_extract(record, '$.restarts') AS restarts FROM pi_tasks WHERE id = ?", String(pending.task_id))?.restarts ?? 0;
+    expect(restarts()).toBe(0);
+    const second = await boot(home, deadline, false, env); child = second.child;
+    await answerApproval(second.port, home, pending.id, "allow_once");
+    expect(await terminal(home, sent.turnId)).toMatchObject({ status: "completed" });
+    expect(readFileSync(target, "utf8")).toBe("approved content\n");
+    expect(restarts()).toBe(0);
+  } finally { if (child) await stop(child); rmSync(home, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+}, 60000);

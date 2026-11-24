@@ -298,6 +298,21 @@ test("refused locations are blocked without asking, and a model cannot approve i
   } finally { db.close(); dirs.close(); }
 });
 
+test("an expired request returns no answer to the Bot", async () => {
+  const dirs = directories();
+  const { db, store, approvals } = approvalsFor(dirs);
+  try {
+    const target = path.join(dirs.outside, "expired.txt");
+    const { settlement, results } = await withTurn(dirs, [write(target)], async () => {
+      for (let tries = 0; tries < 400 && store.listPending().length === 0; tries++) await Bun.sleep(5);
+      store.expire(store.listPending()[0]!.id);
+    }, { approvals });
+    expect(settlement.status).toBe("done");
+    expect(results[0]).toMatchObject({ isError: true, text: expect.stringContaining("No answer: the request to write") });
+    expect(existsSync(target)).toBe(false);
+  } finally { db.close(); dirs.close(); }
+});
+
 test("aborting the reply while it waits withdraws the request", async () => {
   const dirs = directories();
   const { db, store, approvals } = approvalsFor(dirs);

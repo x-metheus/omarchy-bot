@@ -278,14 +278,15 @@ describe("integration: chat through a bot", () => {
     expect(msgs.some((m) => m.author.kind === "system" && m.kind === "text" && (m.text ?? "").includes("cancel"))).toBeTrue();
   });
 
-  test("tool activity remains while approval and public abort routes are absent", async () => {
+  test("tool activity remains, the public abort route is absent, and no approval is pending", async () => {
     const botId = await makeBot(h, "Tool user");
     const sent = await sendToBot(h, botId, "tool");
     await waitThreadIdle(h, sent.threadId);
     const msgs = await messages(sent.threadId);
     expect(msgs.some((m) => m.kind === "tool")).toBeTrue();
     expect(msgs.some((m) => m.kind === "event")).toBeTrue();
-    expect((await apiStatus(h, "GET", "/api/approvals")).status).toBe(404);
+    // Durable file approvals (bot-runtime Task 9) replaced the legacy worker approval routes.
+    expect(await api(h, "GET", "/api/approvals")).toEqual([]);
     expect((await apiStatus(h, "POST", `/api/turns/${sent.turnId}/abort`)).status).toBe(404);
   });
 });

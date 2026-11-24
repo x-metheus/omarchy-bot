@@ -102,6 +102,10 @@ export class TurnService {
   #durableTurns = new Set<string>();
   #durableStarts = new Map<string, Promise<void>>();
   #recovery: { registered: Promise<void>; settled: Promise<void> } | undefined;
+  #recoveredSettled = new Map<string, Promise<void>>();
+  #settleRecovered = new Map<string, () => void>();
+  /** Durable Turns left waiting for an approval at shutdown. They stay working and continue on the next start. */
+  #suspended = new Set<string>();
   #durableAbortReasons = new Map<string, string>();
   #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
   #timeoutQueues = new Map<AgentId, Promise<void>>();
@@ -127,9 +131,17 @@ export class TurnService {
     this.#stopping = true;
     this.#restartReason ??= options.reason;
     await this.#recovery?.registered;
-    await Promise.allSettled([...this.#durableTurns].map((turnId) => this.runtime?.abortTurn(turnId)));
-    await this.#recovery?.settled;
-    await Promise.allSettled(this.#durableStarts.values());
+    // A reply waiting for an approval keeps waiting through a restart: only the Harness closes under it, which is not a
+    // crash and uses none of its restarts. Its run settles only after that close, so shutdown does not wait for it.
+    for (const turnId of this.#durableTurns) {
+      const row = this.threads.turnRow(turnId);
+      if (row && this.runtime?.approvals?.hasPending(row.thread_id, row.bot_id)) this.#suspended.add(turnId);
+    }
+    const running = (turnId: string) => !this.#suspended.has(turnId);
+    await Promise.allSettled([...this.#durableTurns].filter(running).map((turnId) => this.runtime?.abortTurn(turnId)));
+    if (this.#suspended.size === 0) await this.#recovery?.settled;
+    else await Promise.allSettled([...this.#recoveredSettled].filter(([turnId]) => running(turnId)).map(([, settled]) => settled));
+    await Promise.allSettled([...this.#durableStarts].filter(([turnId]) => running(turnId)).map(([, start]) => start));
     await Promise.allSettled(this.#turnStarts.values());
     for (const ctx of this.#turns.values()) clearTimeout(ctx.turnTimeout);
     await Promise.all(this.#timeoutQueues.values());
@@ -139,8 +151,14 @@ export class TurnService {
     if (!this.runtime || this.#recovery) return;
     this.#recovery = this.runtime.recoverTurns({
       db: this.db, threads: this.threads, bots: this.bots, events: this.events,
-      registered: (turnId) => { this.#durableTurns.add(turnId); },
+      registered: (turnId) => {
+        this.#durableTurns.add(turnId);
+        this.#recoveredSettled.set(turnId, new Promise((resolve) => this.#settleRecovered.set(turnId, resolve)));
+      },
       settled: (turnId, outcome) => {
+        this.#settleRecovered.get(turnId)?.();
+        this.#settleRecovered.delete(turnId);
+        this.#recoveredSettled.delete(turnId);
         if (outcome.status === "completed") {
           this.#setTurnStatus(turnId, "completed", undefined, true);
         } else {
@@ -1008,6 +1026,7 @@ export class TurnService {
   }
 
   #finishInterruptedDurableTurn(turnId: string, threadId: string | undefined, status: "failed" | "cancelled", reason: string): void {
+    if (this.#suspended.has(turnId)) return;
     if (threadId !== undefined) this.#removeIncompleteAgentBlocks(threadId, turnId);
     const restartReason = status === "cancelled" && !this.#durableAbortReasons.has(turnId) ? this.#restartReason : undefined;
     this.#setTurnStatus(turnId, restartReason === undefined ? status : "failed", restartReason ?? reason, true);

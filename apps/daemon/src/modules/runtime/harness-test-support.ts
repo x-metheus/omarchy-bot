@@ -190,8 +190,7 @@ export function installDurableCrashProvider(): () => void {
     },
     abort: (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
   });
-  const registry = createRegistry();
-  registry.install(defineExtension({ name: "test-crash", tasks: [sleepTask], sections: [{ key: "test-crash-gate", async render() {
+  const crashExtension = defineExtension({ name: "test-crash", tasks: [sleepTask], sections: [{ key: "test-crash-gate", async render() {
     if (process.env.OMARCHY_TEST_CRASH_MODE === "1") {
       console.log(JSON.stringify({ event: "before-request" }));
       await new Promise<never>(() => {});
@@ -212,25 +211,34 @@ export function installDurableCrashProvider(): () => void {
       parameters: { type: "object", properties: {}, additionalProperties: false },
       async execute() { console.log(JSON.stringify({ event: "hang" })); return await new Promise<never>(() => {}); },
     }),
-  ] }));
+  ] });
   const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }], tokensPerSecond: 15, tokenSize: { min: 1, max: 1 } });
   fake.setResponses(Array.from({ length: 100 }, () => ({ messages }) => {
     const latest = messages.filter((message) => message.role === "user").at(-1);
     const text = typeof latest?.content === "string" ? latest.content : "";
     if (text === "hang") return fauxAssistantMessage([fauxToolCall("hang", {}, { id: "hang-call" })], { stopReason: "toolUse" });
+    if (text === "approval-write") {
+      if (messages.at(-1)?.role === "toolResult") return fauxAssistantMessage("Approval write finished.");
+      return fauxAssistantMessage([fauxToolCall("write", { path: process.env.OMARCHY_TEST_APPROVAL_PATH ?? "", content: "approved content\n" }, { id: "approval-call" })], { stopReason: "toolUse" });
+    }
     if (text === "first-request") return fauxAssistantMessage("First request streaming text stays visible after interruption and the continuation completes.");
     if (!JSON.stringify(messages).includes("scheduled")) return fauxAssistantMessage([fauxToolCall("sleep_until", { at: Number(process.env.OMARCHY_TEST_SLEEP_AT), text: "scheduled post" }, { id: "sleep-call" })], { stopReason: "toolUse" });
     return fauxAssistantMessage("A long reply that keeps streaming across the restart and eventually completes.");
   }));
   const originalOpen = Harness.open;
-  Harness.open = (storage, options, context) => originalOpen.call(Harness, storage, {
-    ...options, registry,
-    models: () => {
-      const models = typeof options.models === "function" ? options.models() : options.models;
-      if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
-      models.setProvider(fake.provider);
-      return models;
-    },
-  }, context);
+  Harness.open = (storage, options, context) => {
+    const runtimeRegistry: unknown = options.registry;
+    if (typeof runtimeRegistry !== "object" || runtimeRegistry === null || !("install" in runtimeRegistry) || typeof runtimeRegistry.install !== "function") throw new Error("Expected a mutable registry");
+    runtimeRegistry.install(crashExtension);
+    return originalOpen.call(Harness, storage, {
+      ...options,
+      models: () => {
+        const models = typeof options.models === "function" ? options.models() : options.models;
+        if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
+        models.setProvider(fake.provider);
+        return models;
+      },
+    }, context);
+  };
   return () => { Harness.open = originalOpen; };
 }
