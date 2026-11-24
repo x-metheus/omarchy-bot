@@ -249,10 +249,9 @@ Tools in the memory extension. The Bot's identity is taken from the conversation
   - The new conversation does not remember earlier dialogue, tool results, or Thinking. The seed carries a summary of the Thread, and `conversation_search` reaches the rest; nothing may assume the reset conversation remembers more.
   - Continuity loss must be measured.
   - Ephemeral recall limits how often a reset is needed.
-- **Truthful wording:** "Removed from memory, search, and what I see from now on. Old Thread text stays until you delete the Thread. Your model provider may have received it under its own policy."
+- **Truthful wording:** "Removed from memory, search, and what I see from now on. Old Thread text stays until you delete the Bot. Your model provider may have received it under its own policy."
 - **Deletion:**
   - Bot Deletion removes that Bot's private Facts, private tombstones, search rows, and conversations. Shared Facts stay.
-  - Deleting a Thread removes its search rows and keeps its Facts, with the source reference cleared. The confirmation says so.
 
 ### Secrets and sensitive information
 
