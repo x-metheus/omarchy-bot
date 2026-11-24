@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { CredentialStore } from "./credentials.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings } from "./compaction.ts";
-import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationWatch, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
+import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 export const DEFAULT_MAX_TURNS = 50;
@@ -28,6 +28,11 @@ export interface BotRuntime {
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
   close(): Promise<void>;
+}
+
+function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | undefined): boolean {
+  if (lastEntryBeforeAbort === undefined || entry.id <= lastEntryBeforeAbort || !AssistantEntry.is(entry)) return true;
+  return !entry.model?.some((message) => message.role === "assistant" && message.stopReason === "aborted");
 }
 
 export async function openBotRuntime(dbPath: string, stateDir: string, db?: Database): Promise<BotRuntime> {
@@ -63,14 +68,14 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
       throw error;
     }
     let closing: Promise<void> | undefined;
-    const active = new Map<string, { db: Database; threadId: string; admitted: Promise<{ conversation: Conversation; submission: Submission }>; pending: Promise<SettledSubmissionRecord | undefined>[]; steers: Submission[]; inputs: Set<number>; recovering?: boolean }>();
+    const active = new Map<string, { db: Database; threadId: string; admitted: Promise<{ conversation: Conversation; submission: Submission }>; pending: Promise<SettledSubmissionRecord | undefined>[]; steers: Submission[]; inputs: Set<number>; lastEntryBeforeAbort: number | undefined; abortCutoffRead?: Promise<void>; recovering?: boolean }>();
     return {
       async startTurn(input) {
         let ready!: (value: { conversation: Conversation; submission: Submission }) => void;
         let fail!: (error: unknown) => void;
         const admitted = new Promise<{ conversation: Conversation; submission: Submission }>((resolve, reject) => { ready = resolve; fail = reject; });
         void admitted.catch(() => {});
-        const turn = { db: input.db, threadId: input.threadId, admitted, pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>() };
+        const turn = { db: input.db, threadId: input.threadId, admitted, pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>(), lastEntryBeforeAbort: undefined as number | undefined };
         active.set(input.turnId, turn);
         try {
           const model = resolveModelForBot(input.db, credentials, input.botId);
@@ -99,7 +104,8 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
               const entries = status.entry === undefined ? call.value.entries : call.value.entries.filter((entry) => entry.id < status.entry!);
               transcript = new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, { ...call.value, entries });
             }
-            transcript.update(call.value);
+            const entries = call.value.entries.filter((entry) => shouldProjectEntry(entry, turn.lastEntryBeforeAbort));
+            transcript.update({ ...call.value, entries });
           });
           try {
             input.working();
@@ -167,7 +173,7 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
               }
               if (!primary) throw new Error("durable submission not found");
               const owned = primary;
-              const turn = { db: input.db, threadId: row.thread_id, admitted: Promise.resolve({ conversation, submission: owned }), pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>([owned.id]), recovering: true };
+              const turn = { db: input.db, threadId: row.thread_id, admitted: Promise.resolve({ conversation, submission: owned }), pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>([owned.id]), lastEntryBeforeAbort: undefined as number | undefined, recovering: true };
               active.set(row.id, turn);
               input.registered(row.id);
               jobs.push((async () => {
@@ -219,7 +225,8 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
                     let entryCursor: Cursor | undefined;
                     do {
                       const page = await conversation.entries({ order: "ascending", minEntryId: firstEntry }, 100, entryCursor, context);
-                      transcript.update({ ...ownedWatch.value, entries: page.items.filter((entry) => nextEntry === undefined || entry.id < nextEntry), docs: { ...ownedWatch.value.docs, "pi.live": {} } });
+                      const entries = page.items.filter((entry) => (nextEntry === undefined || entry.id < nextEntry) && shouldProjectEntry(entry, turn.lastEntryBeforeAbort));
+                      transcript.update({ ...ownedWatch.value, entries, docs: { ...ownedWatch.value.docs, "pi.live": {} } });
                       entryCursor = page.next;
                     } while (entryCursor);
                     transcript.update({ ...ownedWatch.value, entries: [], docs: initialDocs });
@@ -233,7 +240,8 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
                     }
                     firstEntry ??= (await owned.status(context)).entry;
                     if (firstEntry === undefined) return;
-                    transcript.update({ ...call.value, entries: call.value.entries.filter((entry) => entry.id >= firstEntry! && (nextEntry === undefined || entry.id < nextEntry)) });
+                    const entries = call.value.entries.filter((entry) => entry.id >= firstEntry! && (nextEntry === undefined || entry.id < nextEntry) && shouldProjectEntry(entry, turn.lastEntryBeforeAbort));
+                    transcript.update({ ...call.value, entries });
                   });
                   const settlements = [await owned.wait(context)];
                   for (let i = 0; i < turn.pending.length; i++) {
@@ -252,8 +260,10 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
                   else {
                     const failed = settlements.find((item) => item.status === "unanswered");
                     if (!failed || failed.status !== "unanswered") throw new Error("Durable turn did not complete");
-                    if (failed.reason === "aborted") input.settled(row.id, { status: "cancelled" });
-                    else {
+                    if (failed.reason === "aborted") {
+                      await ownedWatch.stop();
+                      input.settled(row.id, { status: "cancelled" });
+                    } else {
                       const live = ownedWatch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; detail?: string } } | undefined;
                       const reason = (live?.runFailure?.inputs.includes(failed.id) ? live.runFailure.detail : undefined) ?? (typeof failed.detail === "string" ? failed.detail : failed.reason);
                       input.settled(row.id, { status: "failed", reason });
@@ -308,6 +318,13 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
         const turn = active.get(turnId);
         if (turn) {
           const { conversation, submission } = await turn.admitted;
+          if (turn.lastEntryBeforeAbort === undefined) {
+            // The abort journals its partial as an aborted entry. Earlier entries include any partials replayed after a hard kill.
+            turn.abortCutoffRead ??= conversation.entries({ order: "descending" }, 1, undefined, context)
+              .then(({ items }) => { turn.lastEntryBeforeAbort = items[0]?.id ?? 0; })
+              .finally(() => { delete turn.abortCutoffRead; });
+            await turn.abortCutoffRead;
+          }
           const result = await submission.abort(context);
           if (result === "already_placed" || (result === "settled" && (turn.pending.length > 0 || turn.recovering))) await conversation.abort(context);
         }

@@ -336,7 +336,7 @@ export async function main(options: MainOptions = {}): Promise<{
     clearInterval(deviceLiveness);
     devices.close();
     mailbox.pauseDispatch();
-    await turns.shutdown();
+    await turns.shutdown({ reason: "daemon restart" });
     await runtime.close();
     computer.shutdown();
     await projections.shutdown();

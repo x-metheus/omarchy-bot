@@ -86,7 +86,7 @@ This keeps an upgrade of the experimental package to one module.
 
 **Startup:** open the Harness, then call `resume()`. Unfinished replies and tasks continue, and replies that cannot continue end with a visible failure reason.
 
-**Shutdown:** stop accepting input, abort running replies, and close the Harness. Aborted replies are recorded as aborted, not lost.
+**Shutdown** stops accepting input, aborts running replies, and closes the Harness. When SIGTERM disconnects the Service for restart, interrupted Turns are recorded as failed with the reason `daemon restart`. A user abort records the Turn as cancelled with the supplied reason. Both remove streaming Response and Thinking blocks and preserve completed blocks.
 
 **Crash safety:** commit-before-show and `resume()` cover a crashed Service. pi-durable's retry and `restartLimit` settings stop a reply that keeps crashing the process from looping forever.
 

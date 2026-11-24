@@ -209,7 +209,7 @@ test("recovery keeps a queued follow-up in its own Turn", async () => {
   } finally { if (child) await stop(child); rmSync(home, { recursive: true, force: true }); }
 }, 60000);
 
-test("shutdown aborts and awaits a recovered running reply", async () => {
+test("shutdown on SIGTERM fails the running reply with the daemon restart reason", async () => {
   const home = setup(); let child: Child | undefined;
   try {
     const deadline = Date.now() + 12000;
@@ -218,11 +218,14 @@ test("shutdown aborts and awaits a recovered running reply", async () => {
     await waitFor(() => query<{ text: string }>(home, "SELECT text FROM messages WHERE turn_id = ? AND kind = 'response' AND length(text) > 0", sent.turnId) ?? undefined);
     await stop(child); child = undefined;
     const second = await boot(home, deadline); child = second.child;
-    await waitFor(() => query<{ text: string }>(home, "SELECT text FROM messages WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming' AND length(text) > 0", sent.turnId) ?? undefined);
+    const streamingResponse = await waitFor(() => query<{ block_id: string }>(home, "SELECT block_id FROM messages WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming' AND length(text) > 0", sent.turnId) ?? undefined);
+    expect(streamingResponse).toBeDefined();
     child.kill("SIGTERM");
     await Promise.race([child.exited, Bun.sleep(10000).then(() => { throw new Error("shutdown did not finish"); })]);
     child = undefined;
-    expect(query<{ status: string; outcome_reason: string }>(home, "SELECT status, outcome_reason FROM turns WHERE id = ?", sent.turnId)).toMatchObject({ status: "cancelled", outcome_reason: "aborted" });
+    expect(query<{ status: string; outcome_reason: string }>(home, "SELECT status, outcome_reason FROM turns WHERE id = ?", sent.turnId)).toMatchObject({ status: "failed", outcome_reason: "daemon restart" });
+    expect(query<{ n: number }>(home, "SELECT count(*) AS n FROM messages WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming'", sent.turnId)?.n).toBe(0);
+    expect(query(home, "SELECT 1 FROM messages WHERE block_id = ?", streamingResponse.block_id)).toBeNull();
   } finally { if (child) await stop(child); rmSync(home, { recursive: true, force: true }); }
 }, 60000);
 

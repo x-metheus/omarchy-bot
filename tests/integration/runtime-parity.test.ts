@@ -308,7 +308,7 @@ test("aborting a queued durable follow-up leaves the active reply running", () =
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
 
-test("aborting a durable turn records cancellation and keeps the partial reply", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "a long streamed reply" }] }], { tokensPerSecond: 10 }, async () => {
+test("aborting a durable turn records cancellation and removes the incomplete reply", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "a long streamed reply" }] }], { tokensPerSecond: 10 }, async () => {
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Abort durable");
@@ -326,10 +326,9 @@ test("aborting a durable turn records cancellation and keeps the partial reply",
     await h.svc.turns.abortTurn(sent.turnId, "test abort");
     await waitThreadIdle(h, sent.threadId);
     expect(h.svc.threads.turnRow(sent.turnId)).toMatchObject({ status: "cancelled", outcome_reason: "test abort" });
-    const partial = (await messages(h, sent.threadId)).find((message) => message.kind === "response")?.text;
-    expect(partial).toBeTruthy();
+    expect((await messages(h, sent.threadId)).some((message) => message.kind === "response")).toBeFalse();
     await Bun.sleep(2500);
-    expect((await messages(h, sent.threadId)).find((message) => message.kind === "response")?.text).toBe(partial);
+    expect((await messages(h, sent.threadId)).some((message) => message.kind === "response")).toBeFalse();
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("cancelled");
   } finally {
     await h.stop();

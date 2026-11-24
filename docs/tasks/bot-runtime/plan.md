@@ -66,8 +66,8 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 - [x] The shared integration files run with the switch on
 - [x] Worker-only internals are marked for Task 20 removal
 - [ ] Existing Thread and lifecycle integration tests pass with the switch on
-  - Open decisions on abort's partial reply and SIGTERM's restart status remain; tool-dependent failures are tracked in Checkpoint C.
-- [ ] Killing the Service mid-reply resumes or visibly fails the reply
+  - Durable mode, per file: 115 pass, 12 fail, 15 skip. Eight failures are the tool- and computer-dependent items Checkpoint C names; four are worker-internal tests not marked `workerOnly`. Switch off: 142 pass, identical to `504980c`. The decisions are recorded in [todo.md](todo.md).
+- [x] Killing the Service mid-reply resumes or visibly fails the reply
 
 ### Phase 3: Prompt and tools
 - [ ] Task 7: App prompt sections, Skills list, and private folders

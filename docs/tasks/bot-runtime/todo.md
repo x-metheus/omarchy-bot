@@ -152,13 +152,18 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 - [x] The shared integration files run with the switch on
 - [x] Worker-only internals are marked for Task 20 removal
 - [ ] Existing Thread and lifecycle integration tests pass with the switch on
-  - Open decisions on abort's partial reply and SIGTERM's restart status remain; tool-dependent failures are tracked in Checkpoint C.
-- [ ] Killing the Service mid-reply resumes or visibly fails the reply
+  - Durable mode, run per file: 115 pass, 12 fail, 15 skip. Eight failures are the tool- and computer-dependent items Checkpoint C already names: tool-call projection, the `process-only` fixture, and computer tools. The other four are worker internals whose tests are not marked `workerOnly`: native-steering capability rejection, and three Shared Workspace `session.open` assertions. Switch off: 142 pass, identical to `504980c`.
+- [x] Killing the Service mid-reply resumes or visibly fails the reply
 
-**Open decisions:**
+**Decisions approved on 2026-11-24**
 
-- **Abort and the partial reply:** `tests/integration/response-blocks.test.ts:81` expects an incomplete Response to be removed after `abortTurn`; `tests/integration/runtime-parity.test.ts:330` expects the partial Response to remain. The durable runtime currently retains it. **Recommendation for the human:** remove the incomplete block, as the worker does, and change the parity expectation: [the spec](../../specs/bot-runtime.md) promises that blocks match today's ordered transcript (ADR 0007's guarantee).
-- **SIGTERM and the restart status:** `apps/daemon/src/modules/runtime/restart.test.ts:225` expects `{ status: "cancelled", outcome_reason: "aborted" }` after SIGTERM; `tests/integration/response-blocks.test.ts:110` expects `{ status: "failed", reason: "daemon restart" }` after `disconnectForRestart`, the same path SIGTERM calls in `apps/daemon/src/bootstrap/main.ts:304` (handler), registered for SIGTERM at `apps/daemon/src/bootstrap/main.ts:352`. The durable runtime currently reports cancellation. **Recommendation for the human:** report failure with the daemon restart reason, because Checkpoint B requires a killed Service's reply to resume or visibly fail.
+- A user abort removes streaming Response and Thinking blocks, preserves completed blocks, and records cancellation with the supplied reason.
+- SIGTERM uses `disconnectForRestart` and records an interrupted Turn as failed with the reason `daemon restart`. A hard kill continues through durable recovery and its restart limit.
+
+**Known limits, not addressed here**
+
+- An abort after the provider ends a Thinking segment but before the projection marks that block completed can drop that Thinking block, which the worker path keeps. Fixing it needs the provider's segment-end signal in the durable projection.
+- A hard kill between pi-durable committing the aborted entry and the Service writing the terminal status can resurrect the partial reply on recovery and report the fallback reason `aborted` instead of the user's reason.
 
 ---
 

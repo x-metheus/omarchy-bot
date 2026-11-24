@@ -106,6 +106,7 @@ export class TurnService {
   #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
   #timeoutQueues = new Map<AgentId, Promise<void>>();
   #stopping = false;
+  #restartReason: string | undefined;
   #reportedRuntimeSetting = false;
 
   constructor(
@@ -122,8 +123,9 @@ export class TurnService {
     private readonly runtime?: BotRuntime,
   ) {}
 
-  async shutdown(): Promise<void> {
+  async shutdown(options: { reason?: "daemon restart" } = {}): Promise<void> {
     this.#stopping = true;
+    this.#restartReason ??= options.reason;
     await this.#recovery?.registered;
     await Promise.allSettled([...this.#durableTurns].map((turnId) => this.runtime?.abortTurn(turnId)));
     await this.#recovery?.settled;
@@ -139,12 +141,15 @@ export class TurnService {
       db: this.db, threads: this.threads, bots: this.bots, events: this.events,
       registered: (turnId) => { this.#durableTurns.add(turnId); },
       settled: (turnId, outcome) => {
-        const row = this.threads.turnRow(turnId);
-        if (outcome.status === "failed") {
-          if (row) this.#removeIncompleteAgentBlocks(row.thread_id, turnId);
-          this.#setTurnStatus(turnId, "failed", outcome.reason, true);
-        } else this.#setTurnStatus(turnId, outcome.status, outcome.status === "cancelled" ? "aborted" : undefined, true);
+        if (outcome.status === "completed") {
+          this.#setTurnStatus(turnId, "completed", undefined, true);
+        } else {
+          const threadId = this.threads.turnRow(turnId)?.thread_id;
+          const reason = outcome.status === "failed" ? outcome.reason : this.#durableAbortReasons.get(turnId) ?? "aborted";
+          this.#finishInterruptedDurableTurn(turnId, threadId, outcome.status, reason);
+        }
         this.#durableTurns.delete(turnId);
+        this.#durableAbortReasons.delete(turnId);
       },
     });
   }
@@ -312,9 +317,9 @@ export class TurnService {
       else {
         const tracked = start.then(() => this.#setTurnStatus(turnId, "completed", undefined, true), (err: unknown) => {
           rejectAdmission(err);
-          const abortReason = this.#durableAbortReasons.get(turnId) ?? (err instanceof DurableRunAborted ? "aborted" : undefined);
-          if (abortReason === undefined) this.#removeIncompleteAgentBlocks(result.threadId, turnId);
-          this.#setTurnStatus(turnId, abortReason === undefined ? "failed" : "cancelled", abortReason ?? errorMessage(err), true);
+          const aborted = err instanceof DurableRunAborted;
+          const abortReason = aborted ? this.#durableAbortReasons.get(turnId) ?? "aborted" : undefined;
+          this.#finishInterruptedDurableTurn(turnId, result.threadId, aborted ? "cancelled" : "failed", abortReason ?? errorMessage(err));
         }).finally(() => { this.#durableTurns.delete(turnId); this.#durableAbortReasons.delete(turnId); this.#durableStarts.delete(turnId); });
         this.#durableStarts.set(turnId, tracked);
       }
@@ -988,6 +993,12 @@ export class TurnService {
     }
 
     this.#setTurnStatus(ctx.turnId, outcome, reason);
+  }
+
+  #finishInterruptedDurableTurn(turnId: string, threadId: string | undefined, status: "failed" | "cancelled", reason: string): void {
+    if (threadId !== undefined) this.#removeIncompleteAgentBlocks(threadId, turnId);
+    const restartReason = status === "cancelled" && !this.#durableAbortReasons.has(turnId) ? this.#restartReason : undefined;
+    this.#setTurnStatus(turnId, restartReason === undefined ? status : "failed", restartReason ?? reason, true);
   }
 
   #removeIncompleteAgentBlocks(threadId: string, turnId: string): void {
