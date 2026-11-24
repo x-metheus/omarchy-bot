@@ -175,6 +175,30 @@ test.each(["sig", "signature"])("the store rejects and sanitizes the %s URL cred
   }
 });
 
+test("MCP snapshots and reconciliation reject a workspace configuration over 1 MiB", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "bot-mcp-oversize-"));
+  const store = new NativeMcpStore(root, path.join(root, "private"));
+  const file = path.join(root, ".mcp.json");
+  try {
+    const ordinary = JSON.stringify({ mcpServers: { local: { command: "fixture" } } });
+    writeFileSync(file, ordinary);
+    expect(store.list()).toEqual([expect.objectContaining({ name: "local", status: "unchecked" })]);
+    const oversized = ordinary + " ".repeat(1024 * 1024);
+    writeFileSync(file, oversized);
+    expect(store.effectiveServers()).toMatchObject({
+      servers: {}, configurationError: expect.stringMatching(/\.mcp\.json.*exceeds 1 MiB/),
+    });
+    expect(store.list()).toEqual([]);
+    expect(store.errors).toEqual([expect.stringMatching(/\.mcp\.json.*exceeds 1 MiB/)]);
+    expect(JSON.stringify(store.errors)).not.toContain(root);
+    expect(readFileSync(file, "utf8")).toBe(oversized);
+    writeFileSync(file, ordinary);
+    expect(store.list()).toEqual([expect.objectContaining({ name: "local", status: "unchecked" })]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("effectiveServers rejects a workspace FIFO without blocking", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-fifo-"));
   const fifo = path.join(root, ".mcp.json");

@@ -254,7 +254,7 @@ export class NativeMcpStore {
     mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const parent = path.relative(this.workspace, realpathSync(path.dirname(file)));
     if (parent.startsWith("..") || path.isAbsolute(parent)) throw new Error("Native Pi settings are outside the shared workspace");
-    if ((existsSync(file) ? readFileSync(file, "utf8") : "") !== document.text) throw new Error("Native Pi settings changed during provisioning");
+    if (this.#readWorkspaceText(file) !== document.text) throw new Error("Native Pi settings changed during provisioning");
     const temporary = `${file}.${randomUUID()}.tmp`;
     writeFileSync(temporary, `${JSON.stringify({ ...document.root, packages: updated }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     renameSync(temporary, file);
@@ -262,13 +262,21 @@ export class NativeMcpStore {
     this.#persist();
   }
 
+  #readWorkspaceText(file: string): string {
+    const result = readRuntimeConfig(file, this.workspace);
+    if ("error" in result) throw new Error(`${path.relative(this.workspace, file)}: ${result.error}`);
+    return result.contents?.toString("utf8") ?? "";
+  }
+
   #document(file: string): Document {
-    if (existsSync(file)) {
-      const relative = path.relative(this.workspace, realpathSync(file));
-      if (relative.startsWith("..") || path.isAbsolute(relative) || lstatSync(file).isSymbolicLink()) throw new Error(`${file}: external or linked configuration is read-only`);
-    }
-    const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-    return this.#parseDocument(file, text);
+    return this.#parseDocument(file, this.#readWorkspaceText(file));
+  }
+
+  #configurationRevision(): string {
+    return nativeMcpRevision(this.workspace, this.#file, (file) => {
+      const result = readRuntimeConfig(file, file === path.resolve(this.#file) ? undefined : this.workspace);
+      return "error" in result ? null : result.contents;
+    });
   }
 
   #parseDocument(file: string, text: string, label = file, skipInvalidServers = false): Document {
@@ -286,7 +294,7 @@ export class NativeMcpStore {
 
   #write(document: Document, updates: Map<string, Definition | undefined>): void {
     if (!updates.size) return;
-    if ((existsSync(document.file) ? readFileSync(document.file, "utf8") : "") !== document.text) throw new HttpError(409, "Native MCP configuration changed during the operation; retry after inspecting it");
+    if (this.#readWorkspaceText(document.file) !== document.text) throw new HttpError(409, "Native MCP configuration changed during the operation; retry after inspecting it");
     const values = { ...document.values };
     for (const [name, value] of updates) { if (value) values[name] = value; else delete values[name]; }
     const text = document.toml ? editToml(document.text, updates) : `${JSON.stringify({ ...document.root, mcpServers: values }, null, 2)}\n`;
@@ -521,7 +529,7 @@ export class NativeMcpStore {
     this.reconcile();
     let shared: Document, pi: Document, codex: Document;
     try { shared = this.#document(this.#shared); pi = this.#document(this.#pi); codex = this.#document(this.#codex); } catch { return []; }
-    const revision = nativeMcpRevision(this.workspace, this.#file);
+    const revision = this.#configurationRevision();
     return [...new Set([...Object.keys(shared.values), ...Object.keys(pi.values), ...Object.keys(codex.values)])].sort().flatMap((name) => {
       const metadata = this.#metadata.entries[name];
       if (!includeService && metadata?.owner) return [];
@@ -560,7 +568,7 @@ export class NativeMcpStore {
   name(id: string): string { const entry = this.list(true).find((item) => item.id === id); if (!entry) throw new HttpError(404, "Native MCP connection not found"); return entry.name; }
   updateStatus(statuses: NativeMcpStatus[]): void {
     this.reconcile();
-    const revision = nativeMcpRevision(this.workspace, this.#file);
+    const revision = this.#configurationRevision();
     this.#live.clear();
     if (!statuses.length) this.#pending.clear();
     for (const status of statuses) {

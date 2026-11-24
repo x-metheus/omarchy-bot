@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import type { NativeMcpStatus } from "@omarchy-bot/agent-contract";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
@@ -34,6 +35,7 @@ export interface BotRuntime {
   activeTurn(threadId: string): Promise<string | undefined>;
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
+  mcpStatus(): NativeMcpStatus[];
   close(): Promise<void>;
   /** Requests to use files outside the allowed folders; absent without Service storage and events. */
   readonly approvals?: ApprovalStore;
@@ -46,11 +48,11 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
 
 export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: {
   events?: Pick<EventLog, "append">;
-  mcp?: McpExtensionDeps["servers"];
+  mcp?: Pick<McpExtensionDeps, "servers" | "prepareServers">;
 } = {}): Promise<BotRuntime> {
   const credentials = new CredentialStore(paths.stateDir);
   const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
-  const mcp = options.mcp ? createMcpExtension({ servers: options.mcp }) : undefined;
+  const mcp = options.mcp ? createMcpExtension(options.mcp) : undefined;
   let reportedCredentialsFailure = false;
   const selections: { providerId: string; modelId: string }[] = [];
   const conversationBots = new Map<ConversationId, string>();
@@ -391,6 +393,9 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           const result = await submission.abort(context);
           if (result === "already_placed" || (result === "settled" && (turn.pending.length > 0 || turn.recovering))) await conversation.abort(context);
         }
+      },
+      mcpStatus() {
+        return mcp?.status() ?? [];
       },
       close() {
         closing ??= (async () => {

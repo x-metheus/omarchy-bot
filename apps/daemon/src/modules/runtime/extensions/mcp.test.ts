@@ -11,7 +11,9 @@ import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { StdioTransport } from "@earendil-works/pi-mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { PLUGIN_PROVIDERS } from "@omarchy-bot/protocol";
 import { NativeMcpStore } from "../../plugins/nativeMcp.ts";
+import { PluginsService } from "../../plugins/plugins.ts";
 import { createMcpExtension, type McpExtensionDeps } from "./mcp.ts";
 
 test("a scripted conversation searches, describes, and calls a local MCP server", async () => {
@@ -253,6 +255,172 @@ await server.connect(new StdioServerTransport());
     await mcp?.close();
     await harness?.close(context);
     await storage.close(context);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP searches, describes, and calls an authenticated Streamable HTTP service and closes its session", async () => {
+  const daemon = path.resolve(import.meta.dir, "../../../..");
+  const sdk = await import(Bun.resolveSync("@modelcontextprotocol/sdk/server/mcp.js", daemon)) as typeof import("@modelcontextprotocol/sdk/server/mcp.js");
+  const http = await import(Bun.resolveSync("@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js", daemon)) as typeof import("@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js");
+  const token = "fixture-service-account-bearer";
+  const sessionId = crypto.randomUUID();
+  const observedAuthorization: (string | null)[] = [];
+  const rejectedRequests: string[] = [];
+  const closedSessions: string[] = [];
+  const fixture = new sdk.McpServer({ name: "fixture", version: "1" });
+  const transport = new http.WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: () => sessionId,
+    onsessionclosed: (id) => { closedSessions.push(id); },
+    enableJsonResponse: true,
+  });
+  fixture.registerTool("reflect", { description: "Reflect service authorization", inputSchema: {} }, (_args, { requestInfo }) => {
+    const authorization = String(requestInfo?.headers.authorization);
+    return { content: [{ type: "text", text: `Header: ${authorization}; token: ${authorization.slice("Bearer ".length)}` }] };
+  });
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    const pathname = new URL(request.url).pathname;
+    if (pathname === "/account") {
+      const authorization = request.headers.get("authorization");
+      observedAuthorization.push(authorization);
+      if (authorization === `Bearer ${token}`) return transport.handleRequest(request);
+    } else {
+      rejectedRequests.push(`${request.method} ${pathname}`);
+    }
+    return new Response(null, { status: 401, headers: { "www-authenticate": `Bearer resource_metadata="${new URL("/.well-known/oauth-protected-resource", request.url)}"` } });
+  } });
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-http-"));
+  const store = new NativeMcpStore(root, path.join(root, "private"));
+  const mcp = createMcpExtension({ servers: () => store.effectiveServers() });
+  try {
+    await fixture.connect(transport);
+    const url = new URL("/account", server.url).href;
+    store.putService("account", { url }, { accountId: "fixture-account", serviceId: "fixture-service" });
+    store.setServiceToken("account", url, token);
+    store.save(null, { name: "consent", enabled: true, transport: { type: "http", url: new URL("/consent", server.url).href } });
+
+    const search = await executeMcp(mcp, { action: "search", service: "account", query: "authorization" });
+    expect(search.isError).toBe(false);
+    expect(search.output).toEqual([{ type: "text", text: JSON.stringify({ services: [{ service: "account", tools: [{ name: "reflect", description: "Reflect service authorization" }] }] }, null, 2) }]);
+    const describe = await executeMcp(mcp, { action: "describe", service: "account", tool: "reflect" });
+    expect(describe.isError).toBe(false);
+    const metadata = describe.output?.[0];
+    expect(JSON.parse(metadata?.type === "text" ? metadata.text : "")).toMatchObject({
+      service: "account", tool: "reflect", description: "Reflect service authorization", inputSchema: { type: "object", properties: {} },
+    });
+    const call = await executeMcp(mcp, { action: "call", service: "account", tool: "reflect", arguments: {} });
+    expect(call).toEqual({ isError: false, output: [{ type: "text", text: "Header: [redacted]; token: [redacted]" }] });
+
+    const unauthorized = await executeMcp(mcp, { action: "search", service: "consent" });
+    expect(unauthorized).toEqual({ isError: true, output: [{ type: "text", text: expect.stringMatching(/consent.*needs sign-in/) }] });
+    expect(rejectedRequests).toEqual(["POST /consent"]);
+    const configurationRevision = store.effectiveServers().revision;
+    expect(mcp.status()).toEqual([
+      { name: "account", configurationRevision, status: "connected", toolCount: 1, disabled: false },
+      { name: "consent", configurationRevision, status: "needs-auth", toolCount: 0, disabled: false },
+    ]);
+    expect(transport.sessionId).toBe(sessionId);
+    expect(closedSessions).toEqual([]);
+    await mcp.close();
+    expect(closedSessions).toEqual([sessionId]);
+    expect([...new Set(observedAuthorization)]).toEqual([`Bearer ${token}`]);
+  } finally {
+    await mcp.close();
+    await server.stop(true);
+    await fixture.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP status follows the bounded configuration snapshot and reports failed discovery", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-status-"));
+  const store = new NativeMcpStore(root, path.join(root, "private"));
+  const mcp = createMcpExtension({ servers: () => store.effectiveServers() });
+  try {
+    const script = await writeStdioFixture(root, `
+server.registerTool("run", {}, () => ({ content: [{ type: "text", text: "finished" }] }));
+await server.connect(new StdioServerTransport());
+`);
+    const local = store.save(null, { name: "local", enabled: true, transport: { type: "stdio", command: process.execPath, args: [script] } });
+    store.save(null, { name: "broken", enabled: true, transport: { type: "stdio", command: path.join(root, "missing"), args: [] } });
+    store.save(null, { name: "off", enabled: false, transport: { type: "stdio", command: "unlaunched", args: [] } });
+    const initialRevision = store.effectiveServers().revision;
+    expect(mcp.status()).toEqual([
+      { name: "local", configurationRevision: initialRevision, status: "not-connected", toolCount: 0, disabled: false },
+      { name: "broken", configurationRevision: initialRevision, status: "not-connected", toolCount: 0, disabled: false },
+      { name: "off", configurationRevision: initialRevision, status: "disabled", toolCount: 0, disabled: true },
+    ]);
+    const result = await executeMcp(mcp, { action: "search" });
+    expect(result.isError).toBe(false);
+    expect(mcp.status()).toEqual([
+      { name: "local", configurationRevision: initialRevision, status: "connected", toolCount: 1, disabled: false },
+      { name: "broken", configurationRevision: initialRevision, status: "failed", toolCount: 0, disabled: false },
+      { name: "off", configurationRevision: initialRevision, status: "disabled", toolCount: 0, disabled: true },
+    ]);
+    store.updateStatus(mcp.status());
+    expect(store.list().find(({ name }) => name === "local")).toMatchObject({ status: "connected", toolCount: 1, pendingReload: false });
+
+    store.save(local.id, { name: "local", enabled: true, transport: { type: "stdio", command: process.execPath, args: [script, "edited"] } });
+    const editedRevision = store.effectiveServers().revision;
+    expect(editedRevision).not.toBe(initialRevision);
+    expect(mcp.status().find(({ name }) => name === "local")).toEqual({
+      name: "local", configurationRevision: editedRevision, status: "not-connected", toolCount: 0, disabled: false,
+    });
+  } finally {
+    await mcp.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("durable MCP credential preparation rejects a workspace FIFO without blocking", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-credential-fifo-"));
+  const workspace = path.join(root, "workspace");
+  const privateDir = path.join(root, "private");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await mkdir(workspace);
+    await mkdir(privateDir);
+    await writeFile(path.join(privateDir, "configuration.json"), JSON.stringify({ version: 1, revision: 0, cloudUrl: null, mcp: [], skills: [], accounts: [{
+      id: "fixture", providerId: "github", label: "Fixture", identity: "github:fixture", status: "connected",
+      enabledServices: ["github"], nativeManaged: true, grant: {
+        generation: "fixture", accessToken: "fixture-publisher-credential", scopes: [], cloudUrl: "https://publisher.invalid",
+      },
+    }] }));
+    expect(Bun.spawnSync(["mkfifo", path.join(workspace, ".mcp.json")]).exitCode).toBe(0);
+    const child = Bun.spawn([process.execPath, "--eval", `
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { PluginsService } from ${JSON.stringify(new URL("../../plugins/plugins.ts", import.meta.url).href)};
+import { createMcpExtension } from ${JSON.stringify(new URL("./mcp.ts", import.meta.url).href)};
+const plugins = new PluginsService(${JSON.stringify(privateDir)}, ${JSON.stringify(workspace)}, async () => ({ skills: [] }));
+const servers = () => plugins.mcp.effectiveServers();
+const mcp = createMcpExtension({ servers, async prepareServers() {
+  await plugins.prepareServiceCredentials();
+  return servers();
+} });
+try {
+  console.log(JSON.stringify(await mcp.tools[0].execute({ action: "search" }, {}, BACKGROUND_CONTEXT)));
+} finally {
+  await mcp.close();
+  await plugins.shutdown();
+}
+`], { cwd: path.resolve(import.meta.dir, "../../../.."), stdout: "pipe", stderr: "inherit" });
+    try {
+      const [stdout, code] = await Promise.race([
+        Promise.all([new Response(child.stdout).text(), child.exited]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Durable MCP blocked in credential preparation on a workspace FIFO")), 2_000);
+        }),
+      ]);
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout)).toEqual({ isError: true, output: [{ type: "text", text: expect.stringMatching(/MCP configuration.*\.mcp\.json.*regular file/) }] });
+      expect(stdout).not.toContain(root);
+      expect(stdout).not.toContain("fixture-publisher-credential");
+    } finally {
+      clearTimeout(timer);
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+    }
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -559,6 +727,75 @@ test.each(["request timeout", "invocation deadline"] as const)("a timed-out HTTP
   }
 });
 
+test("MCP shutdown drains publisher credential preparation after a call is aborted", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-close-preparation-"));
+  const privateDir = path.join(root, "private");
+  const publisher = "https://publisher.invalid";
+  const tokenEndpoint = `${publisher}/api/plugins/oauth/token`;
+  const service = "service-fixture-github";
+  const url = PLUGIN_PROVIDERS.github.services[0]!.mcpUrl!;
+  const staleToken = "fixture-stale-bearer";
+  const refreshedToken = "fixture-refreshed-bearer";
+  const publisherStarted = Promise.withResolvers<void>();
+  const releasePublisher = Promise.withResolvers<void>();
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+    if (String(input) !== tokenEndpoint) throw new Error(`Unexpected request to ${input}`);
+    publisherStarted.resolve();
+    await releasePublisher.promise;
+    return Response.json({ access_token: refreshedToken, expires_in: 3600 });
+  }, { preconnect: fetch.preconnect }));
+  let plugins: PluginsService | undefined;
+  let mcp: ReturnType<typeof createMcpExtension> | undefined;
+  const preparations: Promise<void>[] = [];
+  try {
+    await mkdir(privateDir);
+    await writeFile(path.join(privateDir, "configuration.json"), JSON.stringify({ version: 1, revision: 0, cloudUrl: publisher, mcp: [], skills: [], accounts: [{
+      id: "fixture", providerId: "github", label: "Fixture", identity: "github:fixture", status: "connected", enabledServices: ["github"], nativeManaged: true,
+      grant: { generation: "fixture", accessToken: staleToken, refreshToken: "fixture-refresh", expiresAt: Date.now() - 10_000, scopes: [], cloudUrl: publisher },
+    }] }));
+    const servicePlugins = plugins = new PluginsService(privateDir, root, async () => ({ skills: [] }));
+    servicePlugins.mcp.putService(service, { url }, { accountId: "fixture", serviceId: "github" });
+    servicePlugins.mcp.setServiceToken(service, url, staleToken);
+    const servers = () => servicePlugins.mcp.effectiveServers();
+    mcp = createMcpExtension({ servers, async prepareServers() {
+      const preparation = servicePlugins.prepareServiceCredentials();
+      preparations.push(preparation);
+      await preparation;
+      return servers();
+    } });
+
+    const input = { action: "call", service, tool: "run" };
+    const abort = new AbortController();
+    const call = executeMcp(mcp, input, withAbortSignal(abort.signal, context));
+    await Promise.race([publisherStarted.promise, call.then(() => { throw new Error("MCP call completed before publisher refresh"); })]);
+    abort.abort(new Error("cancel MCP call"));
+    await expect(call).rejects.toThrow("cancel MCP call");
+
+    let closed = false;
+    const closing = mcp.close().then(() => { closed = true; });
+    expect(await executeMcp(mcp, input)).toEqual({ isError: true, output: [{ type: "text", text: expect.stringMatching(/shutting down/i) }] });
+    expect(preparations).toHaveLength(1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closed).toBe(false);
+    expect(servers().secrets).toContain(staleToken);
+
+    releasePublisher.resolve();
+    await closing;
+    expect(servers().secrets).toContain(refreshedToken);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([tokenEndpoint]);
+  } finally {
+    releasePublisher.resolve();
+    await Promise.allSettled(preparations);
+    try {
+      await mcp?.close();
+      await plugins?.shutdown();
+    } finally {
+      fetchMock.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("MCP shutdown waits for a failed handshake's child to exit", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-handshake-"));
   const closing = path.join(root, "closing");
@@ -628,24 +865,56 @@ await server.connect(new StdioServerTransport());
   }
 });
 
-test("MCP search reports private metadata made malformed after startup without exposing its contents", async () => {
+test("MCP status fails connected servers while private metadata is malformed", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-private-config-"));
   const privateDir = path.join(root, "private");
   let mcp: ReturnType<typeof createMcpExtension> | undefined;
   try {
+    const script = await writeStdioFixture(root, `
+server.registerTool("run", {}, () => ({ content: [{ type: "text", text: "finished" }] }));
+await server.connect(new StdioServerTransport());
+`);
+    const definition = { command: process.execPath, args: [script] };
+    await writeFile(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: {
+      local: definition, other: definition, off: { ...definition, disabled: true },
+    } }));
     await mkdir(privateDir);
     const file = path.join(privateDir, "native-mcp.json");
     await writeFile(file, JSON.stringify({ version: 1, entries: {} }));
     const store = new NativeMcpStore(root, privateDir);
-    await writeFile(file, '{"serviceTokens": broken-private-fixture-value}');
-    const message = store.effectiveServers().configurationError ?? "";
-    expect(message).toMatch(/MCP configuration.*native-mcp\.json.*invalid JSON/i);
+    const metadata = await readFile(file, "utf8");
     mcp = createMcpExtension({ servers: () => store.effectiveServers() });
-    const result = await executeMcp(mcp, { action: "search" });
-    expect(result.isError).toBe(true);
-    expect(result.output).toEqual([{ type: "text", text: message }]);
-    expect(JSON.stringify(result)).not.toContain("broken-private-fixture-value");
-    expect(JSON.stringify(result)).not.toContain(root);
+    const call = { action: "call", service: "local", tool: "run" };
+    expect((await executeMcp(mcp, call)).isError).toBe(false);
+    expect((await executeMcp(mcp, { ...call, service: "other" })).isError).toBe(false);
+    const initialRevision = store.effectiveServers().revision;
+    expect(mcp.status()).toEqual([
+      { name: "local", configurationRevision: initialRevision, status: "connected", toolCount: 1, disabled: false },
+      { name: "other", configurationRevision: initialRevision, status: "connected", toolCount: 1, disabled: false },
+      { name: "off", configurationRevision: initialRevision, status: "disabled", toolCount: 0, disabled: true },
+    ]);
+
+    await writeFile(file, '{"serviceTokens": broken-private-fixture-value}');
+    const { revision, configurationError = "" } = store.effectiveServers();
+    expect(configurationError).toMatch(/MCP configuration.*native-mcp\.json.*invalid JSON/i);
+    expect(revision).not.toBe(initialRevision);
+    expect(mcp.status()).toEqual([
+      { name: "local", configurationRevision: revision, status: "failed", toolCount: 0, disabled: false },
+      { name: "other", configurationRevision: revision, status: "failed", toolCount: 0, disabled: false },
+      { name: "off", configurationRevision: revision, status: "disabled", toolCount: 0, disabled: true },
+    ]);
+    for (const input of [call, { action: "search" }]) {
+      const result = await executeMcp(mcp, input);
+      expect(result).toEqual({ isError: true, output: [{ type: "text", text: configurationError }] });
+      expect(JSON.stringify(result)).not.toContain("broken-private-fixture-value");
+      expect(JSON.stringify(result)).not.toContain(root);
+    }
+
+    await writeFile(file, metadata);
+    expect(await executeMcp(mcp, call)).toEqual({ isError: false, output: [{ type: "text", text: "finished" }] });
+    expect(mcp.status().find(({ name }) => name === "local")).toEqual({
+      name: "local", configurationRevision: initialRevision, status: "connected", toolCount: 1, disabled: false,
+    });
   } finally {
     await mcp?.close();
     await rm(root, { recursive: true, force: true });
