@@ -90,6 +90,18 @@ test("custom provider CRUD preserves an omitted key and hides credentials in raw
   expect((await apiStatus(h, "DELETE", path)).status).toBe(404);
 }));
 
+test("provider create and update store and return each model ID once", withDaemon(async (h) => {
+  const created = await providerRequest<ProviderDto>(h, "POST", providersPath, 201, { ...custom, models: [" example-model ", "example-model"] });
+  const firstModels = [{ id: "example-model" }];
+  expect(created.models).toEqual(firstModels);
+  expect(h.svc.credentials.getForRuntime(created.id)?.models).toEqual(firstModels);
+
+  const updated = await providerRequest<ProviderDto>(h, "PUT", `${providersPath}/${created.id}`, 200, { models: ["next-model", "second-model", "next-model"] });
+  const updatedModels = [{ id: "next-model" }, { id: "second-model" }];
+  expect(updated.models).toEqual(updatedModels);
+  expect(h.svc.credentials.getForRuntime(created.id)?.models).toEqual(updatedModels);
+}));
+
 test("custom provider IDs suffix collisions and reserve built-in IDs even for concurrent creates", withDaemon(async (_h, client) => {
   const body = { ...custom, protocol: "anthropic-messages", name: "OpenAI" } as const;
   const providers = await Promise.all([client.createProvider(body), client.createProvider(body)]);
@@ -119,6 +131,21 @@ test("built-in provider list is sorted and saved providers project catalog and e
   const updated = await providerRequest<ProviderDto>(h, "PUT", path, 200, { models: ["gpt-4o", "extra-model"] });
   expect(updated).toEqual({ ...created, models: [...created.models, { id: "extra-model" }] });
   expect(await providerRequest<ProviderDto[]>(h, "GET", providersPath, 200)).toContainEqual(updated);
+}));
+
+test("provider listing keeps the first legacy model for each ID and prefers the built-in catalog", withDaemon(async (h) => {
+  const firstExtra = { id: "extra-model", name: "First extra" };
+  await h.svc.credentials.add({ id: "openai", name: "OpenAI", protocol: "built-in", apiKey: fixtureKey, models: [
+    { id: "gpt-4o", name: "Legacy override" },
+    firstExtra,
+    { id: firstExtra.id, name: "Second extra" },
+  ] });
+  expect(h.svc.credentials.list()[0]?.models).toEqual([{ id: "gpt-4o", name: "Legacy override" }, firstExtra]);
+  const [listed] = await providerRequest<ProviderDto[]>(h, "GET", providersPath, 200);
+  expect(listed?.models.filter(({ id }) => id === firstExtra.id)).toEqual([firstExtra]);
+  const stock = listed?.models.filter(({ id }) => id === "gpt-4o");
+  expect(stock).toHaveLength(1);
+  expect(stock?.[0]?.name).not.toBe("Legacy override");
 }));
 
 test("OAuth-only built-ins are rejected and omitted from the API-key catalog but reserve their slugs", withDaemon(async (h, client) => {
@@ -164,6 +191,60 @@ test("invalid provider requests return 400 without echoing request values, and u
   expect(await client.providers()).toContainEqual(created);
   expect((await apiStatus(h, "PUT", `${providersPath}/unknown`, {})).status).toBe(404);
   expect((await apiStatus(h, "DELETE", `${providersPath}/unknown`)).status).toBe(404);
+}));
+
+test("provider writes reject encoded keys in base URLs without echoing credentials", withDaemon(async (h, client) => {
+  const key = "provider-http-key+/=%";
+  const encodedKey = encodeURIComponent(key);
+  const baseUrl = `${custom.baseUrl}?token=${encodedKey}`;
+
+  async function expectRejected(method: string, path: string, body: { baseUrl: string } & Record<string, unknown>) {
+    const response = await authedFetch(h, `${h.baseUrl}${path}`, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(response.status).toBe(400);
+    const text = await response.text();
+    expectSecretFree(text);
+    expect(text).not.toContain(key);
+    expect(text).not.toContain(encodedKey);
+    expect(text).not.toContain(body.baseUrl);
+  }
+
+  await expectRejected("POST", providersPath, { ...custom, key, baseUrl });
+  await expectRejected("POST", providersPath, { ...custom, key, baseUrl: `${custom.baseUrl}/${key}` });
+  await expectRejected("POST", providersPath, { ...custom, key, baseUrl: `${baseUrl}&malformed=%ZZ` });
+  expect(h.svc.credentials.getAllForRuntime()).toEqual([]);
+
+  await client.createProvider({ ...custom, key });
+  await expectRejected("POST", providersPath, { ...custom, name: "Other gateway", baseUrl });
+  const existing = await client.createProvider({ ...custom, name: "Other gateway" });
+  await expectRejected("PUT", `${providersPath}/${existing.id}`, { baseUrl });
+  expect(h.svc.credentials.getForRuntime(existing.id)?.baseUrl).toBe(custom.baseUrl);
+}));
+
+test("provider listing hides legacy metadata containing an encoded stored key", withDaemon(async (h, client) => {
+  const apiKey = "legacy-provider-key+/=%";
+  const encodedKey = encodeURIComponent(apiKey);
+  const legacy = { id: "legacy-gateway", name: "Legacy Gateway", protocol: custom.protocol, baseUrl: `${custom.baseUrl}?token=${encodedKey}`, apiKey };
+  await h.svc.credentials.add(legacy);
+  const created = await client.createProvider(custom);
+  const { apiKey: safeKey, ...safe } = h.svc.credentials.getForRuntime(created.id)!;
+  await h.svc.credentials.add({
+    ...safe,
+    apiKey: safeKey,
+    models: [{ id: "example-model" }, { id: "unsafe-model", name: `Label ${encodedKey}` }],
+  });
+  expect(h.svc.credentials.getForRuntime(legacy.id)).toEqual(legacy);
+  expect(h.svc.credentials.list()).toEqual([{ ...safe, hasKey: true }]);
+
+  const response = await authedFetch(h, `${h.baseUrl}${providersPath}`);
+  expect(response.status).toBe(200);
+  const text = await response.text();
+  expect(text).not.toContain(apiKey);
+  expect(text).not.toContain(encodedKey);
+  expect(JSON.parse(text)).toEqual([created]);
 }));
 
 test("provider listing omits a legacy base URL containing userinfo", withDaemon(async (h) => {

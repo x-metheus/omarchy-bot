@@ -6,7 +6,7 @@ import { createModels, createProvider, type MutableModels, type Provider } from 
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { BuiltinProviderDto, ProviderModelDto } from "@omarchy-bot/protocol";
 import { getSetting } from "../../persistence/settings.ts";
-import type { CredentialStore, StoredProvider } from "./credentials.ts";
+import { uniqueProviderModels, type CredentialStore, type StoredProvider } from "./credentials.ts";
 
 export const DEFAULT_MODEL_SETTING = "default_model";
 // Generic endpoints cannot be assumed to support images or reasoning.
@@ -32,9 +32,7 @@ export function listProviderModels(record: Pick<StoredProvider, "id" | "protocol
     if (!builtin) return [];
     catalog = builtin.getModels();
   }
-  const catalogIds = new Set(catalog.map(({ id }) => id));
-  const extras = (record.models ?? []).filter(({ id }) => !catalogIds.has(id));
-  return [...catalog, ...extras].map(({ id, name, contextWindow, maxTokens, reasoning, input }) => ({
+  return uniqueProviderModels([...catalog, ...(record.models ?? [])]).map(({ id, name, contextWindow, maxTokens, reasoning, input }) => ({
     id, name, contextWindow, maxTokens, reasoning, input: input && [...input],
   }));
 }

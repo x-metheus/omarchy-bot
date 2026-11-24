@@ -1,7 +1,7 @@
 import { CreateProviderBody, ProviderBaseUrl, UpdateProviderBody, type ProviderDto } from "@omarchy-bot/protocol";
 import type { ZodType } from "zod";
 import { HttpError } from "../modules/bots/bots.ts";
-import type { CredentialStore, ProviderProjection, StoredProvider } from "../modules/runtime/credentials.ts";
+import { uniqueProviderModels, type CredentialStore, type ProviderProjection, type StoredProvider } from "../modules/runtime/credentials.ts";
 import { listBuiltinProviderIds, listBuiltinProviders, listProviderModels } from "../modules/runtime/models.ts";
 
 const providersPath = "/api/providers";
@@ -48,7 +48,7 @@ export function createProviderRoutes(credentials: CredentialStore) {
 
   async function save(provider: StoredProvider, status = 200): Promise<Response> {
     try {
-      await credentials.add(provider);
+      await credentials.add(provider, { checkEncodedKeys: true });
     } catch (error) {
       if (error instanceof Error && (error.message === "Provider metadata must not contain a key" || error.message === "Secret metadata must not contain the value")) {
         throw new HttpError(400, "Provider metadata must not contain a key");
@@ -78,7 +78,8 @@ export function createProviderRoutes(credentials: CredentialStore) {
           return save({ id, name, protocol, apiKey: key }, 201);
         }
         const { name, baseUrl, models } = body;
-        return save({ id: customId(name), name, protocol, baseUrl, apiKey: key, models: (models ?? []).map((id) => ({ id })) }, 201);
+        const providerModels = uniqueProviderModels((models ?? []).map((id) => ({ id })));
+        return save({ id: customId(name), name, protocol, baseUrl, apiKey: key, models: providerModels }, 201);
       });
     }
 
@@ -109,7 +110,7 @@ export function createProviderRoutes(credentials: CredentialStore) {
         apiKey: key ?? existing.apiKey,
         ...(name === undefined ? {} : { name }),
         ...(baseUrl === undefined ? {} : { baseUrl }),
-        ...(models === undefined ? {} : { models: models.map((id) => ({ id })) }),
+        ...(models === undefined ? {} : { models: uniqueProviderModels(models.map((id) => ({ id }))) }),
       });
     });
   };

@@ -52,8 +52,27 @@ function safeText(keys: readonly string[]): (value: string) => boolean {
   return (value) => !keys.some((key) => value.includes(key));
 }
 
+function safeProviderMetadataText(keys: readonly string[]): (value: string) => boolean {
+  const safe = safeText(keys);
+  return (value) => {
+    if (!safe(value)) return false;
+    if (!/%[0-9a-f]{2}/i.test(value)) return true;
+    try { return safe(decodeURIComponent(value)); }
+    catch { return false; }
+  };
+}
+
 function hasSafeFields(record: ProviderRecord, safe: (value: string) => boolean): boolean {
   return safe(record.id) && safe(record.name) && (record.baseUrl === undefined || safe(record.baseUrl));
+}
+
+export function uniqueProviderModels<T extends Pick<StoredModel, "id">>(models: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return models.filter(({ id }) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }
 
 export function projectProviderModels(models: unknown[], safe: (value: string) => boolean): StoredModel[] {
@@ -157,20 +176,24 @@ export class CredentialStore {
 
   list(projectModels?: (record: Pick<ProviderRecord, "id" | "protocol" | "models">) => unknown[]): ProviderProjection[] {
     const records = [...this.#providers.values()];
-    const safe = safeText(records.map(({ apiKey }) => apiKey));
+    const safe = safeProviderMetadataText(records.map(({ apiKey }) => apiKey));
     return records.filter((record) => hasSafeFields(record, safe)).map((record) => {
       const metadata = providerRecord(record, safe);
       if (projectModels) metadata.models = projectProviderModels(projectModels(metadata), safe);
+      if (metadata.models) metadata.models = uniqueProviderModels(metadata.models);
       return { ...metadata, hasKey: record.apiKey.length > 0 };
     });
   }
 
-  async add(provider: StoredProvider): Promise<void> {
+  async add(provider: StoredProvider, { checkEncodedKeys = false } = {}): Promise<void> {
     if (!isStoredProvider(provider)) throw new Error("Invalid model provider");
     const input = structuredClone(provider);
     return this.#write(async () => {
-      const safe = safeText([input.apiKey, ...[...this.#providers.values()].map(({ apiKey }) => apiKey)]);
-      const record = await this.#save(input, safe);
+      const keys = [input.apiKey, ...[...this.#providers.values()].map(({ apiKey }) => apiKey)];
+      if (checkEncodedKeys && !hasSafeFields(input, safeProviderMetadataText(keys))) {
+        throw new Error("Provider metadata must not contain a key");
+      }
+      const record = await this.#save(input, safeText(keys));
       this.#providers.delete(record.id);
       this.#providers.set(record.id, record);
     });

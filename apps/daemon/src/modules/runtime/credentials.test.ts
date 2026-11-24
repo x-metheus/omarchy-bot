@@ -92,6 +92,9 @@ test("a failed provider removal keeps the ID listed for retry and hides the key 
   expect(store.getForRuntime(provider.id)).toBeUndefined();
   expect(store.getAllForRuntime()).toEqual([]);
   expect(store.redactKeys(`${provider.id}/${apiKey}`)).toBe(`${provider.id}/[redacted]`);
+  const other = { ...provider, id: "other", baseUrl: `https://example.test?token=${apiKey.replace("-", "%2D")}`, apiKey: "new-key" };
+  await expect(store.add(other, { checkEncodedKeys: true })).rejects.toThrow("Provider metadata must not contain a key");
+  expect(store.has(other.id)).toBeFalse();
   expect(await secrets.forApp().list()).toHaveLength(1);
   expect(values.size).toBe(1);
   failDelete = false;
