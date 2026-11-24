@@ -267,11 +267,12 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 
 ## Task 12: Bot mail, Local Sidecar, and plugin tools in process
 
-**Description:** Port the Bot mail, local, and plugin tools to runtime extensions that call `MailboxService`, `SidecarBroker`, and `PluginsService` directly. Bot mail notices reach the target as `write` entries with author labels.
+**Description:** Port the Bot mail, local, and plugin tools to runtime extensions that call `MailboxService`, `SidecarBroker`, and `PluginsService` directly. Bot mail notices reach the target as `write` entries with author labels. The plugins tool keeps only managing actions (connect and sign in to accounts; install, enable, and remove Skills and MCP servers); calls to a connected service go through `mcp` (Task 13). Skills installed from the catalog go into `<workspace>/.agents/skills`.
 
 **Acceptance criteria:**
 - [ ] Mail, sidecar, and plugin tool calls behave as on the worker path
 - [ ] The Bot's identity comes from the active Turn, never from tool arguments
+- [ ] A Skill installed from the catalog appears in the Bot's Skills list on its next Turn
 
 **Verification:** default commands; `bot-mailbox` and `local-sidecar-dispatch` integration tests pass with the switch on.
 
@@ -294,7 +295,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ## Task 13: MCP through `pi-mcp`
 
-**Description:** Add the MCP extension: servers from `<workspace>/.mcp.json`, stdio and Streamable HTTP, connected on first use, exposed as one `mcp` tool with search, describe, and call. Keep the Services panel's status behavior.
+**Description:** Add the MCP extension: servers from `<workspace>/.mcp.json` and service accounts connected in the plugins panel, stdio and Streamable HTTP, connected on first use, exposed as one `mcp` tool with search, describe, and call. Keep the Services panel's status behavior.
 
 **Acceptance criteria:**
 - [ ] A Bot calls a tool on a configured MCP service through the `mcp` tool
@@ -311,9 +312,30 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ---
 
+## Task 22: Secret store, secrets tool, and a clean shell environment
+
+**Description:** Add the spec's [Secrets](../../specs/bot-runtime.md#secrets): one store in the OS keychain for app secrets (provider keys, MCP sign-ins) and each Bot's private secrets, with the 0600 file only as a fallback that Settings warns about. Add the `secrets` tool (save, list names, delete; never returns a value), `{{secret:name}}` filling in `bash`, `web_fetch`, and `mcp` calls, and replacement of used values in results. Move keys from `model-credentials.json` into the keychain on first start and remove the file. Start `bash` with a clean environment. Keychain access needs a library or each platform's command-line tool: choosing a library is an ask-first dependency decision.
+
+**Acceptance criteria:**
+- [ ] A secret saved by one Bot is filled in at run time for that Bot, replaced in the result, and cannot be listed or used by another Bot
+- [ ] No secret value appears in `pi_` entries, Service Messages, logs, events, or memory
+- [ ] Existing provider keys move into the keychain once, and Turns still complete; without a keychain the fallback file is used and Settings warns
+- [ ] `bash` cannot see the Service's environment variables
+- [ ] Bot Deletion removes the Bot's secrets, and the confirmation says so
+
+**Verification:** default commands; tests with a fake keychain backend, plus one manual run on Linux Secret Service.
+
+**Dependencies:** Tasks 2 and 8. Tasks 14 and 16 use this store.
+
+**Files likely touched:** `apps/daemon/src/modules/runtime/secrets.ts`, `apps/daemon/src/modules/runtime/credentials.ts`, `apps/daemon/src/modules/runtime/extensions/secrets.ts`, `apps/daemon/src/modules/runtime/extensions/files-shell.ts`, `apps/daemon/src/modules/bots/botDeletion.ts`, tests
+
+**Estimated scope:** Medium
+
+---
+
 ## Task 14: MCP OAuth sign-in and token import
 
-**Description:** Add an `McpOAuthStateStore` backed by the credential store, a loopback callback listener on `127.0.0.1`, and a sign-in action in the Services panel. On first start, import `pi-mcp-adapter` tokens from the system keyring once, read-only, converting expiry from seconds to milliseconds. A token that fails shows "needs sign-in".
+**Description:** Add an `McpOAuthStateStore` backed by the secret store (Task 22), a loopback callback listener on `127.0.0.1`, and a sign-in action in the Services panel. On first start, import `pi-mcp-adapter` tokens from the system keyring once, read-only, converting expiry from seconds to milliseconds. A token that fails shows "needs sign-in".
 
 **Acceptance criteria:**
 - [ ] Signing in to an OAuth MCP service from the Services panel completes and the tool works
@@ -322,7 +344,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 **Verification:** default commands; a test against a local OAuth test server; one manual sign-in to a real service.
 
-**Dependencies:** Task 13
+**Dependencies:** Tasks 13 and 22
 
 **Files likely touched:** `apps/daemon/src/modules/runtime/mcpOAuth.ts`, `apps/daemon/src/api/pluginRoutes.ts`, `apps/web/src/components/`, tests
 
@@ -332,12 +354,13 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ## Task 15: `web_fetch` and `web_search`
 
-**Description:** Add the web extension as the spec describes: `web_fetch` reads a URL as text and refuses internal addresses unless Settings exempts a range; `web_search` uses Exa's free MCP endpoint by default, with an optional Exa key. Report rate limits as rate limits.
+**Description:** Add the web extension as the spec describes: `web_fetch` reads a URL as text, extracting with `@mozilla/readability` on `linkedom` and converting with `turndown` (approved 2026-11-24, pinned exactly, imported only by the web extension), and refuses internal addresses unless Settings exempts a range; `web_search` uses Exa's free MCP endpoint through `pi-mcp` by default, with an optional Exa key. Report rate limits as rate limits.
 
 **Acceptance criteria:**
 - [ ] Internal addresses are refused with an error naming the range and the setting
 - [ ] HTTP 429 and the `ai.exa/rateLimited` flag are reported as rate limits, never as empty results
 - [ ] Results are marked as outside content for the memory trust rules
+- [ ] Downloads over 5 MB stop with a clear error; extraction runs in a worker thread with a time limit, and a slow or huge page does not block the Service
 
 **Verification:** default commands; tests against a local HTTP stub.
 
@@ -351,16 +374,17 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ## Task 16: Provider import, Settings providers screen, and per-Bot model
 
-**Description:** On first start, copy keys from `~/.pi/agent/auth.json` and providers from `~/.pi/agent/models.json` into the credential store, read-only, and seed the Service default model from the Pi default. Add a Settings screen to add, edit, and remove providers by protocol, and a model picker in Bot Settings.
+**Description:** On first start, copy keys from `~/.pi/agent/auth.json` and providers from `~/.pi/agent/models.json` into the secret store (Task 22), read-only, and seed the Service default model from the Pi default. Add a Settings screen to add, edit, and remove providers by protocol, a list of allowed folders to add and remove, and a model picker in Bot Settings.
 
 **Acceptance criteria:**
 - [ ] The import runs once, never writes `~/.pi`, and leaves existing Bots on their current model
 - [ ] A provider added in Settings completes a Turn, for both an OpenAI-compatible and a built-in `pi-ai` provider
 - [ ] Keys are never shown after saving
+- [ ] A folder added in Settings is allowed on the next tool call, and a removed one is not
 
 **Verification:** default commands; a migration test with fixture `~/.pi` files; one Playwright flow.
 
-**Dependencies:** Task 2
+**Dependencies:** Tasks 2 and 22
 
 **Files likely touched:** `apps/daemon/src/modules/runtime/providerImport.ts`, `apps/daemon/src/api/`, `apps/web/src/routes/`, `apps/web/src/components/`, tests
 
@@ -400,7 +424,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Acceptance criteria:**
 - [ ] A Thread with an old session continues with its history
 - [ ] A broken session file falls back to the transcript seed and logs it
-- [ ] Old session files are untouched until their Thread or Bot is deleted, and deletion removes only the recorded path
+- [ ] Old session files are untouched until their Bot is deleted, and deletion removes only the recorded path
 
 **Verification:** default commands; tests with copies of real session files from the current release.
 
@@ -414,13 +438,14 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ## Task 19: Cutover and deletion
 
-**Description:** Make `durable` the only path: remove the switch and the worker branch from `TurnService`. Deleting a Thread deletes its conversation; deleting a Bot deletes all its conversations. Stop requiring Agent readiness to start a Turn.
+**Description:** Make `durable` the only path: remove the switch and the worker branch from `TurnService`. Threads cannot be deleted; deleting a Bot deletes all its conversations. Stop requiring Agent readiness to start a Turn.
 
-pi-durable 1.5.2 exposes no conversation deletion API. An index insertion failure can leave an unindexed conversation; Task 19 must also sweep such orphaned conversations when implementing deletion.
+pi-durable 1.5.2 exposes no conversation deletion API, so the runtime module adds one contained function that deletes a conversation's rows from the `pi_` tables in a transaction, as the spec's Storage section describes. It is the only direct write to pi-durable's tables, it has a test that runs on every Pi upgrade, and the memory spec's conversation reset reuses it. An index insertion failure can leave an unindexed conversation; Task 19 also sweeps such orphaned conversations.
 
 **Acceptance criteria:**
 - [ ] Every existing Thread, mailbox, attachment, and lifecycle test passes on the runtime
-- [ ] Deleting a Thread or Bot leaves no `pi_` rows for it
+- [ ] Deleting a Bot leaves no `pi_` rows for any of its conversations
+- [ ] The delete function's test fails if a pi-durable upgrade adds a `pi_` table it does not cover
 - [ ] Creating a Bot needs no Agent
 
 **Verification:** default commands plus `bun test`.

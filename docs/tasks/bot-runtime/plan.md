@@ -22,7 +22,7 @@ Replace the Pi agent worker (`workers/pi`, `pi-coding-agent` 0.84.4, and the age
 - **TurnService keeps its public API.** Routes, mailbox, and clients keep calling `TurnService`. Inside, it calls either the worker path or `BotRuntime`. The cutover task removes the worker branch.
 - **Tools call Service modules directly.** In-process extensions call `ComputerBroker`, `SidecarBroker`, `PluginsService`, and `MailboxService` without the tool channel. The computer worker and sidecar protocols stay.
 - **One approval flow.** It reuses the `approvals` table with a forward migration, and pauses tools as durable tool tasks as the spec describes.
-- **The credential store** is a private file in the Service state directory, protected like the pairing Host secret, and used for model keys and MCP OAuth.
+- **The secret store** is the OS keychain, holding model keys, MCP OAuth, and each Bot's private secrets (Task 22). Task 2 shipped a private 0600 file in the Service state directory; Task 22 moves its keys into the keychain and keeps the file only as a fallback where no keychain exists.
 - **Migrations** follow `persistence/db.ts` conventions: forward-only, named, and covered by `bot-migrations.test.ts`.
 
 ## Dependency graph
@@ -37,6 +37,7 @@ Replace the Pi agent worker (`workers/pi`, `pi-coding-agent` 0.84.4, and the age
 3 ── 7 prompt + Skills + private folders ── 8 files/shell + allowed folders ── 9 approvals (server) ── 10 approvals (UI)
 3 ── 11 computer + browser    3 ── 12 mail + sidecar + plugins
 3 ── 13 MCP tool ── 14 MCP OAuth + token import
+8 ── 22 secrets ── 14, 16
 3 ── 15 web tools             7 ── 17 workspace cleanup
 3 ── 18 session migration
 all of 4–18 ── 19 cutover + deletion ── 20 remove worker + Agent UI ── 21 real scenarios + docs
@@ -90,6 +91,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ### Phase 4: MCP, web, and workspace
 - [ ] Task 13: MCP through `pi-mcp`
+- [ ] Task 22: Secret store, secrets tool, and a clean shell environment
 - [ ] Task 14: MCP OAuth sign-in and token import
 - [ ] Task 15: `web_fetch` and `web_search`
 - [ ] Task 16: Provider import, Settings providers screen, and per-Bot model

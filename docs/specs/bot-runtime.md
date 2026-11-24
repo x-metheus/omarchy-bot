@@ -143,7 +143,7 @@ Tools are app extensions in the registry. Each Bot's conversation selects its ex
 
 | Extension | Tools | Notes |
 | --- | --- | --- |
-| Files and shell | `read`, `write`, `edit`, `bash` (PowerShell on Windows) | pi-durable's tools from `@earendil-works/pi-durable/tools`, installed under an app extension name, with an app execution environment. See [File access](#file-access). |
+| Files and shell | `read`, `write`, `edit`, `bash` (PowerShell on Windows, with the cross-platform work) | pi-durable's tools from `@earendil-works/pi-durable/tools`, installed under an app extension name, with an app execution environment. See [File access](#file-access). |
 | Computer | computer | Unchanged behavior over the computer protocol |
 | Browser | browser | Unchanged |
 | Web | `web_fetch`, `web_search` | See [Web](#web) |
@@ -175,7 +175,7 @@ A denied call returns an error result to the Bot, which tells it you said no.
 
 **Always refused**, even with approval:
 
-- the Service data directory, which holds memory, credentials, and sessions
+- the Service data and state directories, which hold memory, secrets, and sessions
 - the secret store's fallback file
 - another Bot's private folder
 
@@ -185,7 +185,7 @@ Path checks resolve symbolic links and `..` before comparing.
 
 - `bash` starts in the Shared Workspace.
 - It runs with your user's rights, and its commands are not checked against the allowed folders, because that cannot be enforced without an OS sandbox.
-- It has a time limit and honors abort.
+- It has a time limit, 120 seconds by default and 600 at most, and honors abort.
 - It starts with a clean environment: the Service's own environment variables are not passed on, so no app secret reaches it that way.
 - This is the main reason the workspace is not a sandbox, and the wording says so.
 
