@@ -1,6 +1,6 @@
 import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
-import { getSetting } from "../persistence/settings.ts";
+import { getSetting, setSetting } from "../persistence/settings.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
 import { ThreadsService } from "../modules/threads/threads.ts";
 import { AgentsRegistry } from "../modules/agents/registry.ts";
@@ -8,6 +8,7 @@ import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { openBotRuntime } from "../modules/runtime/runtime.ts";
+import { importMcpOAuthTokensOnce, pendingPiMcpAdapterTokenReader } from "../modules/runtime/mcpOAuthImport.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker, type ComputerSurfaceOwner } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
@@ -178,6 +179,20 @@ export async function main(options: MainOptions = {}): Promise<{
     if (origin.hostname === "[::]") origin.hostname = "[::1]";
     return origin.origin;
   }, (event) => { events.append("plugin", event.accountId ?? event.mcpId ?? event.providerId ?? "plugins", `plugin.authorization_${event.status}`, event); });
+  if (typeof runtime.mcpControl === "function") {
+    const markerKey = "mcpOAuthAdapterImport";
+    void importMcpOAuthTokensOnce({
+      reader: pendingPiMcpAdapterTokenReader,
+      secrets: runtime.secrets,
+      snapshot: mcpServers,
+      check: (name) => runtime.mcpControl({ action: "connect", server: name })
+        .then(({ servers }) => servers.some((server) => server.name === name && server.status === "connected")),
+      marker: {
+        get: () => getSetting(db, markerKey) ?? undefined,
+        set: (value) => setSetting(db, markerKey, value),
+      },
+    }).catch(() => undefined);
+  }
   const devices = new SidecarBroker(cfg.sharedWorkspaceDir);
   const pairing = new PairingService(db);
   const pairingHostSecret = pairing.ensureHostSecret(cfg.stateDir);

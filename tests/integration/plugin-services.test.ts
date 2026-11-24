@@ -355,7 +355,8 @@ const privateUserInfo = () => ({ ...userInfo(), homedir: home });
 mock.module("node:os", () => ({ ...os, userInfo: privateUserInfo, default: { ...os, userInfo: privateUserInfo } }));
 process.env.PATH = home + "/bin:" + process.env.PATH;
 process.env.PI_CODING_AGENT_DIR = home + "/.pi/agent";
-process.env.PI_MCP_ADAPTER_TEST_AUTH_STORE = home + "/oauth.json";
+// The adapter honors memory, sizelimited, unavailable, and keyrevoked here. A path falls through to the real keyring.
+process.env.PI_MCP_ADAPTER_TEST_AUTH_STORE = "memory";
 const stdoutWrite = process.stdout.write.bind(process.stdout);
 let holdStatus = false;
 const heldStatus = [];
