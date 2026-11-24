@@ -426,9 +426,9 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** On a Thread's first Turn on the new runtime, read its old Pi session file read-only, and write the latest compaction summary and later messages into a new conversation with native roles. Unmappable messages become labeled text; old thinking is not replayed; metadata is dropped. If that fails, seed from the Service transcript.
 
 **Acceptance criteria:**
-- [ ] A Thread with an old session continues with its history
-- [ ] A broken session file falls back to the transcript seed and logs it
-- [ ] Old session files are untouched until their Bot is deleted, and deletion removes only the recorded path
+- [x] A Thread with an old session continues with its history. In `tests/integration/session-migration.test.ts`, `a Thread continues its old Pi session in the first durable model request` verifies that the provider request contains the latest compaction summary, post-compaction user, assistant, and tool-result history, and the native `toolCall`/`toolResult` pair. The reply reaches the transcript. The native mapping is also covered in `apps/daemon/src/modules/runtime/sessionMigration.test.ts`.
+- [x] A broken session file falls back to the transcript seed and logs it. The same integration suite covers this in `a broken old Pi session seeds prior Service transcript messages and warns`. The unit suite covers missing, unsupported, and malformed files, an empty transcript, a failed transcript commit, and path-free reasons.
+- [x] Old session files are untouched until their Bot is deleted, and deletion removes only the recorded path. The 12 tests in `tests/integration/old-session-deletion.test.ts` verify that bytes and mtime stay unchanged across the first durable Turn and that deletion removes only the recorded file. They cover preservation or a zero count for a sibling, another Bot's session, unrelated files, paths with `..`, symlinked ancestors, directories, relative paths, missing files, shared paths, and unlink failures. The sole change to `tests/integration/permanent-deletion.test.ts` adds the count to one exact DTO expectation.
 
 **Verification:** default commands; tests with copies of real session files from the current release.
 
@@ -437,6 +437,34 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Files likely touched:** `apps/daemon/src/modules/runtime/conversations.ts`, `apps/daemon/src/modules/runtime/sessionMigration.ts`, `tests/integration/fixtures/`, tests
 
 **Estimated scope:** Medium
+
+### Decisions
+
+- **v1.** In `conversations.ts`, a lazy seed callback runs only when creating a conversation, before the index row is inserted. An indexed conversation bypasses transcript and session reads. A seed failure still allows indexing and the Turn to proceed.
+- **v2.** Migration accepts only header version 3 from `pi-coding-agent` 0.84.4. Older versions fail closed to the transcript seed.
+- **v3.** Use the last compaction entry and every subsequent entry in file order. Without compaction, migrate all messages. Ignore parent and branch pointers.
+- **v4.** Preserve native user messages and assistant text for `stop`, `length`, and `toolUse`. Keep native `toolCall` blocks and `toolResult` messages only in complete, ordered runs matched by `toolCallId` and tool name, including across dropped non-message entries. Label `error` and `aborted` assistant messages and their results. Strip thinking and all signatures, convert unmappable messages to labeled user text such as `[old tool result: name]`, and drop and count metadata and non-message entries.
+- **v5.** Write the compaction summary as a user message labeled `Previous conversation compaction summary:`, matching the prototype.
+- **v6.** Flatten the transcript fallback into labeled user text and skip old thinking. Use the persisted user message `seq` to exclude the current message and later queued rows. A missing `seq` disables transcript seeding. Session migration can still proceed.
+- **v7.** Log `Migrated old Pi session for thread <id>: user=.. assistant=.. toolResult=.. labeled=.. thinking=.. dropped=..` via `console.log`. Use `console.warn` to describe the actual fallback outcome. Filesystem reasons contain only the error code.
+- **v8.** Bot deletion unlinks only the exact distinct absolute paths recorded in `thread_sessions` for the Bot's Threads. It skips paths still recorded by another Bot and refuses `..`, symlinked ancestors, directories, and relative paths. With `unlink`, `ENOENT` counts as zero. Failures log codes only, deletion continues, and the result reports `oldSessionFilesRemoved`.
+- **v9.** The approved protocol change adds the required non-negative integer `oldSessionFilesRemoved` to `DeleteBotResultDto`. Old session cleanup contributes only a count to the DTO.
+- **v10.** All fixtures are synthetic and follow the pinned 0.84.4 format exactly. The repository contains no copied real session content.
+
+### Evidence
+
+- `bun run typecheck` reported one pre-existing failure, TS2769 at `tests/integration/daemon.test.ts(289,59)`, reproduced on HEAD before this work.
+- `bun run lint:boundaries` passed 4 tests with 0 failures. `bun test apps/daemon` passed 167 tests with 1 pre-existing skip and 0 failures. The `sessionMigration` unit suite passed 39 tests.
+- `bun test tests/integration/session-migration.test.ts` passed 3 tests, and the same command with `OMARCHY_TEST_DURABLE=1` passed 3. The suite also covers `a new durable Thread without a legacy session sends only its first user message and logs no migration`.
+- `bun test tests/integration/old-session-deletion.test.ts` passed 12 tests, and the same command with `OMARCHY_TEST_DURABLE=1` passed 12. `bun test tests/integration/permanent-deletion.test.ts` passed 8 tests.
+
+### Not done / residual risks
+
+- An external process can swap an ancestor between validation and `unlink` (TOCTOU).
+- Concurrent deletions of two Bots sharing a path can both skip the file, leaving it for Task 19's orphan sweep and avoiding deletion while either Bot records it.
+- A crash between the seed commit and index insert can leave a seeded orphan conversation for Task 19 to sweep.
+- The recorded-path deletion test exercises the HTTP endpoint. Live-provider coverage is outstanding.
+- The spec asks for copies of real 0.84.4 session files. Verification used only synthetic fixtures that follow that format exactly.
 
 ---
 
