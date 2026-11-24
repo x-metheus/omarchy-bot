@@ -16,6 +16,7 @@ import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
+import { createWebExtension, readWebExemptRanges } from "./extensions/web.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
@@ -62,6 +63,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         return row ? { threadId: row.thread_id, botId: row.bot_id } : undefined;
       },
     } : undefined));
+    registry.install(createWebExtension({ exemptRanges: () => readWebExemptRanges(db) }));
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         if (!reportedCredentialsFailure) {

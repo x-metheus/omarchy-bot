@@ -19,7 +19,10 @@
     "@earendil-works/pi-durable": "1.5.2",
     "@earendil-works/pi-mcp": "1.5.2",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@mozilla/readability": "0.6.0",
+    "linkedom": "0.18.15",
     "tar": "^7.5.0",
+    "turndown": "7.2.5",
     "yaml": "^2.8.1",
     "fflate": "^0.8.2",
     "toml-eslint-parser": "^0.10.0",
@@ -28,5 +31,8 @@
     "@omarchy-bot/protocol": "workspace:*",
     "sharp": "0.35.4",
     "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/turndown": "5.0.6"
   }
 }
