@@ -18,9 +18,11 @@ import type {
   AvatarRecipeBodyDto,
   BotDto,
   BotViewDto,
+  BuiltinProviderDto,
   ClientToServer,
   ComputerViewDto,
   CreateBotBodyDto,
+  CreateProviderBody,
   DeleteBotResultDto,
   DeviceDto,
   EventEnvelope,
@@ -28,10 +30,12 @@ import type {
   PatchBotBodyDto,
   PatchThreadBodyDto,
   PinBodyDto,
+  ProviderDto,
   SendMessageBodyDto,
   SendResultDto,
   ServerToClient,
   ThreadDto,
+  UpdateProviderBody,
 } from "@omarchy-bot/protocol";
 import {
   ComputerViewDto as ComputerViewSchema,
@@ -167,6 +171,23 @@ export class ApiClient {
 
   secretStorageStatus(): Promise<{ backend: "keychain" | "file" }> {
     return this.req("/api/secrets/status");
+  }
+
+  // ----- providers -----
+  providers(): Promise<ProviderDto[]> {
+    return this.req("/api/providers");
+  }
+  builtinProviders(): Promise<BuiltinProviderDto[]> {
+    return this.req("/api/providers/builtin");
+  }
+  createProvider(body: CreateProviderBody): Promise<ProviderDto> {
+    return this.req("/api/providers", { method: "POST", body: JSON.stringify(body) });
+  }
+  updateProvider(id: string, body: UpdateProviderBody): Promise<ProviderDto> {
+    return this.req(`/api/providers/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) });
+  }
+  deleteProvider(id: string): Promise<void> {
+    return this.req(`/api/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   // ----- agents -----

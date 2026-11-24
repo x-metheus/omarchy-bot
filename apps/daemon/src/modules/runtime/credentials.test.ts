@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CredentialStore, MODEL_CREDENTIALS_FILENAME, type StoredProvider } from "./credentials.ts";
@@ -70,7 +70,7 @@ test("keeps the legacy file until every provider verifies and retries without du
   expect(existsSync(file)).toBeFalse();
 }));
 
-test("a failed provider removal drops the cached credential and preserves the indexed entry for retry", () => withCredentialDirectory(async (dir) => {
+test("a failed provider removal keeps the ID listed for retry and hides the key from runtime", () => withCredentialDirectory(async (dir) => {
   const values = new Map<string, string>();
   let failDelete = true;
   const backend: SecretBackend = {
@@ -84,15 +84,66 @@ test("a failed provider removal drops the cached credential and preserves the in
   };
   const secrets = new SecretStore(dir, backend);
   const store = await CredentialStore.open(dir, secrets);
-  const provider = providers[0];
-  await store.add(provider);
+  const { apiKey, ...provider } = providers[0];
+  await store.add({ ...provider, apiKey });
   await expect(store.remove(provider.id)).rejects.toThrow("Unable to delete secret");
+  expect(store.list()).toEqual([{ ...provider, hasKey: true }]);
+  expect(store.has(provider.id)).toBeTrue();
   expect(store.getForRuntime(provider.id)).toBeUndefined();
+  expect(store.getAllForRuntime()).toEqual([]);
+  expect(store.redactKeys(`${provider.id}/${apiKey}`)).toBe(`${provider.id}/[redacted]`);
   expect(await secrets.forApp().list()).toHaveLength(1);
+  expect(values.size).toBe(1);
   failDelete = false;
   await store.remove(provider.id);
+  expect(store.list()).toEqual([]);
+  expect(store.has(provider.id)).toBeFalse();
+  expect(store.getForRuntime(provider.id)).toBeUndefined();
+  expect(store.getAllForRuntime()).toEqual([]);
   expect((await CredentialStore.open(dir, secrets)).list()).toEqual([]);
   expect(values.size).toBe(0);
+  await store.add({ ...provider, apiKey });
+  expect(store.getForRuntime(provider.id)).toEqual({ ...provider, apiKey });
+}));
+
+test("an index write failure after provider key deletion keeps the cached key out of runtime", () => withCredentialDirectory(async (dir) => {
+  const values = new Map<string, string>();
+  const index = path.join(dir, "secret-index.json");
+  const backup = `${index}.backup`;
+  let failIndexWrite = true;
+  let deleteAttempts = 0;
+  const backend: SecretBackend = {
+    kind: "keychain",
+    async get(account) { return values.get(account); },
+    async set(account, value) { values.set(account, value); },
+    async delete(account) {
+      deleteAttempts++;
+      values.delete(account);
+      if (failIndexWrite) {
+        // Block the index replacement after SecretStore has read the original index.
+        renameSync(index, backup);
+        mkdirSync(index);
+      }
+    },
+  };
+  const secrets = new SecretStore(dir, backend);
+  const store = await CredentialStore.open(dir, secrets);
+  const { apiKey, ...provider } = providers[0];
+  await store.add({ ...provider, apiKey });
+  await expect(store.remove(provider.id)).rejects.toMatchObject({ code: "EISDIR", dest: index });
+  expect(values.size).toBe(0);
+  expect(store.list()).toEqual([{ ...provider, hasKey: true }]);
+  expect(store.getForRuntime(provider.id)).toBeUndefined();
+  expect(store.getAllForRuntime()).toEqual([]);
+
+  rmSync(index, { recursive: true });
+  renameSync(backup, index);
+  failIndexWrite = false;
+  expect(await secrets.forApp().list()).toHaveLength(1);
+  await store.remove(provider.id);
+  expect(deleteAttempts).toBe(2);
+  expect(store.list()).toEqual([]);
+  expect(await secrets.forApp().list()).toEqual([]);
 }));
 
 test("malformed credentials and invalid inputs fail without disclosing keys", () => withCredentialDirectory(async (dir, file) => {

@@ -86,6 +86,7 @@ function providerRecord(record: ProviderRecord, safe: (value: string) => boolean
 /** Service-only provider credentials. Expose metadata through list(), never the runtime accessors. */
 export class CredentialStore {
   readonly #providers = new Map<string, StoredProvider>();
+  readonly #pendingRemovals = new Set<string>();
   readonly #app: SecretScope;
   #pending: Promise<void> = Promise.resolve();
 
@@ -137,15 +138,31 @@ export class CredentialStore {
     return store;
   }
 
-  getForRuntime(id: string): StoredProvider | undefined { return structuredClone(this.#providers.get(id)); }
-  getAllForRuntime(): StoredProvider[] { return structuredClone([...this.#providers.values()]); }
+  has(id: string): boolean { return this.#providers.has(id); }
 
-  list(): ProviderProjection[] {
+  getForRuntime(id: string): StoredProvider | undefined {
+    return this.#pendingRemovals.has(id) ? undefined : structuredClone(this.#providers.get(id));
+  }
+
+  getAllForRuntime(): StoredProvider[] {
+    return structuredClone([...this.#providers.values()].filter(({ id }) => !this.#pendingRemovals.has(id)));
+  }
+
+  redactKeys(text: string): string {
+    const keys = [...this.#providers.values()].map(({ apiKey }) => apiKey).sort((a, b) => b.length - a.length);
+    if (!keys.length) return text;
+    const pattern = new RegExp(keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+    return text.replace(pattern, "[redacted]");
+  }
+
+  list(projectModels?: (record: Pick<ProviderRecord, "id" | "protocol" | "models">) => unknown[]): ProviderProjection[] {
     const records = [...this.#providers.values()];
     const safe = safeText(records.map(({ apiKey }) => apiKey));
-    return records.filter((record) => hasSafeFields(record, safe)).map((record) => ({
-      ...providerRecord(record, safe), hasKey: record.apiKey.length > 0,
-    }));
+    return records.filter((record) => hasSafeFields(record, safe)).map((record) => {
+      const metadata = providerRecord(record, safe);
+      if (projectModels) metadata.models = projectProviderModels(projectModels(metadata), safe);
+      return { ...metadata, hasKey: record.apiKey.length > 0 };
+    });
   }
 
   async add(provider: StoredProvider): Promise<void> {
@@ -161,9 +178,11 @@ export class CredentialStore {
 
   remove(id: string): Promise<void> {
     return this.#write(async () => {
-      // Stop using the cached key while a failed backend deletion can still be retried.
-      this.#providers.delete(id);
+      // Retain the record for retries and hide its key while the deletion outcome is unresolved.
+      if (this.#providers.has(id)) this.#pendingRemovals.add(id);
       await this.#app.delete(secretName(id));
+      this.#providers.delete(id);
+      this.#pendingRemovals.delete(id);
     });
   }
 

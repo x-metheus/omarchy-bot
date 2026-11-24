@@ -4,12 +4,40 @@ import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messag
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { createModels, createProvider, type MutableModels, type Provider } from "@earendil-works/pi-ai/models";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import type { BuiltinProviderDto, ProviderModelDto } from "@omarchy-bot/protocol";
 import { getSetting } from "../../persistence/settings.ts";
 import type { CredentialStore, StoredProvider } from "./credentials.ts";
 
 export const DEFAULT_MODEL_SETTING = "default_model";
 // Generic endpoints cannot be assumed to support images or reasoning.
 export const DEFAULT_MODEL_METADATA = { contextWindow: 128_000, maxTokens: 8_192, reasoning: false, input: ["text"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+
+export function listBuiltinProviderIds(): string[] {
+  return builtinProviders().map(({ id }) => id);
+}
+
+function builtinApiKeyProviders(): Provider[] {
+  return builtinProviders().filter(({ auth }) => auth.apiKey !== undefined);
+}
+
+export function listBuiltinProviders(): BuiltinProviderDto[] {
+  return builtinApiKeyProviders().map(({ id, name }) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Project chat-model metadata without exposing provider routes or credentials. */
+export function listProviderModels(record: Pick<StoredProvider, "id" | "protocol" | "models">): ProviderModelDto[] {
+  let catalog: readonly Model<string>[] = [];
+  if (record.protocol === "built-in") {
+    const builtin = builtinApiKeyProviders().find(({ id }) => id === record.id);
+    if (!builtin) return [];
+    catalog = builtin.getModels();
+  }
+  const catalogIds = new Set(catalog.map(({ id }) => id));
+  const extras = (record.models ?? []).filter(({ id }) => !catalogIds.has(id));
+  return [...catalog, ...extras].map(({ id, name, contextWindow, maxTokens, reasoning, input }) => ({
+    id, name, contextWindow, maxTokens, reasoning, input: input && [...input],
+  }));
+}
 
 function buildProvider(record: StoredProvider, requestedIds: string[] = []): Provider {
   const registry = builtinProviders();
@@ -115,10 +143,8 @@ export function resolveModelForBot(db: Database, store: CredentialStore, botId: 
   } catch {
     // The underlying error may include credentials or other private store data.
   }
-  let reference = selected;
-  try {
-    const keys = store.getAllForRuntime().map((p) => p.apiKey).filter(Boolean).sort((a, b) => b.length - a.length);
-    if (keys.length) reference = reference.replace(new RegExp(keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g"), () => "[redacted]");
-  } catch { reference = "[unavailable]"; }
+  let reference: string;
+  try { reference = store.redactKeys(selected); }
+  catch { reference = "[unavailable]"; }
   throw new Error(`Unable to resolve Bot provider/model selection: ${reference}`);
 }

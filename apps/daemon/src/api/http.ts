@@ -29,6 +29,7 @@ import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleProjectionRequest } from "./projectionRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import { handlePluginRequest } from "./pluginRoutes.ts";
+import { createProviderRoutes } from "./providerRoutes.ts";
 import type { PluginsService } from "../modules/plugins/plugins.ts";
 import type { DevicePort, SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import type { PairingService } from "../modules/pairing/pairing.ts";
@@ -159,6 +160,7 @@ const PairingExchangeBody = z.object({
  * loopback is not exempt (ADR 0014).
  */
 export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; port: number } {
+  const handleProviderRequest = createProviderRoutes(svc.credentials);
   // Only what Bun.serve needs from a socket: revoke closes these directly.
   const pairedSockets = new Map<string, Set<{ close(code?: number, reason?: string): void }>>();
 
@@ -283,6 +285,9 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
 
     if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION, protocol: PROTOCOL_VERSION });
     if (pathname === "/api/secrets/status" && req.method === "GET") return json({ backend: svc.secretsBackend });
+    const providerResponse = await handleProviderRequest(req, pathname);
+    if (providerResponse !== undefined) return providerResponse;
+
     if (pathname === "/api/host-identity" && req.method === "GET") {
       const identity = hostIdentity(svc.cfg.stateDir);
       return identity ? json(identity) : json({ error: "Service host identity is unavailable" }, 503);

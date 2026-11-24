@@ -642,6 +642,56 @@ export const SendResultDto = z.object({
 });
 export type SendResultDto = z.infer<typeof SendResultDto>;
 
+// ----- providers -----
+
+const CustomProviderProtocol = z.enum(["openai-compatible", "anthropic-messages"]);
+const ProviderProtocol = z.enum(["openai-compatible", "anthropic-messages", "built-in"]);
+
+export const ProviderModelDto = z.object({
+  id: z.string(),
+  name: z.string().optional(),
+  contextWindow: z.number().optional(),
+  maxTokens: z.number().optional(),
+  reasoning: z.boolean().optional(),
+  input: z.array(z.enum(["text", "image"])).optional(),
+});
+export type ProviderModelDto = z.infer<typeof ProviderModelDto>;
+
+export const BuiltinProviderDto = z.object({ id: z.string(), name: z.string() });
+export type BuiltinProviderDto = z.infer<typeof BuiltinProviderDto>;
+
+export const ProviderBaseUrl = z.string({ required_error: "Provider base URL is required", invalid_type_error: "Provider base URL must be a string" }).trim().refine((value) => {
+  const url = URL.parse(value);
+  return url !== null && (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password;
+}, "Provider base URL must be HTTP or HTTPS and cannot include a username or password");
+
+export const ProviderDto = BuiltinProviderDto.extend({
+  protocol: ProviderProtocol,
+  baseUrl: ProviderBaseUrl.optional(),
+  hasKey: z.boolean(),
+  models: z.array(ProviderModelDto),
+});
+export type ProviderDto = z.infer<typeof ProviderDto>;
+
+const ProviderKey = z.string({ required_error: "Provider key is required", invalid_type_error: "Provider key must be a string" })
+  .refine((value) => value.trim().length > 0, "Provider key is required");
+const ProviderModels = z.array(z.string().trim().min(1, "Model ID is required"));
+const CustomProviderName = z.string({ required_error: "Provider name is required" }).trim().min(1, "Provider name is required");
+
+export const CreateProviderBody = z.discriminatedUnion("protocol", [
+  z.object({ protocol: CustomProviderProtocol, name: CustomProviderName, baseUrl: ProviderBaseUrl, key: ProviderKey, models: ProviderModels.optional() }).strict(),
+  z.object({ protocol: z.literal("built-in"), id: z.string().min(1, "Built-in provider ID is required"), key: ProviderKey }).strict(),
+]);
+export type CreateProviderBody = z.infer<typeof CreateProviderBody>;
+
+export const UpdateProviderBody = z.object({
+  name: CustomProviderName.optional(),
+  baseUrl: ProviderBaseUrl.optional(),
+  key: ProviderKey.optional(),
+  models: ProviderModels.optional(),
+}).strict();
+export type UpdateProviderBody = z.infer<typeof UpdateProviderBody>;
+
 // ----- approvals -----
 
 export const ApprovalStatusSchema = z.enum(["pending", "allowed_once", "allowed_folder", "denied", "expired", "cancelled"]);
