@@ -9,12 +9,18 @@ import { createRegistry, Harness, ToolResultEntry, type ToolExecutionApi } from 
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { StdioTransport } from "@earendil-works/pi-mcp";
+import { McpOAuthAuthorizationRequiredError } from "@earendil-works/pi-mcp/oauth";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { PLUGIN_PROVIDERS } from "@omarchy-bot/protocol";
 import { NativeMcpStore } from "../../plugins/nativeMcp.ts";
 import { PluginsService } from "../../plugins/plugins.ts";
+import { startOAuthMcpServer } from "../testing/oauthMcpServer.ts";
 import { createMcpExtension, type McpExtensionDeps } from "./mcp.ts";
+
+function expectSafeEqual(actual: unknown, expected: unknown) {
+  expect(Bun.deepEquals(actual, expected)).toBe(true);
+}
 
 test("a scripted conversation searches, describes, and calls a local MCP server", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-runtime-mcp-"));
@@ -88,8 +94,8 @@ await server.connect(new StdioServerTransport());
     expect(results.map(({ isError }) => isError)).toEqual([false, false, false, true, true, true, true, true, true]);
     expect(results[0]?.text).toContain("local");
     expect(results[0]?.text).toContain("repeat");
-    expect(results[0]?.text).toContain("Echo a message");
-    expect(results[1]?.text).toContain("Echo a message");
+    expect(results[0]?.text?.includes("Echo a message")).toBe(true);
+    expect(results[1]?.text?.includes("Echo a message")).toBe(true);
     expect(JSON.parse(results[1]!.text).inputSchema).toMatchObject({
       type: "object", properties: { message: { type: "string" } }, required: ["message"],
     });
@@ -232,14 +238,16 @@ await server.connect(new StdioServerTransport());
     const results = items.filter(ToolResultEntry.is).flatMap(({ model }) => model ?? []).filter((message) => message.role === "toolResult");
     expect(results.map(({ isError }) => isError)).toEqual([false, false, false, true, false]);
     const texts = results.map(({ content }) => content.map((item) => item.type === "text" ? item.text : "").join("\n"));
-    expect(JSON.parse(texts[0]!).services[0].tools[0].description).toBe("Fixture description: [redacted], [redacted], type, [redacted]");
-    expect(JSON.parse(texts[1]!)).toMatchObject({
-      description: "Fixture description: [redacted], [redacted], type, [redacted]",
-      inputSchema: { type: "object", properties: { fail: { type: "boolean", description: "Mode: type; key: [redacted]" }, q7: { type: "string" } } },
-    });
-    expect(texts.slice(2, 4)).toEqual(Array(2).fill("Fixture result: [redacted], [redacted], [redacted], [redacted]"));
+    const description = "Fixture description: [redacted], [redacted], type, [redacted]";
+    expect(JSON.parse(texts[0]!).services[0].tools[0].description === description).toBe(true);
+    const described = JSON.parse(texts[1]!);
+    expect(described.description === description).toBe(true);
+    const schema = described.inputSchema;
+    expect(schema?.type === "object" && schema?.properties?.fail?.type === "boolean" &&
+      schema?.properties?.fail?.description === "Mode: type; key: [redacted]" && schema?.properties?.q7?.type === "string").toBe(true);
+    expectSafeEqual(texts.slice(2, 4), Array(2).fill("Fixture result: [redacted], [redacted], [redacted], [redacted]"));
     const jsonTexts = results[4]!.content.flatMap((item) => item.type === "text" ? [item.text] : []);
-    expect(jsonTexts).toEqual([
+    expectSafeEqual(jsonTexts, [
       `{
   "2": 9007199254740993,
   "1": [redacted],
@@ -250,7 +258,7 @@ await server.connect(new StdioServerTransport());
       "Escaped fragment: [redacted]",
     ]);
     const transcript = JSON.stringify(items);
-    expect(transcript).not.toContain("fixture-");
+    expect(transcript.includes("fixture-")).toBe(false);
   } finally {
     await mcp?.close();
     await harness?.close(context);
@@ -301,15 +309,17 @@ test("MCP searches, describes, and calls an authenticated Streamable HTTP servic
 
     const search = await executeMcp(mcp, { action: "search", service: "account", query: "authorization" });
     expect(search.isError).toBe(false);
-    expect(search.output).toEqual([{ type: "text", text: JSON.stringify({ services: [{ service: "account", tools: [{ name: "reflect", description: "Reflect service authorization" }] }] }, null, 2) }]);
+    expectSafeEqual(search.output, [{ type: "text", text: JSON.stringify({ services: [{ service: "account", tools: [{ name: "reflect", description: "Reflect service authorization" }] }] }, null, 2) }]);
     const describe = await executeMcp(mcp, { action: "describe", service: "account", tool: "reflect" });
     expect(describe.isError).toBe(false);
     const metadata = describe.output?.[0];
-    expect(JSON.parse(metadata?.type === "text" ? metadata.text : "")).toMatchObject({
-      service: "account", tool: "reflect", description: "Reflect service authorization", inputSchema: { type: "object", properties: {} },
-    });
+    const described = JSON.parse(metadata?.type === "text" ? metadata.text : "null");
+    expect(described?.service === "account" && described?.tool === "reflect" &&
+      described?.description === "Reflect service authorization" && described?.inputSchema?.type === "object").toBe(true);
+    const properties = described?.inputSchema?.properties;
+    expect(properties !== null && typeof properties === "object" && !Array.isArray(properties)).toBe(true);
     const call = await executeMcp(mcp, { action: "call", service: "account", tool: "reflect", arguments: {} });
-    expect(call).toEqual({ isError: false, output: [{ type: "text", text: "Header: [redacted]; token: [redacted]" }] });
+    expectSafeEqual(call, { isError: false, output: [{ type: "text", text: "Header: [redacted]; token: [redacted]" }] });
 
     const unauthorized = await executeMcp(mcp, { action: "search", service: "consent" });
     expect(unauthorized).toEqual({ isError: true, output: [{ type: "text", text: expect.stringMatching(/consent.*needs sign-in/) }] });
@@ -319,15 +329,96 @@ test("MCP searches, describes, and calls an authenticated Streamable HTTP servic
       { name: "account", configurationRevision, status: "connected", toolCount: 1, disabled: false },
       { name: "consent", configurationRevision, status: "needs-auth", toolCount: 0, disabled: false },
     ]);
-    expect(transport.sessionId).toBe(sessionId);
-    expect(closedSessions).toEqual([]);
+    expect(transport.sessionId === sessionId).toBe(true);
+    expectSafeEqual(closedSessions, []);
     await mcp.close();
-    expect(closedSessions).toEqual([sessionId]);
-    expect([...new Set(observedAuthorization)]).toEqual([`Bearer ${token}`]);
+    expectSafeEqual(closedSessions, [sessionId]);
+    expectSafeEqual([...new Set(observedAuthorization)], [`Bearer ${token}`]);
   } finally {
     await mcp.close();
     await server.stop(true);
     await fixture.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP passes the HTTP URL to its auth provider and maps OAuth challenges to needs-auth", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-auth-provider-"));
+  let needsAuth = true;
+  const fixture = new McpServer({ name: "fixture", version: "1" });
+  const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true, sessionIdGenerator: () => crypto.randomUUID() });
+  fixture.registerTool("read", {}, () => ({ content: [{ type: "text", text: "read" }] }));
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    return needsAuth ? new Response(null, { status: 401 }) : transport.handleRequest(request);
+  } });
+  const url = new URL("/mcp", server.url).href;
+  const providerCalls: string[][] = [];
+  const store = new NativeMcpStore(root, path.join(root, "private"));
+  const mcp = createMcpExtension({ servers: () => store.effectiveServers(), authProvider(service, resolvedUrl) {
+    providerCalls.push([service, resolvedUrl]);
+    return { async token() { return undefined; }, onUnauthorized() { throw new McpOAuthAuthorizationRequiredError(); } };
+  } });
+  try {
+    await fixture.connect(transport);
+    const script = await writeStdioFixture(root, `
+server.registerTool("local_read", {}, () => ({ content: [{ type: "text", text: "read" }] }));
+await server.connect(new StdioServerTransport());
+`);
+    store.save(null, { name: "local", enabled: true, transport: { type: "stdio", command: process.execPath, args: [script] } });
+    store.save(null, { name: "remote", enabled: true, transport: { type: "http", url } });
+    expect((await executeMcp(mcp, { action: "search", service: "local" })).isError).toBe(false);
+    expect((await executeMcp(mcp, { action: "search", service: "remote" })).isError).toBe(true);
+    expectSafeEqual(providerCalls, [["remote", url]]);
+    expect(mcp.status().find(({ name }) => name === "remote")?.status).toBe("needs-auth");
+
+    needsAuth = false;
+    expect(await mcp.check("remote")).toMatchObject({ status: "connected", toolCount: 1 });
+    needsAuth = true;
+    const call = await executeMcp(mcp, { action: "call", service: "remote", tool: "read" });
+    expectSafeEqual(call, { isError: true, output: [{
+      type: "text", text: 'MCP service "remote" needs sign-in. Sign in through Services and retry.',
+    }] });
+    expect(mcp.status().find(({ name }) => name === "remote")?.status).toBe("needs-auth");
+    expect(await mcp.check("missing")).toBeUndefined();
+    await server.stop(true);
+    expect(await mcp.check("remote")).toMatchObject({ status: "failed", toolCount: 0 });
+  } finally {
+    await mcp.close();
+    await server.stop(true);
+    await fixture.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP check reports stdio status without spawning or replacing the process", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-check-"));
+  const launches = path.join(root, "launches");
+  const script = await writeStdioFixture(root, `
+writeFileSync(${JSON.stringify(launches)}, String(process.pid) + "\\n", { flag: "a" });
+server.registerTool("pid", {}, () => ({ content: [{ type: "text", text: String(process.pid) }] }));
+await server.connect(new StdioServerTransport());
+`);
+  const mcp = createMcpExtension({ servers: localServer(script) });
+  const getPid = async () => {
+    const result = await executeMcp(mcp, { action: "call", service: "local", tool: "pid" });
+    const part = result.output?.[0];
+    return Number(part?.type === "text" ? part.text : NaN);
+  };
+  try {
+    expect(await mcp.check("local")).toMatchObject({ status: "not-connected", toolCount: 0 });
+    expect(await Bun.file(launches).exists()).toBe(false);
+    const first = await getPid();
+    expect(first).toBeGreaterThan(1);
+    expect(await mcp.check("local", root)).toMatchObject({ status: "connected", toolCount: 1 });
+    const second = await getPid();
+    expect(second).toBeGreaterThan(1);
+    expect(second).toBe(first);
+    expect(() => process.kill(first, 0)).not.toThrow();
+    expect(await readFile(launches, "utf8")).toBe(`${first}\n`);
+    await mcp.close();
+    expect(() => process.kill(second, 0)).toThrow();
+  } finally {
+    await mcp.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -413,8 +504,8 @@ try {
       ]);
       expect(code).toBe(0);
       expect(JSON.parse(stdout)).toEqual({ isError: true, output: [{ type: "text", text: expect.stringMatching(/MCP configuration.*\.mcp\.json.*regular file/) }] });
-      expect(stdout).not.toContain(root);
-      expect(stdout).not.toContain("fixture-publisher-credential");
+      expect(stdout.includes(root)).toBe(false);
+      expect(stdout.includes("fixture-publisher-credential")).toBe(false);
     } finally {
       clearTimeout(timer);
       if (child.exitCode === null) child.kill("SIGKILL");
@@ -447,7 +538,7 @@ test("MCP redacts quoted and unquoted cookie values echoed by an HTTP tool", asy
     });
     const result = await executeMcp(mcp, { action: "call", service: "remote", tool: "read_session" });
     expect(result.isError).toBe(false);
-    expect(result.output).toEqual([
+    expectSafeEqual(result.output, [
       { type: "text", text: "Session: [redacted]" },
       { type: "text", text: "Decoded session: [redacted]" },
     ]);
@@ -498,16 +589,18 @@ await server.connect(new StdioServerTransport());
     const describe = await executeMcp(mcp, { action: "describe", service, tool });
     expect(describe.isError).toBe(false);
     const metadata = describe.output?.[0];
-    expect(JSON.parse(metadata?.type === "text" ? metadata.text : "")).toMatchObject({
-      service: serviceName, tool: toolName, description: "Visible description [redacted]",
-    });
+    const described = JSON.parse(metadata?.type === "text" ? metadata.text : "null");
+    expect(described?.service === serviceName && described?.tool === toolName &&
+      described?.description === "Visible description [redacted]").toBe(true);
     const call = await executeMcp(mcp, { action: "call", service, tool });
     expect(call.isError).toBe(false);
     expect(call.output).toEqual([{ type: "text", text: "found" }]);
-    expect(found).toEqual({
+    const searchError = found.errors?.[0] ?? "";
+    expectSafeEqual(found, {
       services: [{ service: serviceName, tools: [{ name: toolName, description: "Visible description [redacted]" }] }],
-      errors: [expect.stringMatching(/unavailable-\[redacted\].*failed/)],
+      errors: [searchError],
     });
+    expect(/unavailable-\[redacted\].*failed/.test(searchError)).toBe(true);
 
     const failed = await executeMcp(mcp, { action: "search", service: broken });
     expect(failed.isError).toBe(true);
@@ -739,7 +832,7 @@ test("MCP shutdown drains publisher credential preparation after a call is abort
   const publisherStarted = Promise.withResolvers<void>();
   const releasePublisher = Promise.withResolvers<void>();
   const fetchMock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0]) => {
-    if (String(input) !== tokenEndpoint) throw new Error(`Unexpected request to ${input}`);
+    if (String(input) !== tokenEndpoint) throw new Error("Unexpected request during credential preparation.");
     publisherStarted.resolve();
     await releasePublisher.promise;
     return Response.json({ access_token: refreshedToken, expires_in: 3600 });
@@ -777,12 +870,12 @@ test("MCP shutdown drains publisher credential preparation after a call is abort
     expect(preparations).toHaveLength(1);
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(closed).toBe(false);
-    expect(servers().secrets).toContain(staleToken);
+    expect(servers().secrets.includes(staleToken)).toBe(true);
 
     releasePublisher.resolve();
     await closing;
-    expect(servers().secrets).toContain(refreshedToken);
-    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([tokenEndpoint]);
+    expect(servers().secrets.includes(refreshedToken)).toBe(true);
+    expectSafeEqual(fetchMock.mock.calls.map(([input]) => String(input)), [tokenEndpoint]);
   } finally {
     releasePublisher.resolve();
     await Promise.allSettled(preparations);
@@ -847,14 +940,14 @@ await server.connect(new StdioServerTransport());
     });
     expect(effective.configurationError).toBeUndefined();
     expect(effective.servers.local).toEqual({ configurationError: expect.stringMatching(/deletion conflicts/i) });
-    expect(JSON.stringify(effective.servers.local)).not.toContain(secret);
+    expect(JSON.stringify(effective.servers.local).includes(secret)).toBe(false);
 
     mcp = createMcpExtension({ servers: () => store.effectiveServers() });
     for (const action of ["search", "describe", "call"]) {
       const result = await executeMcp(mcp, { action, service: "local", tool: "run" });
       expect(result.isError).toBe(true);
       expect(result.output).toEqual([{ type: "text", text: expect.stringMatching(/deletion conflicts/i) }]);
-      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(JSON.stringify(result).includes(secret)).toBe(false);
     }
     const result = await executeMcp(mcp, { action: "call", service: "other", tool: "run" });
     expect(result.isError).toBe(false);
@@ -936,5 +1029,190 @@ test("MCP search reports malformed workspace configuration without exposing its 
   } finally {
     await mcp?.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an HTTP MCP check queues behind the active tool call before closing its session", async () => {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const events: string[] = [];
+  let handshakes = 0;
+  const replyToRequest = async (_url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> => {
+    if (init?.method === "GET") return new Response(null, { status: 405 });
+    if (init?.method === "DELETE") {
+      events.push("session closed");
+      return new Response(null, { status: 204 });
+    }
+    const { id, method, params } = JSON.parse(String(init?.body));
+    switch (method) {
+      case "initialize":
+        return Response.json({ jsonrpc: "2.0", id, result: {
+          protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" },
+        } }, { headers: { "mcp-session-id": String(++handshakes) } });
+      case "notifications/initialized":
+        return new Response(null, { status: 202 });
+      case "tools/list":
+        return Response.json({ jsonrpc: "2.0", id, result: { tools: [{ name: "wait", inputSchema: { type: "object" } }] } });
+      case "tools/call":
+        started.resolve();
+        await release.promise;
+        init?.signal?.throwIfAborted();
+        events.push("tool finished");
+        return Response.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "finished" }] } });
+      default:
+        throw new Error(`Unexpected MCP method ${method}`);
+    }
+  };
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(replyToRequest, { preconnect: () => {} }));
+  const mcp = createMcpExtension({ servers: () => ({
+    revision: "fixture", secrets: [], servers: { remote: { disabled: false, transport: { type: "http", url: "https://fixture.example/mcp" } } },
+  }) });
+  try {
+    const call = executeMcp(mcp, { action: "call", service: "remote", tool: "wait" });
+    await started.promise;
+    const checking = mcp.check("remote", import.meta.dir).then((status) => {
+      events.push("check finished");
+      return status;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(events).toEqual([]);
+    release.resolve();
+    expect(await call).toEqual({ isError: false, output: [{ type: "text", text: "finished" }] });
+    expect(await checking).toMatchObject({ status: "connected", toolCount: 1 });
+    expect(handshakes).toBe(2);
+    expect(events).toEqual(["tool finished", "session closed", "check finished"]);
+  } finally {
+    release.resolve();
+    try { await mcp.close(); }
+    finally { fetchMock.mockRestore(); }
+  }
+});
+
+test("checking another MCP service defers retirement and keeps OAuth tokens redacted on the replacement connection", async () => {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const retired = Promise.withResolvers<void>();
+  const token = crypto.randomUUID();
+  const events: string[] = [];
+  let secondPath = "/second";
+  const replyToRequest = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> => {
+    const pathname = new URL(String(input)).pathname;
+    if (init?.method === "GET") return new Response(null, { status: 405 });
+    if (init?.method === "DELETE") {
+      if (pathname === "/second") {
+        events.push("old session closed");
+        retired.resolve();
+      }
+      return new Response(null, { status: 204 });
+    }
+    const { id, method, params } = JSON.parse(String(init?.body));
+    switch (method) {
+      case "initialize":
+        return Response.json({ jsonrpc: "2.0", id, result: {
+          protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" },
+        } }, { headers: { "mcp-session-id": crypto.randomUUID() } });
+      case "notifications/initialized":
+        return new Response(null, { status: 202 });
+      case "tools/list":
+        return Response.json({ jsonrpc: "2.0", id, result: { tools: [{ name: "wait", inputSchema: { type: "object" } }] } });
+      case "tools/call":
+        if (pathname === "/second") {
+          started.resolve();
+          await release.promise;
+          init?.signal?.throwIfAborted();
+          events.push("tool finished");
+        }
+        return Response.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: `Finished: ${token}` }] } });
+      default:
+        throw new Error("Unexpected MCP method");
+    }
+  };
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(replyToRequest, { preconnect: () => {} }));
+  const mcp = createMcpExtension({
+    servers: () => ({ revision: secondPath, secrets: [], servers: {
+      first: { disabled: false, transport: { type: "http", url: "https://fixture.example/first" } },
+      second: { disabled: false, transport: { type: "http", url: `https://fixture.example${secondPath}` } },
+    } }),
+    authProvider: (_service, url) => new URL(url).pathname === "/second" ? { async token() { return token; } } : undefined,
+  });
+  try {
+    const input = { action: "call", service: "second", tool: "wait" };
+    const call = executeMcp(mcp, input);
+    await started.promise;
+    secondPath = "/replacement";
+    expect(await mcp.check("first")).toMatchObject({ status: "connected", toolCount: 1 });
+    expect(mcp.status().find(({ name }) => name === "second")?.status).toBe("not-connected");
+    expect(events).toEqual([]);
+    release.resolve();
+    expectSafeEqual(await call, { isError: false, output: [{ type: "text", text: "Finished: [redacted]" }] });
+    await retired.promise;
+    expect(events).toEqual(["tool finished", "old session closed"]);
+    const replacement = await executeMcp(mcp, input);
+    expectSafeEqual(replacement, { isError: false, output: [{ type: "text", text: "Finished: [redacted]" }] });
+  } finally {
+    release.resolve();
+    try { await mcp.close(); }
+    finally { fetchMock.mockRestore(); }
+  }
+});
+
+test("MCP redacts issued OAuth tokens from disabled service errors and preserves service and tool identifiers", async () => {
+  const token = crypto.randomUUID();
+  const service = `fixture-${token}`;
+  const tool = `read_fixture-${token}`;
+  const fixture = await startOAuthMcpServer({ fixedAuthorization: `Bearer ${token}`, toolName: tool });
+  let disabled = false;
+  const mcp = createMcpExtension({
+    servers: () => ({ revision: disabled ? "disabled" : "enabled", secrets: [], servers: {
+      [service]: { disabled, transport: { type: "http", url: fixture.url } },
+    } }),
+    authProvider: () => ({ async token() { return token; } }),
+  });
+  try {
+    const described = await executeMcp(mcp, { action: "describe", service, tool });
+    expect(described.isError).toBe(false);
+    const metadata = described.output?.[0];
+    const identifiers = JSON.parse(metadata?.type === "text" ? metadata.text : "null");
+    expect(identifiers?.service === service && identifiers?.tool === tool).toBe(true);
+    expect(fixture.observedAuthorization.has(`Bearer ${token}`)).toBe(true);
+
+    disabled = true;
+    const failed = await executeMcp(mcp, { action: "call", service, tool });
+    expect(JSON.stringify(failed).includes(token)).toBe(false);
+    expect(failed).toEqual({ isError: true, output: [{
+      type: "text", text: 'MCP service "fixture-[redacted]" is disabled. Enable it in Services before retrying.',
+    }] });
+    const status = mcp.status();
+    expect(status).toHaveLength(1);
+    expect(status[0]?.name === service && status[0]?.status === "disabled").toBe(true);
+  } finally {
+    await mcp.close();
+    await fixture.close();
+  }
+});
+
+test("MCP redacts an issued OAuth token from a model-visible discovery failure", async () => {
+  const token = crypto.randomUUID();
+  const service = `fixture-${token}`;
+  let issued = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    return new Response(null, { status: request.headers.get("authorization") === `Bearer ${token}` ? 500 : 401 });
+  } });
+  const mcp = createMcpExtension({
+    servers: () => ({ revision: "fixture", secrets: [], servers: {
+      [service]: { disabled: false, transport: { type: "http", url: server.url.href } },
+    } }),
+    authProvider: () => ({ async token() { issued++; return token; } }),
+  });
+  try {
+    const result = await executeMcp(mcp, { action: "search", service });
+    expect(JSON.stringify(result).includes(token)).toBe(false);
+    expect(result.isError).toBe(true);
+    const text = result.output?.[0]?.type === "text" ? result.output[0].text : "";
+    expect(/fixture-\[redacted\].*failed/.test(text) && Bun.deepEquals(result.output, [{ type: "text", text }])).toBe(true);
+    expect(issued).toBe(1);
+  } finally {
+    await mcp.close();
+    await server.stop(true);
   }
 });

@@ -6,14 +6,21 @@ import {
   normalizeMcpInputSchema, StdioTransport, StreamableHttpTransport, toLlmContent,
   type AuthProvider, type McpTransport, type Tool,
 } from "@earendil-works/pi-mcp";
+import { McpOAuthAuthorizationRequiredError } from "@earendil-works/pi-mcp/oauth";
 import type { NativeMcpStatus } from "@omarchy-bot/agent-contract";
 import type { EffectiveMcpServer, EffectiveMcpServers } from "../../plugins/nativeMcp.ts";
 
 const DISCOVERY_TIMEOUT_MS = 20_000;
 const CALL_TIMEOUT_MS = 120_000;
+const MAX_RETAINED_OAUTH_TOKENS = 4;
 const CONFIGURATION_LOAD_ERROR = "MCP configuration could not be loaded. Check the configuration in Services and retry.";
+const SHUTDOWN_ERROR = "The MCP runtime is shutting down. Retry once the Service is running.";
 
 class McpConfigurationError extends Error {}
+
+function needsSignIn(error: unknown): boolean {
+  return error instanceof McpAuthRequiredError || error instanceof McpOAuthAuthorizationRequiredError;
+}
 
 type Redact = (text: string) => string;
 type ConfiguredMcpServer = Exclude<EffectiveMcpServer, { configurationError: string }>;
@@ -24,6 +31,7 @@ type Connection = {
   discovery: Promise<Tool[]>;
   tools: Promise<Tool[]>;
   toolCount?: number;
+  retiring?: boolean;
 };
 type DiscoveryFailure = { revision: string; status: "failed" | "needs-auth" };
 type McpArguments = {
@@ -38,12 +46,16 @@ export type McpExtensionDeps = {
   servers: () => EffectiveMcpServers;
   prepareServers?: () => Promise<EffectiveMcpServers>;
   fillSecrets?: (value: string) => string;
-  authProvider?: (service: string) => AuthProvider | undefined;
+  authProvider?: (service: string, url: string) => AuthProvider | undefined;
   callTimeoutMs?: number;
 };
 
 function credentialRedactor(secrets: string[]): Redact {
-  const forms = new Set(secrets.filter(Boolean).flatMap((secret) => [secret, JSON.stringify(secret).slice(1, -1)]));
+  const forms = new Set(secrets.filter(Boolean).flatMap((secret) => {
+    const json = JSON.stringify(secret).slice(1, -1);
+    // Unicode escapes and other re-encodings are outside literal credential redaction.
+    return [secret, json, json.replaceAll("/", "\\/")];
+  }));
   const patterns = [...forms].sort((a, b) => b.length - a.length)
     .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   if (!patterns.length) return (text) => text;
@@ -100,11 +112,46 @@ function fillArgumentRecord(fields: Record<string, unknown>, fill: (value: strin
 
 export function createMcpExtension({ servers: loadServers, prepareServers, fillSecrets = (value) => value, authProvider, callTimeoutMs = CALL_TIMEOUT_MS }: McpExtensionDeps) {
   const connections = new Map<string, Connection>();
+  const issuedTokensByName = new Map<string, Set<string>>();
   const failures = new Map<string, DiscoveryFailure>();
   const pendingCloses = new Map<string, Promise<void>>();
   const pendingPreparations = new Set<Promise<EffectiveMcpServers>>();
   const callQueues = new Map<string, Promise<void>>();
   let closing: Promise<void> | undefined;
+
+  function enqueue<T>(name: string, run: () => Promise<T>): Promise<T> {
+    const next = (callQueues.get(name) ?? Promise.resolve()).then(run);
+    const finished = next.then(() => {}, () => {}).finally(() => {
+      if (callQueues.get(name) === finished) callQueues.delete(name);
+    });
+    callQueues.set(name, finished);
+    return next;
+  }
+
+  function trackTokens(name: string, provider: AuthProvider): AuthProvider {
+    return {
+      async token() {
+        const token = await provider.token();
+        if (closing) return undefined;
+        if (token) {
+          let issuedTokens = issuedTokensByName.get(name);
+          if (!issuedTokens) issuedTokensByName.set(name, issuedTokens = new Set());
+          issuedTokens.delete(token);
+          issuedTokens.add(token);
+          if (issuedTokens.size > MAX_RETAINED_OAUTH_TOKENS) issuedTokens.delete(issuedTokens.values().next().value!);
+        }
+        return token;
+      },
+      ...(provider.onUnauthorized ? { onUnauthorized: provider.onUnauthorized.bind(provider) } : {}),
+    };
+  }
+
+  function redactFor(name: string | undefined, secrets: string[]): Redact {
+    const issuedTokens = name === undefined
+      ? [...issuedTokensByName.values()].flatMap((tokens) => [...tokens])
+      : issuedTokensByName.get(name) ?? [];
+    return credentialRedactor([...secrets, ...issuedTokens]);
+  }
 
   function discard(name: string, connection: Connection) {
     if (connections.get(name) !== connection) return pendingCloses.get(name);
@@ -124,19 +171,20 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
     if (configuration.type !== "stdio" && configuration.type !== "http") return undefined;
     const key = fingerprint(server, cwd);
     const cached = connections.get(name);
-    if (cached?.fingerprint === key && cached.client.connectionState !== "closed") return cached;
+    if (cached?.fingerprint === key && !cached.retiring && cached.client.connectionState !== "closed") return cached;
     if (cached) discard(name, cached);
     const resolved = configuration.type === "stdio"
       ? { ...configuration, env: fillFields(configuration.env, fillSecrets) ?? {} }
       : { ...configuration, headers: fillFields(configuration.headers, fillSecrets) ?? {} };
-    const auth = resolved.type === "http" ? authProvider?.(name) : undefined;
+    const auth = resolved.type === "http" && !Object.keys(resolved.headers).some((key) => key.toLowerCase() === "authorization")
+      ? authProvider?.(name, resolved.url) : undefined;
     const transport: McpTransport = resolved.type === "stdio"
       ? new StdioTransport({
         command: resolved.command, args: resolved.args.map(fillSecrets),
         ...(cwd !== undefined ? { cwd } : {}), env: resolved.env, inheritEnv: false,
       })
       : new StreamableHttpTransport({
-        url: resolved.url, headers: resolved.headers, ...(auth ? { authProvider: auth } : {}),
+        url: resolved.url, headers: resolved.headers, ...(auth ? { authProvider: trackTokens(name, auth) } : {}),
         fetch: (input, init) => fetch(input, { ...init, redirect: "error" }),
       });
     const client = new McpClient({ name: "omarchy-bot", version: "0.1.0", requestTimeoutMs: DISCOVERY_TIMEOUT_MS });
@@ -156,7 +204,7 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
       return found;
     }, (error) => {
       if (connections.get(name) === connection && !(error instanceof McpConfigurationError)) {
-        failures.set(name, { revision, status: error instanceof McpAuthRequiredError ? "needs-auth" : "failed" });
+        failures.set(name, { revision, status: needsSignIn(error) ? "needs-auth" : "failed" });
       }
       if (signal.aborted) throw new McpTimeoutError(DISCOVERY_TIMEOUT_MS);
       throw error;
@@ -180,46 +228,56 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
       if (failure.revision !== effective.revision) failures.delete(name);
     }
     for (const [name, connection] of connections) {
+      if (connection.retiring) continue;
       const server = servers.get(name);
-      if (!server || "configurationError" in server || server.disabled || connection.fingerprint !== fingerprint(server, connection.cwd)) discard(name, connection);
+      if (!server || "configurationError" in server || server.disabled || connection.fingerprint !== fingerprint(server, connection.cwd)) {
+        connection.retiring = true;
+        // Start closing in order. The next connection can then revalidate after pendingCloses resolves.
+        void enqueue(name, async () => { discard(name, connection); });
+      }
     }
     return { ...effective, servers };
   }
 
   function withService<T>(
     action: McpArguments["action"], name: string, server: EffectiveMcpServer, cwd: string | undefined, context: Context,
-    snapshot: { revision: string; secrets: string[]; redact: Redact },
-    run: (connection: Connection, tools: Tool[], redact: Redact) => T | Promise<T>,
+    snapshot: { revision: string; secrets: string[] },
+    run: (connection: Connection, tools: Tool[], getRedactor: () => Redact) => T | Promise<T>,
   ): Promise<{ result: T } | { error: string }> {
     if ("configurationError" in server) {
-      return Promise.resolve({ error: snapshot.redact(server.configurationError) });
+      return Promise.resolve({ error: redactFor(name, snapshot.secrets)(server.configurationError) });
     }
     const signal = context.abortSignal;
-    const queued = server.transport.type === "stdio" || action === "call";
-    const predecessor = queued ? callQueues.get(name) : undefined;
+    const existingConnection = connections.get(name);
+    const queued = server.transport.type === "stdio" || action === "call" || existingConnection?.retiring;
+    const hasPredecessor = queued && callQueues.has(name);
     const execute = async () => {
       signal?.throwIfAborted();
-      let redact = snapshot.redact;
+      let secrets = snapshot.secrets;
       let revision = snapshot.revision;
-      const failure = (message: string) => ({ error: formatError(message, redact).text });
-      if (closing) return failure("The MCP runtime is shutting down. Retry once the Service is running.");
-      const configurationError = (message: string) => new McpConfigurationError(redact(message));
+      let connection: Connection | undefined;
+      const getRedactor = () => redactFor(name, secrets);
+      const failure = (message: string) => ({ error: getRedactor()(message) });
+      if (closing) return { error: SHUTDOWN_ERROR };
+      const configurationError = (message: string) => new McpConfigurationError(getRedactor()(message));
       const readServer = () => {
         const current = refreshServers(readServers());
         if (!current) throw configurationError(CONFIGURATION_LOAD_ERROR);
         revision = current.revision;
-        redact = credentialRedactor([...new Set([...snapshot.secrets, ...current.secrets])]);
+        secrets = [...snapshot.secrets, ...current.secrets];
         if (current.configurationError) throw configurationError(current.configurationError);
         const selected = current.servers.get(name);
-        if (!selected) throw configurationError(`MCP service "${name}" is no longer configured. Use mcp search to find available services.`);
+        if (!selected) {
+          const redact = redactFor(undefined, secrets);
+          throw new McpConfigurationError(redact(`MCP service "${name}" is no longer configured. Use mcp search to find available services.`));
+        }
         if ("configurationError" in selected) throw configurationError(selected.configurationError);
         if (selected.disabled) throw configurationError(`MCP service "${name}" is disabled. Enable it in Services before retrying.`);
         return selected;
       };
       let currentServer = server;
-      let connection: Connection | undefined;
       try {
-        if (action === "call" || predecessor) currentServer = readServer();
+        if (action === "call" || hasPredecessor) currentServer = readServer();
         connection = getConnection(name, currentServer, revision, cwd, (key) => {
           if (fingerprint(readServer(), cwd) !== key) {
             throw configurationError(`MCP service "${name}" changed while waiting for its previous connection to close. Use mcp search before retrying.`);
@@ -231,11 +289,12 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
         }
         const tools = await awaitWithContext(connection.tools, context);
         signal?.throwIfAborted();
-        const result = await awaitWithContext(Promise.resolve(run(connection, tools, redact)), context);
+        if (closing) return { error: SHUTDOWN_ERROR };
+        const result = await awaitWithContext(Promise.resolve(run(connection, tools, getRedactor)), context);
         return { result };
       } catch (error) {
         const deadline = signal?.reason?.name === "TimeoutError";
-        const needsAuth = error instanceof McpAuthRequiredError;
+        const needsAuth = needsSignIn(error);
         if (connection && needsAuth && connections.get(name) === connection) {
           failures.set(name, { revision, status: "needs-auth" });
         }
@@ -244,19 +303,14 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
           await discard(name, connection);
         }
         if (signal?.aborted) throw error;
+        if (closing) return { error: SHUTDOWN_ERROR };
         if (error instanceof McpConfigurationError) return { error: error.message };
         if (needsAuth) return failure(`MCP service "${name}" needs sign-in. Sign in through Services and retry.`);
         if (error instanceof McpTimeoutError) return failure(`MCP service "${name}" timed out after ${error.timeoutMs / 1000} seconds (${error.timeoutMs} ms).`);
         return failure(`MCP service "${name}" failed. Check its configuration in Services and retry.`);
       }
     };
-    if (!queued) return execute();
-    const next = (predecessor ?? Promise.resolve()).then(execute);
-    const finished = next.then(() => {}, () => {}).finally(() => {
-      if (callQueues.get(name) === finished) callQueues.delete(name);
-    });
-    callQueues.set(name, finished);
-    return awaitWithContext(next, context);
+    return queued ? awaitWithContext(enqueue(name, execute), context) : execute();
   }
 
   const extension = defineExtension({
@@ -279,7 +333,7 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
       async execute(input, api, context) {
         const signal = context.abortSignal;
         signal?.throwIfAborted();
-        if (closing) return errorResult("The MCP runtime is shutting down. Retry once the Service is running.");
+        if (closing) return errorResult(SHUTDOWN_ERROR);
         const { action, service, tool, query, arguments: args } = input as McpArguments;
         if (action !== "search" && (!service || !tool)) {
           return errorResult(`Specify both service and tool for ${action === "describe" ? "describe" : "call"}. Use mcp search to find their names.`);
@@ -298,23 +352,27 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
           }
         } catch { signal?.throwIfAborted(); }
         signal?.throwIfAborted();
-        if (closing) return errorResult("The MCP runtime is shutting down. Retry once the Service is running.");
+        if (closing) return errorResult(SHUTDOWN_ERROR);
         const effective = refreshServers(loaded);
         if (!effective) return errorResult(CONFIGURATION_LOAD_ERROR);
         const { servers, revision, secrets } = effective;
-        const redact = credentialRedactor(secrets);
-        const snapshot = { revision, secrets, redact };
-        const cwd = api.env?.cwd;
-        if (effective.configurationError) return errorResult(effective.configurationError, redact);
         const selected = service ? servers.get(service) : undefined;
-        if (service && !selected) return errorResult(`Unknown MCP service "${service}". Use mcp search to find available services.`, redact);
-        if (service && selected?.disabled) return errorResult(`MCP service "${service}" is disabled. Enable it in Services before retrying.`, redact);
+        if (effective.configurationError) return errorResult(effective.configurationError, redactFor(selected ? service : undefined, secrets));
+        if (service && !selected) {
+          return errorResult(`Unknown MCP service "${service}". Use mcp search to find available services.`, redactFor(undefined, secrets));
+        }
+        if (service && selected?.disabled) {
+          return errorResult(`MCP service "${service}" is disabled. Enable it in Services before retrying.`, redactFor(service, secrets));
+        }
+        const snapshot = { revision, secrets };
+        const cwd = api.env?.cwd;
 
         if (action === "search") {
           const term = query?.trim().toLowerCase() ?? "";
           const matches = (value: string) => value.toLowerCase().includes(term);
           const targets = [...servers].filter(([name, server]) => !server.disabled && (!service || name === service));
-          const found = await Promise.all(targets.map(([name, server]) => withService(action, name, server, cwd, context, snapshot, (_connection, tools, redact) => {
+          const found = await Promise.all(targets.map(([name, server]) => withService(action, name, server, cwd, context, snapshot, (_connection, tools, getRedactor) => {
+            const redact = getRedactor();
             const matchesService = matches(name);
             const foundTools = tools.map((item) => redactToolMetadata(item, redact))
               .filter((item) => matchesService || matches(item.name) || matches(item.description ?? ""))
@@ -327,16 +385,18 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
           return modelResult(JSON.stringify({ services, ...(errors.length ? { errors } : {}) }, null, 2));
         }
 
-        const result = await withService(action, service!, selected!, cwd, context, snapshot, async ({ client }, tools, redact) => {
+        const result = await withService(action, service!, selected!, cwd, context, snapshot, async ({ client }, tools, getRedactor) => {
           const selectedTool = tools.find((item) => item.name === tool);
-          if (!selectedTool) return errorResult(`Unknown MCP tool "${tool}" on "${service}". Use mcp search for this service.`, redact);
+          if (!selectedTool) return errorResult(`Unknown MCP tool "${tool}" on "${service}". Use mcp search for this service.`, getRedactor());
           if (action === "describe") {
-            const { name, description, inputSchema } = redactToolMetadata(selectedTool, redact);
+            const { name, description, inputSchema } = redactToolMetadata(selectedTool, getRedactor());
             return modelResult(JSON.stringify({ service, tool: name, description, inputSchema }, null, 2));
           }
           const result = await client.callTool(selectedTool.name, args && fillArgumentRecord(args, fillSecrets), {
             ...(signal ? { signal } : {}), timeoutMs: callTimeoutMs,
           });
+          if (closing) return errorResult(SHUTDOWN_ERROR);
+          const redact = getRedactor();
           // Redacting a numeric JSON literal produces a bare [redacted] token. Text results need not be valid JSON.
           const content = !result.content?.length && result.structuredContent !== undefined
             ? [{ type: "text" as const, text: JSON.stringify(redactStrings(result.structuredContent, redact), null, 2) }]
@@ -349,7 +409,38 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
     })],
   });
 
-  return Object.assign(extension, {
+  const mcp = Object.assign(extension, {
+    async check(name: string, cwd?: string): Promise<NativeMcpStatus | undefined> {
+      if (closing) return undefined;
+      return enqueue(name, async () => {
+        if (closing) return undefined;
+        const effective = refreshServers(readServers());
+        const server = effective?.servers.get(name);
+        // Stdio processes start in the caller's workspace through tool discovery or execution.
+        if (effective && server && !effective.configurationError && !("configurationError" in server) &&
+          !server.disabled && server.transport.type === "http") {
+          const previous = connections.get(name);
+          if (previous) discard(name, previous);
+          failures.delete(name);
+          const { revision } = effective;
+          let connection: Connection | undefined;
+          try {
+            connection = getConnection(name, server, revision, cwd, (key) => {
+              const current = refreshServers(readServers());
+              const selected = current?.servers.get(name);
+              if (current?.configurationError || !selected || "configurationError" in selected || selected.disabled ||
+                fingerprint(selected, cwd) !== key) throw new McpConfigurationError();
+            });
+            if (connection) await connection.tools;
+          } catch (error) {
+            if (connection) discard(name, connection);
+            else failures.set(name, { revision, status: needsSignIn(error) ? "needs-auth" : "failed" });
+          }
+          await pendingCloses.get(name);
+        }
+        return mcp.status().find((entry) => entry.name === name);
+      });
+    },
     status(): NativeMcpStatus[] {
       if (closing) return [];
       const effective = refreshServers(readServers());
@@ -361,7 +452,7 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
           return { name, configurationRevision, status: disabled ? "disabled" : "failed", toolCount: 0, disabled };
         }
         const connection = connections.get(name);
-        const toolCount = connection?.client.connectionState === "connected" ? connection.toolCount : undefined;
+        const toolCount = !connection?.retiring && connection?.client.connectionState === "connected" ? connection.toolCount : undefined;
         let status: NativeMcpStatus["status"] = "not-connected";
         if (toolCount !== undefined) status = "connected";
         else if ("configurationError" in server) status = "failed";
@@ -369,14 +460,20 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
         return { name, configurationRevision, status, toolCount: toolCount ?? 0, disabled };
       });
     },
+    retainedTokenSetCountForTest(): number {
+      return issuedTokensByName.size;
+    },
     close(): Promise<void> {
       if (!closing) {
         const shutdown = Promise.withResolvers<void>();
         closing = shutdown.promise;
         for (const [name, connection] of connections) discard(name, connection);
-        shutdown.resolve(Promise.allSettled([...pendingCloses.values(), ...pendingPreparations]).then(() => {}));
+        shutdown.resolve(Promise.allSettled([...pendingCloses.values(), ...pendingPreparations]).then(() => {
+          issuedTokensByName.clear();
+        }));
       }
       return closing;
     },
   });
+  return mcp;
 }
