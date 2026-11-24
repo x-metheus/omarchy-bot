@@ -237,11 +237,13 @@ The wait runs inside the replay-safe tool task, as in the prototype: a tool cann
 **Description:** Show pending approvals on the Thread and as notifications, naming the Bot, the action, and the path, with the three answers. Follow `apps/web/AGENTS.md`.
 
 **Acceptance criteria:**
-- [ ] A pending request appears on its Thread and in notifications, and answering it updates the Thread
-- [ ] Keyboard-operable with accessible labels
-- [ ] A request answered on another client disappears here
+- [x] A pending request appears on its Thread and in notifications, and answering it updates the Thread — `19-approvals.spec.ts`: the card names the Bot, action, and path; `events.test.ts`: `approval.requested` notification copy
+- [x] Keyboard-operable with accessible labels — `19-approvals.spec.ts`: Tab order, Enter answers, focus moves to the next card or composer, and an error restores it; `approvalFocus.test.ts`
+- [x] A request answered on another client disappears here — `19-approvals.spec.ts`: an authenticated POST removes the card within the shared 8-second deadline, shorter than the 15-second poll
 
-**Verification:** default commands plus `bun run test:e2e` with one Playwright flow.
+**Verification:** `bun run typecheck`, `bun run lint:boundaries`, `bun test apps/daemon`, `bun test apps/web`, and `bun run test:e2e`. While iterating, `bun run test:e2e -- specs/19-approvals.spec.ts` runs the approval flow alone. The flow creates its Bot and two Threads through the Service API. The Bun helper in `tests/e2e/seed-approval.ts` inserts only pending approval rows into the isolated e2e database because the Service has no route that creates approvals. Listing, answering, and resolution events use the real Service.
+
+Decided 2026-11-24: the approval UI reuses the inline `Banner` + `Button` composer-error pattern, so the plan's design-pass question does not need a new screen or visual pattern. Desktop notifications fire for live `approval.requested` events only; events replayed after a reconnect stay quiet and still invalidate the approvals query, so the Thread recovers the current state without alerting for requests already answered, expired, or deleted. Existing turn-completion replay notifications are unchanged. The pending list is the plain `["approvals", threadId]` query with a 15-second refetch, and both approval events invalidate it. A 409 answer means the request was already answered, so the card refreshes instead of showing an error. Control and bidi characters in paths render as labelled `\uXXXX` escapes with literal backslashes doubled, so the displayed path cannot be confused with another; the Service still receives the raw path. After a keyboard answer, focus moves to the first surviving following approval, then the composer, then the conversation-history button, and is not stolen if it moved elsewhere. The e2e seed helper is test-only; no product route was added.
 
 **Dependencies:** Task 9
 
