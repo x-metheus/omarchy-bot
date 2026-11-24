@@ -372,10 +372,13 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
   - `web_search recognizes a JSON-RPC rate-limit message or error data at HTTP 200` (checks message and data flags)
   - `web_search detects an HTTP 200 standalone marker in an unsupported content type` (bare and `true` flags produce the rate-limit message)
   - `web_search detects true and bare flags in HTTP 200 MCP tool error text` (both flags produce the rate-limit message with `isError: true`)
-  - `web_search detects an HTTP 200 MCP result flag in _meta before reporting empty content` (the same table-driven check covers boolean `true` in `_meta` and `structuredContent` and a bare flag in `providerMetadata`)
+  - `web_search detects an HTTP 200 MCP result flag in _meta before reporting empty content` (checks a boolean `true` flag)
+  - `web_search detects an HTTP 200 MCP result flag in providerMetadata before reporting empty content` (checks a bare flag)
+  - `web_search detects an HTTP 200 MCP tool error flag in structuredContent` (checks a boolean `true` flag with `isError: true`)
   - `web_search returns results with a false rate-limit flag in MCP result metadata`
   - `web_search reports empty content with a null rate-limit flag in MCP result metadata`
   - `web_search preserves a JSON search result that quotes the rate-limit marker`
+  - `web_search preserves successful results when structuredContent quotes the rate-limit marker`
 - [x] Results are marked as outside content for the memory trust rules
   - `WEB_TOOL_NAMES lists exactly the registered outside-content tools` (checks both registered names and the classifier)
   - `web_fetch preserves the full HTML citation and appends a sanitized outside-content notice` (checks the notice and sanitized source)
@@ -389,10 +392,10 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 **Verification:** default commands; tests against a local HTTP stub.
 
-- `bun test apps/daemon` — 200 passed, 1 skipped, 0 failed across 16 files (worker-reported).
+- `bun test apps/daemon` — 201 passed, 1 skipped, 0 failed across 16 files (verified).
 - `bun run lint:boundaries` — 6 passed, 0 failed.
 - `bun run typecheck` — the sole diagnostic was the pre-existing `TS2769` at `tests/integration/daemon.test.ts:289`.
-- `bun test apps/daemon/src/modules/runtime/extensions/web.test.ts apps/daemon/src/modules/runtime/credentials.test.ts` — 77 passed, 0 failed across 2 files. The web tests use `Bun.serve` loopback stubs with no live network.
+- `bun test apps/daemon/src/modules/runtime/extensions/web.test.ts apps/daemon/src/modules/runtime/credentials.test.ts` — 78 passed, 0 failed across 2 files (verified). The web tests use `Bun.serve` loopback stubs with no live network.
 
 **Dependencies:** Task 3
 
@@ -408,7 +411,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 - The extraction worker has a 10-second hard limit by default and is terminated when extraction ends. The worker normalizes HTML without a body and excludes `script`, `style`, `noscript`, `template`, `svg`, `[hidden]`, and `[aria-hidden="true"]` from fallback text.
 - Exa is the sole implementation of the search provider interface. It calls `web_search_exa` through `pi-mcp` with a 20-second timeout and sends the optional key only in the `x-api-key` header, keeping it out of URLs and logs.
 - `CredentialStore` trims the Exa key and writes it under `webSearchKeys` in the same atomic `0600` `model-credentials.json` file, preserving unknown sections. The setter is Service-side. Task 22 moves the key to the OS secret store.
-- HTTP 429 is classified immediately, including on SSE resume, with no retry. The `ai.exa/rateLimited` scanner reads HTTP error bodies (including unsupported HTTP 200 response bodies on the protocol error path), JSON-RPC error messages and data, and MCP tool-result text only when `isError === true`. It also checks protocol metadata such as `_meta`, `structuredContent`, and `providerMetadata` before classifying empty results. The cycle-safe metadata walk caps depth at 16 and visits at most 1,024 entries. An exact metadata key of `ai.exa/rateLimited` requires boolean `true`. Scanned text and metadata strings recognize the bare marker or an unquoted `true` value. Successful page text bypasses marker scanning. Empty results and outages have distinct messages. Rate limits and outages suggest the browser tool.
+- HTTP 429 is classified immediately, including on SSE resume, with no retry. The `ai.exa/rateLimited` scanner reads HTTP error bodies (including unsupported HTTP 200 response bodies on the protocol error path), JSON-RPC error messages and data, and protocol metadata (`_meta`, `providerMetadata`, and other extra fields) on any MCP tool result. It scans MCP tool-result error text and `structuredContent` only when `isError === true`. On success, `structuredContent` is treated as result data and content text always bypasses marker scanning. The cycle-safe walk caps depth at 16 and visits at most 1,024 entries. An exact metadata key of `ai.exa/rateLimited` requires boolean `true`. Scanned strings recognize the bare marker or an unquoted `true` value. Empty results and outages have distinct messages. Rate limits and outages suggest the browser tool.
 - `WEB_TOOL_NAMES` and `isExternalContentTool` are exported for the memory trust rules, and both tools append an outside-content notice to successful results. The memory module owns applying the taint.
 - The unrelated `bun run typecheck` error `TS2769` at `tests/integration/daemon.test.ts:289` predates Task 15. The file is byte-identical to HEAD and the commit before Task 15.
 
