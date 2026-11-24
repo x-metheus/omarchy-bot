@@ -43,6 +43,20 @@ export function createDurableSuiteFakeProvider() {
     }
     if (text === "ordered-transcript") return fauxAssistantMessage([fauxText(orderedIntro), fauxThinking("**Inspect** every ordered boundary."), fauxToolCall("steer_boundary", {}, { id: "ordered-steering" })], { stopReason: "toolUse" });
     if (text === "steer-echo") return fauxAssistantMessage([fauxToolCall("steer_boundary", {}, { id: "steer-boundary" })], { stopReason: "toolUse" });
+    if (text.startsWith("mcp-durable: ")) {
+      const action = text.slice("mcp-durable: ".length);
+      const latest = context.messages.at(-1);
+      const result = action === "recall" ? context.messages.slice(0, lastUser).findLast((message) => message.role === "toolResult" && message.toolName === "mcp") : latest;
+      if (result?.role === "toolResult" && result.toolName === "mcp") {
+        return fauxAssistantMessage(result.content.flatMap((part) => part.type === "text" ? [fauxText(action === "recall" ? `Recalled ${part.text}` : part.text)] : []));
+      }
+      if (action === "recall") return fauxAssistantMessage("MCP result missing from history");
+      const account = action === "account";
+      return fauxAssistantMessage([fauxToolCall("mcp", {
+        action: "call", service: account ? "service-fixture-github" : "local", tool: "reflect",
+        arguments: account ? {} : { message: action === "block" ? "block" : "hello" },
+      })], { stopReason: "toolUse" });
+    }
     if (text === "parity-stream") return fauxAssistantMessage([fauxThinking("T"), fauxText("R")]);
     // The worker inserts a read tool between these thinking blocks; asserting it is Checkpoint C.
     if (text === "thinking-order") return fauxAssistantMessage([fauxText("Before Thinking."), fauxThinking("**Inspect** the request."), fauxThinking("Provider-authored summary."), fauxText("After Thinking.")]);

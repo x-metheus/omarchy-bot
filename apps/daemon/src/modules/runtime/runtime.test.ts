@@ -28,6 +28,7 @@ test("runtime creates durable tables and can close and reopen", async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
       try {
+        expect(runtime.mcpStatus()).toEqual([]);
         const db = new Database(dbPath, { readonly: true });
         try {
           const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'pi_*'").all();

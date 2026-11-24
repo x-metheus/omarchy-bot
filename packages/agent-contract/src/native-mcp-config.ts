@@ -105,17 +105,22 @@ function storedSecret(value: string): string {
   return value.startsWith("!") ? `!${value}` : value;
 }
 
-/** Substitute private `${FIELD}` secrets, then owned service tokens, into one loaded server map. */
+/** Substitute private `${FIELD}` secrets and owned service tokens, returning the credentials used. */
 export function resolveNativeMcpCredentials(
   config: { mcpServers: Readonly<Record<string, ResolvableServer>> },
   metadata: NativeMcpMetadata,
-): void {
+  { literalSecrets = false }: { literalSecrets?: boolean } = {},
+): Set<string> {
+  const secrets = new Set<string>();
   for (const [key, raw] of Object.entries(metadata.secrets)) {
     const server = config.mcpServers[raw.server];
     if (!server || nativeMcpEndpoint(server) !== raw.endpoint) continue;
-    const value = storedSecret(raw.value);
-    if (raw.kind === "env" && server.env?.[raw.field] === nativeMcpSecretPlaceholder("env", raw.field, key)) server.env[raw.field] = value;
-    if (raw.kind === "header" && server.headers?.[raw.field] === nativeMcpSecretPlaceholder("header", raw.field, key)) server.headers[raw.field] = value;
+    const fields = raw.kind === "env" ? server.env : server.headers;
+    if (!fields || fields[raw.field] !== nativeMcpSecretPlaceholder(raw.kind, raw.field, key)) continue;
+    // The legacy adapter interprets leading `!` as a command marker.
+    const value = literalSecrets ? raw.value : storedSecret(raw.value);
+    fields[raw.field] = value;
+    secrets.add(value);
   }
   for (const [name, value] of Object.entries(metadata.serviceTokens)) {
     const server = config.mcpServers[name];
@@ -123,5 +128,7 @@ export function resolveNativeMcpCredentials(
     if (!server || server.disabled || !owner || value.url !== server.url) continue;
     if (Object.keys(server.headers ?? {}).length) continue;
     server.headers = { Authorization: `Bearer ${value.token}` };
+    secrets.add(value.token);
   }
+  return secrets;
 }

@@ -407,7 +407,7 @@ export class PluginsService {
     }
   }
 
-  async #prepareServiceCredentials(): Promise<void> {
+  async prepareServiceCredentials(): Promise<void> {
     await this.#ready;
     for (const account of this.#state.accounts) {
       if (!account.grant || account.status !== "connected") continue;
@@ -473,7 +473,7 @@ export class PluginsService {
 
   async acquire(): Promise<PluginLease> {
     if (this.#stopping) throw new Error("Plugin runtime is stopping");
-    await this.#prepareServiceCredentials();
+    await this.prepareServiceCredentials();
     this.mcp.reconcile();
     const snapshot: AgentPluginSnapshot = {
       revision: this.#state.revision,

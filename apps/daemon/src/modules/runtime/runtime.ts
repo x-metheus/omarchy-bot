@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import type { NativeMcpStatus } from "@omarchy-bot/agent-contract";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
@@ -15,6 +16,7 @@ import { ApprovalStore } from "./approvals.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
+import { createMcpExtension, type McpExtensionDeps } from "./extensions/mcp.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
@@ -53,6 +55,7 @@ export interface BotRuntime {
   activeTurn(threadId: string): Promise<string | undefined>;
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
+  mcpStatus(): NativeMcpStatus[];
   close(): Promise<void>;
   /** Requests to use files outside the allowed folders; absent without Service storage and events. */
   readonly approvals?: ApprovalStore;
@@ -69,8 +72,12 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
   return !entry.model?.some((message) => message.role === "assistant" && message.stopReason === "aborted");
 }
 
-export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: { events?: Pick<EventLog, "append"> } = {}): Promise<BotRuntime> {
+export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: {
+  events?: Pick<EventLog, "append">;
+  mcp?: Pick<McpExtensionDeps, "servers" | "prepareServers">;
+} = {}): Promise<BotRuntime> {
   const secretStore = new SecretStore(paths.dataDir);
+  const mcp = options.mcp ? createMcpExtension(options.mcp) : undefined;
   let reportedCredentialsFailure = false;
   const reportCredentialsFailure = () => {
     if (reportedCredentialsFailure) return;
@@ -99,6 +106,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       },
     } : undefined, secrets));
     registry.install(createSecretsExtension(secrets));
+    if (mcp) registry.install(mcp);
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         reportCredentialsFailure();
@@ -125,6 +133,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       // Recovery maps the owners before the scheduler can replay their tool calls.
       if (recoveringBots.length === 0) resumeScheduler();
     } catch (error) {
+      await mcp?.close();
       await harness.close(context);
       throw error;
     }
@@ -438,9 +447,13 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           if (result === "already_placed" || (result === "settled" && (turn.pending.length > 0 || turn.recovering))) await conversation.abort(context);
         }
       },
+      mcpStatus() {
+        return mcp?.status() ?? [];
+      },
       close() {
         closing ??= (async () => {
           try {
+            await mcp?.close();
             await harness.close(context);
           } finally {
             await storage.close(context);

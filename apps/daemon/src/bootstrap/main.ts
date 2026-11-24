@@ -1,5 +1,6 @@
 import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
+import { getSetting } from "../persistence/settings.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
 import { ThreadsService } from "../modules/threads/threads.ts";
 import { AgentsRegistry } from "../modules/agents/registry.ts";
@@ -58,13 +59,23 @@ export async function main(options: MainOptions = {}): Promise<{
   const db = openDb(cfg);
   recoverOnStartup(db);
   const events = new EventLog(db);
-  const runtime = await openBotRuntime(cfg, db, { events });
+  let plugins!: PluginsService;
+  const mcpServers = () => plugins?.mcp.effectiveServers() ?? { revision: "", servers: {}, secrets: [] };
+  const runtime = await openBotRuntime(cfg, db, {
+    events,
+    mcp: {
+      servers: mcpServers,
+      async prepareServers() {
+        await plugins?.prepareServiceCredentials();
+        return mcpServers();
+      },
+    },
+  });
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
   let mailbox!: MailboxService;
-  let plugins!: PluginsService;
   const supervisor: Supervisor = new Supervisor(
     {
       onAgentEvent: (agentId, event) => {
@@ -150,7 +161,11 @@ export async function main(options: MainOptions = {}): Promise<{
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
     const worker = await supervisor.agentWorker("pi");
-    return worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
+    const resources = await worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
+    if (getSetting(db, "runtime") !== "durable") return resources;
+    // Reconciliation can change the configuration revision before Services applies the status.
+    plugins.mcp.reconcile();
+    return { ...resources, mcp: runtime.mcpStatus() };
   }, async (input) => {
     const worker = await supervisor.agentWorker("pi");
     return worker.request({ type: "mcp.control", cwd: cfg.sharedWorkspaceDir, ...input }, 90_000);

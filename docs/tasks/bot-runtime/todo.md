@@ -304,15 +304,25 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** Add the MCP extension: servers from `<workspace>/.mcp.json` and service accounts connected in the plugins panel, stdio and Streamable HTTP, connected on first use, exposed as one `mcp` tool with search, describe, and call. Keep the Services panel's status behavior.
 
 **Acceptance criteria:**
-- [ ] A Bot calls a tool on a configured MCP service through the `mcp` tool
-- [ ] stdio servers run as child processes that are killed on abort and shutdown
-- [ ] The Services panel shows each server's status as today
+- [x] A Bot calls a tool on a configured MCP service through the `mcp` tool — `mcp-durable.test.ts`: durable MCP journals the redacted result, reports Services status, and releases children on abort and shutdown
+- [x] stdio servers run as child processes that are killed on abort and shutdown — same test (live PID, `ESRCH` after abort and after `services.stop()`); `mcp.test.ts`: abort, timeout and failed-handshake cleanup
+- [x] The Services panel shows each server's status as today — same test: `GET /api/plugins` returns `connected` with the tool count and `disabled`, with `pendingReload: false`; the worker value is returned unchanged when the switch is off
 
-**Verification:** default commands; an integration test with a local test MCP server.
+Decided 2026-11-25: servers come from one bounded snapshot of the files the panel already reconciles (`.mcp.json`, `.pi/mcp.json`, the Codex config, and service accounts), with the same private-credential projection the worker uses. The runtime reads no other configuration. Only `stdio` and Streamable HTTP are supported; `sse`, socket and malformed entries return a sanitized error.
+
+Decided: one `mcp` tool with `search`, `describe` and `call`, as today, so many services do not fill the prompt. Server and tool names are identifiers and are not redacted; descriptions, schemas and results are. Servers connect on first use and stay connected; calls are serialized per server, have a 20-second connect/list limit and a 120-second call limit (injectable in tests), and an aborted or timed-out call retires the connection, which kills a stdio child. `close()` refuses new calls, waits for in-flight credential preparation, then closes every connection.
+
+Decided: the runtime derives `NativeMcpStatus[]` from the same revision the panel compares, and the bootstrap substitutes it for the worker's `mcp` array only while the `runtime` setting is `durable`, so the panel DTO, route and UI are unchanged. A snapshot-level error reports enabled servers as `failed` with no tools instead of a stale `connected`. The durable supplier awaits the same per-account service-credential preparation `acquire()` uses, so two concurrent calls refresh a grant once. The panel still needs a successful worker `resources.list` for its other fields until Task 20.
+
+Decided: resolved placeholder values, service bearer tokens, credential-named environment and header values, bearer token portions and cookie values are redacted from every model-visible string, including quoted and escaped forms, without re-serializing JSON. Task 22 generalises this to `{{secret:name}}` and Bot secrets; images, embedded blobs, JSON keys, literal stdio arguments and identifiers are left to it. The `fillSecrets` and `authProvider` options are the seams; a server that needs sign-in reports `needs-auth` and no OAuth flow runs here (Task 14).
+
+Decided: to follow the spec's Hangs rule, the runtime snapshot and the store's document reads accept only regular files up to 1 MiB, so a FIFO or an oversized file becomes a sanitized configuration error instead of blocking the Service. A shared deletion with a concurrent `.pi` edit reports the same conflict the panel shows instead of silently hiding the server.
+
+**Verification:** `bun run typecheck` (only the pre-existing `tests/integration/daemon.test.ts` TS2769, reproduced at HEAD without this change), `bun run lint:boundaries` (4 pass), `bun test apps/daemon` (155 pass, 1 existing skip), the focused MCP suites (37 pass), and `OMARCHY_TEST_DURABLE=1 bun test tests/integration/mcp-durable.test.ts` (2 pass, local fixtures only).
 
 **Dependencies:** Task 3
 
-**Files likely touched:** `apps/daemon/src/modules/runtime/extensions/mcp.ts`, `apps/daemon/src/modules/plugins/nativeMcp.ts`, tests
+**Files likely touched:** `apps/daemon/src/modules/runtime/extensions/mcp.ts`, `apps/daemon/src/modules/runtime/runtime.ts`, `apps/daemon/src/bootstrap/main.ts`, `apps/daemon/src/modules/plugins/nativeMcp.ts`, `apps/daemon/src/modules/plugins/plugins.ts`, `packages/agent-contract/src/native-mcp-config.ts`, `packages/agent-contract/src/native-mcp-revision.ts`, `packages/testkit/src/fake-provider.ts`, tests
 
 **Estimated scope:** Medium
 
@@ -357,6 +367,8 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 - [ ] Signing in to an OAuth MCP service from the Services panel completes and the tool works
 - [ ] Imported tokens that work are used; others show "needs sign-in"
 - [ ] The keyring is never written
+
+Carried from Task 13 (2026-11-25): with the switch on, the Services panel takes MCP status from the runtime, which has no OAuth until this task. So `plugin-services.test.ts` "native standalone consent completes over the event stream without checking by hand" fails with the switch on: the old worker completes the sign-in, and the panel reports `not-connected`. It passes with the switch off. This task owns making it pass with the switch on.
 
 **Verification:** default commands; a test against a local OAuth test server; one manual sign-in to a real service.
 
