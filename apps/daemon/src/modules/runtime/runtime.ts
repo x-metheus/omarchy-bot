@@ -9,11 +9,13 @@ import { DurableTranscript } from "./transcript.ts";
 import { resolveModelForBot } from "./models.ts";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { AgentBotMessageToolOutput } from "@omarchy-bot/agent-contract";
 import { CredentialStore } from "./credentials.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
+import { createMailExtension } from "./extensions/mail.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
@@ -27,7 +29,14 @@ export class DurableRunAborted extends Error {
   constructor() { super("aborted"); }
 }
 
+export interface RuntimeServices {
+  mailbox: {
+    enqueue(context: { botId: string; turnId: string; toolCallId: string }, targetBotId: string, text: string): AgentBotMessageToolOutput;
+  };
+}
+
 export interface BotRuntime {
+  bindServices(services: RuntimeServices): void;
   startTurn(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; threadId: string; botId: string; turnId: string; text: string; instructions: string; workspaceDir: string; privateDir: string; whenBusy?: "followUp"; admitted?(): void; working(): void }): Promise<void>;
   recoverTurns(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; registered(turnId: string): void; settled(turnId: string, outcome: { status: "completed" | "cancelled" } | { status: "failed"; reason: string }): void }): { registered: Promise<void>; settled: Promise<void> };
   activeTurn(threadId: string): Promise<string | undefined>;
@@ -49,9 +58,12 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   let reportedCredentialsFailure = false;
   const selections: { providerId: string; modelId: string }[] = [];
   const conversationBots = new Map<ConversationId, string>();
+  const active = new Map<string, { db: Database; threadId: string; admitted: Promise<{ conversation: Conversation; submission: Submission }>; pending: Promise<SettledSubmissionRecord | undefined>[]; steers: Submission[]; inputs: Set<number>; lastEntryBeforeAbort: number | undefined; abortCutoffRead?: Promise<void>; recovering?: boolean }>();
+  let services: RuntimeServices | undefined;
   try {
     const registry = createRegistry();
     registry.install(compactionExtension);
+    registry.install(createMailExtension(db, () => services?.mailbox, active));
     const approvals = db && options.events ? new ApprovalStore(db, options.events) : undefined;
     registry.install(createFilesShellExtension(process.platform, db && approvals ? {
       store: approvals,
@@ -96,9 +108,9 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     }
     let closing: Promise<void> | undefined;
     let recoveryRegistration: Promise<void> | undefined;
-    const active = new Map<string, { db: Database; threadId: string; admitted: Promise<{ conversation: Conversation; submission: Submission }>; pending: Promise<SettledSubmissionRecord | undefined>[]; steers: Submission[]; inputs: Set<number>; lastEntryBeforeAbort: number | undefined; abortCutoffRead?: Promise<void>; recovering?: boolean }>();
     return {
       ...(approvals ? { approvals } : {}),
+      bindServices(bound) { services = bound; },
       async startTurn(input) {
         let ready!: (value: { conversation: Conversation; submission: Submission }) => void;
         let fail!: (error: unknown) => void;

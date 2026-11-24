@@ -123,7 +123,7 @@ test("configured conversation uses the Service limit for unset and null Bots and
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
 
-test("the model request contains only the app prompt and Shared Workspace Skills", () => {
+test("the model request contains the app prompt, Shared Workspace Skills, and Bot mail guidance", () => {
   const prompts: string[] = [];
   return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "bot-prompt-home-"));
@@ -188,7 +188,15 @@ test("the model request contains only the app prompt and Shared Workspace Skills
         allowedFolders,
         skills: [{ name: "Workspace Skill", description: "Workspace skill description sentinel", path: ".agents/skills/workspace/SKILL.md" }],
       });
-      expect(prompt).toBe(`<instructions>\n${appPrompt}\n</instructions>`);
+      expect(prompt).toBe([
+        "<send_bot_message>",
+        "Send durable asynchronous text mail to another Omarchy Bot.",
+        "Use send_bot_message only when handing work or information to a distinct Bot ID.",
+        "After a successful queued acknowledgement, conclude your response; the target Bot's later output is not returned to this Turn.",
+        "</send_bot_message>",
+        "",
+        `<instructions>\n${appPrompt}\n</instructions>`,
+      ].join("\n"));
     } finally {
       await h?.stop();
       if (previousPiConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

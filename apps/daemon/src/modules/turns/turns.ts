@@ -744,7 +744,7 @@ export class TurnService {
     if (!this.agents.capabilityInventory(agentId)?.botMail) throw new Error(`Bot mail is not supported by ${agentId}`);
     const message = params as { targetBotId: string; text: string };
     return mailbox.enqueue(
-      { botId: active.botId, turnId: active.turnId, workerSessionId: active.workerSessionId, toolCallId: context.toolCallId },
+      { botId: active.botId, turnId: active.turnId, toolCallId: context.toolCallId },
       message.targetBotId,
       message.text,
     );

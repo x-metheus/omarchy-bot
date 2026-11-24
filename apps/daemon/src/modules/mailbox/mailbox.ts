@@ -71,7 +71,7 @@ export class MailboxService {
   }
 
   enqueue(
-    context: AgentBotMessageToolContext,
+    context: Pick<AgentBotMessageToolContext, "botId" | "turnId" | "toolCallId">,
     targetBotId: string,
     text: string,
   ): AgentBotMessageToolOutput {
