@@ -5,13 +5,14 @@ import {
   type McpAuthProvider, type McpOAuthServerStore, type McpOAuthSettings, type McpOAuthState,
   type McpSignInOptions, type McpSignInRedirect, type OAuthCallback, type OAuthChallenge,
 } from "@earendil-works/pi-mcp/oauth";
+import { parseMcpOAuthCallbackUrl } from "../plugins/nativeMcpOAuth.ts";
 import type { SecretStore } from "./secrets.ts";
 
 const secretPrefix = "mcp-oauth-";
 const refreshQueues = new Map<string, Promise<void>>();
 
-export function mcpOAuthSecretName(server: string): string {
-  const digest = createHash("sha256").update(new URL(server).href).digest("hex");
+export function mcpOAuthSecretName(name: string, server: string): string {
+  const digest = createHash("sha256").update(JSON.stringify([name, new URL(server).href])).digest("hex");
   return secretPrefix + digest.slice(0, 64 - secretPrefix.length);
 }
 
@@ -21,10 +22,10 @@ export class SecretMcpOAuthStateStore implements McpOAuthServerStore {
   readonly #name: string;
   readonly #description: string;
 
-  constructor({ secrets, server }: { secrets: SecretStore; server: string }) {
+  constructor({ secrets, name, server }: { secrets: SecretStore; name: string; server: string }) {
     this.#secrets = secrets;
     this.#server = new URL(server).href;
-    this.#name = mcpOAuthSecretName(this.#server);
+    this.#name = mcpOAuthSecretName(name, this.#server);
     this.#description = `MCP OAuth state (${this.#name})`;
   }
 
@@ -47,11 +48,11 @@ export class SecretMcpOAuthStateStore implements McpOAuthServerStore {
 
   // pi-mcp uses the same lock for refreshes and for the initial refresh during sign-in.
   withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
-    const next = (refreshQueues.get(this.#server) ?? Promise.resolve()).then(fn);
+    const next = (refreshQueues.get(this.#name) ?? Promise.resolve()).then(fn);
     const finished = next.then(() => {}, () => {}).finally(() => {
-      if (refreshQueues.get(this.#server) === finished) refreshQueues.delete(this.#server);
+      if (refreshQueues.get(this.#name) === finished) refreshQueues.delete(this.#name);
     });
-    refreshQueues.set(this.#server, finished);
+    refreshQueues.set(this.#name, finished);
     return next;
   }
 }
@@ -271,13 +272,16 @@ function callbackPage(status: number): Response {
 
 export type McpOAuthManagerDeps = {
   secrets: SecretStore;
-  settings?: (serverUrl: string) => McpOAuthSettings;
+  settings?: (connection: { name: string; serverUrl: string }) => McpOAuthSettings;
   clientName?: string;
   now?: () => number;
-  onComplete?: (outcome: { name: string; authorizationId: string; status: "completed" | "failed"; reason?: string }) => Promise<void> | void;
+  onComplete?: (outcome: { name: string; authorizationId: string } & McpOAuthCompletionOutcome) =>
+    Promise<McpOAuthCompletionOutcome | void> | McpOAuthCompletionOutcome | void;
 };
 
 type McpOAuthFailureReason = "auth_failed" | "connect_failed" | "expired";
+type McpOAuthCompletionOutcome = { status: "completed" } | { status: "failed"; reason: McpOAuthFailureReason };
+type CachedMcpAuthProvider = { url: string; provider: McpAuthProvider; challenge?: OAuthChallenge };
 type McpOAuthStartInput = { name: string; serverUrl: string; authorizationId: string; expiresAt?: number };
 type PendingMcpOAuthAttempt = {
   name: string;
@@ -286,15 +290,14 @@ type PendingMcpOAuthAttempt = {
   listener: Promise<McpOAuthLoopbackCallback>;
   deadline: number;
   signIn?: { options: McpSignInOptions; authorization: McpSignInRedirect };
-  completing: boolean;
+  completion?: Promise<McpOAuthCompletionOutcome>;
 };
 
 export class McpOAuthManager {
   readonly #deps: McpOAuthManagerDeps;
   readonly #clientName: string;
   readonly #now: () => number;
-  readonly #providers = new Map<string, McpAuthProvider>();
-  readonly #challenges = new Map<string, OAuthChallenge>();
+  readonly #providers = new Map<string, CachedMcpAuthProvider>();
   readonly #pending = new Map<string, PendingMcpOAuthAttempt>();
   readonly #operations = new Set<Promise<unknown>>();
   #closing: Promise<void> | undefined;
@@ -305,18 +308,18 @@ export class McpOAuthManager {
     this.#now = deps.now ?? Date.now;
   }
 
-  authProvider(_name: string, serverUrl: string): McpAuthProvider {
+  authProvider(name: string, serverUrl: string): McpAuthProvider {
     if (this.#closing) throw new Error("The MCP OAuth manager is closed.");
     const url = new URL(serverUrl).href;
-    const cached = this.#providers.get(url);
-    if (cached) return cached;
-    // The challenge belongs to the protected resource and is shared by aliases of this URL.
+    const cached = this.#providers.get(name);
+    if (cached?.url === url) return cached.provider;
+    // Each connection owns its OAuth credentials and challenge, even when accounts share an endpoint.
     const provider = createMcpAuthProvider({
       serverUrl: url,
-      store: new SecretMcpOAuthStateStore({ secrets: this.#deps.secrets, server: url }),
-      settings: () => this.#deps.settings?.(url) ?? {},
+      store: new SecretMcpOAuthStateStore({ secrets: this.#deps.secrets, name, server: url }),
+      settings: () => this.#deps.settings?.({ name, serverUrl: url }) ?? {},
       clientName: this.#clientName,
-      onChallenge: (challenge) => { this.#challenges.set(url, challenge); },
+      onChallenge: (challenge) => { entry.challenge = challenge; },
     });
     const onUnauthorized = provider.onUnauthorized?.bind(provider);
     const trackedProvider: McpAuthProvider = {
@@ -327,7 +330,8 @@ export class McpOAuthManager {
         onUnauthorized: (context) => this.#closing ? Promise.resolve() : this.#track(onUnauthorized(context)),
       } : {}),
     };
-    this.#providers.set(url, trackedProvider);
+    const entry: CachedMcpAuthProvider = { url, provider: trackedProvider };
+    this.#providers.set(name, entry);
     return trackedProvider;
   }
 
@@ -345,11 +349,11 @@ export class McpOAuthManager {
     try {
       deadline = expiresAt ?? this.#now() + DEFAULT_CALLBACK_TIMEOUT_MS;
       url = new URL(serverUrl).href;
-      settings = this.#deps.settings?.(url) ?? {};
+      settings = this.#deps.settings?.({ name, serverUrl: url }) ?? {};
       callbackBinding = resolveCallbackBinding(settings);
     } catch {
       await Promise.allSettled([previousClose]);
-      this.#reportOutcome(name, authorizationId, "auth_failed");
+      void this.#reportOutcome(name, authorizationId, { status: "failed", reason: "auth_failed" });
       throw new Error("MCP sign-in could not be started.");
     }
     const controller = new AbortController();
@@ -363,44 +367,55 @@ export class McpOAuthManager {
         now: this.#now,
       });
     });
-    const attempt: PendingMcpOAuthAttempt = { name, authorizationId, controller, listener, deadline, completing: false };
+    const attempt: PendingMcpOAuthAttempt = { name, authorizationId, controller, listener, deadline };
     this.#pending.set(name, attempt);
     let callback: McpOAuthLoopbackCallback | undefined;
     try {
       callback = await listener;
       signal.throwIfAborted();
-      const store = new SecretMcpOAuthStateStore({ secrets: this.#deps.secrets, server: url });
-      const challenge = this.#challenges.get(url);
+      const store = new SecretMcpOAuthStateStore({ secrets: this.#deps.secrets, name, server: url });
+      const cached = this.#providers.get(name);
+      const challenge = cached?.url === url ? cached.challenge : undefined;
+      const redirectUrl = callbackBinding.fixedRedirectUrl ?? (callbackBinding.redirectHostname
+        ? `http://${callbackBinding.redirectHostname}:${callback.port}${callbackBinding.path}` : callback.redirectUrl);
       const options: McpSignInOptions = {
         serverUrl: url, store, settings, clientName: this.#clientName,
-        redirectUrl: callback.redirectUrl, signal, ...(challenge ? { challenge } : {}),
+        redirectUrl, signal, ...(challenge ? { challenge } : {}),
       };
+      let outcome: McpOAuthCompletionOutcome | undefined;
       const authorization = await startSignInUnderLock(options, async (authorized) => {
         if (this.#now() >= deadline) {
           if (authorized) await invalidateSignInTokens(options);
           throw new McpOAuthCallbackTimeoutError();
         }
-        if (authorized && !await this.#finishAttempt(attempt, undefined, options)) signal.throwIfAborted();
+        if (authorized) {
+          outcome = await this.#finishAttempt(attempt, undefined, options);
+          if (!outcome) signal.throwIfAborted();
+        }
       });
-      if (authorization.kind === "authorized") return { authorized: true };
+      if (authorization.kind === "authorized") {
+        if (outcome) void this.#reportAttemptOutcome(attempt, outcome);
+        return { authorized: true };
+      }
       signal.throwIfAborted();
       attempt.signIn = { options, authorization };
       void callback.waitForCallback(authorization.state, signal).then(
-        (response) => this.#track(this.#completeAttempt(attempt, response)),
-        (error: unknown) => this.#track(this.#callbackFailed(attempt, error)),
+        (response) => this.#completeAttempt(attempt, response),
+        (error: unknown) => this.#completeAttempt(attempt, error instanceof McpOAuthCallbackTimeoutError ? "expired" : "auth_failed"),
       ).catch(() => {});
       return { authorizationUrl: authorization.authorizationUrl };
     } catch (error) {
       const reason = callback || error instanceof McpOAuthCallbackTimeoutError ? failureReason(error) : "auth_failed";
-      await this.#finishAttempt(attempt, reason);
+      const outcome = await this.#finishAttempt(attempt, reason);
+      if (outcome) void this.#reportAttemptOutcome(attempt, outcome);
       if (reason === "expired") throw new McpOAuthCallbackTimeoutError();
       throw new Error("MCP sign-in could not be started.");
     }
   }
 
-  async complete({ name, redirectUrl }: { name: string; redirectUrl: string }): Promise<void> {
+  async complete({ name, redirectUrl }: { name: string; redirectUrl: string }): Promise<McpOAuthCompletionOutcome> {
     const attempt = this.#pending.get(name);
-    if (!attempt?.signIn || attempt.completing) throw new Error("No pending MCP sign-in.");
+    if (!attempt?.signIn) throw new Error("No pending MCP sign-in.");
     const { authorization } = attempt.signIn;
     const url = URL.parse(redirectUrl);
     const expected = new URL(authorization.redirectUrl);
@@ -409,24 +424,16 @@ export class McpOAuthManager {
       throw new Error("The MCP sign-in redirect is invalid.");
     }
     const error = url.searchParams.get("error");
-    if (error !== null) {
-      await this.#track(this.#callbackFailed(attempt, new McpOAuthCallbackError(error)));
-      return;
-    }
-    if (this.#now() >= attempt.deadline) {
-      const timeout = new McpOAuthCallbackTimeoutError();
-      await this.#track(this.#callbackFailed(attempt, timeout));
-      throw timeout;
-    }
+    if (error !== null) return this.#completeAttempt(attempt, "auth_failed");
     const code = url.searchParams.get("code");
     if (!code) throw new Error("The MCP sign-in redirect is invalid.");
     const iss = url.searchParams.get("iss");
-    await this.#track(this.#completeAttempt(attempt, { code, state, ...(iss ? { iss } : {}) }));
+    return this.#completeAttempt(attempt, { code, state, ...(iss ? { iss } : {}) });
   }
 
   async cancel({ name, authorizationId }: { name: string; authorizationId?: string }): Promise<void> {
     const attempt = this.#pending.get(name);
-    if (attempt && (authorizationId === undefined || attempt.authorizationId === authorizationId)) {
+    if (attempt && !attempt.controller.signal.aborted && (authorizationId === undefined || attempt.authorizationId === authorizationId)) {
       await this.#stopAttempt(attempt);
     }
   }
@@ -439,7 +446,7 @@ export class McpOAuthManager {
         ...[...this.#pending.values()].map((attempt) => this.#stopAttempt(attempt)),
         ...this.#operations,
       ]).then(async () => {
-        await Promise.allSettled([...this.#providers.values()].map((provider) => provider.settled()));
+        await Promise.allSettled([...this.#providers.values()].map(({ provider }) => provider.settled()));
       }));
     }
     return this.#closing;
@@ -456,67 +463,71 @@ export class McpOAuthManager {
     return this.#track(attempt.listener.then((listener) => listener.close(), () => {}));
   }
 
-  async #completeAttempt(attempt: PendingMcpOAuthAttempt, response: OAuthCallback): Promise<void> {
+  #completeAttempt(attempt: PendingMcpOAuthAttempt, response: OAuthCallback | McpOAuthFailureReason): Promise<McpOAuthCompletionOutcome> {
+    // Outcome handlers can check the connection or call close() after credential work has drained.
+    return attempt.completion ??= this.#track(this.#settleAttempt(attempt, response)).then(async (outcome): Promise<McpOAuthCompletionOutcome> => {
+      if (!outcome) return { status: "failed", reason: "auth_failed" };
+      return this.#reportAttemptOutcome(attempt, outcome);
+    });
+  }
+
+  async #settleAttempt(attempt: PendingMcpOAuthAttempt, response: OAuthCallback | McpOAuthFailureReason): Promise<McpOAuthCompletionOutcome | undefined> {
     const { signIn, deadline, controller: { signal } } = attempt;
-    if (!signIn || attempt.completing || signal.aborted) return;
-    attempt.completing = true;
+    if (!signIn || signal.aborted) return;
+    if (typeof response === "string") return this.#finishAttempt(attempt, response);
     const { options, authorization } = signIn;
     try {
       // Hold the refresh lock through the final deadline check so a later sign-in cannot race credential cleanup.
-      await options.store.withRefreshLock(async () => {
+      return await options.store.withRefreshLock(async () => {
         signal.throwIfAborted();
         if (this.#now() >= deadline) throw new McpOAuthCallbackTimeoutError();
         await completeMcpSignIn({ ...options, authorization, response });
         if (this.#now() >= deadline) await invalidateSignInTokens(options);
-        await this.#finishAttempt(attempt, undefined, options);
+        return this.#finishAttempt(attempt, undefined, options);
       });
     } catch (error) {
-      if (await this.#finishAttempt(attempt, failureReason(error))) {
-        throw new Error("MCP sign-in could not be completed.");
-      }
+      return this.#finishAttempt(attempt, failureReason(error));
     }
   }
 
-  async #callbackFailed(attempt: PendingMcpOAuthAttempt, error: unknown): Promise<void> {
-    if (attempt.completing || attempt.controller.signal.aborted) return;
-    attempt.completing = true;
-    await this.#finishAttempt(attempt, error instanceof McpOAuthCallbackTimeoutError ? "expired" : "auth_failed");
-  }
-
-  async #finishAttempt(attempt: PendingMcpOAuthAttempt, reason?: McpOAuthFailureReason, options?: McpSignInOptions): Promise<boolean> {
-    const { name, authorizationId, controller, deadline } = attempt;
+  async #finishAttempt(attempt: PendingMcpOAuthAttempt, reason?: McpOAuthFailureReason, options?: McpSignInOptions): Promise<McpOAuthCompletionOutcome | undefined> {
+    const { name, controller, deadline } = attempt;
     await attempt.listener.then((listener) => listener.close(), () => {});
     if (options && this.#now() >= deadline) await invalidateSignInTokens(options);
     // Cancelled, replaced, and shutdown attempts publish no outcome because the caller has abandoned them.
-    if (controller.signal.aborted) return false;
-    this.#pending.delete(name);
+    if (controller.signal.aborted) return;
     controller.abort();
-    if (options?.challenge && this.#challenges.get(options.serverUrl) === options.challenge) {
-      this.#challenges.delete(options.serverUrl);
-    }
-    this.#reportOutcome(name, authorizationId, reason);
-    return true;
+    const cached = this.#providers.get(name);
+    if (cached && options?.challenge && cached.challenge === options.challenge) delete cached.challenge;
+    return reason ? { status: "failed", reason } : { status: "completed" };
   }
 
-  #reportOutcome(name: string, authorizationId: string, reason?: McpOAuthFailureReason): void {
-    // The outcome handler can call close(), which drains this attempt's credential work.
-    void Promise.resolve().then(() => this.#deps.onComplete?.(reason
-      ? { name, authorizationId, status: "failed", reason }
-      : { name, authorizationId, status: "completed" })).catch(() => {});
+  async #reportAttemptOutcome(attempt: PendingMcpOAuthAttempt, outcome: McpOAuthCompletionOutcome): Promise<McpOAuthCompletionOutcome> {
+    const { name, authorizationId } = attempt;
+    try {
+      return await this.#reportOutcome(name, authorizationId, outcome);
+    } finally {
+      if (this.#pending.get(name) === attempt) this.#pending.delete(name);
+    }
+  }
+
+  async #reportOutcome(name: string, authorizationId: string, outcome: McpOAuthCompletionOutcome): Promise<McpOAuthCompletionOutcome> {
+    try { return await this.#deps.onComplete?.({ name, authorizationId, ...outcome }) ?? outcome; }
+    catch { return outcome; }
   }
 }
 
-export function resolveCallbackBinding({ callbackUrl, callbackPort = 0 }: McpOAuthSettings): { port: number; path?: string } {
+export function resolveCallbackBinding({ callbackUrl, callbackPort = 0 }: McpOAuthSettings):
+  { port: number; path?: string; redirectHostname?: string; fixedRedirectUrl?: string } {
   if (callbackUrl === undefined) return { port: callbackPort };
-  const url = invalidCallbackCharacters.test(callbackUrl) ? null : URL.parse(callbackUrl);
-  if (url?.protocol !== "http:" || (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") ||
-    url.username || url.password) {
-    throw new Error("Invalid MCP OAuth callback URL.");
-  }
-  // URL.port omits the default HTTP port, even when the authority specifies it explicitly.
-  const authority = /^http:\/*([^/]+)/i.exec(callbackUrl)?.[1];
-  const explicitPort = authority?.match(/:(\d+)$/)?.[1];
-  return { port: explicitPort === undefined ? callbackPort : Number(explicitPort), path: url.pathname };
+  const parsed = parseMcpOAuthCallbackUrl(callbackUrl);
+  if (!parsed) throw new Error("Invalid MCP OAuth callback URL.");
+  return {
+    port: parsed.port ?? callbackPort,
+    path: parsed.url.pathname,
+    redirectHostname: parsed.url.hostname,
+    ...(parsed.port === undefined ? {} : { fixedRedirectUrl: callbackUrl }),
+  };
 }
 
 function failureReason(error: unknown): McpOAuthFailureReason {

@@ -221,6 +221,16 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
     catch { return undefined; }
   }
 
+  async function prepare(): Promise<EffectiveMcpServers> {
+    if (closing) throw new Error(SHUTDOWN_ERROR);
+    if (!prepareServers) return loadServers();
+    // Credential writes can outlive the caller's wait for preparation.
+    const preparation = Promise.resolve().then(prepareServers);
+    pendingPreparations.add(preparation);
+    try { return await preparation; }
+    finally { pendingPreparations.delete(preparation); }
+  }
+
   function refreshServers(effective: EffectiveMcpServers | undefined) {
     if (!effective) return undefined;
     const servers = new Map(Object.entries(effective.servers));
@@ -339,18 +349,8 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
           return errorResult(`Specify both service and tool for ${action === "describe" ? "describe" : "call"}. Use mcp search to find their names.`);
         }
         let loaded: EffectiveMcpServers | undefined;
-        try {
-          if (prepareServers) {
-            // Credential writes can outlive the Turn's wait for preparation.
-            const preparation = prepareServers();
-            pendingPreparations.add(preparation);
-            const forgetPreparation = () => { pendingPreparations.delete(preparation); };
-            void preparation.then(forgetPreparation, forgetPreparation);
-            loaded = await awaitWithContext(preparation, context);
-          } else {
-            loaded = readServers();
-          }
-        } catch { signal?.throwIfAborted(); }
+        try { loaded = await awaitWithContext(prepare(), context); }
+        catch { signal?.throwIfAborted(); }
         signal?.throwIfAborted();
         if (closing) return errorResult(SHUTDOWN_ERROR);
         const effective = refreshServers(loaded);
@@ -410,17 +410,18 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
   });
 
   const mcp = Object.assign(extension, {
+    prepare,
     async check(name: string, cwd?: string): Promise<NativeMcpStatus | undefined> {
       if (closing) return undefined;
       return enqueue(name, async () => {
         if (closing) return undefined;
         const effective = refreshServers(readServers());
         const server = effective?.servers.get(name);
-        // Stdio processes start in the caller's workspace through tool discovery or execution.
+        // Stdio discovery needs the caller's workspace to start a process.
         if (effective && server && !effective.configurationError && !("configurationError" in server) &&
-          !server.disabled && server.transport.type === "http") {
+          !server.disabled && (server.transport.type === "http" || (server.transport.type === "stdio" && cwd !== undefined))) {
           const previous = connections.get(name);
-          if (previous) discard(name, previous);
+          if (previous && server.transport.type === "http") discard(name, previous);
           failures.delete(name);
           const { revision } = effective;
           let connection: Connection | undefined;

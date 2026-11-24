@@ -370,6 +370,8 @@ Decided: to follow the spec's Hangs rule, the runtime snapshot and the store's d
 
 Carried from Task 13 (2026-11-25): with the switch on, the Services panel takes MCP status from the runtime, which has no OAuth until this task. So `plugin-services.test.ts` "native standalone consent completes over the event stream without checking by hand" fails with the switch on: the old worker completes the sign-in, and the panel reports `not-connected`. It passes with the switch off. This task owns making it pass with the switch on.
 
+Slice C2 routes Services MCP controls through the durable runtime and its OAuth manager. Both carried consent cases pass with the switch on. `mcp-oauth-durable.test.ts` covers browser and manual sign-in, the status and tool count shown in Services, tool calls after sign-in, and provider denial using a loopback fixture.
+
 **Verification:** default commands; a test against a local OAuth test server; one manual sign-in to a real service.
 
 **Dependencies:** Tasks 13 and 22

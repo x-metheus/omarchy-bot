@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { NativeMcpStatus } from "@omarchy-bot/agent-contract";
+import type { AgentCommand, NativeMcpControlResult, NativeMcpStatus } from "@omarchy-bot/agent-contract";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
@@ -21,6 +21,7 @@ import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
 import { SecretStore } from "./secrets.ts";
+import { McpOAuthManager, type McpOAuthManagerDeps } from "./mcpOAuth.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
@@ -31,6 +32,9 @@ const context = BACKGROUND_CONTEXT;
 export class DurableRunAborted extends Error {
   constructor() { super("aborted"); }
 }
+
+type McpControlInput = Pick<Extract<AgentCommand, { type: "mcp.control" }>, "action" | "server" | "redirectUrl" | "authorizationId" | "expiresAt">;
+type McpAuthorizationOutcome = Omit<Parameters<NonNullable<McpOAuthManagerDeps["onComplete"]>>[0], "name"> & { server: string };
 
 export interface BotRuntime {
   startTurn(input: {
@@ -56,6 +60,7 @@ export interface BotRuntime {
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
   mcpStatus(): NativeMcpStatus[];
+  mcpControl(input: McpControlInput): Promise<NativeMcpControlResult>;
   close(): Promise<void>;
   /** Requests to use files outside the allowed folders; absent without Service storage and events. */
   readonly approvals?: ApprovalStore;
@@ -74,10 +79,47 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
 
 export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: {
   events?: Pick<EventLog, "append">;
-  mcp?: Pick<McpExtensionDeps, "servers" | "prepareServers">;
+  mcp?: Pick<McpExtensionDeps, "servers" | "prepareServers" | "fillSecrets" | "authProvider">;
+  mcpOAuth?: { onAuthorization?: (outcome: McpAuthorizationOutcome) => void };
 } = {}): Promise<BotRuntime> {
   const secretStore = new SecretStore(paths.dataDir);
-  const mcp = options.mcp ? createMcpExtension(options.mcp) : undefined;
+  const mcpOptions = options.mcp;
+  const manager = mcpOptions ? new McpOAuthManager({
+    secrets: secretStore,
+    settings({ name, serverUrl }) {
+      const { servers, configurationError } = mcpOptions.servers();
+      const entry = Object.hasOwn(servers, name) ? servers[name] : undefined;
+      const transport = entry?.transport;
+      if (configurationError || entry?.disabled || transport?.type !== "http" || new URL(transport.url).href !== serverUrl) {
+        throw new Error("The MCP connection configuration changed.");
+      }
+      if (!transport.oauth) return {};
+      const { clientId, clientSecret, callbackPort, callbackUrl, scope, clientName, authServerMetadataUrl, clientRegistration } = transport.oauth;
+      return {
+        ...(clientId === undefined ? {} : { clientId }),
+        ...(clientSecret === undefined ? {} : { clientSecret }),
+        ...(callbackPort === undefined ? {} : { callbackPort }),
+        ...(callbackUrl === undefined ? {} : { callbackUrl }),
+        ...(scope === undefined ? {} : { scope }),
+        ...(clientName === undefined ? {} : { clientName }),
+        ...(authServerMetadataUrl === undefined ? {} : { authServerMetadataUrl: new URL(authServerMetadataUrl) }),
+        ...(clientRegistration === undefined ? {} : { clientRegistration }),
+      };
+    },
+    async onComplete({ name, authorizationId, ...outcome }) {
+      if (outcome.status === "completed") {
+        const entry = await mcp?.check(name).catch(() => undefined);
+        if (entry?.status !== "connected") outcome = { status: "failed", reason: "connect_failed" };
+      }
+      try { await options.mcpOAuth?.onAuthorization?.({ ...outcome, authorizationId, server: name }); }
+      catch { /* Event consumers must not interrupt OAuth completion. */ }
+      return outcome;
+    },
+  }) : undefined;
+  const mcp = mcpOptions && manager ? createMcpExtension({
+    ...mcpOptions,
+    authProvider: (name, url) => manager.authProvider(name, url),
+  }) : undefined;
   let reportedCredentialsFailure = false;
   const reportCredentialsFailure = () => {
     if (reportedCredentialsFailure) return;
@@ -133,6 +175,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       // Recovery maps the owners before the scheduler can replay their tool calls.
       if (recoveringBots.length === 0) resumeScheduler();
     } catch (error) {
+      await manager?.close();
       await mcp?.close();
       await harness.close(context);
       throw error;
@@ -450,10 +493,52 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       mcpStatus() {
         return mcp?.status() ?? [];
       },
+      async mcpControl({ action, server, redirectUrl, authorizationId, expiresAt }) {
+        const status = () => mcp?.status() ?? [];
+        const respond = (result: Record<string, unknown>) => ({ servers: status(), result });
+        if (action === "status") return { servers: status() };
+        if (typeof server !== "string" || !server.trim()) return respond({ error: "invalid_request" });
+        switch (action) {
+          case "connect": {
+            try {
+              await mcp?.prepare();
+              const entry = await mcp?.check(server, paths.sharedWorkspaceDir);
+              if (!entry) return respond({ error: "not_configured" });
+              if (entry.status === "connected") return respond({});
+              const message = "error" in entry && typeof entry.error === "string" ? entry.error : undefined;
+              return respond({ error: entry.status === "needs-auth" ? "auth_required" : "connect_failed", ...(message === undefined ? {} : { message }) });
+            } catch { return respond({ error: "connect_failed" }); }
+          }
+          case "auth-start": {
+            if (typeof authorizationId !== "string" || !authorizationId.trim()) return respond({ error: "invalid_request" });
+            if (!mcp || !manager) return respond({ error: "not_configured" });
+            try {
+              const effective = await mcp.prepare();
+              const entry = Object.hasOwn(effective.servers, server) ? effective.servers[server] : undefined;
+              if (effective.configurationError || entry?.disabled || entry?.transport?.type !== "http") return respond({ error: "not_configured" });
+              const result = await manager.start({ name: server, serverUrl: entry.transport.url, authorizationId, ...(expiresAt === undefined ? {} : { expiresAt }) });
+              return respond("authorizationUrl" in result ? { authorizationUrl: result.authorizationUrl } : { authenticated: true });
+            } catch { return respond({ error: "authorization_failed" }); }
+          }
+          case "auth-complete": {
+            if (typeof redirectUrl !== "string" || !redirectUrl.trim()) return respond({ error: "invalid_request" });
+            if (!manager) return respond({ error: "not_configured" });
+            try {
+              const outcome = await manager.complete({ name: server, redirectUrl });
+              return respond(outcome.status === "completed" ? { authenticated: true } : { error: outcome.reason });
+            } catch { return respond({ error: "auth_failed" }); }
+          }
+          case "auth-cancel":
+            await manager?.cancel({ name: server, ...(authorizationId === undefined ? {} : { authorizationId }) });
+            return respond({});
+          default:
+            return respond({ error: "invalid_request" });
+        }
+      },
       close() {
         closing ??= (async () => {
           try {
-            await mcp?.close();
+            await Promise.all([manager?.close(), mcp?.close()]);
             await harness.close(context);
           } finally {
             await storage.close(context);

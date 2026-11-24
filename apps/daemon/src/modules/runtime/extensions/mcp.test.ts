@@ -400,7 +400,8 @@ await server.connect(new StdioServerTransport());
 `);
   const mcp = createMcpExtension({ servers: localServer(script) });
   const getPid = async () => {
-    const result = await executeMcp(mcp, { action: "call", service: "local", tool: "pid" });
+    const result = await mcp.tools![0]!.execute({ action: "call", service: "local", tool: "pid" },
+      { ...({} as ToolExecutionApi), env: new NodeExecutionEnv({ cwd: root }) }, context);
     const part = result.output?.[0];
     return Number(part?.type === "text" ? part.text : NaN);
   };

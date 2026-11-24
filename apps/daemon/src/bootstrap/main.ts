@@ -70,6 +70,7 @@ export async function main(options: MainOptions = {}): Promise<{
         return mcpServers();
       },
     },
+    mcpOAuth: { onAuthorization: (outcome) => { plugins?.handleNativeAuthorization(outcome); } },
   });
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
@@ -167,6 +168,7 @@ export async function main(options: MainOptions = {}): Promise<{
     plugins.mcp.reconcile();
     return { ...resources, mcp: runtime.mcpStatus() };
   }, async (input) => {
+    if (getSetting(db, "runtime") === "durable") return runtime.mcpControl(input);
     const worker = await supervisor.agentWorker("pi");
     return worker.request({ type: "mcp.control", cwd: cfg.sharedWorkspaceDir, ...input }, 90_000);
   }, () => {

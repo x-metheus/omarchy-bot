@@ -17,6 +17,7 @@ import {
 } from "./mcpOAuth.ts";
 import { SecretStore, type SecretBackend } from "./secrets.ts";
 
+const connectionName = "account";
 const bareOrigin = "https://tools.example.test";
 const canonicalOrigin = new URL(bareOrigin).href;
 const server = "https://tools.example.test/mcp";
@@ -69,7 +70,7 @@ async function withSecretStore(
     const namespace = createHash("sha256").update(realpathSync(dataDir)).digest("hex");
     // The keychain account hashes the scope and name, then prefixes the data-directory namespace.
     const appAccounts = servers.map((url) => {
-      const account = createHash("sha256").update(JSON.stringify(["app", mcpOAuthSecretName(url)])).digest("hex");
+      const account = createHash("sha256").update(JSON.stringify(["app", mcpOAuthSecretName(connectionName, url)])).digest("hex");
       return `${namespace}:${account}`;
     });
     for (const account of backend.writtenAccounts) expect(appAccounts).toContain(account);
@@ -79,26 +80,27 @@ async function withSecretStore(
 }
 
 test("mcpOAuthSecretName is stable lowercase SHA-256 hex within the secret name limit", () => {
-  const name = mcpOAuthSecretName(bareOrigin);
-  const digest = createHash("sha256").update(canonicalOrigin).digest("hex");
-  expect(mcpOAuthSecretName(canonicalOrigin)).toBe(name);
+  const name = mcpOAuthSecretName(connectionName, bareOrigin);
+  const digest = createHash("sha256").update(JSON.stringify([connectionName, canonicalOrigin])).digest("hex");
+  expect(mcpOAuthSecretName(connectionName, canonicalOrigin)).toBe(name);
   expect(name).toMatch(/^mcp-oauth-[a-f0-9]+$/);
   expect(name.length).toBeLessThanOrEqual(64);
   expect(digest.startsWith(name.slice("mcp-oauth-".length))).toBe(true);
-  expect(mcpOAuthSecretName(otherServer)).not.toBe(name);
+  expect(mcpOAuthSecretName(connectionName, otherServer)).not.toBe(name);
+  expect(mcpOAuthSecretName("another-account", canonicalOrigin)).not.toBe(name);
 });
 
 test("SecretMcpOAuthStateStore returns undefined for absent state", () => withSecretStore(async (secrets) => {
-  expect((await new SecretMcpOAuthStateStore({ secrets, server }).load()) === undefined).toBe(true);
+  expect((await new SecretMcpOAuthStateStore({ secrets, name: connectionName, server }).load()) === undefined).toBe(true);
 }));
 
 test("SecretMcpOAuthStateStore round-trips full OAuth state as an app secret", () => withSecretStore(async (secrets) => {
-  const store = new SecretMcpOAuthStateStore({ secrets, server });
-  const name = mcpOAuthSecretName(server);
+  const store = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server });
+  const name = mcpOAuthSecretName(connectionName, server);
   await store.save(state);
 
   expect((await secrets.getAppSecretForRuntime(name)) === JSON.stringify(state)).toBe(true);
-  expect(isDeepStrictEqual(await new SecretMcpOAuthStateStore({ secrets, server }).load(), state)).toBe(true);
+  expect(isDeepStrictEqual(await new SecretMcpOAuthStateStore({ secrets, name: connectionName, server }).load(), state)).toBe(true);
   const entries = await secrets.forApp().list();
   expect(isDeepStrictEqual(entries, [{ name, description: `MCP OAuth state (${name})` }])).toBe(true);
 }));
@@ -108,7 +110,7 @@ test("SecretMcpOAuthStateStore round-trips a bare origin through McpOAuthProvide
     serverUrl: bareOrigin,
     redirectUrl: "http://127.0.0.1/callback",
     clientMetadata: {},
-    store: new SecretMcpOAuthStateStore({ secrets, server: bareOrigin }),
+    store: new SecretMcpOAuthStateStore({ secrets, name: connectionName, server: bareOrigin }),
     onRedirect: () => {},
   });
   const clientInformation = { client_id: "test-client", client_secret: "test-client-secret" };
@@ -123,29 +125,29 @@ test("SecretMcpOAuthStateStore round-trips a bare origin through McpOAuthProvide
   expect(isDeepStrictEqual(await reader.clientInformation(), clientInformation)).toBe(true);
   expect(isDeepStrictEqual(await reader.tokens(), tokens)).toBe(true);
   expect((await reader.codeVerifier()) === codeVerifier).toBe(true);
-  const canonicalStore = new SecretMcpOAuthStateStore({ secrets, server: canonicalOrigin });
+  const canonicalStore = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server: canonicalOrigin });
   const expectedState = { serverUrl: canonicalOrigin, clientInformation, codeVerifier, tokens };
   expect(isDeepStrictEqual(await canonicalStore.load(), expectedState)).toBe(true);
-  expect(await secrets.getAppSecretForRuntime(mcpOAuthSecretName(bareOrigin))).toBeDefined();
+  expect(await secrets.getAppSecretForRuntime(mcpOAuthSecretName(connectionName, bareOrigin))).toBeDefined();
 }, [canonicalOrigin]));
 
 test("SecretMcpOAuthStateStore round-trips partial state and preserves unknown metadata", () => withSecretStore(async (secrets) => {
-  const store = new SecretMcpOAuthStateStore({ secrets, server });
+  const store = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server });
   const partialState = { serverUrl: server, clientInformation: state.clientInformation, extra: { enabled: true } };
   await store.save(partialState);
 
   expect(isDeepStrictEqual(await store.load(), partialState)).toBe(true);
-  const name = mcpOAuthSecretName(server);
+  const name = mcpOAuthSecretName(connectionName, server);
   expect((await secrets.getAppSecretForRuntime(name)) === JSON.stringify(partialState)).toBe(true);
 }));
 
 test("SecretMcpOAuthStateStore keeps URL credentials out of metadata", () => {
   const credentialedServer = "https://user:test-password@tools.example.test/test-path-token?token=test-access-token#test-refresh-token";
   return withSecretStore(async (secrets) => {
-    const store = new SecretMcpOAuthStateStore({ secrets, server: credentialedServer });
+    const store = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server: credentialedServer });
     await store.save({ ...state, serverUrl: credentialedServer });
     const entries = await secrets.forApp().list();
-    const name = mcpOAuthSecretName(credentialedServer);
+    const name = mcpOAuthSecretName(connectionName, credentialedServer);
     expect(isDeepStrictEqual(entries, [{ name, description: `MCP OAuth state (${name})` }])).toBe(true);
   }, [credentialedServer]);
 });
@@ -154,10 +156,10 @@ test("SecretMcpOAuthStateStore keeps hostname credentials out of metadata", () =
   const hostnameToken = "tok-fixture-abc123";
   const credentialedServer = `https://${hostnameToken}.example.test/mcp`;
   return withSecretStore(async (secrets) => {
-    const store = new SecretMcpOAuthStateStore({ secrets, server: credentialedServer });
+    const store = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server: credentialedServer });
     await store.save({ ...state, serverUrl: credentialedServer });
     const entries = await secrets.forApp().list();
-    const name = mcpOAuthSecretName(credentialedServer);
+    const name = mcpOAuthSecretName(connectionName, credentialedServer);
     expect(entries.some(({ description }) => description.includes(hostnameToken))).toBe(false);
     expect(isDeepStrictEqual(entries, [{ name, description: `MCP OAuth state (${name})` }])).toBe(true);
   }, [credentialedServer]);
@@ -171,10 +173,10 @@ test.each([
   ["a missing server URL", "{}"],
   ["a non-string server URL", '{"serverUrl":42}'],
 ])("SecretMcpOAuthStateStore ignores %s without deleting it", (_label, value) => withSecretStore(async (secrets) => {
-  const name = mcpOAuthSecretName(server);
+  const name = mcpOAuthSecretName(connectionName, server);
   await secrets.forApp().save(name, "Invalid OAuth state fixture", value);
 
-  expect((await new SecretMcpOAuthStateStore({ secrets, server }).load()) === undefined).toBe(true);
+  expect((await new SecretMcpOAuthStateStore({ secrets, name: connectionName, server }).load()) === undefined).toBe(true);
   expect((await secrets.getAppSecretForRuntime(name)) === value).toBe(true);
 }));
 
@@ -193,22 +195,22 @@ test.each([
   ["tokensExpireAt as a string", '"tokensExpireAt":"42"'],
   ["tokensExpireAt as a non-finite number", '"tokensExpireAt":1e999'],
 ])("SecretMcpOAuthStateStore ignores %s without changing the raw value", (_label, field) => withSecretStore(async (secrets) => {
-  const name = mcpOAuthSecretName(server);
+  const name = mcpOAuthSecretName(connectionName, server);
   const value = `{"serverUrl":${JSON.stringify(server)},${field}}`;
   await secrets.forApp().save(name, "Invalid OAuth field fixture", value);
 
-  expect((await new SecretMcpOAuthStateStore({ secrets, server }).load()) === undefined).toBe(true);
+  expect((await new SecretMcpOAuthStateStore({ secrets, name: connectionName, server }).load()) === undefined).toBe(true);
   expect((await secrets.getAppSecretForRuntime(name)) === value).toBe(true);
 }));
 
 test("mcpOAuthSecretName and SecretMcpOAuthStateStore reject an unparseable server URL", () => withSecretStore(async (secrets) => {
-  expect(() => mcpOAuthSecretName("")).toThrow(TypeError);
-  expect(() => new SecretMcpOAuthStateStore({ secrets, server: "" })).toThrow(TypeError);
+  expect(() => mcpOAuthSecretName(connectionName, "")).toThrow(TypeError);
+  expect(() => new SecretMcpOAuthStateStore({ secrets, name: connectionName, server: "" })).toThrow(TypeError);
 }));
 
 test("SecretMcpOAuthStateStore ignores and can replace state for another server URL", () => withSecretStore(async (secrets) => {
-  const store = new SecretMcpOAuthStateStore({ secrets, server });
-  const name = mcpOAuthSecretName(server);
+  const store = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server });
+  const name = mcpOAuthSecretName(connectionName, server);
   const wrongState = JSON.stringify({ ...state, serverUrl: otherServer });
   await secrets.forApp().save(name, "Mismatched OAuth state fixture", wrongState);
 
@@ -219,8 +221,8 @@ test("SecretMcpOAuthStateStore ignores and can replace state for another server 
 }));
 
 test("SecretMcpOAuthStateStore keeps different servers' state separate", () => withSecretStore(async (secrets) => {
-  const first = new SecretMcpOAuthStateStore({ secrets, server });
-  const second = new SecretMcpOAuthStateStore({ secrets, server: otherServer });
+  const first = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server });
+  const second = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server: otherServer });
   const otherState = { serverUrl: otherServer, codeVerifier: "other-verifier" };
 
   await first.save(state);
@@ -231,8 +233,8 @@ test("SecretMcpOAuthStateStore keeps different servers' state separate", () => w
 }, [server, otherServer]));
 
 test("withRefreshLock serializes three tasks across equivalent server URLs", () => withSecretStore(async (secrets) => {
-  const first = new SecretMcpOAuthStateStore({ secrets, server: bareOrigin });
-  const second = new SecretMcpOAuthStateStore({ secrets, server: canonicalOrigin });
+  const first = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server: bareOrigin });
+  const second = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server: canonicalOrigin });
   const events: string[] = [];
   const run = async (task: number) => {
     events.push(`start ${task}`);
@@ -251,7 +253,7 @@ test("withRefreshLock serializes three tasks across equivalent server URLs", () 
 }));
 
 test("withRefreshLock releases the queue after a task rejects", () => withSecretStore(async (secrets) => {
-  const store = new SecretMcpOAuthStateStore({ secrets, server });
+  const store = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server });
   const failure = new Error("refresh failed");
   const first = store.withRefreshLock(async () => { throw failure; });
   const second = store.withRefreshLock(async () => "next task");
@@ -261,8 +263,8 @@ test("withRefreshLock releases the queue after a task rejects", () => withSecret
 }));
 
 test("withRefreshLock lets another server finish while the first server is locked", () => withSecretStore(async (secrets) => {
-  const first = new SecretMcpOAuthStateStore({ secrets, server });
-  const second = new SecretMcpOAuthStateStore({ secrets, server: otherServer });
+  const first = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server });
+  const second = new SecretMcpOAuthStateStore({ secrets, name: connectionName, server: otherServer });
   const firstStarted = Promise.withResolvers<void>();
   const releaseFirst = Promise.withResolvers<void>();
   const firstTask = first.withRefreshLock(async () => {

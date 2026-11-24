@@ -33,6 +33,7 @@ class MemoryKeychain implements SecretBackend {
 async function setup(
   options?: Parameters<typeof startOAuthMcpServer>[0],
   { onComplete, ...managerOptions }: Partial<Omit<McpOAuthManagerDeps, "secrets">> & { now?: () => number } = {},
+  names: readonly [string, ...string[]] = ["remote"],
 ) {
   const fixture = await startOAuthMcpServer(options);
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "mcp-oauth-sign-in-"));
@@ -45,11 +46,11 @@ async function setup(
     completed.resolve(outcome);
     await onComplete?.(outcome);
   } });
-  const name = "remote";
+  const [name] = names;
   const mcp = createMcpExtension({
-    servers: () => ({ revision: "fixture", secrets: [], servers: {
-      [name]: { disabled: false, transport: { type: "http", url: fixture.url } },
-    } }),
+    servers: () => ({ revision: "fixture", secrets: [], servers: Object.fromEntries(names.map((service) => [
+      service, { disabled: false, transport: { type: "http", url: fixture.url } },
+    ])) }),
     authProvider: (service, url) => manager.authProvider(service, url),
   });
   return {
@@ -61,8 +62,8 @@ async function setup(
       if (!("authorizationUrl" in result)) throw new Error("Expected a browser sign-in.");
       return result.authorizationUrl;
     },
-    call(tool = options?.toolName ?? "read_fixture") {
-      return mcp.tools![0]!.execute({ action: "call", service: name, tool },
+    call(tool = options?.toolName ?? "read_fixture", service = name) {
+      return mcp.tools![0]!.execute({ action: "call", service, tool },
         {} as ToolExecutionApi, BACKGROUND_CONTEXT);
     },
     async close() {
@@ -127,8 +128,8 @@ test("durable MCP reports needs-auth until browser sign-in saves app-scoped toke
     const response = await fetchOAuthUrl(authorizationUrl, { redirect: "follow" });
     expect(response.status).toBe(200);
     expectSafeEqual(await testMcp.completed, { name, authorizationId: "first", status: "completed" });
-    const secretName = mcpOAuthSecretName(fixture.url);
-    const saved = await new SecretMcpOAuthStateStore({ secrets, server: fixture.url }).load();
+    const secretName = mcpOAuthSecretName(name, fixture.url);
+    const saved = await new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url }).load();
     expect(Boolean(saved?.tokens?.access_token && saved.tokens.refresh_token)).toBe(true);
     expect(await secrets.forApp().list()).toEqual([{ name: secretName, description: `MCP OAuth state (${secretName})` }]);
     const namespace = createHash("sha256").update(realpathSync(testMcp.dataDir)).digest("hex");
@@ -137,7 +138,9 @@ test("durable MCP reports needs-auth until browser sign-in saves app-scoped toke
 
     expect(await mcp.check(name)).toMatchObject({ status: "connected", toolCount: 1 });
     expectSafeEqual(await testMcp.call(), { isError: false, output: [{ type: "text", text: "The report is ready." }] });
-    expect(fixture.counts).toMatchObject({ authorize: 1, token: 1, toolCalls: 1, refresh: 0 });
+    expect(fixture.counts).toMatchObject({ authorize: 1, token: 1, toolCalls: 1, refresh: 0, register: 1 });
+    expect(fixture.registeredClientNames).toEqual(["Omarchy Bot"]);
+    expect(new URL(redirectUri(authorizationUrl)).hostname).toBe("127.0.0.1");
     const refresh = await testMcp.manager.start({ name, serverUrl: fixture.url, authorizationId: "refresh" });
     expect("authorized" in refresh && refresh.authorized).toBe(true);
     expect(fixture.counts.refresh).toBe(1);
@@ -252,7 +255,7 @@ test("a superseded OAuth callback cannot exchange a code after waiting for the r
   const { manager, name, fixture, secrets, outcomes } = testMcp;
   const locked = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  const store = new SecretMcpOAuthStateStore({ secrets, server: fixture.url });
+  const store = new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url });
   let lock: Promise<void> | undefined;
   try {
     const first = await testMcp.start();
@@ -284,7 +287,7 @@ test("an OAuth exchange network failure reports connect_failed without exposing 
   try {
     const redirectUrl = await callbackLocation(await testMcp.start());
     await fixture.close();
-    await expectRejection(manager.complete({ name, redirectUrl }), "MCP sign-in could not be completed.");
+    expect(await manager.complete({ name, redirectUrl })).toEqual({ status: "failed", reason: "connect_failed" });
     expectSafeEqual(outcomes, [{ name, authorizationId: "first", status: "failed", reason: "connect_failed" }]);
     await expectClosedListener(redirectUrl);
   } finally {
@@ -328,7 +331,7 @@ test("an expired OAuth attempt closes its listener and reports expired", async (
   try {
     const redirectUrl = await callbackLocation(await testMcp.start("expiring", expiresAt));
     now = expiresAt;
-    await expectRejection(testMcp.manager.complete({ name: testMcp.name, redirectUrl }), "The MCP sign-in callback timed out.");
+    expect(await testMcp.manager.complete({ name: testMcp.name, redirectUrl })).toEqual({ status: "failed", reason: "expired" });
     expectSafeEqual(await testMcp.completed, { name: testMcp.name, authorizationId: "expiring", status: "failed", reason: "expired" });
     expect(testMcp.fixture.counts.token).toBe(0);
     await expectClosedListener(redirectUrl);
@@ -340,12 +343,12 @@ test("an expired OAuth attempt closes its listener and reports expired", async (
 
 test.each([1, 3600])("durable MCP refreshes a rotated OAuth token with a %i second lifetime", async (tokenTtlSeconds) => {
   const testMcp = await setup({ tokenTtlSeconds });
-  const { fixture, secrets, mcp } = testMcp;
+  const { fixture, name, secrets, mcp } = testMcp;
   try {
     expect((await fetchOAuthUrl(await testMcp.start())).status).toBe(200);
     expect((await testMcp.completed).status).toBe("completed");
     expect((await testMcp.call()).isError).toBe(false);
-    const store = new SecretMcpOAuthStateStore({ secrets, server: fixture.url });
+    const store = new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url });
     const before = (await store.load())?.tokens?.access_token;
     const { refresh, unauthorized } = fixture.counts;
     fixture.rotateAccessToken();
@@ -365,12 +368,35 @@ test.each([1, 3600])("durable MCP refreshes a rotated OAuth token with a %i seco
   }
 });
 
-test("MCP OAuth aliases share a provider by normalized URL", async () => {
-  const testMcp = await setup();
-  const { manager, fixture, name } = testMcp;
+test("MCP connections at the same OAuth URL authorize and use their own tokens", async () => {
+  const names = ["account-a", "account-b"] as const;
+  const [name, alias] = names;
+  const tokens = [crypto.randomUUID(), crypto.randomUUID()];
+  let nextToken = 0;
+  const testMcp = await setup({ issueAccessToken: () => tokens[nextToken++]! }, {}, names);
+  const { manager, fixture, mcp } = testMcp;
   try {
-    expect(manager.authProvider(name, fixture.url)).toBe(manager.authProvider("alias", `${fixture.origin}/./mcp`));
+    expect((await fetchOAuthUrl(await testMcp.start())).status).toBe(200);
+    expect((await testMcp.completed).status).toBe("completed");
+    expect(await mcp.check(name)).toMatchObject({ status: "connected", toolCount: 1 });
+    fixture.observedAuthorization.clear();
+    expect(await mcp.check(alias)).toMatchObject({ status: "needs-auth", toolCount: 0 });
+    expectSafeEqual(fixture.observedAuthorization, new Set([null]));
+    expect(manager.authProvider(name, fixture.url)).toBe(manager.authProvider(name, `${fixture.origin}/./mcp`));
+    expect(manager.authProvider(name, fixture.url)).not.toBe(manager.authProvider(alias, fixture.url));
     expect(manager.authProvider(name, fixture.url)).not.toBe(manager.authProvider(name, `${fixture.origin}/different`));
+
+    const second = await manager.start({ name: alias, serverUrl: fixture.url, authorizationId: "second" });
+    if (!("authorizationUrl" in second)) throw new Error("Expected a separate browser sign-in.");
+    const redirectUrl = await callbackLocation(second.authorizationUrl);
+    expect(await manager.complete({ name: alias, redirectUrl })).toEqual({ status: "completed" });
+    expect(fixture.counts).toMatchObject({ authorize: 2, token: 2, refresh: 0 });
+    for (const [index, service] of names.entries()) {
+      fixture.observedAuthorization.clear();
+      expect((await testMcp.call(undefined, service)).isError).toBe(false);
+      expectSafeEqual(fixture.observedAuthorization, new Set([`Bearer ${tokens[index]}`]));
+    }
+    expect(fixture.counts.toolCalls).toBe(2);
   } finally {
     await testMcp.close();
   }
@@ -388,7 +414,7 @@ test("a configured Authorization header takes precedence over stored MCP OAuth t
   });
   try {
     await manager.complete({ name, redirectUrl: await callbackLocation(await testMcp.start()) });
-    const stored = await new SecretMcpOAuthStateStore({ secrets, server: fixture.url }).load();
+    const stored = await new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url }).load();
     expect(Boolean(stored?.tokens?.access_token)).toBe(true);
     const result = await mcp.tools![0]!.execute({ action: "call", service: name, tool: "read_fixture" },
       {} as ToolExecutionApi, BACKGROUND_CONTEXT);
@@ -405,7 +431,7 @@ test("a configured Authorization header takes precedence over stored MCP OAuth t
 test("MCP redacts issued OAuth tokens from calls and tool errors after a 401 retry", async () => {
   const testMcp = await setup({ echoAuthorization: true });
   const { fixture, manager, name, secrets } = testMcp;
-  const store = new SecretMcpOAuthStateStore({ secrets, server: fixture.url });
+  const store = new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url });
   try {
     await manager.complete({ name, redirectUrl: await callbackLocation(await testMcp.start()) });
     const before = (await store.load())?.tokens?.access_token;
@@ -507,6 +533,32 @@ test.each([
   }
 });
 
+test("manual OAuth completion joins an in-flight browser exchange and publishes one outcome", async () => {
+  const exchangeStarted = Promise.withResolvers<void>();
+  const releaseExchange = Promise.withResolvers<void>();
+  const testMcp = await setup({ async beforeTokenResponse() {
+    exchangeStarted.resolve();
+    await releaseExchange.promise;
+  } });
+  const { manager, name, fixture, outcomes } = testMcp;
+  try {
+    const redirectUrl = await callbackLocation(await testMcp.start());
+    expect((await fetchOAuthUrl(redirectUrl)).status).toBe(200);
+    await exchangeStarted.promise;
+    const manual = manager.complete({ name, redirectUrl });
+    void manual.catch(() => {});
+    expectSafeEqual(outcomes, []);
+    releaseExchange.resolve();
+    expect(await manual).toEqual({ status: "completed" });
+    await expectRejection(manager.complete({ name, redirectUrl }), "No pending MCP sign-in.");
+    expect(fixture.counts.token).toBe(1);
+    expectSafeEqual(outcomes, [{ name, authorizationId: "first", status: "completed" }]);
+  } finally {
+    releaseExchange.resolve();
+    await testMcp.close();
+  }
+});
+
 test("a rejecting OAuth completion handler receives one completed outcome", async () => {
   const testMcp = await setup(undefined, { onComplete() { throw new Error("Fixture outcome handler failed."); } });
   const { manager, name, outcomes } = testMcp;
@@ -541,7 +593,7 @@ test("an OAuth token exchange crossing the deadline reports expired and invalida
     await completing;
     expectSafeEqual(outcomes, [{ name, authorizationId: "expiring", status: "failed", reason: "expired" }]);
     expect(fixture.counts.token).toBe(1);
-    const stored = await new SecretMcpOAuthStateStore({ secrets, server: fixture.url }).load();
+    const stored = await new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url }).load();
     expect(Boolean(stored?.tokens || stored?.tokensExpireAt)).toBe(false);
     await expectClosedListener(redirectUrl);
     const retry = await manager.start({ name, serverUrl: fixture.url, authorizationId: "retry" });
@@ -563,9 +615,9 @@ test.each([
     const redirect = new URL(await callbackLocation(await testMcp.start()));
     redirect.searchParams.set("error", code);
     const redirectUrl = redirect.href;
-    const result = await manager.complete({ name, redirectUrl }).then(() => "resolved", () => "rejected");
+    const result = await manager.complete({ name, redirectUrl });
     expectSafeEqual(outcomes, [{ name, authorizationId: "first", status: "failed", reason: "auth_failed" }]);
-    expect(result).toBe("resolved");
+    expect(result).toEqual({ status: "failed", reason: "auth_failed" });
     expect(fixture.counts.token).toBe(0);
     await expectClosedListener(redirectUrl);
     await expectRejection(manager.complete({ name, redirectUrl }), "No pending MCP sign-in.");
@@ -597,10 +649,10 @@ test.each([
   }
   try {
     const redirectUrl = await callbackLocation(await testMcp.start("expiring", expiresAt));
-    await expectRejection(manager.complete({ name, redirectUrl }), "MCP sign-in could not be completed.");
+    expect(await manager.complete({ name, redirectUrl })).toEqual({ status: "failed", reason: "expired" });
     expect(tokensWritten).toBe(true);
     expectSafeEqual(outcomes, [{ name, authorizationId: "expiring", status: "failed", reason: "expired" }]);
-    const stored = await new SecretMcpOAuthStateStore({ secrets, server: fixture.url }).load();
+    const stored = await new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url }).load();
     expect(Boolean(stored?.tokens || stored?.tokensExpireAt)).toBe(false);
     if (invalidate !== "available") expectSafeEqual(stored, { serverUrl: fixture.url });
     await expectClosedListener(redirectUrl);
@@ -616,8 +668,8 @@ test.each([
 test("an OAuth attempt waiting for the refresh lock uses the deadline from start", async () => {
   let now = Date.now();
   const testMcp = await setup(undefined, { now: () => now });
-  const { secrets, fixture, outcomes, backend } = testMcp;
-  const store = new SecretMcpOAuthStateStore({ secrets, server: fixture.url });
+  const { secrets, name, fixture, outcomes, backend } = testMcp;
+  const store = new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url });
   const release = Promise.withResolvers<void>();
   const lock = store.withRefreshLock(() => release.promise);
   try {
@@ -700,7 +752,7 @@ test("closing the OAuth manager waits for a cached provider's refresh", async ()
     await release.promise;
   } });
   const { manager, fixture, name, secrets } = testMcp;
-  const store = new SecretMcpOAuthStateStore({ secrets, server: fixture.url });
+  const store = new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url });
   try {
     await manager.complete({ name, redirectUrl: await callbackLocation(await testMcp.start()) });
     const before = (await store.load())?.tokens?.access_token;
@@ -752,14 +804,34 @@ test("MCP OAuth listens on the configured callback port", async () => {
   }
 });
 
-test("MCP OAuth resolves an explicit callback URL port 80 before callbackPort", () => {
+test("MCP OAuth uses and advertises an explicit callback URL port ahead of callbackPort", async () => {
   const callbackUrl = "http://127.0.0.1:80/callback";
-  expect(resolveCallbackBinding({ callbackUrl, callbackPort: 4000 })).toEqual({ port: 80, path: "/callback" });
-  expect(resolveCallbackBinding({ callbackUrl })).toEqual({ port: 80, path: "/callback" });
-  expect(resolveCallbackBinding({ callbackUrl: "http://127.0.0.1/callback:80", callbackPort: 4000 })).toEqual({ port: 4000, path: "/callback:80" });
+  const binding = { port: 80, path: "/callback", redirectHostname: "127.0.0.1", fixedRedirectUrl: callbackUrl };
+  expect(resolveCallbackBinding({ callbackUrl, callbackPort: 4000 })).toEqual(binding);
+  expect(resolveCallbackBinding({ callbackUrl })).toEqual(binding);
+  const noAuthorityPort = resolveCallbackBinding({ callbackUrl: "http://127.0.0.1/callback:80", callbackPort: 4000 });
+  expect(noAuthorityPort).toEqual({ port: 4000, path: "/callback:80", redirectHostname: "127.0.0.1" });
+  expect(noAuthorityPort).not.toHaveProperty("fixedRedirectUrl");
+
+  const explicitCallbackUrl = "http://localhost:4000/callback";
+  const settings = { callbackUrl: explicitCallbackUrl, callbackPort: 8000 };
+  expect(resolveCallbackBinding(settings)).toEqual({
+    port: 4000, path: "/callback", redirectHostname: "localhost", fixedRedirectUrl: explicitCallbackUrl,
+  });
+  const testMcp = await setup(undefined, { settings: () => settings });
+  const serve = Bun.serve;
+  // Use an available port so the test can verify the advertised URI independently of the listener port.
+  const callbackServe = spyOn(Bun, "serve").mockImplementationOnce(({ unix: _unix, ...options }) => serve({ ...options, port: 0 }));
+  try {
+    expect(redirectUri(await testMcp.start())).toEqual(explicitCallbackUrl);
+    expect(callbackServe).toHaveBeenCalledWith(expect.objectContaining({ port: 4000 }));
+  } finally {
+    callbackServe.mockRestore();
+    await testMcp.close();
+  }
 });
 
-test("MCP OAuth uses the callbackUrl port and path and redirects localhost to IPv4 loopback", async () => {
+test("MCP OAuth advertises the registered localhost callback URL", async () => {
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(null) });
   const port = reservation.port!;
   const testMcp = await setup(undefined, { settings: () => ({ callbackUrl: `http://localhost:${port}/oauth/finish`, callbackPort: 0 }) });
@@ -768,8 +840,8 @@ test("MCP OAuth uses the callbackUrl port and path and redirects localhost to IP
     const url = await testMcp.start();
     const redirect = new URL(redirectUri(url));
     expect(redirect.port === String(port)).toBe(true);
-    expect(redirect.hostname === "127.0.0.1").toBe(true);
-    expect(redirect.pathname === "/oauth/finish").toBe(true);
+    // The authorization server must receive the exact registered redirect URI.
+    expect(redirect.href).toBe(`http://localhost:${port}/oauth/finish`);
     expect((await fetchOAuthUrl(new URL("/callback", redirect))).status).toBe(404);
     expect((await fetchOAuthUrl(url)).status).toBe(200);
     expect((await testMcp.completed).status).toBe("completed");
@@ -822,7 +894,7 @@ test.each(["consumed", "replaced"] as const)("MCP OAuth clears a %s challenge on
       expect((await testMcp.call()).isError).toBe(true);
     }
     await manager.complete({ name, redirectUrl: await callbackLocation(authorizationUrl) });
-    const store = new SecretMcpOAuthStateStore({ secrets, server: fixture.url });
+    const store = new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url });
     const saved = await store.load();
     if (!saved?.tokens) throw new Error("Expected stored OAuth tokens.");
     delete saved.tokens;

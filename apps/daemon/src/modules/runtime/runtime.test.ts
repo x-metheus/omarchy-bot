@@ -18,6 +18,8 @@ import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { openBotRuntime, type BotRuntime } from "./runtime.ts";
 import { openThreadConversation } from "./conversations.ts";
 import { ALLOWED_FOLDERS_SETTING } from "../workspace/allowedFolders.ts";
+import { NativeMcpStore } from "../plugins/nativeMcp.ts";
+import { startOAuthMcpServer } from "./testing/oauthMcpServer.ts";
 
 test("runtime creates durable tables and can close and reopen", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-"));
@@ -53,6 +55,155 @@ test("runtime creates durable tables and can close and reopen", async () => {
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("runtime MCP connect discovers stdio tools in the shared workspace while status does not spawn", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-stdio-"));
+  const stateDir = path.join(directory, "state");
+  const sharedWorkspaceDir = path.join(directory, "workspace");
+  mkdirSync(stateDir);
+  mkdirSync(sharedWorkspaceDir);
+  const script = path.join(directory, "server.ts");
+  const launched = path.join(sharedWorkspaceDir, "fixture-cwd");
+  writeFileSync(script, `
+import { writeFileSync } from "node:fs";
+import { McpServer } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/mcp.js", import.meta.dir))};
+import { StdioServerTransport } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/stdio.js", import.meta.dir))};
+writeFileSync(${JSON.stringify(launched)}, process.cwd());
+const server = new McpServer({ name: "fixture", version: "1" });
+server.registerTool("read_fixture", {}, () => ({ content: [{ type: "text", text: "fixture" }] }));
+await server.connect(new StdioServerTransport());
+`);
+  const runtime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+    homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+    mcp: { servers: () => ({ revision: "fixture", secrets: [], servers: {
+      local: { disabled: false, transport: { type: "stdio", command: process.execPath, args: [script] } },
+    } }) },
+  });
+  try {
+    expect(runtime.mcpStatus()).toMatchObject([{ name: "local", status: "not-connected", toolCount: 0 }]);
+    expect(existsSync(launched)).toBe(false);
+    expect(await runtime.mcpControl({ action: "connect", server: "local" })).toMatchObject({
+      servers: [{ name: "local", status: "connected", toolCount: 1 }], result: {},
+    });
+    expect(readFileSync(launched, "utf8")).toBe(sharedWorkspaceDir);
+  } finally {
+    await runtime.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("runtime close drains Services MCP control preparation and refuses later controls", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-preparation-"));
+  const stateDir = path.join(directory, "state");
+  const preparationStarted = Promise.withResolvers<void>();
+  const releasePreparation = Promise.withResolvers<void>();
+  const servers = () => ({ revision: "fixture", secrets: [], servers: {} });
+  let preparations = 0;
+  let runtime: BotRuntime | undefined;
+  try {
+    mkdirSync(stateDir);
+    runtime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+      homeDir: directory, dataDir: directory, sharedWorkspaceDir: directory, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+      mcp: { servers, async prepareServers() {
+        preparations++;
+        preparationStarted.resolve();
+        await releasePreparation.promise;
+        return servers();
+      } },
+    });
+    const control = runtime.mcpControl({ action: "connect", server: "local" });
+    await preparationStarted.promise;
+    let closed = false;
+    const closing = runtime.close().then(() => { closed = true; });
+    const refused = runtime.mcpControl({ action: "auth-start", server: "local", authorizationId: "closing" });
+    const duringClose = await Promise.race([refused, new Promise<string>((resolve) => setImmediate(() => resolve("pending")))]);
+    expect(closed).toBe(false);
+    expect(duringClose).toEqual({ servers: [], result: { error: "authorization_failed" } });
+    releasePreparation.resolve();
+    await Promise.all([closing, control]);
+    expect(await runtime.mcpControl({ action: "connect", server: "local" }))
+      .toEqual({ servers: [], result: { error: "connect_failed" } });
+    expect(preparations).toBe(1);
+  } finally {
+    releasePreparation.resolve();
+    await runtime?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("runtime signs in a pre-registered MCP connection using current settings for its name", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-oauth-"));
+  const stateDir = path.join(directory, "state");
+  const sharedWorkspaceDir = path.join(directory, "workspace");
+  const registeredClient = { clientId: "pre-registered-fixture", redirectUri: "" };
+  const fixture = await startOAuthMcpServer({ preRegisteredClient: registeredClient });
+  let runtime: BotRuntime | undefined;
+  const serve = spyOn(Bun, "serve");
+  try {
+    mkdirSync(stateDir);
+    mkdirSync(sharedWorkspaceDir);
+    const store = new NativeMcpStore(sharedWorkspaceDir, path.join(directory, "private"));
+    const config = path.join(sharedWorkspaceDir, ".mcp.json");
+    const plain = { url: fixture.url };
+    writeFileSync(config, JSON.stringify({ mcpServers: { work: plain, alias: plain } }));
+    const beforeOAuth = store.effectiveServers();
+    const completed = Promise.withResolvers<{ server: string; status: string }>();
+    runtime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+      homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+      mcp: { servers: () => store.effectiveServers(), prepareServers: async () => beforeOAuth },
+      mcpOAuth: { onAuthorization: (outcome) => { if (outcome.server === "work") completed.resolve(outcome); } },
+    });
+
+    const scope = "fixture.work.read";
+    let authorizationUrl: string | undefined;
+    let port: number | undefined;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(null) });
+      try {
+        port = reservation.port!;
+        registeredClient.redirectUri = `http://localhost:${port}/callback`;
+        writeFileSync(config, JSON.stringify({ mcpServers: { alias: plain, work: { ...plain, oauth: {
+          clientId: registeredClient.clientId, redirectUri: registeredClient.redirectUri,
+          authServerMetadataUrl: `${fixture.origin}/oauth-metadata`, scope,
+        } } } }));
+      } finally {
+        await reservation.stop(true);
+      }
+      serve.mockClear();
+      const { result } = await runtime.mcpControl({ action: "auth-start", server: "work", authorizationId: "work-sign-in" });
+      if (typeof result?.authorizationUrl === "string") authorizationUrl = result.authorizationUrl;
+      const portTaken = serve.mock.results.some(({ type, value }) => type === "throw" && (value as NodeJS.ErrnoException).code === "EADDRINUSE");
+      if (!portTaken) break;
+    }
+    if (!authorizationUrl) throw new Error("Expected a browser sign-in for the registered MCP client.");
+    expect(serve.mock.calls.map(([options]) => ({ hostname: options.hostname, port: options.port })))
+      .toEqual([{ hostname: "127.0.0.1", port }]);
+
+    const fetchStatus = (url: string | URL, redirect: RequestRedirect) => fetch(url, { redirect }).then(
+      (response) => response.status,
+      () => { throw new Error("OAuth fixture request failed."); },
+    );
+    const wrongHost = new URL(authorizationUrl);
+    wrongHost.searchParams.set("redirect_uri", `http://127.0.0.1:${port}/callback`);
+    expect(await fetchStatus(wrongHost, "manual")).toBe(400);
+    expect(await fetchStatus(authorizationUrl, "follow")).toBe(200);
+    expect(await completed.promise).toMatchObject({ server: "work", status: "completed" });
+    expect(fixture.authorizationRequests.at(-1)).toEqual({ clientId: registeredClient.clientId, redirectUri: registeredClient.redirectUri, scope });
+    expect(fixture.counts).toMatchObject({ configuredMetadata: 2, register: 0, token: 1 });
+    expect(runtime.mcpStatus()).toContainEqual(expect.objectContaining({ name: "work", status: "connected", toolCount: 1 }));
+
+    const unconfigured = await runtime.mcpControl({ action: "auth-start", server: "alias", authorizationId: "alias-sign-in" });
+    expect(unconfigured.result?.error).toBe("authorization_failed");
+    expect(fixture.counts.register).toBe(1);
+  } finally {
+    serve.mockRestore();
+    try { await runtime?.close(); }
+    finally {
+      await fixture.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 

@@ -12,6 +12,7 @@ export async function startOAuthMcpServer({
   issueAccessToken = () => crypto.randomUUID(),
   beforeTokenResponse,
   challengeScope,
+  preRegisteredClient,
 }: {
   tokenTtlSeconds?: number;
   denyAuthorization?: boolean;
@@ -22,13 +23,16 @@ export async function startOAuthMcpServer({
   issueAccessToken?: () => string;
   beforeTokenResponse?: (grant: "authorization_code" | "refresh_token") => Promise<void>;
   challengeScope?: string;
+  preRegisteredClient?: { clientId: string; redirectUri: string };
 } = {}) {
-  const counts = { authorize: 0, token: 0, toolCalls: 0, unauthorized: 0, refresh: 0, oauthRequests: 0 };
+  const counts = { authorize: 0, token: 0, toolCalls: 0, unauthorized: 0, refresh: 0, oauthRequests: 0, register: 0, configuredMetadata: 0 };
   const observedAuthorization = new Set<string | null>();
+  const authorizationRequests: { clientId: string; redirectUri: string; scope: string | null }[] = [];
+  const registeredClientNames: (string | undefined)[] = [];
   const clients = new Map<string, string[]>();
   const codes = new Map<string, { clientId: string; redirectUri: string; challenge: string }>();
   const refreshTokens = new Map<string, string>();
-  let accessToken: string | undefined;
+  const accessTokens = new Map<string, string>();
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -40,7 +44,9 @@ export async function startOAuthMcpServer({
         case "GET /.well-known/oauth-protected-resource":
         case "GET /.well-known/oauth-protected-resource/mcp":
           return Response.json({ resource: `${origin}/mcp`, authorization_servers: [origin] });
+        case "GET /oauth-metadata":
         case "GET /.well-known/oauth-authorization-server":
+          if (pathname === "/oauth-metadata") counts.configuredMetadata++;
           return Response.json({
             issuer: origin,
             authorization_endpoint: `${origin}/authorize`,
@@ -53,12 +59,15 @@ export async function startOAuthMcpServer({
             authorization_response_iss_parameter_supported: true,
           });
         case "POST /register": {
-          const { redirect_uris: redirects } = await request.json() as { redirect_uris?: string[] };
+          counts.register++;
+          if (preRegisteredClient) return Response.json({ error: "invalid_client_metadata" }, { status: 400 });
+          const { redirect_uris: redirects, client_name: clientName } = await request.json() as { redirect_uris?: string[]; client_name?: string };
           if (!Array.isArray(redirects) || !redirects.length || !redirects.every((uri) => loopbackRedirect(uri))) {
             return Response.json({ error: "invalid_redirect_uri" }, { status: 400 });
           }
           const clientId = crypto.randomUUID();
           clients.set(clientId, redirects);
+          registeredClientNames.push(clientName);
           return Response.json({
             client_id: clientId, redirect_uris: redirects, token_endpoint_auth_method: "none",
           }, { status: 201 });
@@ -70,7 +79,11 @@ export async function startOAuthMcpServer({
           const state = searchParams.get("state");
           const clientId = searchParams.get("client_id") ?? "";
           const challenge = searchParams.get("code_challenge");
-          if (!redirect || !state || !challenge || !clients.get(clientId)?.includes(redirectUri) ||
+          authorizationRequests.push({ clientId, redirectUri, scope: searchParams.get("scope") });
+          const registered = preRegisteredClient
+            ? preRegisteredClient.clientId === clientId && preRegisteredClient.redirectUri === redirectUri
+            : clients.get(clientId)?.includes(redirectUri);
+          if (!redirect || !state || !challenge || !registered ||
             searchParams.get("response_type") !== "code" || searchParams.get("code_challenge_method") !== "S256") {
             return new Response(null, { status: 400 });
           }
@@ -116,7 +129,8 @@ export async function startOAuthMcpServer({
               return Response.json({ error: "unsupported_grant_type" }, { status: 400 });
           }
           await beforeTokenResponse?.(grant);
-          accessToken = issueAccessToken();
+          const accessToken = issueAccessToken();
+          accessTokens.set(clientId, accessToken);
           const refreshToken = crypto.randomUUID();
           refreshTokens.set(refreshToken, clientId);
           return Response.json({
@@ -127,7 +141,7 @@ export async function startOAuthMcpServer({
       if (pathname !== "/mcp") return new Response(null, { status: 404 });
       const authorization = request.headers.get("authorization");
       observedAuthorization.add(authorization);
-      const usesOAuth = Boolean(accessToken && authorization === `Bearer ${accessToken}`);
+      const usesOAuth = [...accessTokens.values()].some((token) => authorization === `Bearer ${token}`);
       if (usesOAuth) counts.oauthRequests++;
       if (fixedAuthorization === undefined ? !usesOAuth : authorization !== fixedAuthorization) {
         counts.unauthorized++;
@@ -164,9 +178,11 @@ export async function startOAuthMcpServer({
     origin: server.url.origin,
     counts,
     observedAuthorization,
+    authorizationRequests,
+    registeredClientNames,
     setChallengeScope(scope: string) { challengeScope = scope; },
     deny() { denyAuthorization = true; },
-    rotateAccessToken() { accessToken = undefined; },
+    rotateAccessToken() { accessTokens.clear(); },
     async close() { await server.stop(true); },
   };
 }

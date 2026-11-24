@@ -7,6 +7,8 @@ import { PLUGIN_PROVIDERS } from "../../packages/protocol/src/pluginProviders.ts
 import type { InstalledSkillDto, PluginAccountDto, PluginStateDto, SkillCommandDto } from "../../packages/protocol/src/plugins.ts";
 import type { EventEnvelope } from "../../packages/protocol/src/events.ts";
 import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
+import { deleteSetting } from "../../apps/daemon/src/persistence/settings.ts";
+import { startOAuthMcpServer } from "../../apps/daemon/src/modules/runtime/testing/oauthMcpServer.ts";
 import { api, apiStatus, authedFetch, startDaemon, type Harness } from "./helpers/harness.ts";
 
 const publisher = "https://service-publisher.invalid";
@@ -44,7 +46,7 @@ async function companion(source: string, name: string, increment: number): Promi
   await writeFile(path.join(source, "scripts", "calculate.js"), `const { amount } = JSON.parse(process.argv[2]);\nconsole.log(JSON.stringify({ result: amount + ${increment} }));\n`);
 }
 
-async function startServices() {
+async function startServices({ intercomMcpUrl }: { intercomMcpUrl?: string } = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), "omarchy-bot-services-"));
   const root = path.join(home, ".omarchy-bot", "workspace", ".service-fixtures");
   const sources = {
@@ -62,6 +64,9 @@ async function startServices() {
     if (service.id === "gmail") return { ...service, scopes: [gmailScope], mcpUrl: `${publisher}/mcp/gmail`, skillSources: [sources.gmail] };
     return { ...service, mcpUrl: `${publisher}/mcp/${service.id}` };
   });
+  if (intercomMcpUrl !== undefined) {
+    PLUGIN_PROVIDERS.intercom.services = PLUGIN_PROVIDERS.intercom.services.map((service) => ({ ...service, mcpUrl: intercomMcpUrl }));
+  }
 
   process.env.PLUGIN_CLOUD_URL = publisher;
   process.env.OAUTH_STATE_SECRET = "service-publisher-secret-at-least-32b";
@@ -276,20 +281,36 @@ test("an abandoned publisher reconnect expires without a callback and refuses la
 }, 10_000);
 
 test.each(["provider", "standalone"])("native %s consent completes over the event stream without checking by hand", async (kind) => {
-  const { h } = await startServices();
-  await writeFile(path.join(h.home, "conformance", "pi-fake-pi-1.json"), JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: { authorizationUrl: "https://native.example/consent", notify: "completed" } }));
-  const connection = kind === "standalone" ? await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "custom-consent", enabled: true, transport: { type: "http", url: "https://native.example/mcp" } }) : undefined;
-  const receive = await authorizationEvent(h, "plugin.authorization_completed");
-  expect((await apiStatus(h, "POST", connection ? `/api/plugins/mcp/${connection.id}/authorize` : "/api/plugins/authorize", connection ? {} : { providerId: "intercom", serviceId: "intercom" })).status).toBe(200);
-  const event = await receive();
-  const state = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  const account = state.accounts.find(entry => entry.providerId === "intercom");
-  expect(event).toMatchObject({ aggregateId: account?.id ?? connection!.id, payload: { mcpId: account?.nativeConnectionId ?? connection!.id, status: "completed", ...(account ? { providerId: "intercom", accountId: account.id } : {}) } });
-  expect(account?.status ?? state.mcp.find(entry => entry.id === connection!.id)?.status).toBe("connected");
+  const originalIntercom = PLUGIN_PROVIDERS.intercom.services;
+  const fixture = process.env.OMARCHY_TEST_DURABLE === "1" ? await startOAuthMcpServer() : undefined;
+  try {
+    const { h } = await startServices(fixture ? { intercomMcpUrl: fixture.url } : undefined);
+    if (!fixture) await writeFile(path.join(h.home, "conformance", "pi-fake-pi-1.json"), JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: { authorizationUrl: "https://native.example/consent", notify: "completed" } }));
+    const connection = kind === "standalone" ? await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "custom-consent", enabled: true, transport: { type: "http", url: fixture?.url ?? "https://native.example/mcp" } }) : undefined;
+    const receive = await authorizationEvent(h, "plugin.authorization_completed");
+    const authorization = await apiStatus(h, "POST", connection ? `/api/plugins/mcp/${connection.id}/authorize` : "/api/plugins/authorize", connection ? {} : { providerId: "intercom", serviceId: "intercom" });
+    expect(authorization.status).toBe(200);
+    if (fixture) {
+      const { authorizationUrl, url } = authorization.body as { authorizationUrl?: string; url?: string };
+      const browserUrl = connection ? authorizationUrl : url;
+      expect(browserUrl).toEqual(expect.any(String));
+      expect((await fetch(browserUrl!, { redirect: "follow" })).status).toBe(200);
+    }
+    const event = await receive();
+    const state = await api<PluginStateDto>(h, "GET", "/api/plugins");
+    const account = state.accounts.find(entry => entry.providerId === "intercom");
+    expect(event).toMatchObject({ aggregateId: account?.id ?? connection!.id, payload: { mcpId: account?.nativeConnectionId ?? connection!.id, status: "completed", ...(account ? { providerId: "intercom", accountId: account.id } : {}) } });
+    expect(account?.status ?? state.mcp.find(entry => entry.id === connection!.id)?.status).toBe("connected");
+  } finally {
+    PLUGIN_PROVIDERS.intercom.services = originalIntercom;
+    await fixture?.close();
+  }
 }, 10_000);
 
 test.each(["provider", "standalone"])("native %s failure and abandoned consent expire with one outcome and allow retry", async (kind) => {
   const { h } = await startServices();
+  // This case exercises fake-worker authorization outcomes through the worker protocol.
+  deleteSetting(h.svc.db, "runtime");
   const control = path.join(h.home, "conformance", "pi-fake-pi-1.json");
   const configure = (authorization: Record<string, unknown>) => writeFile(control, JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: authorization }));
   const connection = kind === "standalone" ? await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "custom-consent", enabled: true, transport: { type: "http", url: "https://native.example/mcp" } }) : undefined;
@@ -394,6 +415,8 @@ await import(${JSON.stringify(path.resolve("workers/pi/src/worker.ts"))});
       return originalFetch(input, init);
     }, { preconnect: originalFetch.preconnect });
     const h = harness = await startDaemon(home, { workersDir: path.join(home, "workers"), waitForAgentReady: false });
+    // This case exercises the worker's callback listener and subprocess clock.
+    deleteSetting(h.svc.db, "runtime");
     await apiStatus(h, "PUT", "/api/plugins/settings", { cloudUrl: "https://native-catalog.invalid" });
     const connection = await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "real-consent", enabled: true, transport: { type: "http", url: `http://127.0.0.1:${provider.port}/mcp` } });
     const plugin = path.join(home, "unrelated-plugin");
@@ -470,6 +493,8 @@ await import(${JSON.stringify(path.resolve("workers/pi/src/worker.ts"))});
 
 test.each(["authenticated", "pending", "error"])("native authorization without a browser URL preserves %s state and retry", async (outcome) => {
   const { h } = await startServices();
+  // This case exercises fake-worker authorization results through the worker protocol.
+  deleteSetting(h.svc.db, "runtime");
   const control = path.join(h.home, "conformance", "pi-fake-pi-1.json");
   await writeFile(control, JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: outcome === "error" ? { error: "Provider consent failed" } : { authenticated: outcome === "authenticated" } }));
   const response = await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "intercom", serviceId: "intercom" });
