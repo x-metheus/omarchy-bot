@@ -66,8 +66,8 @@ export class ApprovalStore {
   listPending(filter: { threadId?: string } = {}): ApprovalDto[] {
     const now = new Date(this.now()).toISOString();
     const rows = filter.threadId === undefined
-      ? this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE status = 'pending' AND expires_at > ? ORDER BY created_at, id").all(now)
-      : this.db.query<ApprovalRow, [string, string]>("SELECT * FROM approvals WHERE status = 'pending' AND expires_at > ? AND thread_id = ? ORDER BY created_at, id").all(now, filter.threadId);
+      ? this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE status = 'pending' AND expires_at > ? ORDER BY created_at, rowid").all(now)
+      : this.db.query<ApprovalRow, [string, string]>("SELECT * FROM approvals WHERE status = 'pending' AND expires_at > ? AND thread_id = ? ORDER BY created_at, rowid").all(now, filter.threadId);
     return rows.map(toDto);
   }
 
