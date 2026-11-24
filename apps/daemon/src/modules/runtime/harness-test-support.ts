@@ -340,16 +340,23 @@ export function installDurableCrashProvider(): () => void {
         return conversation;
       };
     }
-    if (process.env.OMARCHY_TEST_PEER_MAIL_HOLD) {
+    const peerMailHold = process.env.OMARCHY_TEST_PEER_MAIL_HOLD;
+    if (peerMailHold) {
+      const competingInput = Promise.withResolvers<void>();
       const holdPeerMailBookkeeping = (conversation: Conversation) => {
         conversation.submit = new Proxy(conversation.submit, {
           async apply(target, thisArg, args: [SubmissionDraft | Tx, unknown]) {
             const draft = args[0];
-            const submission: unknown = await Reflect.apply(target, thisArg, args);
-            // Hold the Service between the durable commit and its bookkeeping.
-            if ("type" in draft && draft.type === "input" && draft.entry?.kind === "write") {
-              await new Promise<never>(() => {});
+            const input = "type" in draft && draft.type === "input" ? draft : undefined;
+            const peerMail = input?.entry?.kind === "write";
+            if (peerMail && peerMailHold === "queued") {
+              console.log(JSON.stringify({ event: "before-peer-mail-input" }));
+              await competingInput.promise;
             }
+            const submission: unknown = await Reflect.apply(target, thisArg, args);
+            if (input?.content === "Hold the target reply.") competingInput.resolve();
+            // Hold the Service between the durable commit and its bookkeeping.
+            if (peerMail) await new Promise<never>(() => {});
             return submission;
           },
         });

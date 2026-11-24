@@ -300,19 +300,23 @@ test.each([
 }, 15_000);
 
 test.each([
-  ["replies once after a competing user steer on a busy target Thread", false],
-  ["can be aborted after queueing on a busy target Thread", true],
+  ["allows a user steer while mail admission waits and replies once after the user run", false],
+  ["can be aborted after queueing behind a user run that starts after configuration", true],
 ] as const)("peer mail %s", async (_name, abortMail) => {
   let targetBotId = "";
   const userStarted = Promise.withResolvers<void>();
   const releaseUser = Promise.withResolvers<void>();
-  const initialInstructions = "Original recipient instructions.";
+  const updatedInstructions = "Updated recipient instructions.";
+  const releaseMailSubmission = Promise.withResolvers<void>();
   const mailRequest = Promise.withResolvers<{ content: unknown; model: string; instructions: string }>();
   const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model" }, { id: "updated-model" }] });
   fake.setResponses([
     () => fauxAssistantMessage(fauxToolCall("send_bot_message", { targetBotId, text: mail.text }, { id: "peer-mail" }), { stopReason: "toolUse" }),
     fauxAssistantMessage("Mail queued."),
-    async () => {
+    fauxAssistantMessage("Initial reply."),
+    async ({ messages }, _options, _state, model) => {
+      expect(model.id).toBe("updated-model");
+      expect(getCurrentSystemPrompt(messages)).toContain(updatedInstructions);
       userStarted.resolve();
       await releaseUser.promise;
       if (abortMail) return fauxAssistantMessage("User reply.");
@@ -321,8 +325,8 @@ test.each([
     ({ messages }, _options, _state, model) => {
       const user = messages.findLast((message) => message.role === "user");
       expect(user?.content).toBe("A competing user message");
-      expect(model.id).toBe("fake-model");
-      expect(getCurrentSystemPrompt(messages)).toContain(initialInstructions);
+      expect(model.id).toBe("updated-model");
+      expect(getCurrentSystemPrompt(messages)).toContain(updatedInstructions);
       return fauxAssistantMessage("User reply.");
     },
     ({ messages }, _options, _state, model) => {
@@ -334,20 +338,55 @@ test.each([
   await withMailDaemon(fake.provider, async (h, harness) => {
     try {
       const source = await makeBot(h, "Sender");
-      targetBotId = await makeBot(h, "Recipient", initialInstructions);
-      h.svc.agents.markOffline("pi", "Hold mail while a user replies in its Thread");
+      targetBotId = await makeBot(h, "Recipient", "Original recipient instructions.");
+      h.svc.agents.markOffline("pi", "Hold mail while setting up its Thread");
       const sent = await sendToBot(h, source, "Send mail");
       expect((await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).status).toBe("completed");
       const initial = h.svc.db.query<{ id: string; thread_id: string; state: string }, []>("SELECT id, thread_id, state FROM bot_mail_deliveries").get()!;
       expect(initial.state).toBe("queued");
       writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "peer-mail-test.txt"), "A tool boundary for the user steer.");
-      const user = await sendToThread(h, initial.thread_id, "A user message");
-      await userStarted.promise;
+      const seeded = await sendToThread(h, initial.thread_id, "Configure the conversation.");
+      expect(await h.svc.turns.waitForTerminal(seeded.turnId, 5_000)).toMatchObject({ status: "completed" });
       const binding = h.svc.db.query<{ conversation_id: ConversationId }, [string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?").get(initial.thread_id)!;
       const conversation = (await harness.conversation(binding.conversation_id, BACKGROUND_CONTEXT))!;
-      await api(h, "PATCH", `/api/bots/${targetBotId}`, { instructions: "Updated recipient instructions." });
+      await api(h, "PATCH", `/api/bots/${targetBotId}`, { instructions: updatedInstructions });
       h.svc.db.query("UPDATE bots SET model = ? WHERE id = ?").run("fake/updated-model", targetBotId);
+      const competingUser = Promise.withResolvers<Awaited<ReturnType<typeof sendToThread>>>();
+      void competingUser.promise.catch(() => {});
+      const open = harness.conversation.bind(harness);
+      harness.conversation = async (...args) => {
+        const opened = await open(...args);
+        if (!opened || opened.id !== conversation.id) return opened;
+        opened.submit = new Proxy(opened.submit, {
+          async apply(submit, receiver, args) {
+            const [draft] = args;
+            if (draft.type === "input" && draft.entry?.kind === "write") {
+              try {
+                const agent = await opened.agent(BACKGROUND_CONTEXT);
+                expect(agent.model?.modelId).toBe("updated-model");
+                expect(agent.instructions).toContain(updatedInstructions);
+                const user = await h.svc.turns.send(targetBotId, initial.thread_id, "A user message", [], undefined, { whenBusy: "followUp" });
+                await userStarted.promise;
+                competingUser.resolve(user);
+                await releaseMailSubmission.promise;
+              } catch (error) {
+                competingUser.reject(error);
+                throw error;
+              }
+            }
+            return Reflect.apply(submit, receiver, args);
+          },
+        });
+        return opened;
+      };
       await h.svc.agents.recheck("pi");
+      const user = await competingUser.promise;
+      if (!abortMail) {
+        const bound = withAbortSignal(AbortSignal.timeout(1_000), BACKGROUND_CONTEXT);
+        const competing = await awaitWithContext(sendToThread(h, initial.thread_id, "A competing user message"), bound);
+        expect(competing).toMatchObject({ action: "steered", turnId: user.turnId });
+      }
+      releaseMailSubmission.resolve();
       const delivered = await waitForPeerMailDelivery(h);
       expect(delivered.id).toBe(initial.id);
       const submission = h.svc.db.query<{ type: string; status: string }, [string]>(`
@@ -365,43 +404,147 @@ test.each([
         expect(await h.svc.turns.waitForTerminal(user.turnId, 5_000)).toMatchObject({ status: "completed" });
         const { items } = await conversation.entries({ order: "ascending" }, 100, undefined, BACKGROUND_CONTEXT);
         expect(items.filter(({ kind }) => kind === "write")).toEqual([]);
-        expect(items.filter(AssistantEntry.is)).toHaveLength(1);
-        expect(fake.state.callCount).toBe(3);
+        expect(items.filter(AssistantEntry.is)).toHaveLength(2);
+        expect(fake.state.callCount).toBe(4);
         return;
       }
-      const competing = await sendToThread(h, initial.thread_id, "A competing user message");
-      expect(competing).toMatchObject({ action: "steered", turnId: user.turnId });
       releaseUser.resolve();
       for (const turnId of [user.turnId, delivered.target_turn_id]) {
         expect(await h.svc.turns.waitForTerminal(turnId, 5_000)).toMatchObject({ status: "completed" });
       }
       expect(await mailRequest.promise).toEqual({
         content: `Message from Bot Sender (${source}): ${mail.text}`,
-        model: "fake-model",
-        instructions: expect.stringContaining(initialInstructions),
+        model: "updated-model",
+        instructions: expect.stringContaining(updatedInstructions),
       });
       const { items } = await conversation.entries({ order: "ascending" }, 100, undefined, BACKGROUND_CONTEXT);
       expect(items.filter(({ kind }) => kind === "write")).toHaveLength(1);
       expect(submission.all(delivered.target_turn_id)).toEqual([{ type: "input", status: "done" }]);
       expect(h.svc.db.query("SELECT id FROM turns WHERE thread_id = ? ORDER BY rowid").all(initial.thread_id)).toEqual([
-        { id: user.turnId }, { id: delivered.target_turn_id },
+        { id: seeded.turnId }, { id: delivered.target_turn_id }, { id: user.turnId },
       ]);
       expect((await messages(h, initial.thread_id)).map(({ kind, text, peerMail }) => ({ kind, text, deliveryId: peerMail?.deliveryId }))).toEqual([
         { kind: "text", text: mail.text, deliveryId: initial.id },
+        { kind: "text", text: "Configure the conversation.", deliveryId: undefined },
+        { kind: "response", text: "Initial reply.", deliveryId: undefined },
         { kind: "text", text: "A user message", deliveryId: undefined },
         { kind: "text", text: "A competing user message", deliveryId: undefined },
         { kind: "response", text: "User reply.", deliveryId: undefined },
         { kind: "response", text: "Mail reply.", deliveryId: undefined },
       ]);
       expect(h.svc.db.query("SELECT turn_id FROM messages WHERE thread_id = ? AND kind = 'response' ORDER BY seq").all(initial.thread_id)).toEqual([
-        { turn_id: user.turnId }, { turn_id: delivered.target_turn_id },
+        { turn_id: seeded.turnId }, { turn_id: user.turnId }, { turn_id: delivered.target_turn_id },
       ]);
-      expect(fake.state.callCount).toBe(5);
-    } finally { releaseUser.resolve(); }
+      expect(fake.state.callCount).toBe(6);
+    } finally {
+      releaseMailSubmission.resolve();
+      releaseUser.resolve();
+    }
   });
 }, 15_000);
 
-test("peer mail resolves an existing conversation's persisted custom model outside the provider catalog", async () => {
+test("peer mail preserves an active user reply's configuration and refreshes its own model prompt with new instructions and Skills", async () => {
+  let targetBotId = "";
+  const originalInstructions = "Use the original release checklist.";
+  const updatedInstructions = "Use the updated release evidence.";
+  const skill = { name: "release-review", description: "Review release evidence from the workspace Skill" };
+  const relativePath = `.agents/skills/${skill.name}/SKILL.md`;
+  const userStarted = Promise.withResolvers<void>();
+  const releaseUser = Promise.withResolvers<void>();
+  const configurationAttempted = Promise.withResolvers<void>();
+  const requests: { model: string; prompt: string }[] = [];
+  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model" }, { id: "updated-model" }] });
+  fake.setResponses([
+    () => fauxAssistantMessage(fauxToolCall("send_bot_message", { targetBotId, text: mail.text }), { stopReason: "toolUse" }),
+    fauxAssistantMessage("Mail queued."),
+    fauxAssistantMessage("Initial reply."),
+    async ({ messages }, _options, _state, model) => {
+      requests.push({ model: model.id, prompt: getCurrentSystemPrompt(messages) });
+      userStarted.resolve();
+      await releaseUser.promise;
+      return fauxAssistantMessage(fauxToolCall("read", { path: "release.txt" }), { stopReason: "toolUse" });
+    },
+    ({ messages }, _options, _state, model) => {
+      requests.push({ model: model.id, prompt: getCurrentSystemPrompt(messages) });
+      return fauxAssistantMessage("User reply.");
+    },
+    ({ messages }, _options, _state, model) => {
+      requests.push({ model: model.id, prompt: getCurrentSystemPrompt(messages) });
+      return fauxAssistantMessage("Mail reply.");
+    },
+  ]);
+  await withMailDaemon(fake.provider, async (h, harness) => {
+    const source = await makeBot(h, "Sender");
+    targetBotId = await makeBot(h, "Recipient", originalInstructions);
+    h.svc.agents.markOffline("pi", "Hold mail while setting up the existing conversation");
+    const sent = await sendToBot(h, source, "Send mail");
+    expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
+    const delivery = h.svc.db.query<{ thread_id: string; state: string }, []>("SELECT thread_id, state FROM bot_mail_deliveries").get()!;
+    expect(delivery.state).toBe("queued");
+    const seeded = await sendToThread(h, delivery.thread_id, "Review the release checklist.");
+    expect(await h.svc.turns.waitForTerminal(seeded.turnId, 5_000)).toMatchObject({ status: "completed" });
+    const binding = h.svc.db.query<{ conversation_id: ConversationId }, [string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?");
+    const before = binding.get(delivery.thread_id)!;
+    const open = harness.conversation.bind(harness);
+    const conversation = (await open(before.conversation_id, BACKGROUND_CONTEXT))!;
+    writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "release.txt"), "Release evidence.");
+
+    let userTurnId: string | undefined;
+    harness.conversation = async (...args) => {
+      const opened = await open(...args);
+      if (!opened || opened.id !== conversation.id) return opened;
+      harness.conversation = open;
+      const waitForIdle = opened.waitForIdle.bind(opened);
+      opened.waitForIdle = async (context) => {
+        await waitForIdle(context);
+        opened.waitForIdle = waitForIdle;
+        // Start a real user run after mail observes idle and before it can commit configuration.
+        const user = await h.svc.turns.send(targetBotId, delivery.thread_id, "Review the release evidence.", [], undefined, { whenBusy: "followUp" });
+        userTurnId = user.turnId;
+        await userStarted.promise;
+        const skillPath = path.join(h.svc.cfg.sharedWorkspaceDir, relativePath);
+        mkdirSync(path.dirname(skillPath), { recursive: true });
+        writeFileSync(skillPath, `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\nReview the release evidence.\n`);
+        await api(h, "PATCH", `/api/bots/${targetBotId}`, { instructions: updatedInstructions });
+        h.svc.db.query("UPDATE bots SET model = ? WHERE id = ?").run("fake/updated-model", targetBotId);
+      };
+      const commit = opened.commit.bind(opened);
+      opened.commit = (change, context, options) => {
+        opened.commit = commit;
+        const result = commit(change, context, options);
+        void result.then(() => configurationAttempted.resolve(), configurationAttempted.reject);
+        return result;
+      };
+      return opened;
+    };
+    try {
+      await h.svc.agents.recheck("pi");
+      const bound = withAbortSignal(AbortSignal.timeout(5_000), BACKGROUND_CONTEXT);
+      await awaitWithContext(configurationAttempted.promise, bound);
+      releaseUser.resolve();
+      expect(await h.svc.turns.waitForTerminal(userTurnId!, 5_000)).toMatchObject({ status: "completed" });
+      const delivered = await waitForPeerMailDelivery(h);
+      expect(delivered.thread_id).toBe(delivery.thread_id);
+      expect(await h.svc.turns.waitForTerminal(delivered.target_turn_id, 5_000)).toMatchObject({ status: "completed" });
+      expect(binding.get(delivered.thread_id)).toEqual(before);
+      expect(requests.map(({ model }) => model)).toEqual(["fake-model", "fake-model", "updated-model"]);
+      for (const { prompt } of requests.slice(0, 2)) {
+        expect(prompt).toContain(originalInstructions);
+        expect(prompt).not.toContain(updatedInstructions);
+        expect(prompt).not.toContain(skill.name);
+      }
+      expect(requests[2]?.prompt).toContain(`${skill.name}: ${skill.description} (${relativePath})`);
+      expect(requests[2]?.prompt).toContain(updatedInstructions);
+      expect(requests[2]?.prompt).not.toContain(originalInstructions);
+      expect(h.svc.db.query("SELECT text FROM messages WHERE turn_id = ? AND kind = 'response'").all(delivered.target_turn_id)).toEqual([{ text: "Mail reply." }]);
+    } finally {
+      releaseUser.resolve();
+      harness.conversation = open;
+    }
+  });
+}, 15_000);
+
+test("peer mail resolves the current Bot's custom model outside the provider catalog on an existing conversation", async () => {
   let targetBotId = "";
   const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model" }] });
   fake.setResponses([
@@ -409,7 +552,7 @@ test("peer mail resolves an existing conversation's persisted custom model outsi
     fauxAssistantMessage("Mail queued."),
   ]);
   const requested = Promise.withResolvers<string>();
-  const reply = "Mail answered using its persisted model.";
+  const reply = "Mail answered using its current custom model.";
   const endpoint = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const body = await request.json() as { model: string };
     requested.resolve(body.model);
@@ -426,7 +569,8 @@ test("peer mail resolves an existing conversation's persisted custom model outsi
       const { thread_id: threadId } = h.svc.db.query<{ thread_id: string }, []>("SELECT thread_id FROM bot_mail_deliveries").get()!;
       const model = { provider: "custom", modelId: "uncatalogued-model" };
       new CredentialStore(h.svc.cfg.stateDir).add({ id: model.provider, name: "Custom", protocol: "openai-compatible", baseUrl: endpoint.url.href, apiKey: "test-key" });
-      const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, BACKGROUND_CONTEXT);
+      h.svc.db.query("UPDATE bots SET model = ? WHERE id = ?").run(`${model.provider}/${model.modelId}`, targetBotId);
+      const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "fake", modelId: "fake-model" } } }, BACKGROUND_CONTEXT);
       h.svc.db.query("INSERT INTO pi_thread_conversations (thread_id, bot_id, conversation_id, created_at) VALUES (?, ?, ?, ?)")
         .run(threadId, targetBotId, conversation.id, new Date().toISOString());
       await h.svc.agents.recheck("pi");
@@ -472,7 +616,7 @@ test.each(["final answer", "failed predecessor", "reply past the admission deadl
       return fauxAssistantMessage("Mail reply.");
     },
   ]);
-  await withMailDaemon(fake.provider, async (h) => {
+  await withMailDaemon(fake.provider, async (h, harness) => {
     const replies = (threadId: string) => h.svc.db.query(
       "SELECT text, turn_id FROM messages WHERE thread_id = ? AND kind = 'response' AND block_state = 'completed' ORDER BY seq",
     ).all(threadId);
@@ -495,10 +639,26 @@ test.each(["final answer", "failed predecessor", "reply past the admission deadl
         // Let the steer begin its own run before queueing mail so each run has its own reply.
         await steerStarted.promise;
       }
+      const waitingForIdle = Promise.withResolvers<void>();
+      const open = harness.conversation.bind(harness);
+      harness.conversation = async (...args) => {
+        const conversation = await open(...args);
+        if (conversation) {
+          const waitForIdle = conversation.waitForIdle.bind(conversation);
+          conversation.waitForIdle = (context) => {
+            waitingForIdle.resolve();
+            return waitForIdle(context);
+          };
+        }
+        return conversation;
+      };
       await h.svc.agents.recheck("pi");
-      const { target_turn_id: mailTurnId } = await waitForPeerMailDelivery(h);
+      await waitingForIdle.promise;
+      const { target_turn_id: mailTurnId } = await waitForPeerMailDelivery(h, "dispatching");
+      expect(h.svc.db.query("SELECT id FROM pi_submissions WHERE json_extract(record, '$.requestId') = ?").all(mailTurnId)).toEqual([]);
       releaseUser.resolve();
       releaseSteer.resolve();
+      expect(await waitForPeerMailDelivery(h)).toMatchObject({ target_turn_id: mailTurnId });
       const expected = [{ text: boundary === "failed predecessor" ? "Predecessor partial." : "User reply.", turn_id: user.turnId }];
       if (boundary === "reply past the admission deadline") {
         await mailStarted.promise;
@@ -656,6 +816,65 @@ test("aborting peer mail while its announcement writer is held creates no pi sub
     } finally {
       releaseWriter.resolve();
       threads.insertTurnRow = insertTurnRow;
+    }
+  });
+}, 15_000);
+
+test("peer mail admission settles on abort while its configuration commit is queued", async () => {
+  let targetBotId = "";
+  const commitHeld = Promise.withResolvers<void>();
+  const releaseCommit = Promise.withResolvers<void>();
+  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model" }] });
+  fake.setResponses([
+    () => fauxAssistantMessage(fauxToolCall("send_bot_message", { targetBotId, text: mail.text }), { stopReason: "toolUse" }),
+    fauxAssistantMessage("Mail queued."),
+    fauxAssistantMessage("Initial reply."),
+  ]);
+  await withMailDaemon(fake.provider, async (h, harness) => {
+    const source = await makeBot(h, "Sender");
+    targetBotId = await makeBot(h, "Recipient", "Original recipient instructions.");
+    h.svc.agents.markOffline("pi", "Hold mail while setting up the existing conversation");
+    const sent = await sendToBot(h, source, "Send mail");
+    expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
+    const { db } = h.svc;
+    const { thread_id: threadId } = db.query<{ thread_id: string }, []>("SELECT thread_id FROM bot_mail_deliveries WHERE state = 'queued'").get()!;
+    const seeded = await sendToThread(h, threadId, "Configure the conversation.");
+    expect(await h.svc.turns.waitForTerminal(seeded.turnId, 5_000)).toMatchObject({ status: "completed" });
+    const binding = db.query<{ conversation_id: ConversationId }, [string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?").get(threadId)!;
+    await api(h, "PATCH", `/api/bots/${targetBotId}`, { instructions: "Updated recipient instructions." });
+    const open = harness.conversation.bind(harness);
+    harness.conversation = async (...args) => {
+      const opened = await open(...args);
+      if (!opened || opened.id !== binding.conversation_id) return opened;
+      harness.conversation = open;
+      const commit = opened.commit.bind(opened);
+      opened.commit = (change, context, options) => {
+        void harness.commit(async () => {
+          commitHeld.resolve();
+          await releaseCommit.promise;
+        }, BACKGROUND_CONTEXT).catch(commitHeld.reject);
+        return commit(change, context, options);
+      };
+      return opened;
+    };
+    try {
+      await h.svc.agents.recheck("pi");
+      const { target_turn_id: turnId } = await waitForPeerMailDelivery(h, "dispatching");
+      await awaitWithContext(commitHeld.promise, withAbortSignal(AbortSignal.timeout(5_000), BACKGROUND_CONTEXT));
+      const bound = withAbortSignal(AbortSignal.timeout(1_000), BACKGROUND_CONTEXT);
+      await awaitWithContext(h.svc.turns.abortTurn(turnId, "Cancel while the configuration commit is queued"), bound);
+      const failed = await waitForPeerMailDelivery(h, "failed");
+      expect(failed).toMatchObject({ target_turn_id: turnId, failure_reason: "Target Agent could not accept this message." });
+      expect(await h.svc.turns.waitForTerminal(turnId, 1_000)).toMatchObject({ status: "failed", reason: failed.failure_reason });
+      releaseCommit.resolve();
+      await harness.commit(() => {}, BACKGROUND_CONTEXT);
+      expect(db.query("SELECT id FROM pi_submissions WHERE json_extract(record, '$.requestId') = ?").all(turnId)).toEqual([]);
+      const conversation = (await open(binding.conversation_id, BACKGROUND_CONTEXT))!;
+      expect((await conversation.agent(BACKGROUND_CONTEXT)).instructions).toContain("Original recipient instructions.");
+      expect(fake.state.callCount).toBe(3);
+    } finally {
+      releaseCommit.resolve();
+      harness.conversation = open;
     }
   });
 }, 15_000);

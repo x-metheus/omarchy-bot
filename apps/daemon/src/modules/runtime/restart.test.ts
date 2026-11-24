@@ -254,10 +254,10 @@ test.each([
     expect(await terminal(home, sent.turnId)).toMatchObject({ status: "completed" });
     const delivery = query<{ id: string; thread_id: string; state: string }>(home, "SELECT id, thread_id, state FROM bot_mail_deliveries")!;
     expect(delivery.state).toBe("queued");
-    const user = await post<{ turnId: string }>(`/api/threads/${delivery.thread_id}/messages`, { text: "Hold the target reply." });
-    await waitFor(() => query<{ status: string }>(home, "SELECT status FROM pi_submissions WHERE json_extract(record, '$.requestId') = ?", user.turnId)?.status === "placed" ? true : undefined);
     writeFileSync(conformance, originalConformance);
     expect(await post("/api/agents/pi/recheck", {})).toMatchObject({ status: "ready" });
+    await waitFor(() => first.events.includes("before-peer-mail-input") ? true : undefined);
+    const user = await post<{ turnId: string }>(`/api/threads/${delivery.thread_id}/messages`, { text: "Hold the target reply.", whenBusy: "followUp" });
     const queued = await waitFor(() => query<{ id: number; target_turn_id: string }>(home, `
       SELECT s.id, d.target_turn_id FROM bot_mail_deliveries d
       JOIN pi_submissions s ON json_extract(s.record, '$.requestId') = d.target_turn_id
@@ -280,7 +280,7 @@ test.each([
     expect(query<{ submission_id: number }>(home, "SELECT submission_id FROM pi_turn_submissions WHERE turn_id = ?", queued.target_turn_id)).toEqual({ submission_id: queued.id });
     const db = new Database(path.join(home, "db.sqlite"), { readonly: true });
     try {
-      expect(db.query("SELECT id FROM turns WHERE thread_id = ? ORDER BY rowid").all(delivery.thread_id)).toEqual([{ id: user.turnId }, { id: queued.target_turn_id }]);
+      expect(db.query("SELECT id FROM turns WHERE thread_id = ? ORDER BY rowid").all(delivery.thread_id)).toEqual([{ id: queued.target_turn_id }, { id: user.turnId }]);
       expect(db.query(`
         SELECT json_extract(e.record, '$.kind') AS kind, json_extract(e.record, '$.model[0].model') AS model
         FROM pi_entries e JOIN pi_thread_conversations c ON c.conversation_id = e.conversation_id

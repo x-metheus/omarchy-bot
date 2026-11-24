@@ -23,7 +23,7 @@ import { DispatchedCallIds } from "./extensions/model-call.ts";
 import { createPluginsExtension } from "./extensions/plugins.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
-import { AssistantEntry, ConversationIdle, createRegistry, Harness, InboxDoc, type AgentChange, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type LiveState, type SettledSubmissionRecord, type SubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
+import { AssistantEntry, configure, ConversationIdle, createRegistry, Harness, InboxDoc, LiveDoc, type AgentChange, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type LiveState, type SettledSubmissionRecord, type SubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 
@@ -343,6 +343,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         if (recoveryRegistration) await awaitWithContext(recoveryRegistration, waitingContext);
         const currentSettings = (): AgentChange => {
           const model = resolveModelForBot(input.db, credentials, input.botId);
+          rememberModelSelection(model.provider, model.id);
           const bot = input.bots.getDto(input.botId);
           const instructions = buildSystemPrompt({
             botName: bot.name,
@@ -355,20 +356,32 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           return { cwd: paths.sharedWorkspaceDir, model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions, maxTurns: bot.maxTurns ?? DEFAULT_MAX_TURNS };
         };
         const userSettings = peerMail ? undefined : currentSettings();
-        if (userSettings?.model) rememberModelSelection(userSettings.model.provider, userSettings.model.modelId);
+        let configuredOnCreate = false;
         waitingContext.abortSignal?.throwIfAborted();
         const conversation = await awaitWithContext(
-          openThreadConversation(input.db, harness, input.threadId, input.botId, context, writeService, peerMail ? currentSettings : undefined),
+          openThreadConversation(input.db, harness, input.threadId, input.botId, context, writeService, peerMail ? () => {
+            configuredOnCreate = true;
+            return currentSettings();
+          } : undefined),
           waitingContext,
         );
         conversationBots.set(conversation.id, input.botId);
         waitingContext.abortSignal?.throwIfAborted();
         if (userSettings) {
           await conversation.configure(userSettings, context);
-        } else {
-          // A persisted custom model may be absent from the provider catalog after restart.
-          const { model } = await awaitWithContext(conversation.agent(waitingContext), waitingContext);
-          if (model) rememberModelSelection(model.provider, model.modelId);
+        } else if (!configuredOnCreate) {
+          for (;;) {
+            await conversation.waitForIdle(waitingContext);
+            waitingContext.abortSignal?.throwIfAborted();
+            // An input can start a run between the idle wait and this commit.
+            const configured = await awaitWithContext(conversation.commit(async (tx) => {
+              if ((await tx.doc(LiveDoc, conversation.id)).run) return false;
+              waitingContext.abortSignal?.throwIfAborted();
+              await configure(tx, conversation.id, currentSettings());
+              return true;
+            }, waitingContext), waitingContext);
+            if (configured) break;
+          }
         }
 
         const attaching = conversation.watch(context);
@@ -596,7 +609,8 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       },
       async activeTurn(threadId) {
         for (const [turnId, turn] of active) {
-          if (turn.threadId !== threadId) continue;
+          // Pending mail can be waiting for this Thread's placed run to finish.
+          if (turn.threadId !== threadId || turn.cancelAdmission) continue;
           const { submission } = await turn.admitted;
           for (const input of [submission, ...turn.steers]) {
             if ((await input.status(context)).status === "placed") return turnId;
