@@ -284,6 +284,7 @@ describe("local Bot deletion", () => {
       status: "deleted",
       botId,
       botName: "Delete while Agent unavailable",
+      oldSessionFilesRemoved: 0,
       removed: {
         threads: 1,
         messages: 2,

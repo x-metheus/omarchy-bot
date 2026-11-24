@@ -5,6 +5,7 @@ import type { EventLog } from "../events/eventLog.ts";
 import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
 import type { PlatformPaths } from "../workspace/paths.ts";
 import { openThreadConversation } from "./conversations.ts";
+import { seedFirstTurnConversation, transcriptBeforeTurn } from "./sessionMigration.ts";
 import { DurableTranscript } from "./transcript.ts";
 import { resolveModelForBot } from "./models.ts";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -28,7 +29,24 @@ export class DurableRunAborted extends Error {
 }
 
 export interface BotRuntime {
-  startTurn(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; threadId: string; botId: string; turnId: string; text: string; instructions: string; workspaceDir: string; privateDir: string; whenBusy?: "followUp"; admitted?(): void; working(): void }): Promise<void>;
+  startTurn(input: {
+    db: Database;
+    threads: ThreadsService;
+    bots: BotsService;
+    events: EventLog;
+    threadId: string;
+    botId: string;
+    turnId: string;
+    text: string;
+    /** Sequence of the persisted user message. Omitting it disables transcript fallback seeding. */
+    userMessageSeq?: number;
+    instructions: string;
+    workspaceDir: string;
+    privateDir: string;
+    whenBusy?: "followUp";
+    admitted?(): void;
+    working(): void;
+  }): Promise<void>;
   recoverTurns(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; registered(turnId: string): void; settled(turnId: string, outcome: { status: "completed" | "cancelled" } | { status: "failed"; reason: string }): void }): { registered: Promise<void>; settled: Promise<void> };
   activeTurn(threadId: string): Promise<string | undefined>;
   steer(turnId: string, text: string, requestId: string): Promise<void>;
@@ -113,7 +131,15 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           if (!selections.some((selection) => selection.providerId === model.provider && selection.modelId === model.id)) {
             selections.push({ providerId: model.provider, modelId: model.id });
           }
-          const conversation = await openThreadConversation(input.db, harness, input.threadId, input.botId, context);
+          const conversation = await openThreadConversation(input.db, harness, input.threadId, input.botId, context, {
+            async seed(conversation, seedContext) {
+              await seedFirstTurnConversation(conversation, seedContext, {
+                threadId: input.threadId,
+                legacySessionPath: input.threads.getNativeSession(input.threadId),
+                transcript: () => transcriptBeforeTurn(() => input.threads.listMessages(input.threadId), input.userMessageSeq),
+              });
+            },
+          });
           conversationBots.set(conversation.id, input.botId);
           const bot = input.bots.getDto(input.botId);
           const maxTurns = bot.maxTurns ?? DEFAULT_MAX_TURNS;
