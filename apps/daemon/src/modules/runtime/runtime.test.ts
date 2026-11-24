@@ -68,6 +68,7 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
     const settings = typeof options.settings === "function" ? options.settings() : options.settings;
     expect(settings?.afterFailedRun).toBe("continue");
     expect(settings?.restartLimit).toBe(5);
+    expect(settings?.progress?.persistWithinMs).toBe(0);
     if (typeof options.models === "function") {
       options.models();
       options.models();
@@ -412,7 +413,7 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
     const registered: string[] = [];
     const settled: string[] = [];
     type Recovery = Parameters<BotRuntime["recoverTurns"]>[0];
-    const threads = { listMessages: () => [] } as unknown as Recovery["threads"];
+    const threads = { listMessages: () => [], finalizeDurableToolCalls() {} } as unknown as Recovery["threads"];
     const bots = { getDto: () => ({ name: "Recovery Bot", maxTurns: null }) } as unknown as Recovery["bots"];
     const events = {} as Recovery["events"];
     const recovery = runtime.recoverTurns({

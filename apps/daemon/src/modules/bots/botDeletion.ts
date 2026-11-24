@@ -217,7 +217,7 @@ export class BotDeletionService {
     };
 
     try {
-      const commit = this.db.transaction(() => {
+      this.events.transaction(() => {
         this.db.query(
           `DELETE FROM events WHERE
              (aggregate_type = 'bot' AND aggregate_id = ?)
@@ -245,7 +245,6 @@ export class BotDeletionService {
         this.db.query(`DELETE FROM bots WHERE id = ?`).run(botId);
         this.events.append("bot", botId, "bot.deleted", { ...deleted, surfaceId: bot.surface_id });
       });
-      commit();
     } catch (error) {
       const databaseFailure: DeleteBotFailureDto = { stage: "database", resource: botId, message: errorMessage(error) };
       this.#recordFailure(botId, [databaseFailure]);

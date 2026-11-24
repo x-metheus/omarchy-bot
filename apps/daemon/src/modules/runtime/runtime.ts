@@ -16,7 +16,7 @@ import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
-import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
+import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 export const DEFAULT_MAX_TURNS = 50;
@@ -41,6 +41,38 @@ export interface BotRuntime {
 function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | undefined): boolean {
   if (lastEntryBeforeAbort === undefined || entry.id <= lastEntryBeforeAbort || !AssistantEntry.is(entry)) return true;
   return !entry.model?.some((message) => message.role === "assistant" && message.stopReason === "aborted");
+}
+
+async function replayTranscript(
+  transcript: DurableTranscript,
+  watch: ConversationWatch,
+  conversation: Conversation,
+  first: EntryId,
+  last: EntryId | undefined,
+  lastEntryBeforeAbort: number | undefined,
+): Promise<void> {
+  let cursor: Cursor | undefined;
+  do {
+    const page = await conversation.entries({ order: "ascending", minEntryId: first, ...(last === undefined ? {} : { maxEntryId: last }) }, 100, cursor, context);
+    transcript.update({ ...watch.value, entries: page.items.filter((entry) => shouldProjectEntry(entry, lastEntryBeforeAbort)), docs: {} });
+    cursor = page.next;
+  } while (cursor);
+}
+
+async function nextTurnEntry(db: Database, harness: Harness, conversation: Conversation, threadId: string, botId: string, turnId: string, first: EntryId): Promise<EntryId | undefined> {
+  // Other Turns' initial inputs bound the replay. Steers share the current transcript.
+  const otherTurns = db.query<{ id: string; submission_id: number | null }, [string, string, string]>("SELECT t.id, s.submission_id FROM turns t LEFT JOIN pi_turn_submissions s ON s.turn_id = t.id AND s.kind = 'input' WHERE t.thread_id = ? AND t.bot_id = ? AND t.id != ?").all(threadId, botId, turnId);
+  let next: EntryId | undefined;
+  for (const other of otherTurns) {
+    const handle = other.submission_id === null ? undefined : await harness.submission(other.submission_id as SubmissionId, context);
+    const record = handle ? await handle.status(context) : await harness.commit((tx) => tx.submissionByRequest(conversation.id, other.id), context);
+    if (record?.type === "input" && record.entry !== undefined && record.entry > first && (next === undefined || record.entry < next)) next = record.entry;
+  }
+  return next;
+}
+
+function entryBefore(entry: EntryId | undefined): EntryId | undefined {
+  return entry === undefined ? undefined : (entry - 1) as EntryId;
 }
 
 export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: { events?: Pick<EventLog, "append"> } = {}): Promise<BotRuntime> {
@@ -71,7 +103,11 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         return createModels();
       }
     }, registry, env: ({ conversationId, cwd }) => createFilesEnvironment(paths, readSettingsAllowedFolders(db), cwd, conversationBots.get(conversationId)),
-    settings: { afterFailedRun: "continue", restartLimit: 5, compaction: compactionSettings } }, context);
+    settings: {
+      afterFailedRun: "continue", restartLimit: 5, compaction: compactionSettings,
+      // Request persistence as soon as Pi publishes progress that the Service can project.
+      progress: { persistWithinMs: 0 },
+    } }, context);
     let resumed = false;
     const resumeScheduler = () => {
       if (resumed) return;
@@ -129,6 +165,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           const watch = await conversation.watch(context);
           let transcript: DurableTranscript | undefined = input.whenBusy ? undefined : new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, watch.value);
           let foreignTranscript: DurableTranscript | undefined;
+          let watching = true;
           watch.start(async (call) => {
             if (call.kind !== "value") return;
             const live = call.value.docs["pi.live"] as { run?: { inputs: readonly number[] } } | undefined;
@@ -140,6 +177,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
             if (!transcript) {
               const { submission } = await turn.admitted;
               const status = await submission.status(context);
+              if (!watching) return;
               const entries = status.entry === undefined ? call.value.entries : call.value.entries.filter((entry) => entry.id < status.entry!);
               transcript = new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, { ...call.value, entries });
             }
@@ -166,33 +204,47 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
               if (steered) settlements.push(steered);
             }
             let answered = false;
+            watching = false;
+            await watch.stop();
             for (const settled of settlements) {
               if (settled.status !== "done") continue;
               answered = true;
               if (settled.type !== "input") throw new Error("Durable turn did not complete");
               const answer = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
               if (!answer) throw new Error("Durable turn answer not found");
-              transcript ??= new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, { ...watch.value, entries: watch.value.entries.filter((entry) => entry.id !== answer.id) });
-              transcript.update({ ...watch.value, entries: [answer], docs: { ...watch.value.docs, "pi.live": {} } });
+              transcript ??= new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, { ...watch.value, entries: [] });
+              // Settlement can arrive before the watch delivers the last committed entries.
+              await replayTranscript(transcript, watch, conversation, settled.entry, answer.id, turn.lastEntryBeforeAbort);
             }
             if (!answered) {
               const failed = settlements.find((item) => item.status === "unanswered");
               if (!failed || failed.status !== "unanswered") throw new Error("Durable turn did not complete");
+              if (failed.entry !== undefined) {
+                const next = await nextTurnEntry(input.db, harness, conversation, input.threadId, input.botId, input.turnId, failed.entry);
+                transcript ??= new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, { ...watch.value, entries: [] });
+                await replayTranscript(transcript, watch, conversation, failed.entry, entryBefore(next), turn.lastEntryBeforeAbort);
+              }
               if (failed.reason === "aborted") throw new DurableRunAborted();
               const failure = watch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; reason: string; detail?: string } } | undefined;
               const runFailure = failure?.runFailure?.inputs.includes(failed.id) ? failure.runFailure : undefined;
               throw new Error(runFailure?.detail ?? (typeof failed.detail === "string" ? failed.detail : failed.reason));
             }
-          } finally { await watch.stop(); }
+          } finally { watching = false; await watch.stop(); }
         } catch (error) {
           fail(error);
           throw error;
         } finally {
           active.delete(input.turnId);
+          // Closing the Harness can suspend a tool that will resume when the Service opens again.
+          if (!closing) input.threads.finalizeDurableToolCalls(input.turnId);
         }
       },
       recoverTurns(input) {
         const jobs: Promise<void>[] = [];
+        const settle = (row: { id: string; thread_id: string }, outcome: Parameters<typeof input.settled>[1]) => {
+          if (!closing) input.threads.finalizeDurableToolCalls(row.id);
+          input.settled(row.id, outcome);
+        };
         const rows = input.db.query<{ id: string; thread_id: string; bot_id: string }, []>("SELECT id, thread_id, bot_id FROM turns WHERE status = 'working' ORDER BY started_at, id").all();
         const registered = (async () => {
           const prepared: {
@@ -201,7 +253,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
             owned: Submission;
             associations: { submission_id: number; kind: string }[];
           }[] = [];
-          const failed: { turnId: string; reason: string }[] = [];
+          const failed: { row: (typeof rows)[number]; reason: string }[] = [];
           // Waiting on any submission can resume the global scheduler, so map all Bots first.
           for (const row of rows) {
             try {
@@ -222,10 +274,10 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
               if (!primary) throw new Error("durable submission not found");
               prepared.push({ row, conversation, owned: primary, associations });
             } catch (error) {
-              failed.push({ turnId: row.id, reason: error instanceof Error ? error.message : String(error) });
+              failed.push({ row, reason: error instanceof Error ? error.message : String(error) });
             }
           }
-          for (const { turnId, reason } of failed) input.settled(turnId, { status: "failed", reason });
+          for (const { row, reason } of failed) settle(row, { status: "failed", reason });
           for (const { row, conversation, owned, associations } of prepared) {
             try {
               const turn = { db: input.db, threadId: row.thread_id, admitted: Promise.resolve({ conversation, submission: owned }), pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>([owned.id]), lastEntryBeforeAbort: undefined as number | undefined, recovering: true };
@@ -233,6 +285,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
               input.registered(row.id);
               jobs.push((async () => {
                 let watch: ConversationWatch | undefined;
+                let watching = true;
                 try {
                   const steerIds = new Set(associations.filter((item) => item.kind === "steer").map((item) => item.submission_id));
                   const inspected = await harness.inspect(context);
@@ -256,36 +309,22 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
                   }
                   turn.recovering = false;
                   const status = await owned.status(context);
-                  let nextEntry: number | undefined;
-                  if (status.entry !== undefined) {
-                    // Only another Turn's initial input bounds this Turn. Steers share its transcript.
-                    const otherTurns = input.db.query<{ id: string; submission_id: number | null }, [string, string, string]>("SELECT t.id, s.submission_id FROM turns t LEFT JOIN pi_turn_submissions s ON s.turn_id = t.id AND s.kind = 'input' WHERE t.thread_id = ? AND t.bot_id = ? AND t.id != ?").all(row.thread_id, row.bot_id, row.id);
-                    for (const other of otherTurns) {
-                      const handle = other.submission_id === null ? undefined : await harness.submission(other.submission_id as SubmissionId, context);
-                      const record = handle ? await handle.status(context) : await harness.commit((tx) => tx.submissionByRequest(conversation.id, other.id), context);
-                      if (record?.type === "input" && record.entry !== undefined && record.entry > status.entry && (nextEntry === undefined || record.entry < nextEntry)) nextEntry = record.entry;
-                    }
-                  }
                   watch = await conversation.watch(context, { ...(status.entry === undefined ? {} : { from: status.entry }), min: 100, max: 200 });
                   const ownedWatch = watch;
-                  const removed = input.db.query<{ kind: string; count: number }, [string]>("SELECT kind, count(*) AS count FROM messages WHERE turn_id = ? AND kind IN ('response', 'thinking') GROUP BY kind").all(row.id);
-                  input.db.query("DELETE FROM messages WHERE turn_id = ? AND kind IN ('response', 'thinking')").run(row.id);
-                  for (const item of removed) input.events.append("thread", row.thread_id, `${item.kind}.removed`, { threadId: row.thread_id, turnId: row.id, count: item.count });
-                  const transcript = new DurableTranscript(input.threads, input.bots, input.events, row.thread_id, row.bot_id, row.id, { ...ownedWatch.value, entries: [] });
+                  const initialView = ownedWatch.value;
+                  const nextEntry = status.entry === undefined ? undefined : await nextTurnEntry(input.db, harness, conversation, row.thread_id, row.bot_id, row.id, status.entry);
+                  // Reuse rows around steering and replay only through the snapshot that owns the initial live message.
+                  const transcript = new DurableTranscript(input.threads, input.bots, input.events, row.thread_id, row.bot_id, row.id, { ...initialView, entries: [] });
                   let firstEntry = status.entry;
-                  const initialLive = ownedWatch.value.docs["pi.live"] as { run?: { inputs: readonly number[] } } | undefined;
-                  const initialDocs = initialLive?.run && !initialLive.run.inputs.some((id) => turn.inputs.has(id)) ? { ...ownedWatch.value.docs, "pi.live": {} } : ownedWatch.value.docs;
-                  await transcript.reconcileCompactions(ownedWatch.value, conversation);
-                  if (firstEntry !== undefined) {
-                    let entryCursor: Cursor | undefined;
-                    do {
-                      const page = await conversation.entries({ order: "ascending", minEntryId: firstEntry }, 100, entryCursor, context);
-                      const entries = page.items.filter((entry) => (nextEntry === undefined || entry.id < nextEntry) && shouldProjectEntry(entry, turn.lastEntryBeforeAbort));
-                      transcript.update({ ...ownedWatch.value, entries, docs: { ...ownedWatch.value.docs, "pi.live": {} } });
-                      entryCursor = page.next;
-                    } while (entryCursor);
-                    transcript.update({ ...ownedWatch.value, entries: [], docs: initialDocs });
+                  const initialLive = initialView.docs["pi.live"] as { run?: { inputs: readonly number[] } } | undefined;
+                  const initialDocs = initialLive?.run && !initialLive.run.inputs.some((id) => turn.inputs.has(id)) ? { ...initialView.docs, "pi.live": {} } : initialView.docs;
+                  await transcript.reconcileCompactions(initialView, conversation);
+                  const lastSnapshotEntry = initialView.entries.at(-1)?.id ?? initialView.before;
+                  if (firstEntry !== undefined && lastSnapshotEntry !== undefined) {
+                    const last = nextEntry !== undefined && nextEntry <= lastSnapshotEntry ? entryBefore(nextEntry) : lastSnapshotEntry;
+                    await replayTranscript(transcript, ownedWatch, conversation, firstEntry, last, turn.lastEntryBeforeAbort);
                   }
+                  transcript.resume({ ...initialView, docs: initialDocs });
                   ownedWatch.start(async (call) => {
                     if (call.kind !== "value") return;
                     const live = call.value.docs["pi.live"] as { run?: { inputs: readonly number[] } } | undefined;
@@ -294,7 +333,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
                       return;
                     }
                     firstEntry ??= (await owned.status(context)).entry;
-                    if (firstEntry === undefined) return;
+                    if (!watching || firstEntry === undefined) return;
                     const entries = call.value.entries.filter((entry) => entry.id >= firstEntry! && (nextEntry === undefined || entry.id < nextEntry) && shouldProjectEntry(entry, turn.lastEntryBeforeAbort));
                     transcript.update({ ...call.value, entries });
                   });
@@ -304,32 +343,40 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
                     if (item) settlements.push(item);
                   }
                   let answered = false;
+                  watching = false;
+                  await ownedWatch.stop();
                   for (const item of settlements) {
                     if (item.status !== "done" || item.type !== "input") continue;
                     const answer = await conversation.commit((tx) => tx.entry(AssistantEntry, item.answer), context);
                     if (!answer) throw new Error("Durable turn answer not found");
-                    transcript.update({ ...ownedWatch.value, entries: [answer], docs: { ...ownedWatch.value.docs, "pi.live": {} } });
+                    await replayTranscript(transcript, ownedWatch, conversation, item.entry, answer.id, turn.lastEntryBeforeAbort);
                     answered = true;
                   }
-                  if (answered) input.settled(row.id, { status: "completed" });
+                  if (answered) settle(row, { status: "completed" });
                   else {
                     const failed = settlements.find((item) => item.status === "unanswered");
                     if (!failed || failed.status !== "unanswered") throw new Error("Durable turn did not complete");
+                    if (failed.entry !== undefined) {
+                      const next = nextEntry ?? await nextTurnEntry(input.db, harness, conversation, row.thread_id, row.bot_id, row.id, failed.entry);
+                      await replayTranscript(transcript, ownedWatch, conversation, failed.entry, entryBefore(next), turn.lastEntryBeforeAbort);
+                    }
                     if (failed.reason === "aborted") {
-                      await ownedWatch.stop();
-                      input.settled(row.id, { status: "cancelled" });
+                      settle(row, { status: "cancelled" });
                     } else {
                       const live = ownedWatch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; detail?: string } } | undefined;
                       const reason = (live?.runFailure?.inputs.includes(failed.id) ? live.runFailure.detail : undefined) ?? (typeof failed.detail === "string" ? failed.detail : failed.reason);
-                      input.settled(row.id, { status: "failed", reason });
+                      settle(row, { status: "failed", reason });
                     }
                   }
-                } catch (error) { input.settled(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) }); }
-                finally { await watch?.stop(); active.delete(row.id); }
+                } catch (error) {
+                  watching = false;
+                  await watch?.stop();
+                  settle(row, { status: "failed", reason: error instanceof Error ? error.message : String(error) });
+                } finally { await watch?.stop(); active.delete(row.id); }
               })());
             } catch (error) {
               active.delete(row.id);
-              input.settled(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) });
+              settle(row, { status: "failed", reason: error instanceof Error ? error.message : String(error) });
             }
           }
         })().finally(resumeScheduler);

@@ -364,10 +364,14 @@ export class ThreadsService {
     return this.getMessage(id)!;
   }
 
-  appendMessage(threadId: string, m: MessageInput): MessageDto {
-    const dto = this.appendMessageQuiet(threadId, m);
-    this.events.append("thread", threadId, "message.appended", dto);
-    return dto;
+  appendMessage(threadId: string, m: MessageInput, beforeMessageId?: string): MessageDto {
+    const append = () => {
+      const dto = this.appendMessageQuiet(threadId, m);
+      const placed = this.moveMessageBefore(threadId, dto, beforeMessageId) ?? dto;
+      this.events.append("thread", threadId, "message.appended", placed);
+      return placed;
+    };
+    return beforeMessageId === undefined ? append() : this.events.transaction(append);
   }
 
   hasResponseBlock(blockId: string): boolean {
@@ -474,6 +478,88 @@ export class ThreadsService {
     return { responses, thinking };
   }
 
+  reconcileAgentBlock(threadId: string, turnId: string, blockId: string, text: string, reopen: boolean): MessageDto | undefined {
+    return this.events.transaction(() => {
+      const row = this.db.query<{ id: string }, [string, boolean, boolean, string, string, string]>(
+        `UPDATE messages SET text = ?,
+           block_state = CASE WHEN ? THEN 'streaming' ELSE block_state END,
+           block_completed_at = CASE WHEN ? THEN NULL ELSE block_completed_at END
+         WHERE thread_id = ? AND turn_id = ? AND block_id = ?
+           AND kind IN ('response', 'thinking') RETURNING id`,
+      ).get(text, reopen, reopen, threadId, turnId, blockId);
+      if (!row) return;
+      const message = this.getMessage(row.id)!;
+      // Cached completed blocks require a refetch to accept streaming updates again.
+      if (reopen) this.events.append("thread", threadId, "message.appended", message);
+      this.events.append("thread", threadId, `${message.kind}.updated`, message);
+      return message;
+    });
+  }
+
+  removeAgentBlocks(threadId: string, turnId: string, blockIds: readonly string[]): void {
+    if (blockIds.length === 0) return;
+    this.events.transaction(() => {
+      const counts = new Map<string, number>();
+      const remove = this.db.query<{ kind: string }, [string, string, string]>(
+        `DELETE FROM messages WHERE thread_id = ? AND turn_id = ? AND block_id = ?
+         AND kind IN ('response', 'thinking') RETURNING kind`,
+      );
+      for (const blockId of blockIds) {
+        const row = remove.get(threadId, turnId, blockId);
+        if (row) counts.set(row.kind, (counts.get(row.kind) ?? 0) + 1);
+      }
+      for (const [kind, count] of counts) {
+        this.events.append("thread", threadId, `${kind}.removed`, { threadId, turnId, count });
+      }
+    });
+  }
+
+  private moveMessageBefore(threadId: string, message: { id: string; seq: number }, beforeMessageId: string | undefined): MessageDto | undefined {
+    if (beforeMessageId === undefined) return undefined;
+    const before = this.db.query<{ seq: number }, [string, string]>(
+      `SELECT seq FROM messages WHERE thread_id = ? AND id = ?`,
+    ).get(threadId, beforeMessageId);
+    if (!before || message.seq <= before.seq) return undefined;
+
+    // Open the slot backwards to satisfy UNIQUE(thread_id, seq) on every write.
+    const move = this.db.query("UPDATE messages SET seq = ? WHERE id = ?");
+    move.run(0, message.id);
+    const shifted = this.db.query<{ id: string; seq: number }, [string, number, number]>(
+      `SELECT id, seq FROM messages WHERE thread_id = ? AND seq >= ? AND seq < ? ORDER BY seq DESC`,
+    ).all(threadId, before.seq, message.seq);
+    for (const row of shifted) move.run(row.seq + 1, row.id);
+    move.run(before.seq, message.id);
+    return this.getMessage(message.id);
+  }
+
+  listToolCallPositions(threadId: string, turnId: string): { id: string; seq: number; callId: string }[] {
+    return this.db.query<{ id: string; seq: number; callId: string }, [string, string]>(
+      `SELECT id, seq, json_extract(payload, '$.id') AS callId FROM messages
+       WHERE thread_id = ? AND turn_id = ? AND kind = 'tool'`,
+    ).all(threadId, turnId);
+  }
+
+  /** Place a durable call around rows that already streamed. */
+  projectToolCall(threadId: string, turnId: string, toolCall: ToolCallSummary, afterMessageId?: string, beforeMessageId?: string): MessageDto | undefined {
+    return this.events.transaction(() => {
+      const existing = this.db.query<{ id: string; seq: number }, [string, string, string]>(
+        `SELECT id, seq FROM messages WHERE thread_id = ? AND turn_id = ? AND kind = 'tool' AND json_extract(payload, '$.id') = ?`,
+      ).get(threadId, turnId, toolCall.id);
+      if (existing) {
+        const moved = this.moveMessageBefore(threadId, existing, beforeMessageId);
+        // An append event invalidates the transcript when its neighbors' sequences change.
+        if (moved) this.events.append("thread", threadId, "message.appended", moved);
+        return moved ?? this.getMessage(existing.id);
+      }
+      if (this.hasToolCall(threadId, toolCall.id)) return undefined;
+
+      const next = afterMessageId === undefined ? undefined : this.db.query<{ id: string }, [string, string]>(
+        `SELECT id FROM messages WHERE thread_id = ? AND seq > (SELECT seq FROM messages WHERE id = ?) ORDER BY seq LIMIT 1`,
+      ).get(threadId, afterMessageId);
+      return this.appendMessage(threadId, { author: { kind: "bot" }, kind: "tool", turnId, toolCall }, next?.id ?? beforeMessageId);
+    });
+  }
+
   hasToolCall(threadId: string, toolCallId: string): boolean {
     const row = this.db.query(
       `SELECT 1 FROM messages
@@ -485,16 +571,18 @@ export class ThreadsService {
   updateToolCall(
     threadId: string,
     summary: ToolCallSummary,
+    turnId?: string,
   ): MessageDto | undefined {
     if (!isToolCallSummary(summary)) return undefined;
     const row = this.db
-      .query(
+      .query<{ id: string; payload: string }, [string, string, string | null, string | null]>(
         `SELECT id, payload FROM messages
          WHERE thread_id = ? AND kind = 'tool' AND json_extract(payload, '$.id') = ?
+           AND (? IS NULL OR turn_id = ?)
          ORDER BY seq DESC LIMIT 1`,
       )
-      .get(threadId, summary.id) as { id: string; payload: string } | undefined;
-    if (row === undefined) return undefined;
+      .get(threadId, summary.id, turnId ?? null, turnId ?? null);
+    if (!row) return undefined;
     const stored: unknown = JSON.parse(row.payload);
     if (
       !isToolCallSummary(stored) ||
@@ -505,6 +593,23 @@ export class ThreadsService {
     if (!isToolCallSummary(updated)) return undefined;
     this.db.query(`UPDATE messages SET payload = ? WHERE id = ?`).run(JSON.stringify(updated), row.id);
     return this.getMessage(row.id);
+  }
+
+  projectToolResult(threadId: string, turnId: string, summary: ToolCallSummary): void {
+    this.events.transaction(() => {
+      const updated = this.updateToolCall(threadId, summary, turnId);
+      if (updated) this.publishToolUpdate(updated);
+    });
+  }
+
+  finalizeDurableToolCalls(turnId: string): void {
+    this.events.transaction(() => {
+      for (const message of this.finalizeIncompleteToolCalls(turnId)) this.publishToolUpdate(message);
+    });
+  }
+
+  private publishToolUpdate({ threadId, id: messageId, toolCall }: MessageDto): void {
+    this.events.append("thread", threadId, "tool.updated", { threadId, messageId, toolCall });
   }
 
   finalizeIncompleteToolCalls(turnId: string): MessageDto[] {
