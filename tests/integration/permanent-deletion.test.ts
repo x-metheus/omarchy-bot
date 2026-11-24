@@ -235,6 +235,7 @@ describe("local Bot deletion", () => {
       turns: 2,
       attachments: 2,
       avatar: true,
+      privateFolder: true,
       computerArtifacts: 1,
       surface: true,
     });
@@ -289,6 +290,7 @@ describe("local Bot deletion", () => {
         turns: 1,
         attachments: 0,
         avatar: false,
+        privateFolder: true,
         computerArtifacts: 0,
         surface: true,
       },

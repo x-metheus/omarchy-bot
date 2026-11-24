@@ -1,16 +1,18 @@
 import { expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Harness, createRegistry, type ConversationId } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { api, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
+import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
+import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore } from "./credentials.ts";
+import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { openBotRuntime } from "./runtime.ts";
 
 test("runtime creates durable tables and can close and reopen", async () => {
@@ -118,3 +120,199 @@ test("configured conversation uses the Service limit for unset and null Bots and
     expect(await limit(second.threadId)).toBe(50);
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
+
+test("the model request contains only the app prompt and Shared Workspace Skills", () => {
+  const prompts: string[] = [];
+  return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "bot-prompt-home-"));
+    const workspace = path.join(home, ".omarchy-bot", "workspace");
+    const workspaceSkill = [path.join(workspace, ".agents/skills/workspace"), "Workspace Skill", "Workspace skill description sentinel"] as const;
+    const globalSkills = [
+      [path.join(home, ".pi/agent/skills/global"), "Global Pi Skill", "Global Pi skill sentinel"],
+      [path.join(home, ".agents/skills/global"), "Global Agents Skill", "Global Agents skill sentinel"],
+    ] as const;
+    const legacyWorkspaceSkills = [
+      [path.join(workspace, ".pi/skills/workspace"), "Workspace Pi Skill", "Workspace Pi skill sentinel"],
+      [path.join(workspace, ".claude/skills/workspace"), "Workspace Claude Skill", "Workspace Claude skill sentinel"],
+    ] as const;
+    function writeSkill([directory, name, description]: readonly [string, string, string]): void {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(path.join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\nSkill body sentinel\n`);
+    }
+    globalSkills.forEach(writeSkill);
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(path.join(workspace, "AGENTS.md"), "Workspace AGENTS sentinel");
+    const previousPiConfigDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = path.join(home, ".pi/agent");
+    let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+    try {
+      h = await startDaemon(home);
+      // Boot seeds a starter Skill. Use only the explicit workspace fixtures in this request.
+      rmSync(path.join(workspace, ".agents/skills"), { recursive: true, force: true });
+      [workspaceSkill, ...legacyWorkspaceSkills].forEach(writeSkill);
+      const { id: botId } = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Prompt Bot", agentId: "pi", instructions: "Keep track of releases." });
+      new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      setSetting(h.svc.db, "default_model", "fake/fake-model");
+      setSetting(h.svc.db, "runtime", "durable");
+      const { threadId } = await sendToBot(h, botId, "Check the releases.");
+      await waitThreadIdle(h, threadId);
+
+      expect(prompts).toHaveLength(1);
+      const prompt = prompts[0]!;
+      expect(prompt.match(/^## .+$/gm)).toEqual([
+        "## Base Prompt", "## Identity and Job", "## Workspace and private folder", "## Allowed folders", "## Skills",
+      ]);
+      expect(prompt).toContain("Prompt Bot");
+      expect(prompt).toContain("Keep track of releases.");
+      expect(prompt).toContain(path.join(workspace, "bots", botId));
+      expect(prompt).toContain(`## Allowed folders\n- ${workspace}`);
+      expect(prompt).toContain("Workspace Skill");
+      expect(prompt).toContain("Workspace skill description sentinel");
+      expect(prompt).toContain(".agents/skills/workspace/SKILL.md");
+      for (const [, name, description] of [...globalSkills, ...legacyWorkspaceSkills]) {
+        expect(prompt).not.toContain(name);
+        expect(prompt).not.toContain(description);
+      }
+      expect(prompt).not.toContain("Workspace AGENTS sentinel");
+      expect(prompt).not.toContain("Skill body sentinel");
+      const appPrompt = buildSystemPrompt({
+        botName: "Prompt Bot",
+        instructions: "Keep track of releases.",
+        workspaceDir: workspace,
+        privateDir: path.join(workspace, "bots", botId),
+        allowedFolders: [workspace],
+        skills: [{ name: "Workspace Skill", description: "Workspace skill description sentinel", path: ".agents/skills/workspace/SKILL.md" }],
+      });
+      expect(prompt).toBe(`<instructions>\n${appPrompt}\n</instructions>`);
+    } finally {
+      await h?.stop();
+      if (previousPiConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousPiConfigDir;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+for (const mode of ["worker", "durable"] as const) {
+  test(`${mode} creates the private folder on the first Turn, keeps it on rename, and removes it on deletion`, () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], {}, async () => {
+    const h = await startDaemon();
+    try {
+      setSetting(h.svc.db, "runtime", mode);
+      if (mode === "durable") {
+        new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+        setSetting(h.svc.db, "default_model", "fake/fake-model");
+      }
+      const botId = await makeBot(h, "Before rename");
+      const siblingId = await makeBot(h, "Sibling");
+      const botsDir = path.join(h.svc.cfg.sharedWorkspaceDir, "bots");
+      const privateDir = path.join(botsDir, botId);
+      const siblingDir = path.join(botsDir, siblingId);
+      expect(existsSync(privateDir)).toBe(false);
+      const sent = await sendToBot(h, botId, "say: hello");
+      await waitThreadIdle(h, sent.threadId);
+      expect(statSync(privateDir).mode & 0o777).toBe(0o700);
+      const note = path.join(privateDir, "note.txt");
+      writeFileSync(note, "Bot note");
+      await api(h, "PATCH", `/api/bots/${botId}`, { name: "After rename" });
+      expect(readFileSync(note, "utf8")).toBe("Bot note");
+      mkdirSync(siblingDir);
+      writeFileSync(path.join(siblingDir, "keep.txt"), "Sibling note");
+      const deleted = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${botId}`, {});
+      expect(deleted.status).toBe("deleted");
+      expect(deleted.removed.privateFolder).toBe(true);
+      expect(existsSync(privateDir)).toBe(false);
+      expect(readFileSync(path.join(siblingDir, "keep.txt"), "utf8")).toBe("Sibling note");
+    } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+  }));
+}
+
+test("deletion refuses to traverse a symlinked bots folder and can retry", async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Delete this Bot");
+    const siblingId = await makeBot(h, "Keep this Bot");
+    const botsDir = path.join(h.svc.cfg.sharedWorkspaceDir, "bots");
+    const siblingDir = path.join(h.svc.cfg.sharedWorkspaceDir, siblingId);
+    const note = path.join(siblingDir, botId, "keep.txt");
+    mkdirSync(path.dirname(note), { recursive: true });
+    writeFileSync(note, "Sibling note");
+    symlinkSync(siblingDir, botsDir);
+    const response = await apiStatus(h, "DELETE", `/api/bots/${botId}`, {});
+    expect(response.status).toBe(409);
+    const blocked = response.body as DeleteBotResultDto;
+    expect(blocked.status).toBe("failed");
+    expect(blocked.failures[0]?.stage).toBe("private_folder");
+    expect(blocked.removed.privateFolder).toBe(false);
+    expect(readFileSync(note, "utf8")).toBe("Sibling note");
+    rmSync(botsDir);
+    const deleted = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${botId}`, {});
+    expect(deleted.status).toBe("deleted");
+    expect(deleted.removed.privateFolder).toBe(false);
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+});
+
+test("an unreadable SKILL.md is skipped and the durable Turn completes", () => {
+  const prompts: string[] = [];
+  return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
+    const h = await startDaemon();
+    try {
+      const workspace = h.svc.cfg.sharedWorkspaceDir;
+      for (const name of ["Available Skill", "Unreadable Skill"]) {
+        const dir = path.join(workspace, ".agents", "skills", name);
+        mkdirSync(dir, { recursive: true });
+        const skillFile = path.join(dir, "SKILL.md");
+        writeFileSync(skillFile, `---\nname: ${name}\ndescription: Skill metadata\n---\n`);
+        if (name === "Unreadable Skill") chmodSync(skillFile, 0o000);
+      }
+      const botId = await makeBot(h, "Skill availability");
+      new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      setSetting(h.svc.db, "default_model", "fake/fake-model");
+      setSetting(h.svc.db, "runtime", "durable");
+      const { threadId } = await sendToBot(h, botId, "Check the available Skills.");
+      await waitThreadIdle(h, threadId);
+      const thread = await api<ThreadDto>(h, "GET", `/api/threads/${threadId}`);
+      expect(thread.latestTurn?.status).toBe("completed");
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain("Available Skill: Skill metadata");
+      expect(prompts[0]).not.toContain("Unreadable Skill");
+    } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+  });
+});
+
+test("the next Turn sets an existing private folder to mode 0700", async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Private folder mode");
+    const folder = path.join(h.svc.cfg.sharedWorkspaceDir, "bots", botId);
+    mkdirSync(folder, { recursive: true });
+    chmodSync(folder, 0o755);
+    expect(statSync(folder).mode & 0o777).toBe(0o755);
+    writeFileSync(path.join(folder, "note.txt"), "Existing note");
+    const { threadId } = await sendToBot(h, botId, "say: check permissions");
+    await waitThreadIdle(h, threadId);
+    expect(statSync(folder).mode & 0o777).toBe(0o700);
+    expect(readFileSync(path.join(folder, "note.txt"), "utf8")).toBe("Existing note");
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+});
+
+test("deletion refuses a private folder symlink and preserves the sibling Bot's notes", async () => {
+  const h = await startDaemon();
+  try {
+    const botId = await makeBot(h, "Delete this Bot");
+    const siblingId = await makeBot(h, "Keep this Bot");
+    const botsDir = path.join(h.svc.cfg.sharedWorkspaceDir, "bots");
+    const siblingDir = path.join(botsDir, siblingId);
+    const note = path.join(siblingDir, "keep.txt");
+    mkdirSync(siblingDir, { recursive: true });
+    writeFileSync(note, "Sibling note");
+    symlinkSync(siblingDir, path.join(botsDir, botId));
+    const response = await apiStatus(h, "DELETE", `/api/bots/${botId}`, {});
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      status: "failed",
+      removed: { privateFolder: false },
+      failures: [{ stage: "private_folder", resource: botId }],
+    });
+    expect(readFileSync(note, "utf8")).toBe("Sibling note");
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+});

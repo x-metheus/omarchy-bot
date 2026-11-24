@@ -74,7 +74,7 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 - [x] Killing the Service mid-reply resumes or visibly fails the reply
 
 ### Phase 3: Prompt and tools
-- [ ] Task 7: App prompt sections, Skills list, and private folders
+- [x] Task 7: App prompt sections, Skills list, and private folders
 - [ ] Task 8: Files and shell tools with allowed folders
 - [ ] Task 9: Approval flow on the Service
 - [ ] Task 10: Approval UI in the web client

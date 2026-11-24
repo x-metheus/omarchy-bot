@@ -71,6 +71,7 @@ test.describe("direct local Bot deletion", () => {
     await expect(confirmation).toContainText(botName);
     await expect(confirmation).toContainText("conversations");
     await expect(confirmation).toContainText("managed attachments");
+    await expect(confirmation).toContainText("private folder");
     await expect(confirmation).toContainText("Agent-owned Native Sessions may remain");
 
     await page.getByRole("button", { name: "Cancel" }).click();
@@ -171,6 +172,7 @@ test.describe("direct local Bot deletion", () => {
             turns: 0,
             attachments: 0,
             avatar: false,
+            privateFolder: false,
             computerArtifacts: 0,
             surface: false,
           },

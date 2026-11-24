@@ -2,6 +2,7 @@
 // No production module imports this test-only helper.
 import { Harness, createRegistry, defineExtension, defineTask, defineTool, type Conversation } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createDurableSuiteFakeProvider, createFakeProvider, type FakeReply } from "../../../../../packages/testkit/src/fake-provider.ts";
 
@@ -124,18 +125,25 @@ export async function withBlockingRuntimeTool<T>(fn: (tool: { started: Promise<v
   try { return await fn({ started, release, seen: () => seen }); }
   finally { release(); Harness.open = originalOpen; }
 }
-export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: { tokensPerSecond?: number; onMaxTurns?: (maxTurns: number | null | undefined) => void }, fn: () => Promise<T>): Promise<T> {
+export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: { tokensPerSecond?: number; onMaxTurns?: (maxTurns: number | null | undefined) => void; onSystemPrompt?: (systemPrompt: string) => void }, fn: () => Promise<T>): Promise<T> {
   const fake = createFakeProvider(script, options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond });
+  const provider: typeof fake.provider = {
+    ...fake.provider,
+    streamSimple(model, transcript, streamOptions) {
+      options.onSystemPrompt?.(getCurrentSystemPrompt(transcript.messages));
+      return fake.provider.streamSimple(model, transcript, streamOptions);
+    },
+  };
   const originalOpen = Harness.open;
   Harness.open = async (storage, harnessOptions, context) => {
     const harness = await originalOpen.call(Harness, storage, {
     ...harnessOptions,
-    models: () => {
-      const models = typeof harnessOptions.models === "function" ? harnessOptions.models() : harnessOptions.models;
-      if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
-      models.setProvider(fake.provider);
-      return models;
-    },
+      models: () => {
+        const models = typeof harnessOptions.models === "function" ? harnessOptions.models() : harnessOptions.models;
+        if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
+        models.setProvider(provider);
+        return models;
+      },
     }, context);
     if (options.onMaxTurns) {
       const create = harness.createConversation.bind(harness);

@@ -38,7 +38,7 @@ import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "../bots/bots.ts";
 import type { ComputerBroker } from "../computer/broker.ts";
 import type { MailboxService } from "../mailbox/mailbox.ts";
-import { resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
+import { ensurePrivateFolder, resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
 import type { PluginsService, PluginLease } from "../plugins/plugins.ts";
 import type { SidecarBroker } from "../devices/sidecarBroker.ts";
 
@@ -302,6 +302,15 @@ export class TurnService {
     if (durable) this.#recordDurableActivity(botId, result.threadId, turnId);
     else this.bots.recordActivityStatus(botId, result.threadId, turnId);
     this.bots.recordUserMessage(botId, result.threadId);
+    const sent: SendResultDto = { threadId: result.threadId, messageId: result.messageId, turnId, action: "sent" };
+    let privateDir: string;
+    try {
+      privateDir = ensurePrivateFolder(botId, this.cfg.sharedWorkspaceDir);
+    } catch (error) {
+      this.#setTurnStatus(turnId, "failed", errorMessage(error), durable);
+      if (durableFollowUp) throw new HttpError(409, `follow-up unavailable: ${errorMessage(error)}`);
+      return sent;
+    }
     if (durable) {
       this.#durableTurns.add(turnId);
       let admitted!: () => void;
@@ -311,7 +320,7 @@ export class TurnService {
       const runtime = this.runtime;
       const start = runtime && (async () => {
         resolveWorkCwd(this.threads.getThread(result.threadId)!.cwd);
-        await runtime.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, instructions: bot.instructions, ...(durableFollowUp ? { whenBusy: "followUp" as const, admitted } : {}), working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
+        await runtime.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, instructions: bot.instructions, workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, ...(durableFollowUp ? { whenBusy: "followUp" as const, admitted } : {}), working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
       })();
       if (!start) { this.#durableTurns.delete(turnId); this.#setTurnStatus(turnId, "failed", "Durable runtime unavailable", true); rejectAdmission(new Error("Durable runtime unavailable")); }
       else {
@@ -326,7 +335,7 @@ export class TurnService {
       if (durableFollowUp) {
         try { await admission; } catch (error) { throw new HttpError(409, `follow-up unavailable: ${errorMessage(error)}`); }
       }
-      return { threadId: result.threadId, messageId: result.messageId, turnId, action: "sent" };
+      return sent;
     }
     const start = this.#startTurn(turnId, result.threadId, botId, agentId, text, result.workerAttachments, opts.deviceId === undefined ? {} : { deviceId: opts.deviceId });
     this.#turnStarts.set(turnId, start);
@@ -340,7 +349,7 @@ export class TurnService {
       .finally(() => {
         if (this.#turnStarts.get(turnId) === start) this.#turnStarts.delete(turnId);
       });
-    return { threadId: result.threadId, messageId: result.messageId, turnId, action: "sent" };
+    return sent;
   }
 
   /**
@@ -363,19 +372,22 @@ export class TurnService {
       botId: input.botId,
     });
     this.bots.recordActivityStatus(input.botId, input.threadId, input.turnId);
-    const start = this.#startTurn(
-      input.turnId,
-      input.threadId,
-      input.botId,
-      input.agentId,
-      input.envelope,
-      [],
-      {
-        freshSession: true,
-        awaitAcceptance: true,
-        acceptanceFailureReason: input.acceptanceFailureReason,
-      },
-    );
+    const start = (async () => {
+      ensurePrivateFolder(input.botId, this.cfg.sharedWorkspaceDir);
+      return this.#startTurn(
+        input.turnId,
+        input.threadId,
+        input.botId,
+        input.agentId,
+        input.envelope,
+        [],
+        {
+          freshSession: true,
+          awaitAcceptance: true,
+          acceptanceFailureReason: input.acceptanceFailureReason,
+        },
+      );
+    })();
     this.#turnStarts.set(input.turnId, start);
     try {
       await start;

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { BotDto, BotViewDto, MessageDto, ThreadDto } from "../../packages/protocol/src/index.ts";
@@ -158,6 +158,8 @@ describe("durable Bot mailbox", () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Release coordinator");
     const targetBotId = await makeBot(h, "Verification partner");
+    const targetPrivateFolder = path.join(h.svc.cfg.sharedWorkspaceDir, "bots", targetBotId);
+    expect(existsSync(targetPrivateFolder)).toBeFalse();
     const body = "Review the release checklist before handoff.";
 
     const source = await sendToBot(
@@ -191,6 +193,7 @@ describe("durable Bot mailbox", () => {
     targetThreads = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
     expect(targetThreads[0]!.activeTurn).toBeUndefined();
     expect(targetThreads[0]!.latestTurn).toMatchObject({ botId: targetBotId, status: "completed" });
+    expect(existsSync(targetPrivateFolder)).toBeTrue();
 
     const targetMessages = await api<MessageDto[]>(
       h,
@@ -558,6 +561,26 @@ describe("durable Bot mailbox", () => {
       : "";
     expect(controlCommands).not.toContain("message.steer");
     expect(controlCommands).not.toContain("turn.abort");
+  });
+
+  test("a private-folder failure uses the same bounded reason for the target Turn and delivery", async () => {
+    h = await startDaemon();
+    const sourceBotId = await makeBot(h, "Mail source");
+    const targetBotId = await makeBot(h, "Mail target");
+    const botsDir = path.join(h.svc.cfg.sharedWorkspaceDir, "bots");
+    mkdirSync(botsDir, { recursive: true });
+    writeFileSync(path.join(botsDir, targetBotId), "Block directory creation");
+
+    const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:check the private folder`);
+    await waitThreadIdle(h, source.threadId);
+    const deliveryId = acknowledgementDeliveryId(await messages(h, source.threadId));
+    const failed = await waitForDeliveryState(h, deliveryId, "failed");
+    const reason = "Target Agent could not accept this message.";
+    expect(failed.failure_reason).toBe(reason);
+    expect(failed.target_turn_id).not.toBeNull();
+    const targetThreads = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
+    expect(targetThreads).toHaveLength(1);
+    expect(targetThreads[0]?.latestTurn).toMatchObject({ id: failed.target_turn_id, status: "failed", reason });
   });
 
   test("marks delivery on worker acceptance while a later target failure remains only an ordinary failed target Turn", async () => {

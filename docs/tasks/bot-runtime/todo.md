@@ -176,9 +176,9 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 **Description:** Build the system prompt only from app sections: Base Prompt, identity and Job, workspace and private-folder guidance, allowed folders, and the Skills list from `<workspace>/.agents/skills` frontmatter. Create each Bot's private folder at `<workspace>/bots/<bot-id>/` on its first Turn, and remove it on Bot Deletion.
 
 **Acceptance criteria:**
-- [ ] The prompt sent to the model contains only app sections, in order, and no `AGENTS.md` content
-- [ ] Each Skill appears by name and description, and global Skill folders are not read
-- [ ] The private folder is created on the first Turn, kept on rename, and removed on deletion with the confirmation saying so
+- [x] The prompt sent to the model contains only app sections, in order, and no `AGENTS.md` content
+- [x] Each Skill appears by name and description, and global Skill folders are not read
+- [x] The private folder is created on the first Turn, kept on rename, and removed on deletion with the confirmation saying so
 
 **Verification:** default commands; a model-request test asserts the prompt.
 

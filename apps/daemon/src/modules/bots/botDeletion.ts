@@ -6,6 +6,7 @@ import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { AvatarService } from "../avatars/avatarService.ts";
 import type { BotScreenManager } from "../computer/botScreenManager.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import { removePrivateFolder } from "../workspace/sharedWorkspace.ts";
 import { HttpError } from "./bots.ts";
 
 interface DeletionBotRow {
@@ -54,6 +55,7 @@ export class BotDeletionService {
     private readonly turns: BotTurnAborter,
     private readonly threads: BotThreadTurns,
     private readonly screens: BotScreenManager,
+    private readonly workspaceDir: string,
     private readonly terminalWaitTimeoutMs = 30_000,
     private readonly projections?: BotScreenProjectionCleanup,
   ) {}
@@ -128,6 +130,7 @@ export class BotDeletionService {
 
     let attachmentFilesRemoved = 0;
     let avatarRemoved = false;
+    let privateFolderRemoved = false;
     let computerArtifactsRemoved = 0;
     const failures: DeleteBotFailureDto[] = [];
 
@@ -167,6 +170,14 @@ export class BotDeletionService {
       }
     }
 
+    if (failures.length === 0) {
+      try {
+        privateFolderRemoved = removePrivateFolder(botId, this.workspaceDir);
+      } catch (error) {
+        failures.push({ stage: "private_folder", resource: botId, message: errorMessage(error) });
+      }
+    }
+
     if (failures.length > 0) {
       const failed: DeleteBotResultDto = {
         status: "failed",
@@ -178,6 +189,7 @@ export class BotDeletionService {
           turns: 0,
           attachments: attachmentFilesRemoved,
           avatar: avatarRemoved,
+          privateFolder: privateFolderRemoved,
           computerArtifacts: computerArtifactsRemoved,
           surface: false,
         },
@@ -197,6 +209,7 @@ export class BotDeletionService {
         turns: turnCount,
         attachments: attachmentCount,
         avatar: avatarRemoved,
+        privateFolder: privateFolderRemoved,
         computerArtifacts: computerArtifacts.length,
         surface: true,
       },
@@ -268,6 +281,7 @@ export class BotDeletionService {
         turns: 0,
         attachments: 0,
         avatar: false,
+        privateFolder: false,
         computerArtifacts: 0,
         surface: false,
       },

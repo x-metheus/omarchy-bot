@@ -10,6 +10,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { CredentialStore } from "./credentials.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings } from "./compaction.ts";
+import { buildSystemPrompt } from "./extensions/prompt.ts";
+import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
@@ -22,7 +24,7 @@ export class DurableRunAborted extends Error {
 }
 
 export interface BotRuntime {
-  startTurn(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; threadId: string; botId: string; turnId: string; text: string; instructions: string; whenBusy?: "followUp"; admitted?(): void; working(): void }): Promise<void>;
+  startTurn(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; threadId: string; botId: string; turnId: string; text: string; instructions: string; workspaceDir: string; privateDir: string; whenBusy?: "followUp"; admitted?(): void; working(): void }): Promise<void>;
   recoverTurns(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; registered(turnId: string): void; settled(turnId: string, outcome: { status: "completed" | "cancelled" } | { status: "failed"; reason: string }): void }): { registered: Promise<void>; settled: Promise<void> };
   activeTurn(threadId: string): Promise<string | undefined>;
   steer(turnId: string, text: string, requestId: string): Promise<void>;
@@ -83,10 +85,17 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
             selections.push({ providerId: model.provider, modelId: model.id });
           }
           const conversation = await openThreadConversation(input.db, harness, input.threadId, input.botId, context);
-          const bot = input.db.query<{ max_turns: number | null }, [string]>("SELECT max_turns FROM bots WHERE id = ?").get(input.botId);
-          if (!bot) throw new Error("Bot not found; turn limit unavailable");
-          const maxTurns = bot.max_turns ?? DEFAULT_MAX_TURNS;
-          await conversation.configure({ model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions: input.instructions, maxTurns }, context);
+          const bot = input.bots.getDto(input.botId);
+          const maxTurns = bot.maxTurns ?? DEFAULT_MAX_TURNS;
+          const instructions = buildSystemPrompt({
+            botName: bot.name,
+            instructions: input.instructions,
+            workspaceDir: input.workspaceDir,
+            privateDir: input.privateDir,
+            allowedFolders: [input.workspaceDir],
+            skills: listWorkspaceSkills(input.workspaceDir),
+          });
+          await conversation.configure({ model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions, maxTurns }, context);
           const watch = await conversation.watch(context);
           let transcript: DurableTranscript | undefined = input.whenBusy ? undefined : new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, watch.value);
           let foreignTranscript: DurableTranscript | undefined;

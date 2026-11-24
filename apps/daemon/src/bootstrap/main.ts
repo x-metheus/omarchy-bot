@@ -239,6 +239,7 @@ export async function main(options: MainOptions = {}): Promise<{
     turns,
     threads,
     screens,
+    cfg.sharedWorkspaceDir,
     cfg.botDeletionTerminalTimeoutMs,
     projections,
   );
