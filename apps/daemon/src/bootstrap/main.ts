@@ -254,6 +254,7 @@ export async function main(options: MainOptions = {}): Promise<{
   }
 
   const svc: DaemonServices = {
+    ...(runtime.approvals ? { approvals: runtime.approvals } : {}),
     cfg,
     db,
     events,

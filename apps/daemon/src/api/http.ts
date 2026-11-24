@@ -20,6 +20,8 @@ import type { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { handleAvatarRequest } from "./avatarRoutes.ts";
 import { handleThreadFeatureRequest } from "./threadRoutes.ts";
 import { handleBotAttentionRequest } from "./botAttentionRoutes.ts";
+import { handleApprovalRequest } from "./approvalRoutes.ts";
+import type { ApprovalStore } from "../modules/runtime/approvals.ts";
 import { handleBotDeletionRequest } from "./botDeletionRoutes.ts";
 import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleProjectionRequest } from "./projectionRoutes.ts";
@@ -55,6 +57,8 @@ export interface DaemonServices {
   projections: ScreenProjectionService;
   devices: SidecarBroker;
   pairing: PairingService;
+  /** Requests to use files outside the allowed folders; absent without the durable runtime's store. */
+  approvals?: ApprovalStore;
   /** Mode-0600 Service Host secret. Required to mint pairing codes; never logged. */
   pairingHostSecret: string;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
@@ -312,6 +316,9 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
 
     const attentionResponse = await handleBotAttentionRequest(req, svc.bots, pathname);
     if (attentionResponse) return attentionResponse;
+
+    const approvalResponse = await handleApprovalRequest(req, svc.approvals, url);
+    if (approvalResponse) return approvalResponse;
 
 
     const avatarResponse = await handleAvatarRequest(req, svc.avatars, pathname);
