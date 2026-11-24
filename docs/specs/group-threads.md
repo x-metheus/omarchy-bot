@@ -41,93 +41,91 @@ Existing one-Bot Threads, Bot mail, and Takeover keep their current behavior.
 6. As a user, I want to add a Bot to a Group Thread, so that I can bring in a new skill mid-conversation.
 7. As a user, I want to remove a Bot from a Group Thread, so that it stops receiving messages there.
 8. As a user, I want removal rejected with a clear message while that Bot has an Active Turn in the group, so that in-flight work is not orphaned.
-9. As a user, I want to delete a Group Thread, so that I can clear conversations I no longer need.
-10. As a user, I want a Bot's own History to keep listing only its one-Bot Threads, so that selecting a Bot behaves as it does today.
-11. As a user, I want the app's most-recently-active choice to keep selecting a Bot, so that opening the app does not change.
+9. As a user, I want a Bot's own History to keep listing only its one-Bot Threads, so that selecting a Bot behaves as it does today.
+10. As a user, I want the app's most-recently-active choice to keep selecting a Bot, so that opening the app does not change.
 
 **Addressing Bots and deciding to reply**
 
-12. As a user, I want `@` in the Composer to offer the group's members by name and avatar, so that I can address a Bot without typing its exact name.
+11. As a user, I want `@` in the Composer to offer the group's members by name and avatar, so that I can address a Bot without typing its exact name.
 13. As a keyboard user, I want the mention list fully keyboard-operable with accessible labels, so that addressing a Bot needs no pointer.
-14. As a user, I want a mention to keep working after a Bot is renamed, so that history and routing stay correct.
-15. As a user, I want a message mentioning Bots to reach only those Bots, so that I can target work and avoid waking the whole group.
-16. As a user, I want a message with no mention to reach every member, so that whichever Bots are relevant can respond.
-17. As a user, I want each Bot to have a Job/Instructions system prompt and a separate Personality prompt, so that I can define what it is responsible for and how it behaves.
-18. As a user, I want a Bot's Personality to apply in one-Bot and Group Threads, so that it stays the same teammate everywhere.
+12. As a user, I want a mention to keep working after a Bot is renamed, so that history and routing stay correct.
+13. As a user, I want a message mentioning Bots to reach only those Bots, so that I can target work and avoid waking the whole group.
+14. As a user, I want a message with no mention to reach every member, so that whichever Bots are relevant can respond.
+15. As a user, I want each Bot to have a Job/Instructions system prompt and a separate Personality prompt, so that I can define what it is responsible for and how it behaves.
+16. As a user, I want a Bot's Personality to apply in one-Bot and Group Threads, so that it stays the same teammate everywhere.
 19. As a member Bot, I want to decide whether a message with no mention needs my reply, using my Job/Instructions and Personality, so that I speak when it is my duty.
-20. As a user, I want every Bot to have built-in reply rules, even with an empty Job and Personality, so that a new Bot does not answer everything.
-21. As a user, I want a Bot's instructions unable to remove the built-in reply rules, so that group behavior stays dependable.
-22. As a user, I want a Bot that decides not to reply to add nothing to the transcript, so that the conversation stays readable.
-23. As a user, I want anything other than an exact reply decision treated as not replying, so that a model that insists on saying something cannot leak chatter into the group.
-24. As a user, I want a Bot that passes not to run tools or start a Turn, so that a pass has no side effects and costs little.
-25. As a user, I want Bots to decide one after another when no one is mentioned, so that a later Bot can see an earlier reply and not repeat it.
-26. As a user, I want a slow Bot not to hold up the others for long, so that one long job does not silence the group.
-27. As a user, I want a quiet note when every Bot passes on my message, so that I know it was received and can mention a Bot directly.
-28. As a user, I want a mentioned Bot always to take a Turn, so that a direct question is never filtered out.
-29. As a user, I want Bots already started to work at the same time, so that a long job in one does not stop the rest.
-30. As a user, I want each Bot to keep its own Job/Instructions, Personality, and Display Settings in a group, so that it stays the same teammate.
+17. As a user, I want every Bot to have built-in reply rules, even with an empty Job and Personality, so that a new Bot does not answer everything.
+18. As a user, I want a Bot's instructions unable to remove the built-in reply rules, so that group behavior stays dependable.
+19. As a user, I want a Bot that decides not to reply to add nothing to the transcript, so that the conversation stays readable.
+20. As a user, I want anything other than an exact reply decision treated as not replying, so that a model that insists on saying something cannot leak chatter into the group.
+21. As a user, I want a Bot that passes not to run tools or start a Turn, so that a pass has no side effects and costs little.
+22. As a user, I want Bots to decide one after another when no one is mentioned, so that a later Bot can see an earlier reply and not repeat it.
+23. As a user, I want a slow Bot not to hold up the others for long, so that one long job does not silence the group.
+24. As a user, I want a quiet note when every Bot passes on my message, so that I know it was received and can mention a Bot directly.
+25. As a user, I want a mentioned Bot always to take a Turn, so that a direct question is never filtered out.
+26. As a user, I want Bots already started to work at the same time, so that a long job in one does not stop the rest.
+27. As a user, I want each Bot to keep its own Job/Instructions, Personality, and Display Settings in a group, so that it stays the same teammate.
 31. As a member Bot, I want to receive the user messages, attachments, and other Bots' responses I have not yet seen, so that I can follow the conversation.
 32. As a privacy-conscious user, I want other Bots' Thinking and Tool Calls kept out of what a Bot receives, so that groups share the conversation and not private working state.
 33. As a member Bot, I want each message I receive labeled with its author, so that I can tell the user's requests from a peer's statements.
-34. As a user, I want a peer Bot's text unable to pose as a user message, so that a Bot that read a hostile web page cannot speak with my authority.
+28. As a user, I want a peer Bot's text unable to pose as a user message, so that a Bot that read a hostile web page cannot speak with my authority.
 35. As a member Bot, I want to know the group's members and my own identity, so that I can decide whom to bring in.
 36. As a member Bot, I want to bring in other members when I finish speaking, so that I can hand over work in the open.
-37. As a user, I want a Bot's response to wake other Bots only when it explicitly brings them in, so that one reply does not set off the whole group.
-38. As a user, I want a brought-in Bot to start only after the first Bot's Turn completes, so that it can read the finished response.
-39. As a user, I want a failed Turn to bring in nobody, so that a broken step does not trigger more work.
-40. As a user, I want several requests to a busy Bot merged into one later Turn, so that it reads them together and does not run once per request.
-41. As a user, I want a new message from me to cancel Bot-to-Bot work that has not started, so that I can take the conversation back at any point.
-42. As a user, I want my message to steer a Bot that is already working, if it decides the message concerns it or I mentioned it, so that Steering works in a group without redirecting unrelated work.
-43. As a user, I want Bot-initiated requests never to steer an active Turn, so that peers cannot corrupt in-flight work.
-44. As a user, I want a Bot in a group to keep Bot mail, so that it can still hand off work to a Bot outside the group.
+29. As a user, I want a Bot's response to wake other Bots only when it explicitly brings them in, so that one reply does not set off the whole group.
+30. As a user, I want a brought-in Bot to start only after the first Bot's Turn completes, so that it can read the finished response.
+31. As a user, I want a failed Turn to bring in nobody, so that a broken step does not trigger more work.
+32. As a user, I want several requests to a busy Bot merged into one later Turn, so that it reads them together and does not run once per request.
+33. As a user, I want a new message from me to cancel Bot-to-Bot work that has not started, so that I can take the conversation back at any point.
+34. As a user, I want my message to steer a Bot that is already working, if it decides the message concerns it or I mentioned it, so that Steering works in a group without redirecting unrelated work.
+35. As a user, I want Bot-initiated requests never to steer an active Turn, so that peers cannot corrupt in-flight work.
+36. As a user, I want a Bot in a group to keep Bot mail, so that it can still hand off work to a Bot outside the group.
 
 **Attachments**
 
-45. As a user, I want to attach files and images to a group message using the same Composer actions as a one-Bot Thread, so that groups work the way I expect.
-46. As a user, I want group attachments to render in history as they do elsewhere, so that I can see what I sent.
+37. As a user, I want to attach files and images to a group message using the same Composer actions as a one-Bot Thread, so that groups work the way I expect.
+38. As a user, I want group attachments to render in history as they do elsewhere, so that I can see what I sent.
 47. As a member Bot, I want attachments sent while I was not addressed to arrive in my next Turn, so that I can catch up on what the group has seen.
-48. As a user, I want a message rejected with a clear reason if no Bot it reaches can read the attachment, so that I do not send something nobody can use.
+39. As a user, I want a message rejected with a clear reason if no Bot it reaches can read the attachment, so that I do not send something nobody can use.
 49. As a member Bot whose model cannot read an attachment type, I want to be told the file exists and that I cannot read it, so that I do not guess at its contents.
-50. As a user, I want a message with an attachment to a busy Bot delivered when that Bot's Turn ends, so that the attachment is not refused the way Steering refuses it today.
-51. As a user, I want deleting a Bot to leave group attachments in place, so that other members and my history keep them.
-52. As a user, I want deleting a Group Thread to remove its managed attachment copies, so that deletion is complete.
+40. As a user, I want a message with an attachment to a busy Bot delivered when that Bot's Turn ends, so that the attachment is not refused the way Steering refuses it today.
+41. As a user, I want deleting a Bot to leave group attachments in place, so that other members and my history keep them.
 
 **Transcript**
 
-53. As a user, I want each run of Bot output labeled with that Bot's name and avatar, so that I can always see who said what.
-54. As a user, I want output from concurrent Bots kept in its true order without any Bot's blocks being reordered, so that history stays truthful.
-55. As a user, I want one working avatar per active member, so that I can see who is still working.
-56. As a user, I want each Bot's Display Settings applied to that Bot's blocks only, so that hiding one Bot's Tool Calls does not hide another's.
-57. As a user, I want an unavailable or failed member reported in the transcript beside that member's name, so that one failure does not look like the whole group failing.
-58. As a user, I want a message to wait for a member whose model is not ready and run when it becomes ready, so that a temporary failure loses nothing.
-59. As a user, I want accepted work to survive a Service restart without running twice, so that restarts neither lose nor duplicate actions.
+42. As a user, I want each run of Bot output labeled with that Bot's name and avatar, so that I can always see who said what.
+43. As a user, I want output from concurrent Bots kept in its true order without any Bot's blocks being reordered, so that history stays truthful.
+44. As a user, I want one working avatar per active member, so that I can see who is still working.
+45. As a user, I want each Bot's Display Settings applied to that Bot's blocks only, so that hiding one Bot's Tool Calls does not hide another's.
+46. As a user, I want an unavailable or failed member reported in the transcript beside that member's name, so that one failure does not look like the whole group failing.
+47. As a user, I want a message to wait for a member whose model is not ready and run when it becomes ready, so that a temporary failure loses nothing.
+48. As a user, I want accepted work to survive a Service restart without running twice, so that restarts neither lose nor duplicate actions.
 
 **Computer, approvals, and attention**
 
-60. As a user, I want to choose which member's Bot Screen to view from the group header, so that I can watch any of them.
-61. As a user, I want Takeover to work on the chosen member's Screen, so that I can step in for that Bot only.
-62. As a user, I want a Local Sidecar or file-access approval shown in the group with the requesting Bot's name, so that I know who is asking.
-63. As a user, I want a Turn started by my message to use This Device, and a Bot-initiated Turn to have no This Device, so that a Bot cannot reach my laptop without my message having started the work.
-64. As a user, I want unread counts and notifications to belong to the Group Thread, so that one group message does not mark every member Bot as unread.
-65. As a user, I want a member Bot's activity point lit while it works in a group, so that Bot Activity stays true across all of its Threads.
-66. As a user, I want my Composer Draft kept per Group Thread and per window, so that drafts behave as they do elsewhere.
+49. As a user, I want to choose which member's Bot Screen to view from the group header, so that I can watch any of them.
+50. As a user, I want Takeover to work on the chosen member's Screen, so that I can step in for that Bot only.
+51. As a user, I want a Local Sidecar or file-access approval shown in the group with the requesting Bot's name, so that I know who is asking.
+52. As a user, I want a Turn started by my message to use This Device, and a Bot-initiated Turn to have no This Device, so that a Bot cannot reach my laptop without my message having started the work.
+53. As a user, I want unread counts and notifications to belong to the Group Thread, so that one group message does not mark every member Bot as unread.
+54. As a user, I want a member Bot's activity point lit while it works in a group, so that Bot Activity stays true across all of its Threads.
+55. As a user, I want my Composer Draft kept per Group Thread and per window, so that drafts behave as they do elsewhere.
 
 **Shared models and app-owned prompts**
 
-67. As a user, I want Bots to stay distinct even when they use the same LLM model, so that identity always follows the Bot.
-68. As a user, I want a later Bot to know that an earlier Bot is already replying, so that Bots on the same model do not all give the same answer.
-69. As a user, I want a rate limit or outage on a shared model reported beside the affected Bots, so that a failure does not look like those Bots choosing not to reply.
-70. As a user, I want every Bot's system prompt to come from the app, so that all my Bots follow one set of behavior.
-71. As a user, I want this to apply in one-Bot Threads too, so that a Bot does not change character between a Thread and a group.
-72. As a user, I want my own Skills to keep working, so that app-owned prompts do not remove my configuration.
-73. As a user, I want a Bot to use its tools correctly, so that an app-written prompt does not make it worse at work.
+56. As a user, I want Bots to stay distinct even when they use the same LLM model, so that identity always follows the Bot.
+57. As a user, I want a later Bot to know that an earlier Bot is already replying, so that Bots on the same model do not all give the same answer.
+58. As a user, I want a rate limit or outage on a shared model reported beside the affected Bots, so that a failure does not look like those Bots choosing not to reply.
+59. As a user, I want every Bot's system prompt to come from the app, so that all my Bots follow one set of behavior.
+60. As a user, I want this to apply in one-Bot Threads too, so that a Bot does not change character between a Thread and a group.
+61. As a user, I want my own Skills to keep working, so that app-owned prompts do not remove my configuration.
+62. As a user, I want a Bot to use its tools correctly, so that an app-written prompt does not make it worse at work.
 
 **Lifecycle and upgrade**
 
-74. As a user, I want deleting a Bot to remove it from its groups while keeping its past messages under the name it had, so that other Bots' conversations are not rewritten.
-75. As a user, I want a group left with no members to stay readable and refuse new messages, so that history is not lost.
-76. As a user, I want upgrading to keep every existing Thread, Message, attachment, and conversation mapping intact, so that the feature costs me no history.
-77. As a user, I want an out-of-date client told to update rather than misreading groups, so that the mismatch is clear.
+63. As a user, I want deleting a Bot to remove it from its groups while keeping its past messages under the name it had, so that other Bots' conversations are not rewritten.
+64. As a user, I want a group left with no members to stay readable and refuse new messages, so that history is not lost.
+65. As a user, I want upgrading to keep every existing Thread, Message, attachment, and conversation mapping intact, so that the feature costs me no history.
+66. As a user, I want an out-of-date client told to update rather than misreading groups, so that the mismatch is clear.
 
 ## Tech stack
 
@@ -277,7 +275,7 @@ Models tend to produce text even when told to stay quiet, so silence must not de
 - **Staging** accepts a file if at least one current member's model supports its type and size. On send, the Service checks again against the Bots the Message reaches, and rejects the Message with a clear reason if none of them can read an attachment.
 - **Delivery:** a Bot receives each attachment from the managed snapshot in its Turn, if its model accepts it. Otherwise it receives only the attachment's name and type, with a statement that it cannot read it. Nothing is converted, which keeps the product boundary rule.
 - **Catch-up:** attachments sent before a Bot's cursor are not sent again. Those after it arrive with its next catch-up, bounded by count and size. Anything over the bound is listed by name with an explicit marker.
-- **Deletion:** a Bot leaving or being deleted does not touch group attachments. Deleting the Group Thread removes the managed copies, and deletion reports failures as Bot deletion does now.
+- **Deletion:** Group Threads cannot be deleted. A Bot leaving or being deleted does not touch group attachments.
 
 ### Bringing in other members
 
@@ -314,7 +312,6 @@ Models tend to produce text even when told to stay quiet, so silence must not de
 
 - Deleting a Bot removes its membership, Group Wakes, and group conversations. Its group Messages and Turns stay, under the name snapshot.
 - A group with no members stays readable and rejects sends. A group with one member stays usable and can take new members.
-- Deleting a Group Thread removes Service-owned records, all member conversations, and managed attachment copies. It is rejected with a clear message while any member has an Active Turn in it.
 
 ### Documentation changes that ship with this work
 

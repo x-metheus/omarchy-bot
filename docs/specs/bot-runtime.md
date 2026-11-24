@@ -1,9 +1,9 @@
 # Spec: Bot runtime on pi-durable
 
-Status: approved 2026-11-10
+Status: approved 2026-11-10, amended 2026-11-24 (see [Changes](#changes))
 
 Decision record: [ADR 0016](../adr/0016-build-bots-on-pi-durable.md)
-Replaces: `.scratch/bot-runtime/spec.md` (written for `pi-agent-core` 0.84.4)
+Replaces: the earlier draft written for `pi-agent-core` 0.84.4. Its Web and Workspaces rules are copied into this spec, so this spec stands alone.
 
 > The [prototype](#prototype) ran on 2026-11-12 and passed. Its findings are folded into this spec.
 
@@ -34,18 +34,22 @@ This spec covers the runtime: running Turns, storage, tools, models, and file ac
 12. As a user, I want a Bot to ask before touching files outside the folders I allowed, so that a mistake cannot damage my other files.
 13. As a user, I want to be told honestly what the workspace protects, so that I do not mistake it for a sandbox.
 14. As a user, I want each Bot to have a private folder for notes about itself, while all work files stay shared, so that deleting a Bot loses no work.
+15. As a user, I want a Bot to keep passwords and other sensitive data privately and use them without seeing them, so that a Bot misled by a web page cannot reveal them.
 
 ### Success criteria
 
 - No Bot Turn imports `pi-coding-agent` or `pi-agent-core`, and none reads `~/.pi`.
 - Existing Threads continue after upgrade, with their history and each Bot's model.
 - A Service killed mid-reply resumes or clearly fails that reply on next start, and no Turn is lost silently.
+- No secret value is kept in a plain file that a Bot's shell can read where an OS keychain is available, or is sent to a model by the app.
 - Every [prototype](#prototype) check and every [test](#testing-strategy) passes.
 
 ## Tech stack
 
 - Bun 1.4+, TypeScript, ES modules, Bun workspaces (unchanged).
 - `@earendil-works/pi-ai`, `@earendil-works/pi-durable`, and `@earendil-works/pi-mcp`, each pinned to one exact version: the latest release when the prototype starts and when implementation starts. On 2026-11-12 that is 1.5.2 for all three, and `pi-durable` 1.5.2 itself pins `pi-ai` 1.5.2 exactly. The three move together, because they are released together. `pi-durable` is marked experimental, so it is never on a range, and moving to a newer release is a deliberate upgrade that reruns the prototype checks.
+- `@earendil-works/chord`, which pi-durable takes on every entry point but does not re-export, is pinned to the same version and imported only by the runtime module.
+- `web_fetch` uses `@mozilla/readability`, `linkedom`, and `turndown`, each pinned exactly and imported only by the web extension.
 - pi-durable SQLite storage through `node:sqlite`. Bun 1.4.4 runs it end to end (prototype check 1), so Bun 1.4.4 is the minimum.
 - Removed: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-agent-core`, `pi-mcp-adapter`, and loading of the user's global Pi packages.
 
@@ -55,14 +59,14 @@ This spec covers the runtime: running Turns, storage, tools, models, and file ac
 
 The runtime runs **inside the Service process** and has the same lifecycle. It opens when the Service starts and closes when it stops. The separate agent worker (`workers/pi`) and its worker protocol (`packages/agent-contract/src/agent-protocol.ts`) are removed.
 
-The tool protocols to the computer worker, Local Sidecar, plugins, and Bot mail stay, because those still run outside the Service.
+The tool protocols to the computer worker and the Local Sidecar stay, because those still run outside the Service. Bot mail and plugins are Service modules, and their tools call them directly.
 
 ```
 Service process
 ├─ Bot runtime module            the only code that imports pi-durable
 │   ├─ Harness (pi-durable)      one, opened on Service start
 │   ├─ Registry                  app extensions: tools, prompt sections, hooks, tasks
-│   └─ Models (pi-ai)            providers from the app credential store
+│   └─ Models (pi-ai)            providers from the app secret store
 ├─ Threads, Bots, mailbox, …     existing modules; call the runtime module
 └─ Supervisor                    computer worker, sidecars, MCP stdio servers
 ```
@@ -74,7 +78,7 @@ Service process
 - abort
 - configure a Bot's model
 - watch a Thread
-- delete a Thread or Bot
+- delete a Bot
 
 This keeps an upgrade of the experimental package to one module.
 
@@ -96,7 +100,8 @@ This keeps an upgrade of the experimental package to one module.
 
 - **Location:** pi-durable tables live in the Service's SQLite database under the `pi_` prefix, next to the Service's own tables. The prototype confirmed they coexist in a copy of a real database. The Service is their only writer. The Service still owns Bots, Threads, Messages, and attachments in its own tables.
 - **Transcript:** the Service's Message records stay the source the clients read today. The runtime module writes them from committed pi-durable entries, so the order and content of blocks match today's ordered transcript (ADR 0007's guarantee).
-- **Deletion:** deleting a Thread deletes its conversation and entries. Deleting a Bot deletes all its conversations. App-owned storage makes this a real deletion, unlike the old Agent-owned sessions.
+- **Deletion:** Threads cannot be deleted; Bots can. Bot Deletion deletes all of that Bot's conversations and their entries, which makes it a real deletion, unlike the old Agent-owned sessions. The memory spec's conversation reset after a forget also deletes the old conversation's entries.
+- **Deleting conversations:** pi-durable 1.5.2 has no public delete. The runtime module owns one contained function that deletes a conversation's rows from the `pi_` tables in a transaction. It is the only place that writes to pi-durable's tables directly, it has a test that runs on every Pi upgrade, and it is replaced when an upstream request for a public delete lands.
 - **Migration on a Thread's first Turn after upgrade:**
   1. Read the Thread's old Pi session file, read-only.
   2. Write the latest compaction summary and the messages after it into a new conversation.
@@ -107,7 +112,7 @@ This keeps an upgrade of the experimental package to one module.
 
   The prototype (check 4) proved a real session continues when everything is flattened to labeled text. Native mapping is the target because it keeps Tool Call structure for the model; the labeled-text fallback is what the prototype proved.
 
-  Old session files stay until their Thread or Bot is deleted, and deletion removes only the exact recorded path.
+  Old session files stay until their Bot is deleted, and deletion removes only the exact recorded path.
 
 ### Turns, Steering, and the input queue
 
@@ -127,7 +132,7 @@ Non-user entries such as Bot mail and Group Thread entries carry their author la
 
 ### Models and providers
 
-- **Credential store:** the app owns one. It is stored in the Service data directory with the same protection as device tokens today.
+- **Keys:** provider keys live in the app's [secret store](#secrets), never in a plain file where a keychain is available.
 - **Settings screen:** you add a provider by protocol, either OpenAI-compatible or Anthropic Messages, with a name, base URL, and key. Built-in `pi-ai` providers can be added with only a key. No provider gets special-case code.
 - **One-time import:** on first start after upgrade, keys found in `~/.pi/agent/auth.json`, and providers found in `~/.pi/agent/models.json`, are copied into the app store if those files exist. The files are read-only to the app and never written. After the import, nothing reads them.
 - **Per-Bot model:** each Bot has an optional model. An unset Bot uses one Service-wide default. A change applies from that Bot's next Turn. The default is seeded once from the user's current Pi default model, so existing Bots keep their model.
@@ -144,10 +149,11 @@ Tools are app extensions in the registry. Each Bot's conversation selects its ex
 | Web | `web_fetch`, `web_search` | See [Web](#web) |
 | Bot mail | send and read Bot mail | Unchanged behavior; calls the mailbox module directly |
 | Local Sidecar | local tools | Unchanged protocol |
-| Plugins | plugin tools | Unchanged protocol |
-| MCP | one `mcp` tool with search, describe, and call | See [MCP](#mcp) |
+| Plugins | plugin management | Connects and signs in to service accounts, and installs, enables, and removes Skills and MCP servers. Calls the plugins module directly. Calls to a connected service go through `mcp`. |
+| MCP | one `mcp` tool with search, describe, and call | For servers in `.mcp.json` and connected service accounts. See [MCP](#mcp) |
+| Secrets | `secrets` with save, list, and delete | See [Secrets](#secrets) |
 
-Code mode and tool search from pi-durable are not used in v1.
+This table is the complete list of Bot tools. Code mode and tool search from pi-durable are not used in v1.
 
 ### File access
 
@@ -170,7 +176,7 @@ A denied call returns an error result to the Bot, which tells it you said no.
 **Always refused**, even with approval:
 
 - the Service data directory, which holds memory, credentials, and sessions
-- the app credential store
+- the secret store's fallback file
 - another Bot's private folder
 
 Path checks resolve symbolic links and `..` before comparing.
@@ -180,6 +186,7 @@ Path checks resolve symbolic links and `..` before comparing.
 - `bash` starts in the Shared Workspace.
 - It runs with your user's rights, and its commands are not checked against the allowed folders, because that cannot be enforced without an OS sandbox.
 - It has a time limit and honors abort.
+- It starts with a clean environment: the Service's own environment variables are not passed on, so no app secret reaches it that way.
 - This is the main reason the workspace is not a sandbox, and the wording says so.
 
 **Example:** "Download this PDF to my Downloads." The Bot fetches it into the Shared Workspace or straight into Downloads, which is allowed by default, so nothing is asked.
@@ -193,19 +200,33 @@ Path checks resolve symbolic links and `..` before comparing.
 - **Expiry:** an unanswered request expires after 7 days, and the tool returns a "no answer" error to the Bot.
 - The proactive-Bots spec reuses this flow for ask-before-act.
 
+### Secrets
+
+Bots can keep sensitive data privately, such as passwords, tokens, and account numbers. The app keeps its own secrets, provider keys and MCP sign-ins, in the same store.
+
+- **Store:** the OS keychain: Secret Service on Linux, Keychain on macOS, and Credential Manager on Windows. Where no keychain is available, such as a server without Secret Service, the Service falls back to a file in its data directory readable only by your user, and Settings warns that a Bot's shell could read it. Keychain access uses one small library or the platform's command-line tool; which one is an ask-first dependency decision.
+- **Scopes:** app secrets are never available to Bots. Each Bot's secrets are private to that Bot: other Bots cannot list or use them.
+- **The `secrets` tool:** save a value under a name with a short description, list names and descriptions, and delete. It never returns a value.
+- **Use by name:** a Bot writes `{{secret:name}}` in a `bash` command or its environment, a `web_fetch` URL or header, or an `mcp` call's arguments. The app fills in the value when the tool runs. Before a result is stored or sent to the model, every exact occurrence of a value used in that call is replaced with its `{{secret:name}}`.
+- **Never stored elsewhere:** secret values never go into `pi_` entries, Service Messages, logs, or memory.
+- **Typing a secret into a Thread** sends it to the model like any message. Settings lists each Bot's secrets by name and lets you add, replace, and remove them without the model seeing the value.
+- **Bot Deletion** removes that Bot's secrets, and the confirmation says so.
+- **Moving existing keys:** on first start, keys in the earlier 0600 credential file move into the keychain, and the file is removed.
+- **Limits, stated honestly:** replacing values catches exact copies, not changed ones, such as a value a script re-encodes. A Bot that runs a command using a secret can still send it somewhere through that command. This keeps secrets out of the model's sight; it does not stop a Bot told to misuse one.
+
 ### Prompt and Skills
 
 - **Prompt:** the system prompt is built only from app sections: the Base Prompt, the Bot's identity and Job, workspace and private-folder guidance, the allowed folders, the Skills list, and per-Turn context.
 - **No auto-loading:** `AGENTS.md` and similar files are not auto-loaded.
-- **Skills:** one folder, `<workspace>/.agents/skills`. pi-durable has no Skills loader, so an app section lists each Skill's name and description from its `SKILL.md` frontmatter, and the Bot reads a Skill with `read` when it needs it. Global folders such as `~/.pi/agent/skills` and `~/.agents/skills` are not loaded.
+- **Skills:** one folder, `<workspace>/.agents/skills`. pi-durable has no Skills loader, so an app section lists each Skill's name and description from its `SKILL.md` frontmatter, and the Bot reads a Skill with `read` when it needs it. Global folders such as `~/.pi/agent/skills` and `~/.agents/skills` are not loaded. Skills installed from the catalog in the Skills panel are installed into this folder.
 
 ### MCP
 
 - **Client:** `pi-mcp` for connections (stdio and Streamable HTTP) and OAuth (`@earendil-works/pi-mcp/oauth`).
-- **Configuration:** `<workspace>/.mcp.json` only.
+- **Configuration:** servers you add live in `<workspace>/.mcp.json`. Service accounts connected in the plugins panel are MCP servers too. Both go through the same `mcp` tool and the same app-owned sign-in.
 - **Tool shape:** the Bot sees one `mcp` tool with search, describe, and call, as today, so many services do not fill the prompt. Servers connect on first use.
 - **Sign-in:** `pi-mcp` stores no credentials and opens no browser, so the Service owns sign-in:
-  - an `McpOAuthStateStore` backed by the app credential store, holding client registration, tokens, and pending sign-in state
+  - an `McpOAuthStateStore` backed by the app secret store, holding client registration, tokens, and pending sign-in state
   - a loopback callback listener on `127.0.0.1` for the browser redirect
   - a sign-in action in the Services panel that opens the authorization URL on the user's device
 - **Token import:** `pi-mcp-adapter` keeps OAuth tokens in the system keyring (Secret Service on Linux). On first start, the Service reads them once, read-only, and converts the fields, including expiry from seconds to milliseconds. A token that cannot be converted or no longer works is dropped, and that service shows as needing sign-in again. Signing in again is acceptable.
@@ -214,27 +235,35 @@ Path checks resolve symbolic links and `..` before comparing.
 
 ### Web
 
-Unchanged from the previous spec:
+Bots get two web tools built by the app:
 
-- `web_fetch` reads a URL as text.
-- `web_search` uses Exa's free MCP endpoint by default, with an optional Exa key in Settings.
-- A rate limit, either HTTP 429 or a 200 response with the `ai.exa/rateLimited` flag, is reported as a rate limit and never as an empty result.
-- `web_fetch` refuses internal addresses unless Settings exempts an address range. The error names the range and the setting.
-- Results count as outside content for the memory trust rules.
+- **`web_fetch`** reads a URL as text, without a browser. It extracts the readable part of a page with `@mozilla/readability` on `linkedom` and returns Markdown through `turndown`.
+- **`web_search`** works with no setup, through Exa's free MCP endpoint (`https://mcp.exa.ai/mcp`) called with `pi-mcp`. Settings can add an Exa API key, which removes the free endpoint's rate limit, and Settings says that searches without a key go to Exa's free service. Search providers sit behind one small interface, so others can be added later. Exa is the only one in v1, and any other search service can be connected through MCP.
+- **When search fails:** a rate limit, either HTTP 429 or a 200 response with the `ai.exa/rateLimited` flag, is reported as a rate limit and never as an empty result. On a rate limit or outage, the tool says so and suggests the browser tool.
+- **Internal addresses:** `web_fetch` refuses internal addresses, so a page cannot steer a Bot into local services. Settings can exempt address ranges, which is needed when a proxy maps hostnames to fake addresses. The exemption is off by default, and the error names the range and the setting.
+- **Limits:** a download is capped at 5 MB and has a time limit, and page extraction runs in a worker thread with its own time limit, so a large or hostile page cannot freeze the Service.
+- **Trust:** results count as outside content for the memory trust rules.
 
 ### Workspaces
 
-Unchanged from the previous spec:
+```
+<workspace>/
+├─ work files            shared by all Bots
+├─ .agents/skills/       the only Skills folder
+├─ .mcp.json             the only MCP configuration file
+└─ bots/<bot-id>/        each Bot's private folder
+```
 
-- The Shared Workspace is common to all Bots.
-- Each Bot has a private folder at `<workspace>/bots/<bot-id>/`, created on its first Turn and kept under the same path when the Bot is renamed. It holds only the Bot's notes about itself. All work files, including drafts, go in the shared space.
-- Bot Deletion removes the Bot's private folder, and the confirmation says so.
-- The workspace cleanup is unchanged:
-  - one Skills folder and one `.mcp.json`
-  - servers and Skills from `.pi`, `.codex`, and `.claude` are merged in
-  - those old folders are moved to a dated backup in the data directory
-  - nothing moves if any step fails
-  - a marker file prevents a second run
+- **Shared Workspace:** common to all Bots. The default working folder stays the Shared Workspace, and explicit Thread working folders are unchanged.
+- **Private folder:** each Bot has one at `<workspace>/bots/<bot-id>/`, created on its first Turn and named by Bot ID, so renaming the Bot does not move it. It holds only the Bot's notes about itself, such as how it does its Job. All work files, including drafts, go in the shared space. The Service does not inspect content, so this relies on the app prompt.
+- **Enforced where the Service can:** app file tools and Local Sidecar transfers refuse paths inside another Bot's folder. The shell runs as your user, so another Bot can still read the folder that way, and the wording says so.
+- **Not here:** memory, Bot sessions, and secrets stay in Service-owned storage, so a Bot's file tools cannot edit its own memory.
+- **Bot Deletion** removes the Bot's private folder, and the confirmation says so. The rest of the Shared Workspace stays.
+- **Workspace cleanup** runs once at Service start, after the new runtime is in place:
+  1. **MCP:** servers in `.pi/mcp.json` and `.codex/config.toml` that are missing from `.mcp.json` are added to it. If the same name differs, `.mcp.json` wins, and the conflict is logged.
+  2. **Skills:** Skills in `.pi/skills` and `.claude/skills` that are missing from `.agents/skills` are moved there. If the same name exists, `.agents/skills` wins.
+  3. **Old folders:** `.claude`, `.codex`, and `.pi` are moved, not deleted, to a dated backup folder in the data directory, including anything the cleanup did not recognize.
+  4. **Failure:** if any step fails, nothing is moved, and the Service reports it and retries on next start. A marker file prevents a second run.
 
 ### Platform paths
 
@@ -281,9 +310,10 @@ apps/daemon/src/modules/runtime/      new: the only importer of pi-durable
   runtime.ts                          Harness lifecycle, public API for other modules
   conversations.ts                    Thread ↔ conversation mapping, migration
   transcript.ts                       entries → Service Messages and client stream
-  models.ts                           credential store → pi-ai providers
+  models.ts                           secret store → pi-ai providers
+  secrets.ts                          OS keychain store, the secrets tool, value filling and replacing
   approvals.ts                        approval requests
-  extensions/                         files-shell, computer, browser, web, mail, local, plugins, mcp, skills
+  extensions/                         files-shell, computer, browser, web, mail, local, plugins, mcp, secrets, skills
   *.test.ts                           tests next to the code
 apps/daemon/src/modules/workspace/    allowed folders, private folders, platform paths
 workers/pi/                           removed
@@ -302,7 +332,6 @@ export interface BotRuntime {
   steer(threadId: ThreadId, text: string): Promise<void>;
   abort(threadId: ThreadId): Promise<void>;
   watch(threadId: ThreadId, onUpdate: (update: ThreadUpdate) => void): Promise<() => Promise<void>>;
-  deleteThread(threadId: ThreadId): Promise<void>;
   deleteBot(botId: BotId): Promise<void>;
 }
 ```
@@ -326,7 +355,10 @@ export interface BotRuntime {
   - the data directory and other Bots' folders are always refused
 - **Migration:** use a database and session files from the current release. Check that each Thread continues, each Bot keeps its model, keys and providers are imported, and the `~/.pi` files are unchanged.
 - **Providers:** check that one OpenAI-compatible provider and one built-in `pi-ai` provider each complete a Turn.
-- **Web, workspace cleanup, private folders:** as in the previous spec.
+- **Web:** rate limits on both signals, the internal-address refusal and its exemption, and the size and time limits.
+- **Workspace cleanup and private folders:** each cleanup step, a failed step that moves nothing, and the marker file; private folder creation, rename, refusal from another Bot, and removal on Bot Deletion.
+- **Secrets:** a value is filled in at run time and replaced in the result; another Bot cannot list or use it; it never appears in entries, Messages, or logs; the fallback file and its warning; existing keys move into the keychain.
+- **Deleting conversations:** Bot Deletion and a memory reset leave no rows for the conversation in any `pi_` table.
 - **Real scenarios:** rerun the computer and browser scenarios, and a small set of everyday tasks before and after.
 - **Boundary:** `bun run lint:boundaries` fails on a pi-durable import outside the runtime module.
 
@@ -342,6 +374,7 @@ export interface BotRuntime {
   - adding a dependency
   - widening the default allowed folders
 - **Never:**
+  - keep a secret value in entries, Messages, logs, or memory
   - write to `~/.pi`
   - load the user's Pi packages
   - install pi-durable's tools without the app execution environment
@@ -383,6 +416,17 @@ The prototype is in `prototypes/bot-runtime/` on branch `proto/bot-runtime`, wit
 | 6 | Pass with a workaround | `beforeTool` cannot wait; see the [approval flow](#file-access) |
 | 7 | Done | A real MCP tool call passed. OAuth sign-in stopped at the human step and was accepted as done; see [MCP](#mcp). |
 | 8 | Pass | Steering during a tool call and compaction work; compaction can lose authors, see [Compaction](#compaction) |
+
+## Changes
+
+- **2026-11-12:** prototype results folded in.
+- **2026-11-24:**
+  - compaction keeps authors with an app-written summary, and `maxTurns` defaults to 50
+  - a Service restart marks interrupted Turns as failed, and an abort removes the incomplete reply
+  - Threads cannot be deleted, only Bots; the runtime module deletes conversations itself until pi-durable has a public delete
+  - Bot secrets and one secret store in the OS keychain, replacing the credential file
+  - plugins manage accounts and Skills, and every MCP call goes through `mcp`; catalog Skills install into the workspace Skills folder
+  - the web tools are built by the app with three pinned libraries, and the Web and Workspaces rules are copied in from the earlier draft
 
 ## Open questions
 

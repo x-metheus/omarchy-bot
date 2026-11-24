@@ -66,7 +66,7 @@ Build the Bot runtime on `@earendil-works/pi-ai`, `@earendil-works/pi-durable`, 
 - **Memory is owned by the app**, as specified in [the memory spec](../specs/bot-memory.md). Recall goes in through `beforeRequest`, which changes only that one request. Learning runs as durable tasks started from `afterRun`.
 - **Proactive features are owned by the app** and built on durable tasks: recurring check-ins (sleep until the next cron time, then submit), follow-ups and reminders (`sleepUntil`), watchers (a poll, sleep, poll loop), and ask-before-act (`beforeTool` plus an app approval flow). Notification delivery to clients is the app's.
 - **Tools come as app extensions**: computer, browser, web, Bot mail, Local Sidecar, plugins, and MCP through `pi-mcp`. The pi-durable coding tools are not installed.
-- **Models** come through `pi-ai` with an app credential store. Users add providers by protocol: OpenAI-compatible or Anthropic Messages, plus a base URL and key. Built-in `pi-ai` providers are also available. No provider gets special-case code.
+- **Models** come through `pi-ai` with an app secret store in the OS keychain. Users add providers by protocol: OpenAI-compatible or Anthropic Messages, plus a base URL and key. Built-in `pi-ai` providers are also available. No provider gets special-case code.
 
 ## Reasons
 
