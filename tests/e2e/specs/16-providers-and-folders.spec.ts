@@ -139,6 +139,144 @@ test("a built-in provider uses the searchable catalog and a key-only form", asyn
   expect(await page.content()).not.toContain(key);
 });
 
+test("Bot settings saves a model immediately and can restore the Service default", async ({ page, request, createdProviderIds }) => {
+  const suffix = randomUUID();
+  const providerName = `Bot Model Gateway ${suffix}`;
+  const modelId = "example-model";
+  const remoteModelId = "remote-model";
+  const provider = await request.post("/api/providers", { data: {
+    protocol: "openai-compatible",
+    name: providerName,
+    baseUrl: "http://127.0.0.1:9/v1",
+    models: [modelId, remoteModelId],
+    key: "fixture-bot-model-key",
+  } });
+  expect(provider.status()).toBe(201);
+  const { id: providerId } = await provider.json() as { id: string };
+  createdProviderIds.push(providerId);
+
+  const botName = `Model Picker ${suffix}`;
+  const openSettings = () => page.getByRole("button", { name: `Open settings for ${botName}`, exact: true }).click();
+  const settings = page.getByRole("complementary", { name: "Bot settings" });
+  const picker = settings.getByRole("combobox", { name: "Model", exact: true });
+  const modelLabel = `${providerName} — ${modelId}`;
+  const modelChoice = settings.getByRole("button", { name: modelLabel, exact: true });
+  const remoteModelLabel = `${providerName} — ${remoteModelId}`;
+  const remoteModelChoice = settings.getByRole("button", { name: remoteModelLabel, exact: true });
+  const serviceDefault = settings.getByRole("button", { name: "Service default", exact: true });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
+  await page.getByRole("textbox", { name: /^Name\b/ }).fill(botName);
+  await page.getByRole("radio", { name: /^Pi/ }).check();
+  const [created] = await Promise.all([
+    page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/bots"),
+    page.getByRole("button", { name: "Create bot", exact: true }).click(),
+  ]);
+  expect(created.status()).toBe(201);
+  const { id: botId } = await created.json() as { id: string };
+  const botPath = `/api/bots/${botId}`;
+
+  async function searchFromSelectedModel(selectedLabel: string, query: string): Promise<void> {
+    await settings.getByRole("button", { name: selectedLabel, exact: true }).click();
+    await expect(picker).toHaveValue(selectedLabel);
+    await picker.fill(query);
+  }
+
+  async function selectModel(label: string): Promise<void> {
+    const [response] = await Promise.all([
+      page.waitForResponse((response) => response.request().method() === "PATCH" && new URL(response.url()).pathname === botPath),
+      page.getByRole("option", { name: label, exact: true }).click(),
+    ]);
+    expect(response.status()).toBe(200);
+  }
+
+  async function failModelChange(whilePending?: () => Promise<void>): Promise<void> {
+    const patchHeld = Promise.withResolvers<void>();
+    const releaseFailure = Promise.withResolvers<void>();
+    let failedPatch: Promise<void> | undefined;
+    const rejectModelChange: Parameters<Page["route"]>[1] = (route) => {
+      if (route.request().method() !== "PATCH") return route.continue();
+      failedPatch = releaseFailure.promise.then(() => route.fulfill({ status: 500, json: {} }));
+      patchHeld.resolve();
+      return failedPatch;
+    };
+    await page.route(`**${botPath}`, rejectModelChange);
+    try {
+      await searchFromSelectedModel(modelLabel, "Service default");
+      await page.getByRole("option", { name: "Service default", exact: true }).click();
+      await patchHeld.promise;
+      await expect(serviceDefault).toBeVisible();
+      await expect(serviceDefault).toBeDisabled();
+      await whilePending?.();
+      releaseFailure.resolve();
+      await expect(settings.getByRole("alert")).toContainText("Model couldn’t be saved");
+    } finally {
+      releaseFailure.resolve();
+      await failedPatch;
+      await page.unroute(`**${botPath}`, rejectModelChange);
+    }
+  }
+
+  try {
+    await openSettings();
+    const instructions = settings.getByRole("textbox", { name: "Job / Instructions", exact: true });
+    await instructions.fill("An unsaved profile draft");
+    await serviceDefault.click();
+    await expect(picker).toHaveValue("Service default");
+    await picker.fill(providerName);
+    await selectModel(modelLabel);
+    await expect(modelChoice).toBeVisible();
+    await expect(settings.getByRole("alert")).toHaveCount(0);
+    await expect(instructions).toHaveValue("An unsaved profile draft");
+
+    await page.reload();
+    await openSettings();
+    await expect(modelChoice).toBeVisible();
+    await expect(instructions).toHaveValue("");
+
+    await failModelChange();
+    await expect(settings.getByRole("alert")).toContainText("The previous model has been restored.");
+    await expect(modelChoice).toBeVisible();
+
+    const draftName = "An unsaved bot name";
+    const remoteInstructions = "Updated in another window";
+    const name = settings.getByRole("textbox", { name: /^Name\b/ });
+    await failModelChange(async () => {
+      await name.fill(draftName);
+      const refreshed = await request.patch(botPath, { data: {
+        instructions: remoteInstructions,
+        showToolCalls: true,
+        model: `${providerId}/${remoteModelId}`,
+      } });
+      expect(refreshed.status()).toBe(200);
+      await expect(instructions).toHaveValue(remoteInstructions);
+      await expect(name).toHaveValue(draftName);
+    });
+    await expect(remoteModelChoice).toBeVisible();
+    await expect(modelChoice).toHaveCount(0);
+    await expect(settings.getByRole("alert")).toContainText("The latest model has been kept.");
+    await expect(settings.getByRole("switch", { name: "Show tool calls", exact: true })).toBeChecked();
+    await expect(name).toHaveValue(draftName);
+
+    await searchFromSelectedModel(remoteModelLabel, "Service default");
+    await selectModel("Service default");
+    await expect(serviceDefault).toBeVisible();
+    await expect(settings.getByRole("alert")).toHaveCount(0);
+
+    const saved = await request.get(botPath);
+    expect(saved.status()).toBe(200);
+    expect(await saved.json()).toMatchObject({ id: botId, model: null });
+
+    const remoteUpdate = await request.patch(botPath, { data: { model: `${providerId}/${modelId}` } });
+    expect(remoteUpdate.status()).toBe(200);
+    await expect(modelChoice).toBeVisible();
+  } finally {
+    const removed = await request.delete(botPath, { data: {} });
+    expect(removed.status()).toBe(200);
+  }
+});
+
 test("an absolute folder can be added to and removed from Settings", async ({ page }) => {
   const directory = await mkdtemp(join(tmpdir(), "omarchy-bot-e2e-allowed-"));
   try {

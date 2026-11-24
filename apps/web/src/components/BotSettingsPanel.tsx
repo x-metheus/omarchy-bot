@@ -1,5 +1,6 @@
 import type { ChangeEvent, JSX, RefObject } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -12,12 +13,15 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Switch } from "@astryxdesign/core/Switch";
+import { Typeahead, type SearchSource } from "@astryxdesign/core/Typeahead";
 import { VStack } from "@astryxdesign/core/VStack";
 import type { BotDto, BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
 import styles from "../lib/styles.ts";
 import { rollbackBotDisplaySetting, selectBotDisplayState } from "../lib/botDisplaySettings.ts";
 import type { BotDisplaySetting } from "../lib/botDisplaySettings.ts";
+import { buildBotModelOptions, toBotModelOverride } from "../lib/botModelOptions.ts";
+import { getShell } from "../lib/shell.ts";
 import { AvatarView } from "./AvatarView.tsx";
 import { WorkspaceDrawer } from "./WorkspaceDrawer.tsx";
 
@@ -31,6 +35,7 @@ export interface BotSettingsPanelProps {
 }
 
 type BusyAction = "save" | "variation" | "upload" | "recipe";
+type ImmediateSetting = BotDisplaySetting | "model";
 type InvalidField = "name" | "avatarDescription";
 
 /** Right-side Bot Settings panel. Profile identity and Display preferences remain separate. */
@@ -49,33 +54,69 @@ export function BotSettingsPanel({
   const [busy, setBusy] = useState<BusyAction | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   const [displayError, setDisplayError] = useState<string | undefined>(undefined);
-  const [displayBusy, setDisplayBusy] = useState<DisplaySetting | undefined>(undefined);
+  const [modelError, setModelError] = useState<string | undefined>(undefined);
+  const [settingBusy, setSettingBusy] = useState<ImmediateSetting | undefined>(undefined);
   const [invalidField, setInvalidField] = useState<InvalidField | undefined>(undefined);
   const fileInput = useRef<HTMLInputElement>(null);
   const latestBotRef = useRef<BotDto>(bot);
-  const displayBusyRef = useRef<DisplaySetting | undefined>(undefined);
+  const profileSnapshotRef = useRef<Pick<BotDto, "id" | "name" | "instructions"> | undefined>(undefined);
+  const settingBusyRef = useRef<ImmediateSetting | undefined>(undefined);
   const panelOpenRef = useRef(false);
   const panelBotIdRef = useRef<string | undefined>(undefined);
   const nameInput = useRef<HTMLInputElement>(null);
+  const modelField = useRef<HTMLDivElement>(null);
   const promptInput = useRef<HTMLTextAreaElement>(null);
+  const queryClient = useQueryClient();
+  const providers = useQuery({
+    queryKey: ["providers", getShell().service.baseUrl()],
+    queryFn: () => api.providers(),
+    enabled: open,
+    retry: false,
+  });
+  const modelOptions = useMemo(() => buildBotModelOptions(providers.data ?? [], current.model), [providers.data, current.model]);
+  const modelSearch = useMemo<SearchSource>(() => ({
+    search: (query) => {
+      const term = query.trim().toLowerCase();
+      return modelOptions.filter(({ id, label }) => id.toLowerCase().includes(term) || label.toLowerCase().includes(term));
+    },
+    bootstrap: () => modelOptions,
+  }), [modelOptions]);
 
   useEffect(() => {
-    if (displayBusyRef.current === undefined || latestBotRef.current.id === bot.id) latestBotRef.current = bot;
+    if (settingBusyRef.current === undefined || latestBotRef.current.id === bot.id) latestBotRef.current = bot;
     const resetTransientState = (open && !panelOpenRef.current) || panelBotIdRef.current !== bot.id;
     panelOpenRef.current = open;
-    if (!open || displayBusyRef.current !== undefined) return;
+    if (!open || settingBusyRef.current !== undefined) return;
     panelBotIdRef.current = bot.id;
     setCurrent(bot);
-    setName(bot.name);
-    setInstructions(bot.instructions);
     if (!resetTransientState) return;
     setPrompt("");
     setBusy(undefined);
     setError(undefined);
     setDisplayError(undefined);
-    setDisplayBusy(undefined);
+    setModelError(undefined);
     setInvalidField(undefined);
-  }, [bot, displayBusy, open]);
+  }, [bot, settingBusy, open]);
+
+  useEffect(() => {
+    if (!open) {
+      profileSnapshotRef.current = undefined;
+      return;
+    }
+    const previous = profileSnapshotRef.current;
+    profileSnapshotRef.current = { id: bot.id, name: bot.name, instructions: bot.instructions };
+    if (previous?.id !== bot.id) {
+      setName(bot.name);
+      setInstructions(bot.instructions);
+      return;
+    }
+    if (previous.name !== bot.name) {
+      setName((draft) => draft === previous.name ? bot.name : draft);
+    }
+    if (previous.instructions !== bot.instructions) {
+      setInstructions((draft) => draft === previous.instructions ? bot.instructions : draft);
+    }
+  }, [bot.id, bot.name, bot.instructions, open]);
 
   const closeDrawer = useCallback((): void => {
     onClose();
@@ -85,10 +126,10 @@ export function BotSettingsPanel({
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") closeDrawer();
+      if (event.key === "Escape" && !event.defaultPrevented) closeDrawer();
     };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, [closeDrawer, open]);
 
   const acceptUpdate = useCallback(
@@ -123,12 +164,13 @@ export function BotSettingsPanel({
   }, [acceptUpdate, bot.id, instructions, name]);
 
   const updateDisplaySetting = useCallback(async (setting: BotDisplaySetting, value: boolean): Promise<void> => {
+    if (settingBusyRef.current !== undefined) return;
     const previousValue = current[setting];
     const optimistic = { ...current, [setting]: value };
     setCurrent(optimistic);
-    displayBusyRef.current = setting;
+    settingBusyRef.current = setting;
     setDisplayError(undefined);
-    setDisplayBusy(setting);
+    setSettingBusy(setting);
     onUpdated(optimistic);
     try {
       const saved = await api.patchBot(bot.id, { [setting]: value });
@@ -143,10 +185,41 @@ export function BotSettingsPanel({
       const detail = apiErrorMessage(updateError, "This display setting couldn’t be saved.");
       setDisplayError(`${detail} The previous setting has been restored.`);
     } finally {
-      displayBusyRef.current = undefined;
-      setDisplayBusy(undefined);
+      settingBusyRef.current = undefined;
+      setSettingBusy(undefined);
     }
   }, [bot.id, current, onUpdated]);
+
+  const updateModel = useCallback(async (value: string): Promise<void> => {
+    const model = toBotModelOverride(value);
+    if (busy !== undefined || settingBusyRef.current !== undefined || model === current.model) return;
+    const optimistic = { ...current, model };
+    latestBotRef.current = optimistic;
+    settingBusyRef.current = "model";
+    setSettingBusy("model");
+    setModelError(undefined);
+    setCurrent(optimistic);
+    onUpdated(optimistic);
+    try {
+      const saved = await api.patchBot(bot.id, { model });
+      latestBotRef.current = saved;
+      setCurrent(saved);
+      onUpdated(saved);
+    } catch (updateError) {
+      const latest = queryClient.getQueryData<BotViewDto[]>(["bots"])?.find(({ id }) => id === bot.id) ?? latestBotRef.current;
+      const shouldRollback = latest.model === model;
+      const resolved = shouldRollback ? { ...latest, model: current.model } : latest;
+      latestBotRef.current = resolved;
+      setCurrent(resolved);
+      if (shouldRollback) onUpdated(resolved);
+      const detail = apiErrorMessage(updateError, "Check your connection and try again.");
+      const outcome = shouldRollback ? "The previous model has been restored." : "The latest model has been kept.";
+      setModelError(`${detail} ${outcome}`);
+    } finally {
+      settingBusyRef.current = undefined;
+      setSettingBusy(undefined);
+    }
+  }, [bot.id, busy, current, onUpdated, queryClient]);
 
   const newVariation = useCallback(async (): Promise<void> => {
     setBusy("variation");
@@ -208,7 +281,7 @@ export function BotSettingsPanel({
     }
   }, [acceptUpdate, bot.id, prompt]);
 
-  const disabled = busy !== undefined;
+  const disabled = busy !== undefined || settingBusy === "model";
   const displayState = selectBotDisplayState({
     showToolCalls: current.showToolCalls,
     showThinking: current.showThinking,
@@ -243,10 +316,15 @@ export function BotSettingsPanel({
         noValidate
         onSubmit={(event) => {
           event.preventDefault();
-          void save();
+          if (settingBusyRef.current !== "model") void save();
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && event.target instanceof HTMLInputElement && modelField.current?.contains(event.target)) {
+            event.preventDefault();
+          }
         }}
       >
-        <VStack padding={4} paddingBlockStart={0} gap={4} aria-busy={disabled || displayBusy !== undefined || undefined} data-testid="bot-settings-panel">
+        <VStack padding={4} paddingBlockStart={0} gap={4} aria-busy={disabled || settingBusy !== undefined || undefined} data-testid="bot-settings-panel">
           {error !== undefined ? <Banner status="error" title={error} /> : null}
           {displayError !== undefined ? <Banner status="error" title={displayError} /> : null}
           <Heading level={3}>Profile</Heading>
@@ -285,6 +363,27 @@ export function BotSettingsPanel({
             <Text type="label-lg">Backing Agent</Text>
             <Text>{agentDisplayName}</Text>
             <Text color="secondary">Fixed for this bot.</Text>
+          </VStack>
+          <VStack gap={1}>
+            <Typeahead
+              ref={modelField}
+              label="Model"
+              width="100%"
+              value={modelOptions.find(({ id }) => id === (current.model ?? "")) ?? null}
+              onChange={(option) => void updateModel(option?.id ?? "")}
+              searchSource={modelSearch}
+              hasEntriesOnFocus
+              hasClear={false}
+              debounceMs={0}
+              isDisabled={disabled || settingBusy !== undefined}
+            />
+            {settingBusy === "model" ? <Text role="status" color="secondary">Saving model…</Text> : null}
+            {providers.isPending ? <Text color="secondary">Loading provider models…</Text> : null}
+            {providers.isError ? <Text color="secondary">Provider models couldn’t load.</Text> : null}
+            {providers.isSuccess && !providers.data.some(({ models }) => models.length > 0) ? (
+              <Text color="secondary">Add models in Settings → Providers.</Text>
+            ) : null}
+            {modelError !== undefined ? <Banner role="alert" status="error" title="Model couldn’t be saved" description={modelError} /> : null}
           </VStack>
           <Button
             label="Save profile"
@@ -364,7 +463,7 @@ export function BotSettingsPanel({
               description="Show Agent tool work in every conversation for this Bot."
               value={displayState.showToolCalls}
               onChange={(value) => void updateDisplaySetting("showToolCalls", value)}
-              isDisabled={displayBusy !== undefined}
+              isDisabled={settingBusy !== undefined}
               data-testid="show-tool-calls"
             />
             <Switch
@@ -372,7 +471,7 @@ export function BotSettingsPanel({
               description={displayState.thinkingDescription}
               value={displayState.showThinking}
               onChange={(value) => void updateDisplaySetting("showThinking", value)}
-              isDisabled={displayBusy !== undefined || displayState.thinkingDisabled}
+              isDisabled={settingBusy !== undefined || displayState.thinkingDisabled}
               data-testid="show-thinking"
             />
           </VStack>
