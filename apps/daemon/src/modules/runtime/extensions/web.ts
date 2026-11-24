@@ -4,6 +4,7 @@ import { BlockList, isIP } from "node:net";
 import { Worker } from "node:worker_threads";
 import { awaitWithContext, withAbortSignal, type Context } from "@earendil-works/chord/context";
 import { defineExtension, defineTool, type ToolExecutionResult } from "@earendil-works/pi-durable";
+import { isJsonRpcRequest, McpClient, McpError, McpHttpError, StreamableHttpTransport } from "@earendil-works/pi-mcp";
 import { getSetting } from "../../../persistence/settings.ts";
 import type { ExtractionRequest, ExtractionResult } from "./web.worker.ts";
 
@@ -222,7 +223,196 @@ function textResult(text: string, isError = false): ToolExecutionResult {
   return { isError, output: [{ type: "text", text }] };
 }
 
-export function createWebExtension(options: { exemptRanges?: () => readonly string[]; extractionTimeoutMs?: number } = {}) {
+type SearchKeyLookup = () => string | undefined;
+
+type WebExtensionOptions = {
+  exemptRanges?: () => readonly string[];
+  extractionTimeoutMs?: number;
+  searchKey?: SearchKeyLookup;
+  searchEndpoint?: string;
+  searchTimeoutMs?: number;
+};
+
+interface SearchProvider {
+  search(query: string, numResults: number | undefined, signal: AbortSignal): Promise<string>;
+}
+
+const EXA_SEARCH_ENDPOINT = "https://mcp.exa.ai/mcp";
+const EXA_RATE_LIMIT_FLAG = "ai.exa/rateLimited";
+const MAX_EXA_ERROR_BODY_BYTES = 64 * 1024;
+const SEARCH_TIMEOUT_MS = 20_000;
+const MAX_SEARCH_RESULTS = 20;
+
+class SearchRateLimitError extends Error {}
+
+function interpretExaRateLimitFlag(text: string): boolean | undefined {
+  let cursor = 0;
+  let sawFlag = false;
+  const identifierChar = /[A-Za-z0-9_.-]/;
+  const surroundingDelimiters = /[\s\[\]{}"']/;
+  const tokenDelimiters = /[\s,\[\]{}"']/;
+  for (;;) {
+    const marker = text.indexOf(EXA_RATE_LIMIT_FLAG, cursor);
+    if (marker === -1) return sawFlag ? false : undefined;
+    cursor = marker + EXA_RATE_LIMIT_FLAG.length;
+    if (identifierChar.test(text.charAt(marker - 1)) || identifierChar.test(text.charAt(cursor))) continue;
+    sawFlag = true;
+    while (surroundingDelimiters.test(text.charAt(cursor))) cursor++;
+    if (text[cursor] !== ":" && text[cursor] !== "=") return true;
+    cursor++;
+    while (/\s/.test(text.charAt(cursor))) cursor++;
+
+    const valueStart = cursor;
+    const firstChar = text[cursor];
+    if (firstChar === '"' || firstChar === "'" || firstChar === "[" || firstChar === "{") {
+      // Consume the whole assigned value so nested markers cannot become separate flags.
+      let quote: string | undefined;
+      let depth = 0;
+      do {
+        const char = text[cursor++];
+        if (quote !== undefined) {
+          if (char === "\\") cursor++;
+          else if (char === quote) quote = undefined;
+        } else if (char === '"' || char === "'") quote = char;
+        else if (char === "[" || char === "{") depth++;
+        else if (char === "]" || char === "}") depth--;
+      } while (cursor < text.length && (quote !== undefined || depth > 0));
+      continue;
+    }
+    while (cursor < text.length && !tokenDelimiters.test(text.charAt(cursor))) cursor++;
+    if (cursor === valueStart || text.slice(valueStart, cursor) === "true") return true;
+  }
+}
+
+async function checkExaResponse(response: Response) {
+  const type = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (response.status !== 200 || !response.body || type === "application/json" || type === "text/event-stream") return response;
+
+  // pi-mcp discards unsupported 200 response bodies before reporting the protocol error.
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let remaining = MAX_EXA_ERROR_BODY_BYTES;
+  let body = "";
+  try {
+    for (;;) {
+      // At the byte limit, read once more to distinguish EOF from an oversized body.
+      const { done, value } = await reader.read();
+      if (done) {
+        if (interpretExaRateLimitFlag(body + decoder.decode())) throw new McpError(-32000, EXA_RATE_LIMIT_FLAG);
+        break;
+      }
+      if (value.byteLength > remaining) break;
+      remaining -= value.byteLength;
+      body += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  return response;
+}
+
+function isExaRateLimit(error: unknown) {
+  if (error instanceof McpHttpError) return error.status === 429 || interpretExaRateLimitFlag(error.body) === true;
+  if (!(error instanceof McpError)) return false;
+  const { data, message } = error;
+  if (typeof data === "object" && data !== null && "status" in data && data.status === 429) return true;
+  const messageFlag = interpretExaRateLimitFlag(message);
+  const dataFlag = interpretExaRateLimitFlag(typeof data === "string" ? data : JSON.stringify(data) ?? "");
+  if (messageFlag !== undefined || dataFlag !== undefined) return messageFlag === true || dataFlag === true;
+  // Mask embedded markers and distinguish sentence-ending periods from dots in identifiers.
+  return /(?<![A-Za-z0-9_-]|[A-Za-z0-9_-]\.)(?:rate(?:\s|-|_)?limit(?:ed)?|too many requests)(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])/i
+    .test(message.replaceAll(EXA_RATE_LIMIT_FLAG, "_"));
+}
+
+function createExaSearchProvider(endpoint: string, key: string | undefined, timeoutMs: number): SearchProvider {
+  return {
+    async search(query, numResults, signal) {
+      const transport = new StreamableHttpTransport({
+        url: endpoint,
+        ...(key ? { headers: { "x-api-key": key } } : {}),
+        openGetStream: false,
+        async fetch(input, init) {
+          const transportSignal = init?.signal ?? signal;
+          // Session cleanup has its own deadline and still runs after search cancellation.
+          const closing = init?.method === "DELETE";
+          const requestSignal = closing ? transportSignal : AbortSignal.any([signal, transportSignal]);
+          const response = await fetch(input, { ...init, redirect: "error", signal: requestSignal });
+          if (closing) return response;
+          if (response.status === 429) {
+            void response.body?.cancel().catch(() => {});
+            // pi-mcp retries HTTP 429 errors on SSE resume. An MCP error ends the search immediately.
+            throw new McpError(-32000, "Too many requests");
+          }
+          if (response.status === 200 && init?.method === "POST" && typeof init.body === "string") {
+            const message: unknown = JSON.parse(init.body);
+            if (isJsonRpcRequest(message) && !message.method.startsWith("notifications/")) return checkExaResponse(response);
+          }
+          return response;
+        },
+      });
+      const client = new McpClient({ name: "omarchy-web", version: "1.0.0", requestTimeoutMs: timeoutMs });
+      try {
+        await client.connect(transport);
+        const result = await client.callTool("web_search_exa", { query, ...(numResults === undefined ? {} : { numResults }) }, { signal });
+        if (result.isError) throw new Error("Exa returned a tool error.");
+        return result.content.flatMap((block) => block?.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n\n");
+      } catch (error) {
+        if (isExaRateLimit(error)) throw new SearchRateLimitError();
+        throw error;
+      } finally {
+        await client.close();
+      }
+    },
+  };
+}
+
+function defineWebSearch(options: WebExtensionOptions) {
+  const endpoint = options.searchEndpoint ?? EXA_SEARCH_ENDPOINT;
+  const timeoutMs = options.searchTimeoutMs ?? SEARCH_TIMEOUT_MS;
+  const resultCountDescription = `an integer between 1 and ${MAX_SEARCH_RESULTS}`;
+  return defineTool({
+    name: "web_search",
+    description: "Search the web with Exa and return readable search results.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", minLength: 1, description: "A non-empty search query." },
+        numResults: { type: "integer", minimum: 1, maximum: MAX_SEARCH_RESULTS, description: `Optional maximum results, ${resultCountDescription}.` },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    async execute(args, _api, context) {
+      context.abortSignal?.throwIfAborted();
+      const { query, numResults } = args as { query?: unknown; numResults?: unknown };
+      if (typeof query !== "string" || !query.trim()) return textResult("Web search requires a non-empty query.", true);
+      if (numResults !== undefined && (typeof numResults !== "number" || !Number.isInteger(numResults) || numResults < 1 || numResults > MAX_SEARCH_RESULTS)) {
+        return textResult(`Web search result count must be ${resultCountDescription}.`, true);
+      }
+      const timeout = new AbortController();
+      const signal = context.abortSignal ? AbortSignal.any([context.abortSignal, timeout.signal]) : timeout.signal;
+      const timer = setTimeout(() => timeout.abort(), timeoutMs);
+      try {
+        const key = options.searchKey?.()?.trim();
+        const provider = createExaSearchProvider(endpoint, key, timeoutMs);
+        const results = await provider.search(query, numResults, signal);
+        signal.throwIfAborted();
+        if (!results.trim()) return textResult("Web search returned no results.", true);
+        const formatted = `Search results for "${query}":\n\n${results}`;
+        return textResult(key ? formatted.replaceAll(key, "[redacted]") : formatted);
+      } catch (error) {
+        context.abortSignal?.throwIfAborted();
+        if (error instanceof SearchRateLimitError) return textResult("Web search was rate limited. Wait and try again, or use the browser tool.", true);
+        return textResult("Web search failed. Try the browser tool instead.", true);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  });
+}
+
+export function createWebExtension(options: WebExtensionOptions = {}) {
   return defineExtension({
     name: "omarchy-web",
     tools: [defineTool({
@@ -252,6 +442,6 @@ export function createWebExtension(options: { exemptRanges?: () => readonly stri
           return textResult(error instanceof Error ? error.message : "web_fetch failed.", true);
         }
       },
-    })],
+    }), defineWebSearch(options)],
   });
 }

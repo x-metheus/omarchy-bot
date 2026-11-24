@@ -101,7 +101,8 @@ export function resolveModelForBot(db: Database, store: CredentialStore, botId: 
   }
   let reference = selected;
   try {
-    const keys = store.getAllForRuntime().map((p) => p.apiKey).filter(Boolean).sort((a, b) => b.length - a.length);
+    const keys = [...store.getAllForRuntime().map((p) => p.apiKey), store.getWebSearchKey("exa") ?? ""]
+      .filter(Boolean).sort((a, b) => b.length - a.length);
     if (keys.length) reference = reference.replace(new RegExp(keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g"), () => "[redacted]");
   } catch { reference = "[unavailable]"; }
   throw new Error(`Unable to resolve Bot provider/model selection: ${reference}`);

@@ -108,6 +108,28 @@ test("resolution fails closed and redacts every stored key including causes", ()
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("model selection errors redact an Exa key with trailing whitespace", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "models-search-key-errors-"));
+  using db = new Database(":memory:");
+  db.exec("CREATE TABLE bots (id TEXT PRIMARY KEY, model TEXT); CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO bots VALUES ('bot', NULL)");
+  try {
+    const store = new CredentialStore(dir);
+    const key = "exa.example+search-key";
+    const pastedKey = `${key} \t\n`;
+    store.setWebSearchKey("exa", pastedKey);
+    for (const selection of [`missing/${key}`, `missing/${pastedKey}`]) {
+      db.run("UPDATE bots SET model = ? WHERE id = 'bot'", [selection]);
+      let error: unknown;
+      try { resolveModelForBot(db, store, "bot"); } catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error)).toContain("missing/[redacted]");
+      expect(String(error)).not.toContain(key);
+      expect(String(error)).not.toContain(pastedKey);
+      expect(String((error as Error).cause)).not.toContain(key);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("custom endpoints validate URL and avoid metadata from a different native API", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "models-custom-"));
   try {

@@ -63,7 +63,10 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         return row ? { threadId: row.thread_id, botId: row.bot_id } : undefined;
       },
     } : undefined));
-    registry.install(createWebExtension({ exemptRanges: () => readWebExemptRanges(db) }));
+    registry.install(createWebExtension({
+      exemptRanges: () => readWebExemptRanges(db),
+      searchKey: () => credentials.getWebSearchKey("exa"),
+    }));
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         if (!reportedCredentialsFailure) {

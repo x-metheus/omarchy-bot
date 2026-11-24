@@ -16,28 +16,54 @@ export interface StoredProvider {
 export type ProviderProjection = Omit<StoredProvider, "apiKey"> & { hasKey: boolean };
 export const MODEL_CREDENTIALS_FILENAME = "model-credentials.json";
 
+type WebSearchProvider = "exa";
+type CredentialFile = { providers: StoredProvider[]; sections?: Record<string, unknown> };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readWebSearchKey(sections: CredentialFile["sections"], provider: WebSearchProvider) {
+  const keys = sections?.webSearchKeys;
+  if (!isRecord(keys)) return undefined;
+  const key = keys[provider];
+  return typeof key === "string" ? key.trim() || undefined : undefined;
+}
+
 /** The file is private to the Service. Never put its contents in logs or DTOs. */
 export class CredentialStore {
   private readonly file: string;
   constructor(stateDir: string) { this.file = path.join(stateDir, MODEL_CREDENTIALS_FILENAME); }
 
-  private load(): StoredProvider[] {
+  private load(): CredentialFile {
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.file, "utf8"));
-      if (!Array.isArray(parsed) || !parsed.every((p) => p && typeof p.id === "string" && !p.id.includes("/") && typeof p.name === "string" && typeof p.apiKey === "string" && ["built-in", "openai-compatible", "anthropic-messages"].includes(p.protocol) && (p.protocol === "built-in" || typeof p.baseUrl === "string") && (p.models === undefined || (Array.isArray(p.models) && p.models.every((m: unknown) => typeof m === "object" && m !== null && typeof (m as { id?: unknown }).id === "string"))))) throw new Error();
-      return parsed as StoredProvider[];
+      const sections = isRecord(parsed) ? parsed : undefined;
+      const providers = sections ? ("providers" in sections ? sections.providers : []) : parsed;
+      if (!Array.isArray(providers) || !providers.every((p) => p && typeof p.id === "string" && !p.id.includes("/") && typeof p.name === "string" && typeof p.apiKey === "string" && ["built-in", "openai-compatible", "anthropic-messages"].includes(p.protocol) && (p.protocol === "built-in" || typeof p.baseUrl === "string") && (p.models === undefined || (Array.isArray(p.models) && p.models.every((m: unknown) => typeof m === "object" && m !== null && typeof (m as { id?: unknown }).id === "string"))))) throw new Error();
+      return sections ? { providers, sections } : { providers };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { providers: [] };
       throw new Error("Unable to read model credential store");
     }
   }
 
   /** Internal accessor: contains secrets and must only be used for model authentication. */
-  getForRuntime(id: string): StoredProvider | undefined { return this.load().find((p) => p.id === id); }
-  getAllForRuntime(): StoredProvider[] { return this.load(); }
+  getForRuntime(id: string): StoredProvider | undefined { return this.load().providers.find((p) => p.id === id); }
+  getAllForRuntime(): StoredProvider[] { return this.load().providers; }
+
+  // Task 22 moves these keys into the OS secret store.
+  getWebSearchKey(provider: WebSearchProvider): string | undefined { return readWebSearchKey(this.load().sections, provider); }
+  setWebSearchKey(provider: WebSearchProvider, key: string): void {
+    const { providers, sections } = this.load();
+    const storedKeys = sections?.webSearchKeys;
+    const webSearchKeys = { ...(isRecord(storedKeys) ? storedKeys : {}), [provider]: key.trim() };
+    this.save({ providers, sections: { ...sections, webSearchKeys } });
+  }
+
   list(): ProviderProjection[] {
-    const records = this.load();
-    const keys = records.map((p) => p.apiKey).filter(Boolean);
+    const { providers: records, sections } = this.load();
+    const keys = [...records.map((p) => p.apiKey), readWebSearchKey(sections, "exa") ?? ""].filter(Boolean);
     const safe = (value: string): boolean => !keys.some((key) => value.includes(key));
     return records.filter((p) => safe(p.id) && safe(p.name) && (p.baseUrl === undefined || safe(p.baseUrl))).map((p) => ({
       id: p.id, name: p.name, protocol: p.protocol, hasKey: p.apiKey.length > 0,
@@ -47,17 +73,23 @@ export class CredentialStore {
   }
   add(provider: StoredProvider): void {
     if (!provider.id || provider.id.includes("/") || !provider.name || !provider.apiKey || !["built-in", "openai-compatible", "anthropic-messages"].includes(provider.protocol) || (provider.protocol !== "built-in" && !provider.baseUrl)) throw new Error("Invalid model provider");
-    const providers = this.load().filter((p) => p.id !== provider.id);
-    this.save([...providers, provider]);
+    const credentials = this.load();
+    this.save({ ...credentials, providers: [...credentials.providers.filter((p) => p.id !== provider.id), provider] });
   }
-  remove(id: string): void { this.save(this.load().filter((p) => p.id !== id)); }
-  private save(providers: StoredProvider[]): void {
+  remove(id: string): void {
+    const credentials = this.load();
+    this.save({ ...credentials, providers: credentials.providers.filter((p) => p.id !== id) });
+  }
+  private save(credentials: CredentialFile): void {
     const dir = path.dirname(this.file);
     const temp = `${this.file}.${randomBytes(12).toString("hex")}.tmp`;
     try {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodSync(dir, 0o700);
-      writeFileSync(temp, JSON.stringify(providers), { mode: 0o600, flag: "wx" });
+      // Keep the legacy array format until the file has separate sections.
+      const { providers, sections } = credentials;
+      const data = sections === undefined ? providers : { ...sections, providers };
+      writeFileSync(temp, JSON.stringify(data), { mode: 0o600, flag: "wx" });
       chmodSync(temp, 0o600);
       renameSync(temp, this.file);
     } catch {
