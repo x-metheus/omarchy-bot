@@ -1,8 +1,15 @@
-import { expect, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 import { copyFile, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { formatMigrationLog, legacySessionSeed, readLegacySession, selectLegacyWindow } from "./sessionMigration.ts";
+import { dirname, join, sep } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { createRegistry, Harness, type Conversation } from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import type { MessageDto } from "@omarchy-bot/protocol";
+import {
+  formatMigrationLog, legacySessionSeed, readLegacySession, seedFirstTurnConversation, selectLegacyWindow, transcriptBeforeTurn, transcriptSeed,
+} from "./sessionMigration.ts";
 
 const fixtures = join(import.meta.dir, "../../../../../tests/integration/fixtures/sessions");
 const legacyPath = join(fixtures, "legacy-session.jsonl");
@@ -359,3 +366,199 @@ test("formatMigrationLog reports exactly the migration counters", async () => {
   const { counts } = legacySessionSeed(await readLegacySession(legacyPath));
   expect(formatMigrationLog({ ...counts, thinkingDropped: 4 })).toBe("user=1 assistant=2 toolResult=1 labeled=1 thinking=4 dropped=3");
 });
+
+const context = BACKGROUND_CONTEXT;
+const createdAt = "2026-01-01T00:00:01.000Z";
+const oldUserMessage: MessageDto = {
+  id: "old-user", threadId: "thread", seq: 1, createdAt, author: { kind: "user" }, kind: "text", text: "Prior user text",
+};
+const fallbackWarning = "Unable to migrate old Pi session for thread thread; seeded from the Service transcript: ";
+
+async function withSeedConversation(check: (conversation: Conversation) => Promise<void>) {
+  const storage = await openNodeSqliteStorage(":memory:");
+  try {
+    const harness = await Harness.open(storage, { registry: createRegistry(), models: createModels() }, context);
+    try {
+      const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+      await check(conversation);
+    } finally {
+      await harness.close(context);
+    }
+  } finally {
+    await storage.close(context);
+  }
+}
+
+test("transcriptSeed labels visible messages and tool names in order and skips thinking, events, and empty text", () => {
+  const block = { blockId: "old-block", state: "completed" as const, startedAt: createdAt, completedAt: createdAt };
+  const messages: MessageDto[] = [
+    oldUserMessage,
+    { ...oldUserMessage, id: "old-thinking", kind: "thinking", author: { kind: "bot" }, text: "Private thinking", thinking: block },
+    { ...oldUserMessage, id: "old-tool", kind: "tool", author: { kind: "bot" }, text: undefined, toolCall: { id: "call", name: "lookup", status: "completed", target: "Private tool target" } },
+    { ...oldUserMessage, id: "old-response", kind: "response", author: { kind: "bot" }, text: "Prior bot text", response: block },
+    { ...oldUserMessage, id: "old-event", kind: "event", author: { kind: "bot" }, text: undefined, payload: { detail: "Private event" } },
+    { ...oldUserMessage, id: "old-system", author: { kind: "system" }, text: "Prior system text" },
+    { ...oldUserMessage, id: "old-empty", text: "" },
+    { ...oldUserMessage, id: "old-whitespace", text: " \n " },
+  ];
+  const { entries, counts } = transcriptSeed(messages.map((message, index) => ({ ...message, seq: index + 1 })));
+  expect(entries.map(({ kind, data, model }) => [kind, data.sourceId, model[0]])).toEqual([
+    ["migration.transcript", "old-user", { role: "user", content: "[old user message]\nPrior user text", timestamp: Date.parse(createdAt) }],
+    ["migration.transcript", "old-tool", { role: "user", content: "[old tool call: lookup]", timestamp: Date.parse(createdAt) }],
+    ["migration.transcript", "old-response", { role: "user", content: "[old bot response]\nPrior bot text", timestamp: Date.parse(createdAt) }],
+    ["migration.transcript", "old-system", { role: "user", content: "[old system message]\nPrior system text", timestamp: Date.parse(createdAt) }],
+  ]);
+  expect(counts).toEqual({
+    user: 0, assistant: 0, toolResult: 0, labeled: 4, thinkingDropped: 1, dropped: 3, droppedByType: { event: 1, text: 2 },
+  });
+});
+
+test("seedFirstTurnConversation without a legacy path appends nothing and logs nothing", () => withSeedConversation(async (conversation) => {
+  const log = spyOn(console, "log").mockImplementation(() => {});
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  const commit = spyOn(conversation, "commit");
+  const transcript = mock(() => [oldUserMessage]);
+  try {
+    expect(await seedFirstTurnConversation(conversation, context, { threadId: "thread", transcript })).toBe("none");
+    expect(transcript).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  } finally {
+    commit.mockRestore();
+    warn.mockRestore();
+    log.mockRestore();
+  }
+}));
+
+test("seedFirstTurnConversation commits the legacy seed once and logs exact counts without reading the transcript", () => withSeedConversation(async (conversation) => {
+  const log = spyOn(console, "log").mockImplementation(() => {});
+  const commit = spyOn(conversation, "commit");
+  const transcript = mock(() => [oldUserMessage]);
+  try {
+    expect(await seedFirstTurnConversation(conversation, context, { threadId: "thread", legacySessionPath: legacyPath, transcript })).toBe("session");
+    expect(transcript).not.toHaveBeenCalled();
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect((await conversation.context(context)).entries.map(({ kind }) => kind)).toEqual([
+      "legacy.compaction", "legacy.message", "legacy.message", "legacy.message", "legacy.message", "legacy.labeled",
+    ]);
+    expect(log.mock.calls).toEqual([["Migrated old Pi session for thread thread: user=1 assistant=2 toolResult=1 labeled=1 thinking=0 dropped=3"]]);
+  } finally {
+    commit.mockRestore();
+    log.mockRestore();
+  }
+}));
+
+test.each([
+  ["legacy-session-broken.jsonl", "Invalid legacy session JSON on line 2"],
+  ["missing.jsonl", "Legacy session file not found (ENOENT)"],
+  [join("legacy-session.jsonl", "private-path-segment.jsonl"), "Legacy session file not readable (ENOTDIR)"],
+])("seedFirstTurnConversation falls back to the transcript for %s and logs the reason", (file, reason) => withSeedConversation(async (conversation) => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    expect(await seedFirstTurnConversation(conversation, context, { threadId: "thread", legacySessionPath: join(fixtures, file), transcript: () => [oldUserMessage] })).toBe("transcript");
+    expect(warn.mock.calls).toEqual([[`${fallbackWarning}${reason}`]]);
+    for (const part of file.split(sep)) expect(warn.mock.calls[0]?.[0]).not.toContain(part);
+    expect(warn.mock.calls[0]?.[0]).not.toContain(fixtures);
+    expect((await conversation.context(context)).entries).toEqual([
+      expect.objectContaining({ kind: "migration.transcript", model: [{ role: "user", content: "[old user message]\nPrior user text", timestamp: Date.parse(createdAt) }] }),
+    ]);
+  } finally {
+    warn.mockRestore();
+  }
+}));
+
+test("fallback seeding excludes the current user message and a queued follow-up", () => withSeedConversation(async (conversation) => {
+  const current = { ...oldUserMessage, id: "current-user", seq: 2, text: "Current request" };
+  const followUp = { ...oldUserMessage, id: "queued-user", seq: 3, text: "Queued follow-up" };
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  const original = conversation.commit.bind(conversation);
+  const commit = spyOn(conversation, "commit").mockImplementationOnce(async (change, ctx) => {
+    const result = await original(change, ctx);
+    expect(warn).not.toHaveBeenCalled();
+    return result;
+  });
+  try {
+    const transcript = mock(() => transcriptBeforeTurn(() => [oldUserMessage, current, followUp], current.seq));
+    expect(await seedFirstTurnConversation(conversation, context, {
+      threadId: "thread", legacySessionPath: join(fixtures, "legacy-session-broken.jsonl"), transcript,
+    })).toBe("transcript");
+    expect(transcript).toHaveBeenCalledTimes(1);
+    expect((await conversation.context(context)).entries.map(({ data }) => data)).toEqual([
+      expect.objectContaining({ sourceId: oldUserMessage.id }),
+    ]);
+    expect(warn.mock.calls).toEqual([[`${fallbackWarning}Invalid legacy session JSON on line 2`]]);
+  } finally {
+    commit.mockRestore();
+    warn.mockRestore();
+  }
+}));
+
+test("fallback seeding warns and skips the transcript when the current message position is unknown", () => withSeedConversation(async (conversation) => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const listMessages = mock(() => [oldUserMessage]);
+    const transcript = () => transcriptBeforeTurn(listMessages, undefined);
+    expect(await seedFirstTurnConversation(conversation, context, {
+      threadId: "thread", legacySessionPath: join(fixtures, "legacy-session-broken.jsonl"), transcript,
+    })).toBe("transcript");
+    expect(listMessages).not.toHaveBeenCalled();
+    expect((await conversation.context(context)).entries).toEqual([]);
+    expect(warn.mock.calls).toEqual([[
+      "Unable to migrate old Pi session for thread thread; the Service transcript seed failed: Invalid legacy session JSON on line 2 (transcript error: current message position unknown)",
+    ]]);
+  } finally {
+    warn.mockRestore();
+  }
+}));
+
+test("seedFirstTurnConversation returns transcript for a broken session with no visible fallback messages", () => withSeedConversation(async (conversation) => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  const commit = spyOn(conversation, "commit");
+  try {
+    expect(await seedFirstTurnConversation(conversation, context, { threadId: "thread", legacySessionPath: join(fixtures, "legacy-session-broken.jsonl") })).toBe("transcript");
+    expect(commit).not.toHaveBeenCalled();
+    expect(warn.mock.calls).toEqual([["Unable to migrate old Pi session for thread thread; the Service transcript had nothing to seed: Invalid legacy session JSON on line 2"]]);
+  } finally {
+    commit.mockRestore();
+    warn.mockRestore();
+  }
+}));
+
+test("seedFirstTurnConversation commits only the transcript after a failed legacy transaction", () => withSeedConversation(async (conversation) => {
+  const original = conversation.commit.bind(conversation);
+  const commit = spyOn(conversation, "commit").mockImplementationOnce((change, ctx) => original(async (tx) => {
+    await change(tx);
+    throw new Error("Legacy seed transaction failed");
+  }, ctx));
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    expect(await seedFirstTurnConversation(conversation, context, { threadId: "thread", legacySessionPath: legacyPath, transcript: () => [oldUserMessage] })).toBe("transcript");
+    expect((await conversation.context(context)).entries).toEqual([
+      expect.objectContaining({ kind: "migration.transcript", data: expect.objectContaining({ sourceId: oldUserMessage.id }) }),
+    ]);
+    expect(warn.mock.calls).toEqual([[`${fallbackWarning}Legacy seed transaction failed`]]);
+  } finally {
+    warn.mockRestore();
+    commit.mockRestore();
+  }
+}));
+
+test("seedFirstTurnConversation warns and continues when both appends fail", () => withSeedConversation(async (conversation) => {
+  const detail = `append failed\r\n${"x".repeat(200)}`;
+  const commit = spyOn(conversation, "commit")
+    .mockRejectedValueOnce(new Error(detail))
+    .mockRejectedValueOnce(new Error("fallback\u2028append failed"));
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    expect(await seedFirstTurnConversation(conversation, context, { threadId: "thread", legacySessionPath: legacyPath, transcript: () => [oldUserMessage] })).toBe("transcript");
+    expect(commit).toHaveBeenCalledTimes(2);
+    expect((await conversation.context(context)).entries).toEqual([]);
+    expect(warn.mock.calls).toEqual([
+      [`Unable to migrate old Pi session for thread thread; the Service transcript seed failed: append failed ${"x".repeat(186)} (transcript error: fallback append failed)`],
+    ]);
+  } finally {
+    warn.mockRestore();
+    commit.mockRestore();
+  }
+}));

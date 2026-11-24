@@ -1,7 +1,10 @@
 import { readFile } from "node:fs/promises";
+import type { Context } from "@earendil-works/chord/context";
 import type {
   AssistantMessage, ImageContent, Message, TextContent, ToolCall, ToolResultMessage, Usage,
 } from "@earendil-works/pi-ai";
+import type { Conversation } from "@earendil-works/pi-durable";
+import type { MessageDto } from "@omarchy-bot/protocol";
 
 interface LegacyHeader {
   type: "session";
@@ -62,7 +65,15 @@ function isEntry(value: unknown): value is LegacyEntry {
 }
 
 export async function readLegacySession(path: string): Promise<LegacySession> {
-  const file = await readFile(path, "utf8");
+  let file: string;
+  try {
+    file = await readFile(path, "utf8");
+  } catch (error) {
+    const code = isRecord(error) ? error.code : undefined;
+    if (code === "ENOENT") throw new Error("Legacy session file not found (ENOENT)");
+    const detail = typeof code === "string" && /^E[A-Z0-9_]+$/.test(code) ? ` (${code})` : "";
+    throw new Error(`Legacy session file not readable${detail}`);
+  }
   let header: LegacyHeader | undefined;
   const entries: LegacyEntry[] = [];
   let offset = 0;
@@ -114,7 +125,7 @@ function messageTimestamp(entry: LegacyEntry, timestamp?: unknown): number {
   return Number.isFinite(entryTime) ? entryTime : Date.now();
 }
 
-function seedEntry(kind: string, entry: LegacyEntry, message: Message, role?: string): LegacySeedEntry {
+function seedEntry(kind: string, entry: { id: string }, message: Message, role?: string): LegacySeedEntry {
   const data: LegacySeedEntry["data"] = { sourceId: entry.id, timestamp: new Date(message.timestamp).toISOString() };
   if (role !== undefined) data.role = role;
   return { kind, data, model: [message] };
@@ -218,9 +229,13 @@ function labelMessage(message: Record<string, unknown>, role: string, timestamp:
   return { role: "user", content: `${label}\n${flattenContent(content)}`, timestamp };
 }
 
+function emptyMigrationCounts(): MigrationCounts {
+  return { user: 0, assistant: 0, toolResult: 0, labeled: 0, thinkingDropped: 0, dropped: 0, droppedByType: {} };
+}
+
 export function legacySessionSeed(session: LegacySession): { entries: LegacySeedEntry[]; counts: MigrationCounts } {
   const entries: LegacySeedEntry[] = [];
-  const counts: MigrationCounts = { user: 0, assistant: 0, toolResult: 0, labeled: 0, thinkingDropped: 0, dropped: 0, droppedByType: {} };
+  const counts = emptyMigrationCounts();
   const droppedByType = new Map<string, number>();
   const messages: LegacyEntry[] = [];
   for (const entry of selectLegacyWindow(session)) {
@@ -276,4 +291,84 @@ export function legacySessionSeed(session: LegacySession): { entries: LegacySeed
 
 export function formatMigrationLog(counts: MigrationCounts): string {
   return `user=${counts.user} assistant=${counts.assistant} toolResult=${counts.toolResult} labeled=${counts.labeled} thinking=${counts.thinkingDropped} dropped=${counts.dropped}`;
+}
+
+const transcriptLabels = { user: "old user message", bot: "old bot response", system: "old system message" };
+
+export function transcriptSeed(messages: MessageDto[]): { entries: LegacySeedEntry[]; counts: MigrationCounts } {
+  const entries: LegacySeedEntry[] = [];
+  const counts = emptyMigrationCounts();
+  for (const message of messages) {
+    if (message.kind === "thinking") {
+      counts.thinkingDropped++;
+      continue;
+    }
+    const { text, toolCall } = message;
+    let content: string;
+    if (message.kind === "tool" && toolCall) {
+      content = `[old tool call: ${toolCall.name}]`;
+    } else if ((message.kind === "text" || message.kind === "response") && nonEmptyString(text)) {
+      content = `[${transcriptLabels[message.author.kind]}]\n${text}`;
+    } else {
+      counts.dropped++;
+      counts.droppedByType[message.kind] = (counts.droppedByType[message.kind] ?? 0) + 1;
+      continue;
+    }
+    const parsed = Date.parse(message.createdAt);
+    const timestamp = Number.isFinite(parsed) ? parsed : Date.now();
+    entries.push(seedEntry("migration.transcript", message, { role: "user", content, timestamp }, message.author.kind));
+    counts.labeled++;
+  }
+  return { entries, counts };
+}
+
+export function transcriptBeforeTurn(listMessages: () => MessageDto[], userMessageSeq: number | undefined): MessageDto[] {
+  if (userMessageSeq === undefined) throw new Error("current message position unknown");
+  return listMessages().filter((message) => message.seq < userMessageSeq);
+}
+
+interface FirstTurnSeedOptions {
+  threadId: string;
+  legacySessionPath?: string | undefined;
+  transcript?: () => MessageDto[];
+}
+
+async function appendSeed(conversation: Conversation, context: Context, entries: LegacySeedEntry[]): Promise<void> {
+  if (entries.length === 0) return;
+  await conversation.commit(async (tx) => {
+    for (const entry of entries) await tx.appendEntry(conversation.id, entry);
+  }, context);
+}
+
+function seedFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return message.replace(/[\s\p{Cc}]+/gu, " ").trim().slice(0, 200) || "Unknown error";
+}
+
+export async function seedFirstTurnConversation(
+  conversation: Conversation,
+  context: Context,
+  { threadId, legacySessionPath, transcript = () => [] }: FirstTurnSeedOptions,
+): Promise<"session" | "transcript" | "none"> {
+  if (!legacySessionPath) return "none";
+  let migrationReason: string;
+  try {
+    const { entries, counts } = legacySessionSeed(await readLegacySession(legacySessionPath));
+    await appendSeed(conversation, context, entries);
+    console.log(`Migrated old Pi session for thread ${threadId}: ${formatMigrationLog(counts)}`);
+    return "session";
+  } catch (error) {
+    migrationReason = seedFailureReason(error);
+  }
+
+  let fallbackOutcome: string;
+  try {
+    const { entries } = transcriptSeed(transcript());
+    await appendSeed(conversation, context, entries);
+    fallbackOutcome = `${entries.length ? "seeded from the Service transcript" : "the Service transcript had nothing to seed"}: ${migrationReason}`;
+  } catch (error) {
+    fallbackOutcome = `the Service transcript seed failed: ${migrationReason} (transcript error: ${seedFailureReason(error)})`;
+  }
+  console.warn(`Unable to migrate old Pi session for thread ${threadId}; ${fallbackOutcome}`);
+  return "transcript";
 }
