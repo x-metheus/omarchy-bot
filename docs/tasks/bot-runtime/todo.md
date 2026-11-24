@@ -195,9 +195,9 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 **Description:** Install pi-durable's `read`, `write`, `edit`, and `bash` tools under an app extension name with an app execution environment. Add the platform paths module (data, workspace, Downloads). Allowed folders are the Shared Workspace, Downloads, and folders added in Settings. Until Task 9, a call outside them is denied.
 
 **Acceptance criteria:**
-- [ ] Reads and writes inside allowed folders work without asking; symbolic link and `..` escapes are refused
-- [ ] The Service data directory, the credential store, and other Bots' private folders are always refused
-- [ ] `bash` starts in the Shared Workspace, has a time limit, and honors abort
+- [x] Reads and writes inside allowed folders work without asking; symbolic link and `..` escapes are refused
+- [x] The Service data directory, the credential store, and other Bots' private folders are always refused
+- [x] `bash` starts in the Shared Workspace, has a time limit, and honors abort
 
 **Verification:** default commands; file-access tests from the spec's testing strategy.
 

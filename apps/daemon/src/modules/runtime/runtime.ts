@@ -2,6 +2,8 @@ import type { Database } from "bun:sqlite";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
+import type { PlatformPaths } from "../workspace/paths.ts";
 import { openThreadConversation } from "./conversations.ts";
 import { DurableTranscript } from "./transcript.ts";
 import { resolveModelForBot } from "./models.ts";
@@ -10,9 +12,10 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { CredentialStore } from "./credentials.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings } from "./compaction.ts";
+import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
-import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
+import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 export const DEFAULT_MAX_TURNS = 50;
@@ -37,14 +40,16 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
   return !entry.model?.some((message) => message.role === "assistant" && message.stopReason === "aborted");
 }
 
-export async function openBotRuntime(dbPath: string, stateDir: string, db?: Database): Promise<BotRuntime> {
-  const credentials = new CredentialStore(stateDir);
-  const storage = await openNodeSqliteStorage(dbPath, { prefix: "pi_" });
+export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database): Promise<BotRuntime> {
+  const credentials = new CredentialStore(paths.stateDir);
+  const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
   let reportedCredentialsFailure = false;
   const selections: { providerId: string; modelId: string }[] = [];
+  const conversationBots = new Map<ConversationId, string>();
   try {
     const registry = createRegistry();
     registry.install(compactionExtension);
+    registry.install(createFilesShellExtension());
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         if (!reportedCredentialsFailure) {
@@ -53,23 +58,32 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
         }
         return createModels();
       }
-    }, registry, settings: { afterFailedRun: "continue", restartLimit: 5, compaction: compactionSettings } }, context);
+    }, registry, env: ({ conversationId, cwd }) => createFilesEnvironment(paths, readSettingsAllowedFolders(db), cwd, conversationBots.get(conversationId)),
+    settings: { afterFailedRun: "continue", restartLimit: 5, compaction: compactionSettings } }, context);
+    let resumed = false;
+    const resumeScheduler = () => {
+      if (resumed) return;
+      harness.resume();
+      resumed = true;
+    };
     try {
+      const recoveringBots = db?.query<{ bot_id: string }, []>("SELECT DISTINCT bot_id FROM turns WHERE status = 'working'").all() ?? [];
       if (db) {
-        const bots = db.query<{ bot_id: string }, []>("SELECT DISTINCT bot_id FROM turns WHERE status = 'working'").all();
-        for (const { bot_id } of bots) {
+        for (const { bot_id } of recoveringBots) {
           try {
             const model = resolveModelForBot(db, credentials, bot_id);
             selections.push({ providerId: model.provider, modelId: model.id });
           } catch { /* Recovery will report an unavailable model on the Turn. */ }
         }
       }
-      harness.resume();
+      // Recovery maps the owners before the scheduler can replay their tool calls.
+      if (recoveringBots.length === 0) resumeScheduler();
     } catch (error) {
       await harness.close(context);
       throw error;
     }
     let closing: Promise<void> | undefined;
+    let recoveryRegistration: Promise<void> | undefined;
     const active = new Map<string, { db: Database; threadId: string; admitted: Promise<{ conversation: Conversation; submission: Submission }>; pending: Promise<SettledSubmissionRecord | undefined>[]; steers: Submission[]; inputs: Set<number>; lastEntryBeforeAbort: number | undefined; abortCutoffRead?: Promise<void>; recovering?: boolean }>();
     return {
       async startTurn(input) {
@@ -80,11 +94,14 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
         const turn = { db: input.db, threadId: input.threadId, admitted, pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>(), lastEntryBeforeAbort: undefined as number | undefined };
         active.set(input.turnId, turn);
         try {
+          // Submitting a fresh Turn can start the global scheduler while recovery is still mapping Bots.
+          if (recoveryRegistration) await recoveryRegistration;
           const model = resolveModelForBot(input.db, credentials, input.botId);
           if (!selections.some((selection) => selection.providerId === model.provider && selection.modelId === model.id)) {
             selections.push({ providerId: model.provider, modelId: model.id });
           }
           const conversation = await openThreadConversation(input.db, harness, input.threadId, input.botId, context);
+          conversationBots.set(conversation.id, input.botId);
           const bot = input.bots.getDto(input.botId);
           const maxTurns = bot.maxTurns ?? DEFAULT_MAX_TURNS;
           const instructions = buildSystemPrompt({
@@ -92,10 +109,10 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
             instructions: input.instructions,
             workspaceDir: input.workspaceDir,
             privateDir: input.privateDir,
-            allowedFolders: [input.workspaceDir],
+            allowedFolders: readAllowedFolders(db, { ...paths, downloadsDir: resolveImplicitDownloads(paths) }),
             skills: listWorkspaceSkills(input.workspaceDir),
           });
-          await conversation.configure({ model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions, maxTurns }, context);
+          await conversation.configure({ cwd: paths.sharedWorkspaceDir, model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions, maxTurns }, context);
           const watch = await conversation.watch(context);
           let transcript: DurableTranscript | undefined = input.whenBusy ? undefined : new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, watch.value);
           let foreignTranscript: DurableTranscript | undefined;
@@ -165,11 +182,20 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
         const jobs: Promise<void>[] = [];
         const rows = input.db.query<{ id: string; thread_id: string; bot_id: string }, []>("SELECT id, thread_id, bot_id FROM turns WHERE status = 'working' ORDER BY started_at, id").all();
         const registered = (async () => {
+          const prepared: {
+            row: (typeof rows)[number];
+            conversation: Conversation;
+            owned: Submission;
+            associations: { submission_id: number; kind: string }[];
+          }[] = [];
+          const failed: { turnId: string; reason: string }[] = [];
+          // Waiting on any submission can resume the global scheduler, so map all Bots first.
           for (const row of rows) {
             try {
               const indexed = input.db.query<{ conversation_id: number }, [string, string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?").get(row.thread_id, row.bot_id);
               if (!indexed) throw new Error("durable conversation not found");
               const conversation = await openThreadConversation(input.db, harness, row.thread_id, row.bot_id, context);
+              conversationBots.set(conversation.id, row.bot_id);
               const associations = input.db.query<{ submission_id: number; kind: string }, [string]>("SELECT submission_id, kind FROM pi_turn_submissions WHERE turn_id = ? ORDER BY submission_id").all(row.id);
               const association = associations.find((item) => item.kind === "input");
               let primary = association ? await harness.submission(association.submission_id as SubmissionId, context) : undefined;
@@ -181,7 +207,14 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
                 }
               }
               if (!primary) throw new Error("durable submission not found");
-              const owned = primary;
+              prepared.push({ row, conversation, owned: primary, associations });
+            } catch (error) {
+              failed.push({ turnId: row.id, reason: error instanceof Error ? error.message : String(error) });
+            }
+          }
+          for (const { turnId, reason } of failed) input.settled(turnId, { status: "failed", reason });
+          for (const { row, conversation, owned, associations } of prepared) {
+            try {
               const turn = { db: input.db, threadId: row.thread_id, admitted: Promise.resolve({ conversation, submission: owned }), pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>([owned.id]), lastEntryBeforeAbort: undefined as number | undefined, recovering: true };
               active.set(row.id, turn);
               input.registered(row.id);
@@ -286,8 +319,9 @@ export async function openBotRuntime(dbPath: string, stateDir: string, db?: Data
               input.settled(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) });
             }
           }
-        })();
-        const settled = registered.then(async () => { await Promise.allSettled(jobs); });
+        })().finally(resumeScheduler);
+        recoveryRegistration = registered;
+        const settled = registered.finally(async () => { await Promise.allSettled(jobs); });
         return { registered, settled };
       },
       async activeTurn(threadId) {

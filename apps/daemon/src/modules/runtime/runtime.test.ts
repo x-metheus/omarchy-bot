@@ -13,7 +13,9 @@ import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore } from "./credentials.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
-import { openBotRuntime } from "./runtime.ts";
+import { openBotRuntime, type BotRuntime } from "./runtime.ts";
+import { openThreadConversation } from "./conversations.ts";
+import { ALLOWED_FOLDERS_SETTING } from "../workspace/allowedFolders.ts";
 
 test("runtime creates durable tables and can close and reopen", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-"));
@@ -25,7 +27,7 @@ test("runtime creates durable tables and can close and reopen", async () => {
   expect(existsSync(path.join(directory, "model-credentials.json"))).toBe(false);
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const runtime = await openBotRuntime(dbPath, stateDir);
+      const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
       try {
         const db = new Database(dbPath, { readonly: true });
         try {
@@ -73,7 +75,7 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
     return originalOpen.call(Harness, storage, options, context);
   });
   try {
-    const runtime = await openBotRuntime(dbPath, stateDir);
+    const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
@@ -154,6 +156,8 @@ test("the model request contains only the app prompt and Shared Workspace Skills
       new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
       setSetting(h.svc.db, "runtime", "durable");
+      const extraFolder = path.join(home, "extra-files");
+      setSetting(h.svc.db, ALLOWED_FOLDERS_SETTING, JSON.stringify([extraFolder]));
       const { threadId } = await sendToBot(h, botId, "Check the releases.");
       await waitThreadIdle(h, threadId);
 
@@ -165,7 +169,8 @@ test("the model request contains only the app prompt and Shared Workspace Skills
       expect(prompt).toContain("Prompt Bot");
       expect(prompt).toContain("Keep track of releases.");
       expect(prompt).toContain(path.join(workspace, "bots", botId));
-      expect(prompt).toContain(`## Allowed folders\n- ${workspace}`);
+      const allowedFolders = [workspace, path.join(home, "Downloads"), extraFolder];
+      expect(prompt).toContain(`## Allowed folders\n${allowedFolders.map((folder) => `- ${folder}`).join("\n")}\n\n## Skills`);
       expect(prompt).toContain("Workspace Skill");
       expect(prompt).toContain("Workspace skill description sentinel");
       expect(prompt).toContain(".agents/skills/workspace/SKILL.md");
@@ -180,7 +185,7 @@ test("the model request contains only the app prompt and Shared Workspace Skills
         instructions: "Keep track of releases.",
         workspaceDir: workspace,
         privateDir: path.join(workspace, "bots", botId),
-        allowedFolders: [workspace],
+        allowedFolders,
         skills: [{ name: "Workspace Skill", description: "Workspace skill description sentinel", path: ".agents/skills/workspace/SKILL.md" }],
       });
       expect(prompt).toBe(`<instructions>\n${appPrompt}\n</instructions>`);
@@ -315,4 +320,133 @@ test("deletion refuses a private folder symlink and preserves the sibling Bot's 
     });
     expect(readFileSync(note, "utf8")).toBe("Sibling note");
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+});
+
+test.each([false, true])("recovery maps both working Bots before waits and new admissions and resumes even if callbacks throw (%s)", async (throwFromCallbacks) => {
+  const root = mkdtempSync(path.join(tmpdir(), "bot-runtime-recovery-mapping-"));
+  const paths = {
+    dbPath: path.join(root, "durable.sqlite"), homeDir: root,
+    dataDir: path.join(root, "data"), stateDir: path.join(root, "state"),
+    sharedWorkspaceDir: path.join(root, "workspace"), downloadsDir: path.join(root, "Downloads"),
+  };
+  const db = new Database(":memory:");
+  db.run("CREATE TABLE turns (id TEXT, thread_id TEXT, bot_id TEXT, status TEXT, started_at TEXT)");
+  db.run("CREATE TABLE pi_thread_conversations (thread_id TEXT, bot_id TEXT, conversation_id INTEGER, created_at TEXT)");
+  db.run("CREATE TABLE pi_turn_submissions (turn_id TEXT, submission_id INTEGER, kind TEXT)");
+  db.run("CREATE TABLE messages (id TEXT, thread_id TEXT, turn_id TEXT, kind TEXT, author_kind TEXT, payload TEXT)");
+  db.run("CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+  db.run("CREATE TABLE bots (id TEXT PRIMARY KEY, model TEXT)");
+  new CredentialStore(paths.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
+  const rows = ["first", "second"].map((name, index) => ({
+    thread: `thread-${name}`, bot: `bot-${name}`, turn: `turn-${name}`, submission: index + 1,
+    privateFile: path.join(paths.sharedWorkspaceDir, "bots", `bot-${name}`, "notes.txt"),
+  }));
+  const ids: ConversationId[] = [];
+  const ctx = BACKGROUND_CONTEXT;
+  let runtime: BotRuntime | undefined;
+  let restoreOpen: (() => void) | undefined;
+  try {
+    const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
+    const initial = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, ctx);
+    try {
+      for (const row of rows) {
+        mkdirSync(path.dirname(row.privateFile), { recursive: true });
+        writeFileSync(row.privateFile, row.bot);
+        const conversation = await openThreadConversation(db, initial, row.thread, row.bot, ctx);
+        ids.push(conversation.id);
+        db.run("INSERT INTO bots VALUES (?, 'fake/fake-model')", [row.bot]);
+        db.run("INSERT INTO turns VALUES (?, ?, ?, 'working', '')", [row.turn, row.thread, row.bot]);
+        db.run("INSERT INTO pi_turn_submissions VALUES (?, ?, 'input')", [row.turn, row.submission]);
+      }
+    } finally { await initial.close(ctx); await storage.close(ctx); }
+
+    const waited: { submission: number; privateAccess: boolean[] }[] = [];
+    let resumed = 0;
+    let finishSecondOpen!: () => void;
+    const schedulerStarted = new Promise<void>((resolve) => { finishSecondOpen = resolve; });
+    const freshSubmit = new Error("fresh submission reached the scheduler");
+    let freshPrivateAccess: boolean[] | undefined;
+    const originalOpen = Harness.open;
+    Harness.open = async (storage, options, context) => {
+      const harness = await originalOpen.call(Harness, storage, options, context);
+      const open = harness.conversation.bind(harness);
+      const readPrivateFolders = () => Promise.all(rows.map(async (row, index) => {
+        const env = await options.env?.({ conversationId: ids[index]!, read: harness }, ctx);
+        return (await env?.readTextFile(row.privateFile, ctx))?.ok ?? false;
+      }));
+      harness.conversation = async (id, callContext) => {
+        if (id === ids[1]) await Promise.race([schedulerStarted, Bun.sleep(250)]);
+        const conversation = await open(id, callContext);
+        if (id === ids[0] && conversation) {
+          conversation.submit = new Proxy(conversation.submit, { async apply() {
+            freshPrivateAccess = await readPrivateFolders();
+            finishSecondOpen();
+            throw freshSubmit;
+          } });
+        }
+        return conversation;
+      };
+      const resume = harness.resume.bind(harness);
+      harness.resume = () => { resumed++; resume(); };
+      // A recovered wait can start the global scheduler. Check the env for both conversations at that boundary.
+      harness.submission = async (id) => {
+        const conversationId = ids[id - 1];
+        if (conversationId === undefined) return undefined;
+        return {
+          id,
+          status: async () => ({ id, conversationId, type: "input", status: "queued" }),
+          wait: async () => {
+            waited.push({ submission: id, privateAccess: await readPrivateFolders() });
+            finishSecondOpen();
+            return { id, conversationId, type: "input", status: "unanswered", reason: "aborted" };
+          },
+          abort: async () => "settled",
+        };
+      };
+      return harness;
+    };
+    restoreOpen = () => { Harness.open = originalOpen; };
+    runtime = await openBotRuntime(paths, db);
+    expect(resumed).toBe(0);
+    const callbackError = new Error("callback failure");
+    const registered: string[] = [];
+    const settled: string[] = [];
+    type Recovery = Parameters<BotRuntime["recoverTurns"]>[0];
+    const threads = { listMessages: () => [] } as unknown as Recovery["threads"];
+    const bots = { getDto: () => ({ name: "Recovery Bot", maxTurns: null }) } as unknown as Recovery["bots"];
+    const events = {} as Recovery["events"];
+    const recovery = runtime.recoverTurns({
+      db, threads, bots, events,
+      registered: (id) => {
+        registered.push(id);
+        if (throwFromCallbacks) throw callbackError;
+      },
+      settled: (id, outcome) => {
+        settled.push(`${id}:${outcome.status}`);
+        if (throwFromCallbacks) throw callbackError;
+      },
+    });
+    if (throwFromCallbacks) {
+      await expect(recovery.settled).rejects.toBe(callbackError);
+      expect(waited).toEqual([]);
+      expect(settled).toEqual([`${rows[0]!.turn}:failed`]);
+    } else {
+      const [first] = rows;
+      const fresh = expect(runtime.startTurn({
+        db, threads, bots, events, botId: first!.bot, threadId: first!.thread, turnId: "fresh-turn", text: "Try a fresh Turn",
+        instructions: "", workspaceDir: paths.sharedWorkspaceDir, privateDir: path.dirname(first!.privateFile), working() {},
+      })).rejects.toBe(freshSubmit);
+      await Promise.all([recovery.settled, fresh]);
+      expect(freshPrivateAccess).toEqual([true, true]);
+      expect(registered).toEqual(rows.map(({ turn }) => turn));
+      expect(waited.sort((a, b) => a.submission - b.submission)).toEqual(rows.map(({ submission }) => ({ submission, privateAccess: [true, true] })));
+      expect(settled.sort()).toEqual(rows.map(({ turn }) => `${turn}:cancelled`));
+    }
+    expect(resumed).toBe(1);
+  } finally {
+    restoreOpen?.();
+    await runtime?.close();
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

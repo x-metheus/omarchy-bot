@@ -75,7 +75,7 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 
 ### Phase 3: Prompt and tools
 - [x] Task 7: App prompt sections, Skills list, and private folders
-- [ ] Task 8: Files and shell tools with allowed folders
+- [x] Task 8: Files and shell tools with allowed folders
 - [ ] Task 9: Approval flow on the Service
 - [ ] Task 10: Approval UI in the web client
 - [ ] Task 11: Computer and browser tools in process

@@ -1,22 +1,9 @@
 import { accessSync, chmodSync, constants as fsConstants, lstatSync, mkdirSync, rmSync, statSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { confinedPath } from "@omarchy-bot/domain";
+import { sharedWorkspaceDir } from "./paths.ts";
 
-/**
- * User home for Shared Workspace resolution.
- * Bun's `os.homedir()` ignores HOME changes after process start; tests set HOME
- * on the already-running daemon process, so the env var is the live value.
- */
-function userHome(): string {
-  const home = process.env.HOME;
-  return home !== undefined && home !== "" ? home : os.homedir();
-}
-
-/** Home-local Shared Workspace used when a Thread has no explicit cwd. */
-export function sharedWorkspaceDir(home = userHome()): string {
-  return path.join(home, ".omarchy-bot", "workspace");
-}
+export { sharedWorkspaceDir } from "./paths.ts";
 
 /**
  * Create or reuse the Shared Workspace. Existing contents are left intact.

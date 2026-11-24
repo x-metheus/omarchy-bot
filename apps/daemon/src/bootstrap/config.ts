@@ -1,8 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { listenerConfig } from "./listenerConfig.ts";
-import os from "node:os";
 import path from "node:path";
-import { sharedWorkspaceDir } from "../modules/workspace/sharedWorkspace.ts";
+import { platformPaths, type PlatformPaths } from "../modules/workspace/paths.ts";
 export interface BotScreenCapacityPolicy {
   readonly defaultCapacity: number;
   readonly defaultProfile: "1080p" | "720p";
@@ -16,9 +15,7 @@ export const BOT_SCREEN_CAPACITY_POLICY: BotScreenCapacityPolicy = Object.freeze
   limits: Object.freeze({ "1080p": 4, "720p": 8 }),
 });
 
-export interface Config {
-  dataDir: string;
-  stateDir: string;
+export interface Config extends PlatformPaths {
   dbPath: string;
   artifactsDir: string;
   attachmentsDir: string;
@@ -89,18 +86,16 @@ function botScreenCapacity(profile: "1080p" | "720p"): number {
 
 export function loadConfig(): Config {
   const { host, tlsCert, tlsKey, trustedProxy } = listenerConfig(process.env);
-  const dataDir = process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot");
-  const stateDir = process.env.OMARCHY_BOT_STATE ?? path.join(os.homedir(), ".local/state/omarchy-bot");
+  const paths = platformPaths();
+  const { dataDir, stateDir } = paths;
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const screenProfile = botScreenProfile();
   const cfg: Config = {
-    dataDir,
-    stateDir,
+    ...paths,
     dbPath: path.join(dataDir, "db.sqlite"),
     artifactsDir: path.join(dataDir, "artifacts"),
     attachmentsDir: path.join(dataDir, "attachments"),
     avatarsDir: path.join(dataDir, "avatars"),
-    sharedWorkspaceDir: sharedWorkspaceDir(),
     botScreenRuntimeDir: runtimeDir
       ? path.join(runtimeDir, "omarchy-bot", "screens")
       : path.join(stateDir, "screen-runtime"),

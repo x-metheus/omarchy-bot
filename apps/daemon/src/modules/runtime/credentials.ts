@@ -14,11 +14,12 @@ export interface StoredProvider {
   models?: StoredModel[];
 }
 export type ProviderProjection = Omit<StoredProvider, "apiKey"> & { hasKey: boolean };
+export const MODEL_CREDENTIALS_FILENAME = "model-credentials.json";
 
 /** The file is private to the Service. Never put its contents in logs or DTOs. */
 export class CredentialStore {
   private readonly file: string;
-  constructor(stateDir: string) { this.file = path.join(stateDir, "model-credentials.json"); }
+  constructor(stateDir: string) { this.file = path.join(stateDir, MODEL_CREDENTIALS_FILENAME); }
 
   private load(): StoredProvider[] {
     try {
