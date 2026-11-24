@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import type { SidecarBroker } from "../devices/sidecarBroker.ts";
 import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
 import type { PlatformPaths } from "../workspace/paths.ts";
 import { openThreadConversation } from "./conversations.ts";
@@ -15,6 +16,7 @@ import { ApprovalStore } from "./approvals.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings, formatAuthorText } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
+import { createLocalExtension } from "./extensions/local.ts";
 import { createMailExtension } from "./extensions/mail.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
@@ -34,6 +36,7 @@ export interface RuntimeServices {
   mailbox: {
     enqueue(context: { botId: string; turnId: string; toolCallId: string }, targetBotId: string, text: string): AgentBotMessageToolOutput;
   };
+  sidecars: Pick<SidecarBroker, "execute">;
 }
 
 interface DurableTurnStart {
@@ -49,7 +52,7 @@ interface DurableTurnStart {
   working(): void;
 }
 
-type UserTurnStart = DurableTurnStart & { text: string; instructions: string; privateDir: string; whenBusy?: "followUp" };
+type UserTurnStart = DurableTurnStart & { text: string; instructions: string; privateDir: string; deviceId?: string; whenBusy?: "followUp" };
 type PeerMailTurnStart = DurableTurnStart & {
   peerMail: { author: string; text: string; deliveryId: string };
   admissionTimeoutMs: number;
@@ -61,6 +64,7 @@ type TurnAdmission = { conversation: Conversation; submission: Submission };
 type ActiveTurn = {
   db: Database;
   threadId: string;
+  deviceId?: string;
   admitted: Promise<TurnAdmission>;
   cancelAdmission?: (reason?: unknown) => void;
   pending: Promise<SettledSubmissionRecord | undefined>[];
@@ -256,6 +260,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   try {
     const registry = createRegistry();
     registry.install(compactionExtension);
+    registry.install(createLocalExtension(db, () => services?.sidecars, active));
     registry.install(createMailExtension(db, () => services?.mailbox, active, undefined, writeService));
     const approvals = db && options.events ? new ApprovalStore(db, options.events) : undefined;
     registry.install(createFilesShellExtension(process.platform, db && approvals ? {
@@ -313,6 +318,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       }, peerMail.admissionTimeoutMs) : undefined;
       const turn: ActiveTurn = {
         db: input.db, threadId: input.threadId, admitted: admission.promise, pending: [], steers: [], inputs: new Set(),
+        ...("deviceId" in input && input.deviceId !== undefined ? { deviceId: input.deviceId } : {}),
         ...(waiting ? { cancelAdmission: waiting.cancel } : {}),
       };
       active.set(input.turnId, turn);

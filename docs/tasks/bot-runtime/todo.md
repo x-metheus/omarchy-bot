@@ -284,6 +284,12 @@ A placed or queued submission is durable acceptance. The Service records the Tur
 
 Startup can recover an admitted durable reply after a switch back to `worker`. Resuming that reply while new worker mailbox writes run concurrently is a Task 19 cutover concern.
 
+The global runtime registry offers `local` even when all Sidecars are offline. It uses the shared description and omits the worker's per-device OS and shell suffix. `SidecarBroker` checks device availability and capability when the tool runs. For `this-device`, the runtime uses the device ID supplied on the HTTP send that started the Turn. The binding lives in memory for that Turn. A Turn started by peer mail or recovered after a Service restart requires an explicit online device ID. The runtime rejects ambiguous call IDs within one assistant response. It tracks IDs already dispatched during the active Turn in memory. Same-Turn duplicate ID rejection resets on Service restart, matching the worker tool channel's lifetime.
+
+The durable `local` call has a two-minute deadline. Abort or timeout before dispatch prevents `local.job` and has no job to cancel. While the broker is waiting for a Sidecar result, abort or timeout sends `local.cancel` for that job. The broker also sends `local.cancel` if the signal is aborted after the result arrives but before it handles that result.
+
+For durable transfers into the Shared Workspace, the broker rejects the workspace root and symbolic links at the destination. Rejecting a destination link prevents the atomic rename from replacing the link itself. The worker's in-place write follows a destination link. The durable broker creates a temporary file with mode `0600` in the destination directory and applies the existing file's mode before replacement. It checks for abort or timeout before submitting the atomic rename. Once submitted, the rename's outcome determines the tool result, including when the deadline expires before the rename settles. The broker removes the temporary file if preparation or rename fails or cancellation prevents the rename.
+
 **Verification:** default commands; `bot-mailbox` and `local-sidecar-dispatch` integration tests pass with the switch on.
 
 **Dependencies:** Task 3

@@ -332,7 +332,13 @@ export class TurnService {
     if (durable) {
       const admission = this.#startDurableTurn(turnId, result.threadId, (runtime, admitted, working) => {
         resolveWorkCwd(this.threads.getThread(result.threadId)!.cwd);
-        return runtime.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, instructions: bot.instructions, workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, ...(durableFollowUp ? { whenBusy: "followUp" as const } : {}), admitted, working });
+        return runtime.startTurn({
+          db: this.db, threads: this.threads, bots: this.bots, events: this.events,
+          threadId: result.threadId, botId, turnId, text, instructions: bot.instructions,
+          workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, admitted, working,
+          ...(opts.deviceId === undefined ? {} : { deviceId: opts.deviceId }),
+          ...(durableFollowUp ? { whenBusy: "followUp" } : {}),
+        });
       });
       if (durableFollowUp) {
         try { await admission; } catch (error) { throw new HttpError(409, `follow-up unavailable: ${errorMessage(error)}`); }

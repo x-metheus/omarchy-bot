@@ -1,9 +1,10 @@
 import type { Database } from "bun:sqlite";
 import { awaitWithContext, withAbortSignal } from "@earendil-works/chord/context";
-import { AssistantEntry, defineExtension, defineTool, type ToolTaskInput } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { SEND_BOT_MESSAGE_SCHEMA } from "@omarchy-bot/agent-contract";
 import { resolveActiveTurnIdentity, type TurnInputs } from "../active-turn.ts";
 import type { RuntimeServices } from "../runtime.ts";
+import { rejectAmbiguousModelCallId } from "./model-call.ts";
 
 const DEFAULT_MAIL_DEADLINE_MS = 120_000;
 const SEND_BOT_MESSAGE = "send_bot_message";
@@ -39,15 +40,7 @@ export function createMailExtension(
         const mailbox = getMailbox();
         if (!mailbox) throw new Error(`${SEND_BOT_MESSAGE}: mailbox service is not bound`);
         if (!db) throw new Error(`${SEND_BOT_MESSAGE}: Service database is not available`);
-        await awaitWithContext(api.commit(async (tx) => {
-          const input = (await tx.task(api.taskId))?.input as ToolTaskInput | undefined;
-          if (input?.kind !== "model") return;
-          const assistant = (await tx.entry(AssistantEntry, input.assistant))?.model?.[0];
-          // pi-durable resolves duplicate IDs to the first call's arguments, even for distinct tasks.
-          if (assistant?.role === "assistant" && assistant.content.filter((part) => part.type === "toolCall" && part.id === input.callId).length > 1) {
-            throw new Error(`${SEND_BOT_MESSAGE}: duplicate tool call ID ${JSON.stringify(input.callId)} in the assistant response`);
-          }
-        }, callContext), callContext);
+        await awaitWithContext(rejectAmbiguousModelCallId(api, callContext, SEND_BOT_MESSAGE), callContext);
         const { botId, turnId } = await awaitWithContext(resolveActiveTurnIdentity(api, callContext, db, turnInputs), callContext);
         checkCancellation();
         const queued = writeService(() => {

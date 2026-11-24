@@ -1,6 +1,7 @@
 // This test helper lives here to satisfy the pi-durable module boundary rule.
 // No production module imports this test-only helper.
-import { Harness, createRegistry, defineExtension, defineTask, defineTool, type Conversation, type SubmissionDraft, type Tx } from "@earendil-works/pi-durable";
+import type { Database } from "bun:sqlite";
+import { Harness, createRegistry, defineExtension, defineTask, defineTool, ToolResultEntry, type Conversation, type ConversationId, type SubmissionDraft, type Tx } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
@@ -8,6 +9,18 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createDurableSuiteFakeProvider, createFakeProvider, type FakeReply } from "../../../../../packages/testkit/src/fake-provider.ts";
 
 let durableSuiteHarness: Awaited<ReturnType<typeof Harness.open>> | undefined;
+
+export async function durableSuiteToolResults(db: Database, threadId: string) {
+  if (!durableSuiteHarness) throw new Error("Durable suite harness is not installed");
+  const binding = db.query<{ conversation_id: ConversationId }, [string]>(
+    "SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?",
+  ).get(threadId);
+  if (!binding) throw new Error("Missing Thread conversation binding");
+  const conversation = await durableSuiteHarness.conversation(binding.conversation_id, BACKGROUND_CONTEXT);
+  if (!conversation) throw new Error("Missing durable conversation");
+  const { items } = await conversation.entries({ order: "ascending" }, 100, undefined, BACKGROUND_CONTEXT);
+  return items.filter(ToolResultEntry.is).flatMap((entry) => entry.model ?? []);
+}
 
 export async function abortDurableSuiteGeneration(): Promise<void> {
   if (!durableSuiteHarness) throw new Error("Durable suite harness is not installed");

@@ -43,6 +43,16 @@ export function createDurableSuiteFakeProvider() {
     }
     if (text === "ordered-transcript") return fauxAssistantMessage([fauxText(orderedIntro), fauxThinking("**Inspect** every ordered boundary."), fauxToolCall("steer_boundary", {}, { id: "ordered-steering" })], { stopReason: "toolUse" });
     if (text === "steer-echo") return fauxAssistantMessage([fauxToolCall("steer_boundary", {}, { id: "steer-boundary" })], { stopReason: "toolUse" });
+    const localRun = /^local\.run(?:@(dev_[0-9a-f]{32}|this-device))?:(.*)$/.exec(text);
+    const forgedLocalRun = text.startsWith("local.run.forged:");
+    if (localRun || forgedLocalRun) {
+      const latest = context.messages.at(-1);
+      if (latest?.role === "toolResult" && latest.toolName === "local") return fauxAssistantMessage("Local call finished.");
+      const args = localRun
+        ? { action: "run", command: localRun[2]!, ...(localRun[1] === undefined ? {} : { target: localRun[1] }) }
+        : { action: "run", command: text.slice("local.run.forged:".length), botId: "wrong-bot", turnId: "wrong-turn" };
+      return fauxAssistantMessage(fauxToolCall("local", args, { id: "local-run" }), { stopReason: "toolUse" });
+    }
     if (text === "parity-stream") return fauxAssistantMessage([fauxThinking("T"), fauxText("R")]);
     // The worker inserts a read tool between these thinking blocks; asserting it is Checkpoint C.
     if (text === "thinking-order") return fauxAssistantMessage([fauxText("Before Thinking."), fauxThinking("**Inspect** the request."), fauxThinking("Provider-authored summary."), fauxText("After Thinking.")]);

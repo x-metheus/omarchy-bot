@@ -7,6 +7,7 @@ import { Harness, createRegistry, type ConversationId } from "@earendil-works/pi
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { AGENT_LOCAL_TOOL } from "@omarchy-bot/agent-contract";
 import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
 import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
@@ -123,7 +124,7 @@ test("configured conversation uses the Service limit for unset and null Bots and
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
 
-test("the model request contains the app prompt, Shared Workspace Skills, and Bot mail guidance", () => {
+test("the model request contains the app prompt, Shared Workspace Skills, and Local Sidecar and Bot mail guidance", () => {
   const prompts: string[] = [];
   return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "bot-prompt-home-"));
@@ -189,6 +190,12 @@ test("the model request contains the app prompt, Shared Workspace Skills, and Bo
         skills: [{ name: "Workspace Skill", description: "Workspace skill description sentinel", path: ".agents/skills/workspace/SKILL.md" }],
       });
       expect(prompt).toBe([
+        "<local>",
+        AGENT_LOCAL_TOOL.systemPrompt.summary,
+        "local requires an online Local Sidecar. this-device selects the Sidecar on the device that sent the Turn's user message.",
+        ...AGENT_LOCAL_TOOL.systemPrompt.guidelines.slice(1),
+        "</local>",
+        "",
         "<send_bot_message>",
         "Send durable asynchronous text mail to another Omarchy Bot.",
         "Use send_bot_message only when handing work or information to a distinct Bot ID.",
