@@ -4,8 +4,17 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { McpOAuthProvider, type McpOAuthState } from "@earendil-works/pi-mcp/oauth";
-import { mcpOAuthSecretName, SecretMcpOAuthStateStore } from "./mcpOAuth.ts";
+import { McpOAuthProvider, responseFromRedirectUrl, type McpOAuthState } from "@earendil-works/pi-mcp/oauth";
+import {
+  listenForMcpOAuthCallback,
+  MCP_OAUTH_CALLBACK_PATH,
+  McpOAuthCallbackCancelledError,
+  McpOAuthCallbackError,
+  McpOAuthCallbackTimeoutError,
+  mcpOAuthSecretName,
+  SecretMcpOAuthStateStore,
+  type McpOAuthLoopbackCallback,
+} from "./mcpOAuth.ts";
 import { SecretStore, type SecretBackend } from "./secrets.ts";
 
 const bareOrigin = "https://tools.example.test";
@@ -267,4 +276,241 @@ test("withRefreshLock lets another server finish while the first server is locke
     releaseFirst.resolve();
     await firstTask;
   }
+}));
+
+async function withLoopbackCallback(
+  run: (callback: McpOAuthLoopbackCallback) => Promise<void>,
+  options?: Parameters<typeof listenForMcpOAuthCallback>[0],
+): Promise<void> {
+  const callback = await listenForMcpOAuthCallback(options);
+  try {
+    await run(callback);
+  } finally {
+    await callback.close();
+  }
+}
+
+test("listenForMcpOAuthCallback advertises its ephemeral IPv4 loopback address", () => withLoopbackCallback(async (callback) => {
+  expect(callback.hostname).toBe("127.0.0.1");
+  expect(callback.port).toBeGreaterThan(0);
+  expect(MCP_OAUTH_CALLBACK_PATH).toBe("/callback");
+  expect(callback.redirectUrl).toBe(`http://127.0.0.1:${callback.port}/callback`);
+  expect((await fetch(callback.redirectUrl)).status).toBe(400);
+}));
+
+test("listenForMcpOAuthCallback binds exclusively to 127.0.0.1", () => withLoopbackCallback(async (callback) => {
+  const query = "?code=x&state=y";
+  expect((await fetch(callback.redirectUrl + query)).status).toBe(400);
+
+  const control = Bun.serve({
+    hostname: "0.0.0.0",
+    port: 0,
+    development: false,
+    fetch: () => new Response("wildcard listener"),
+  });
+  try {
+    const response = await fetch(`http://127.0.0.2:${control.port}/`, { signal: AbortSignal.timeout(500) });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("wildcard listener");
+    await expect(fetch(`http://127.0.0.2:${callback.port}/callback${query}`, {
+      signal: AbortSignal.timeout(500),
+    })).rejects.toHaveProperty("code", "ECONNREFUSED");
+  } finally {
+    await control.stop(true);
+  }
+
+  const addresses: string[] = [];
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.family === "IPv4" && !entry.internal) addresses.push(entry.address);
+    }
+  }
+  await Promise.all(addresses.map(async (address) => {
+    const url = `http://${address}:${callback.port}/callback${query}`;
+    const error = await fetch(url, { signal: AbortSignal.timeout(500) }).catch((error: unknown) => error);
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    expect(code === "ECONNREFUSED" || (error instanceof Error && error.name === "TimeoutError"), address).toBe(true);
+  }));
+}));
+
+test("waitForCallback accepts the first matching code and serves a private result page", () => withLoopbackCallback(async (callback) => {
+  const url = `${callback.redirectUrl}?code=code-1&state=state-1&iss=https%3A%2F%2Fissuer.example`;
+  const [result, response] = await Promise.all([callback.waitForCallback("state-1"), fetch(url)]);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'");
+  const page = await response.text();
+  expect(page).not.toContain("code-1");
+  expect(page).not.toContain("state-1");
+  expect(result).toStrictEqual({ code: "code-1", state: "state-1", iss: "https://issuer.example" });
+  expect((await fetch(url)).status).toBe(410);
+  expect((await fetch(url, { method: "POST" })).status).toBe(410);
+}));
+
+test("waitForCallback stays pending for missing state or a mismatch, including case", () => withLoopbackCallback(async (callback) => {
+  const result = callback.waitForCallback("state-1").then((response) => ({ response }), (error: unknown) => ({ error }));
+  for (const query of ["?code=private-code", "?code=private-code&state=wrong", "?code=private-code&state=State-1"]) {
+    const response = await fetch(callback.redirectUrl + query);
+    expect(response.status).toBe(400);
+    expect(await response.text()).not.toContain("private-code");
+  }
+  expect(await Promise.race([result, Bun.sleep(50).then(() => "pending")])).toBe("pending");
+  const response = await fetch(`${callback.redirectUrl}?code=code-1&state=state-1`);
+  expect(response.status).toBe(200);
+  expect(await result).toStrictEqual({ response: { code: "code-1", state: "state-1" } });
+}));
+
+test("waitForCallback returns a private error page for a malformed request URL", () => withLoopbackCallback(async (callback) => {
+  const url = `${callback.redirectUrl}?code=private-code&state=state-1`;
+  const result = callback.waitForCallback("state-1").then((response) => ({ response }), (error: unknown) => ({ error }));
+  const malformed = await fetch(url, { headers: { host: "invalid%" } });
+  expect(malformed.status).toBe(400);
+  const page = await malformed.text();
+  expect(page).not.toContain("private-code");
+  expect(page).not.toContain("state-1");
+  expect((await fetch(url)).status).toBe(200);
+  expect(await result).toStrictEqual({ response: { code: "private-code", state: "state-1" } });
+}));
+
+test("waitForCallback reports an authorization server error without its description", () => withLoopbackCallback(async (callback) => {
+  const description = "synthetic secret description";
+  const query = new URLSearchParams({ error: "access_denied", error_description: description, state: "state-1" });
+  const [error, response] = await Promise.all([
+    callback.waitForCallback("state-1").catch((error: unknown) => error),
+    fetch(`${callback.redirectUrl}?${query}`),
+  ]);
+  expect(response.status).toBe(400);
+  const page = await response.text();
+  expect(page).toContain("Sign-in did not complete");
+  expect(page).not.toContain(description);
+  expect(page).not.toContain("access_denied");
+  expect(error).toBeInstanceOf(McpOAuthCallbackError);
+  expect(error).toHaveProperty("code", "access_denied");
+  expect(String(error)).not.toContain(description);
+  expect(String(error)).not.toContain("access_denied");
+  expect((await fetch(`${callback.redirectUrl}?code=code-1&state=state-1`)).status).toBe(410);
+}));
+
+test("McpOAuthCallbackError preserves account_selection_required", () => {
+  expect(new McpOAuthCallbackError("account_selection_required").code).toBe("account_selection_required");
+});
+
+test.each([
+  ["control characters and free-form text", `\u0001\t\r${"synthetic error text".repeat(10)}`],
+  ["an empty value", ""],
+  ["a padded code", " access_denied "],
+])("waitForCallback uses a generic OAuth error for %s", (_label, errorValue) => withLoopbackCallback(async (callback) => {
+  const query = new URLSearchParams({ error: errorValue, state: "state-1" });
+  const [error, response] = await Promise.all([
+    callback.waitForCallback("state-1").catch((error: unknown) => error),
+    fetch(`${callback.redirectUrl}?${query}`),
+  ]);
+  expect(response.status).toBe(400);
+  expect(error).toBeInstanceOf(McpOAuthCallbackError);
+  expect(error).toHaveProperty("code", "oauth_error");
+  expect(error).toHaveProperty("message", "The authorization server rejected MCP sign-in.");
+  const page = await response.text();
+  expect(page).toContain("Sign-in did not complete.");
+  expect(page).not.toContain("synthetic error text");
+  expect(page).not.toContain("access_denied");
+  expect(page).not.toMatch(/\p{Cc}/u);
+}));
+
+test("waitForCallback rejects a matching callback with no authorization code", () => withLoopbackCallback(async (callback) => {
+  const [error, response] = await Promise.all([
+    callback.waitForCallback("state-1").catch((error: unknown) => error),
+    fetch(`${callback.redirectUrl}?state=state-1`),
+  ]);
+  expect(response.status).toBe(400);
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).not.toContain("state-1");
+  expect((await fetch(`${callback.redirectUrl}?code=code-1&state=state-1`)).status).toBe(410);
+}));
+
+test("waitForCallback times out and closes the listener", () => withLoopbackCallback(async (callback) => {
+  await expect(callback.waitForCallback("state-1")).rejects.toBeInstanceOf(McpOAuthCallbackTimeoutError);
+  await expect(fetch(callback.redirectUrl)).rejects.toThrow();
+}, { timeoutMs: 50 }));
+
+test.each([{ alreadyAborted: false }, { alreadyAborted: true }])("waitForCallback closes on abort (%j)", ({ alreadyAborted }) => withLoopbackCallback(async (callback) => {
+  const controller = new AbortController();
+  const reason = new Error("private abort reason");
+  if (alreadyAborted) controller.abort(reason);
+  const failure = callback.waitForCallback("state-1", controller.signal).catch((error: unknown) => error);
+  if (!alreadyAborted) controller.abort(reason);
+  const error = await failure;
+  expect(error).toBeInstanceOf(McpOAuthCallbackCancelledError);
+  expect(String(error)).not.toContain(reason.message);
+  await expect(fetch(callback.redirectUrl)).rejects.toThrow();
+}));
+
+test("McpOAuthLoopbackCallback close is idempotent and cancels a pending waiter", () => withLoopbackCallback(async (callback) => {
+  const failure = callback.waitForCallback("state-1").catch((error: unknown) => error);
+  await expect(Promise.all([callback.close(), callback.close()])).resolves.toEqual([undefined, undefined]);
+  expect(await failure).toBeInstanceOf(McpOAuthCallbackCancelledError);
+  await expect(fetch(callback.redirectUrl)).rejects.toThrow();
+}));
+
+test("waitForCallback rejects a second waiter without replacing the first", () => withLoopbackCallback(async (callback) => {
+  const result = callback.waitForCallback("state-1").then((response) => ({ response }), (error: unknown) => ({ error }));
+  await expect(callback.waitForCallback("state-2")).rejects.toThrow();
+  expect((await fetch(`${callback.redirectUrl}?code=code-1&state=state-1`)).status).toBe(200);
+  expect(await result).toStrictEqual({ response: { code: "code-1", state: "state-1" } });
+  await expect(callback.waitForCallback("state-1")).rejects.toThrow();
+}));
+
+test("listenForMcpOAuthCallback routes only GET requests on its configured path", () => withLoopbackCallback(async (callback) => {
+  const query = "?code=code-1&state=state-1";
+  const result = callback.waitForCallback("state-1").then((response) => ({ response }), (error: unknown) => ({ error }));
+  expect(callback.redirectUrl).toBe(`http://127.0.0.1:${callback.port}/oauth/return`);
+  expect((await fetch(new URL(`/callback${query}`, callback.redirectUrl))).status).toBe(404);
+  const post = await fetch(callback.redirectUrl + query, { method: "POST" });
+  expect(post.status).toBe(405);
+  expect(post.headers.get("allow")).toBe("GET");
+  expect((await fetch(callback.redirectUrl + query)).status).toBe(200);
+  expect(await result).toStrictEqual({ response: { code: "code-1", state: "state-1" } });
+}, { path: "/oauth/return" }));
+
+test.each([
+  ["/oauth/staging/../return%20here", "/oauth/return%20here"],
+  ["/call%20back", "/call%20back"],
+])("listenForMcpOAuthCallback advertises and routes the normalized path for %s", (path, pathname) => withLoopbackCallback(async (callback) => {
+  expect(new URL(callback.redirectUrl).pathname).toBe(pathname);
+  const [result, response] = await Promise.all([
+    callback.waitForCallback("state-1"),
+    fetch(`http://127.0.0.1:${callback.port}${pathname}?code=code-1&state=state-1`),
+  ]);
+  expect(response.status).toBe(200);
+  expect(result).toStrictEqual({ code: "code-1", state: "state-1" });
+}, { path }));
+
+test.each([
+  { path: "callback" }, { path: "/callback?query" }, { path: "/callback#fragment" },
+  { path: "/call\tback" }, { path: "/callback " }, { path: "/oauth/staging/../return here" },
+  { path: "/call\\back" }, { path: "/call\x7fback" },
+  { path: "/" }, { path: "/oauth/.." },
+  { port: 70_000 }, { port: -1 }, { port: 1.5 },
+])("listenForMcpOAuthCallback rejects invalid options %j", async (options) => {
+  const listener = listenForMcpOAuthCallback(options);
+  try {
+    await expect(listener).rejects.toBeInstanceOf(TypeError);
+  } finally {
+    const callback = await listener.catch(() => undefined);
+    await callback?.close();
+  }
+});
+
+test("pi-mcp responseFromRedirectUrl accepts the listener URL and checks origin and state", () => withLoopbackCallback(async (callback) => {
+  const authorization = { redirectUrl: callback.redirectUrl, state: "state-1" };
+  const redirect = new URL(callback.redirectUrl);
+  redirect.searchParams.set("code", "code-1");
+  redirect.searchParams.set("state", authorization.state);
+  const [result, response] = await Promise.all([callback.waitForCallback(authorization.state), fetch(redirect)]);
+  expect(response.status).toBe(200);
+  expect(responseFromRedirectUrl(redirect.href, authorization)).toStrictEqual(result);
+  expect(() => responseFromRedirectUrl("https://evil.example/callback?code=code-1&state=state-1", authorization)).toThrow();
+  redirect.searchParams.set("state", "wrong-state");
+  expect(() => responseFromRedirectUrl(redirect.href, authorization)).toThrow();
 }));
