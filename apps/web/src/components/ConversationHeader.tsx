@@ -32,6 +32,7 @@ export interface ConversationHeaderProps {
   onToggleBotSettings: () => void;
   onToggleComputer: () => void;
   mobileNavigationTriggerRef: RefObject<HTMLButtonElement | null>;
+  historyTriggerRef: RefObject<HTMLButtonElement | null>;
   computerTriggerRef: RefObject<HTMLButtonElement | null>;
   botSettingsTriggerRef: RefObject<HTMLButtonElement | null>;
 }
@@ -76,6 +77,7 @@ export function ConversationHeader({
   onToggleBotSettings,
   onToggleComputer,
   mobileNavigationTriggerRef,
+  historyTriggerRef,
   computerTriggerRef,
   botSettingsTriggerRef,
 }: ConversationHeaderProps): JSX.Element {
@@ -133,6 +135,7 @@ export function ConversationHeader({
             )}
             <StackItem size="fill">
               <Button
+                ref={historyTriggerRef}
                 label="Open conversation history"
                 variant="ghost"
                 size="sm"
