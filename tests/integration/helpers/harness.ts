@@ -11,6 +11,7 @@ import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
+import type { DurableMailReplayObserver } from "../../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 
 /** Mark worker-protocol tests for removal with the worker in Task 20. */
 export function workerOnly(reason: string, options?: { timeout?: number }) {
@@ -42,6 +43,9 @@ export interface HarnessOptions {
   waitForAgentReady?: boolean;
   /** Worker tree override; defaults to the shared fake workers. */
   workersDir?: string;
+  onDurableMailReplay?: DurableMailReplayObserver;
+  /** Keep the Shared Workspace outside the protected Service data directory. */
+  separateWorkspace?: boolean;
 }
 
 /**
@@ -105,7 +109,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     JSON.stringify({ ok: true, image: "verified" }),
   );
 
-  process.env.HOME = home;
+  process.env.HOME = options.separateWorkspace ? `${home}-profile` : home;
   process.env.OMARCHY_BOT_HOME = home;
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
@@ -116,8 +120,8 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
 
   // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
   const durableSuite = process.env.OMARCHY_TEST_DURABLE === "1";
-  const restoreRuntime = durableSuite
-    ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider()
+  let restoreRuntime = durableSuite
+    ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider(options.onDurableMailReplay)
     : undefined;
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
   const daemon = options.useProductionBotScreen
@@ -141,14 +145,22 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     setSetting(svc.db, "default_model", "fake/fake-model");
     setSetting(svc.db, "runtime", "durable");
   }
+  async function close(action: () => Promise<void>): Promise<void> {
+    try {
+      await action();
+    } finally {
+      restoreRuntime?.();
+      restoreRuntime = undefined;
+    }
+  }
   const base: Harness = {
     baseUrl: `http://127.0.0.1:${port}`,
     port,
     token: "",
     home,
     svc,
-    stop: async () => { try { await stop(); } finally { restoreRuntime?.(); } },
-    disconnectForRestart,
+    stop: () => close(stop),
+    disconnectForRestart: () => close(disconnectForRestart),
   };
   base.token = await pairForToken(base.baseUrl, state);
   if (options.waitForAgentReady !== false) {

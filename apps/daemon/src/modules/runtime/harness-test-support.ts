@@ -1,16 +1,16 @@
 // This test helper lives here to satisfy the pi-durable module boundary rule.
 // No production module imports this test-only helper.
 import type { Database } from "bun:sqlite";
-import { Harness, createRegistry, defineExtension, defineTask, defineTool, ToolResultEntry, type Conversation, type ConversationId, type SubmissionDraft, type Tx } from "@earendil-works/pi-durable";
+import { Harness, createRegistry, defineExtension, defineTask, defineTool, ToolResultEntry, type Conversation, type ConversationId, type SubmissionDraft, type ToolExecutionApi, type ToolExecutionResult, type Tx } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { createDurableSuiteFakeProvider, createFakeProvider, type FakeReply } from "../../../../../packages/testkit/src/fake-provider.ts";
 
 let durableSuiteHarness: Awaited<ReturnType<typeof Harness.open>> | undefined;
 
-export async function durableSuiteToolResults(db: Database, threadId: string) {
+async function durableSuiteConversation(db: Database, threadId: string) {
   if (!durableSuiteHarness) throw new Error("Durable suite harness is not installed");
   const binding = db.query<{ conversation_id: ConversationId }, [string]>(
     "SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?",
@@ -18,8 +18,25 @@ export async function durableSuiteToolResults(db: Database, threadId: string) {
   if (!binding) throw new Error("Missing Thread conversation binding");
   const conversation = await durableSuiteHarness.conversation(binding.conversation_id, BACKGROUND_CONTEXT);
   if (!conversation) throw new Error("Missing durable conversation");
+  return conversation;
+}
+
+export async function durableSuiteEntries(db: Database, threadId: string) {
+  const conversation = await durableSuiteConversation(db, threadId);
   const { items } = await conversation.entries({ order: "ascending" }, 100, undefined, BACKGROUND_CONTEXT);
-  return items.filter(ToolResultEntry.is).flatMap((entry) => entry.model ?? []);
+  return items;
+}
+
+export async function durableSuiteAgent(db: Database, threadId: string) {
+  return (await durableSuiteConversation(db, threadId)).agent(BACKGROUND_CONTEXT);
+}
+
+export async function durableSuiteToolResultEntries(db: Database, threadId: string) {
+  return (await durableSuiteEntries(db, threadId)).filter(ToolResultEntry.is);
+}
+
+export async function durableSuiteToolResults(db: Database, threadId: string) {
+  return (await durableSuiteToolResultEntries(db, threadId)).flatMap((entry) => entry.model ?? []);
 }
 
 export async function abortDurableSuiteGeneration(): Promise<void> {
@@ -36,9 +53,11 @@ export function durableSuiteProviderCallCount(): number {
   return durableSuiteCallCount();
 }
 
-export function installDurableSuiteProvider(): () => void {
+export type DurableMailReplayObserver = (first: ToolExecutionResult, replayed: ToolExecutionResult) => void;
+
+export function installDurableSuiteProvider(onMailReplay?: DurableMailReplayObserver): () => void {
   const fake = createDurableSuiteFakeProvider();
-  durableSuiteCallCount = () => fake.state.callCount;
+  durableSuiteCallCount = fake.getCallCount;
   const waiting = new Map<number, () => void>();
   const steered = new Set<number>();
   const boundaries = new Set<number>();
@@ -91,6 +110,20 @@ export function installDurableSuiteProvider(): () => void {
     const registry = options.registry;
     if (!("install" in registry) || typeof registry.install !== "function") throw new Error("Expected a mutable registry");
     registry.install(steering);
+    if (onMailReplay) {
+      const extension = registry.snapshot().extension("omarchy-mail");
+      const tool = extension?.tools?.find(({ name }) => name === "send_bot_message");
+      if (!extension || !tool) throw new Error("Expected the installed mail extension");
+      registry.install({ ...extension, tools: [{
+        ...tool,
+        async execute(args: Parameters<typeof tool.execute>[0], api: ToolExecutionApi, context: Context) {
+          const first = await tool.execute(args, api, context);
+          // Replay the same task while its active Turn still owns the execution.
+          onMailReplay(first, await tool.execute(args, api, context));
+          return first;
+        },
+      }] });
+    }
     const harness = await originalOpen.call(Harness, storage, {
       ...options,
       models: () => {
