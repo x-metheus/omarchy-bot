@@ -692,6 +692,17 @@ export const UpdateProviderBody = z.object({
 }).strict();
 export type UpdateProviderBody = z.infer<typeof UpdateProviderBody>;
 
+// ----- allowed folders -----
+
+export const AllowedFoldersDto = z.object({
+  folders: z.array(z.string()),
+  alwaysAllowed: z.array(z.string()),
+});
+export type AllowedFoldersDto = z.infer<typeof AllowedFoldersDto>;
+
+export const AllowedFolderBody = z.object({ folder: z.string() }).strict();
+export type AllowedFolderBody = z.infer<typeof AllowedFolderBody>;
+
 // ----- approvals -----
 
 export const ApprovalStatusSchema = z.enum(["pending", "allowed_once", "allowed_folder", "denied", "expired", "cancelled"]);

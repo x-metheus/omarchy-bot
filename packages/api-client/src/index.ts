@@ -11,6 +11,8 @@ import type {
 } from "@omarchy-bot/protocol";
 import type {
   AgentDto,
+  AllowedFolderBody,
+  AllowedFoldersDto,
   ApprovalAnswerBodyDto,
   ApprovalDto,
   AttachmentDto,
@@ -188,6 +190,17 @@ export class ApiClient {
   }
   deleteProvider(id: string): Promise<void> {
     return this.req(`/api/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  // ----- allowed folders -----
+  allowedFolders(): Promise<AllowedFoldersDto> {
+    return this.req("/api/settings/allowed-folders");
+  }
+  addAllowedFolder(folder: string): Promise<AllowedFoldersDto> {
+    return this.req("/api/settings/allowed-folders", { method: "POST", body: JSON.stringify({ folder } satisfies AllowedFolderBody) });
+  }
+  removeAllowedFolder(folder: string): Promise<AllowedFoldersDto> {
+    return this.req("/api/settings/allowed-folders", { method: "DELETE", body: JSON.stringify({ folder } satisfies AllowedFolderBody) });
   }
 
   // ----- agents -----

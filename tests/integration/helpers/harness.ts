@@ -42,6 +42,7 @@ export interface HarnessOptions {
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
   legacyModelCredentials?: readonly StoredProvider[];
+  dataDir?: string;
   stateDir?: string;
   /** Worker tree override; defaults to the shared fake workers. */
   workersDir?: string;
@@ -97,6 +98,7 @@ export function authedFetch(h: Harness, input: string, init: RequestInit = {}): 
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
   const home = existingHome ?? path.join(os.tmpdir(), `omarchy-bot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const data = options.dataDir ?? home;
   const state = options.stateDir ?? path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const agentDir = path.join(home, ".pi", "agent");
   mkdirSync(home, { recursive: true });
@@ -106,7 +108,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     writeFileSync(path.join(state, MODEL_CREDENTIALS_FILENAME), JSON.stringify(options.legacyModelCredentials), { mode: 0o600 });
   }
   // Fake conformance record so the fake pi worker probes to `ready`.
-  const conf = path.join(home, "conformance");
+  const conf = path.join(data, "conformance");
   mkdirSync(conf, { recursive: true });
   writeFileSync(
     path.join(conf, "pi-fake-pi-1.json"),
@@ -114,7 +116,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   );
 
   process.env.HOME = home;
-  process.env.OMARCHY_BOT_HOME = home;
+  process.env.OMARCHY_BOT_HOME = data;
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_BOT_WORKERS_DIR = options.workersDir ?? path.resolve(import.meta.dir, "../fake-workers");
