@@ -78,7 +78,7 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 - [x] Task 7: App prompt sections, Skills list, and private folders
 - [x] Task 8: Files and shell tools with allowed folders
 - [x] Task 9: Approval flow on the Service
-- [ ] Task 10: Approval UI in the web client
+- [x] Task 10: Approval UI in the web client
 - [ ] Task 11: Computer and browser tools in process
 - [ ] Task 12: Bot mail, Local Sidecar, and plugin tools in process
 
