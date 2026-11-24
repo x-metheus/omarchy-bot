@@ -2,7 +2,6 @@ import { expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { CredentialStore } from "../../apps/daemon/src/modules/runtime/credentials.ts";
 import { withFakeRuntimeProvider } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 import { setSetting } from "../../apps/daemon/src/persistence/settings.ts";
 import { DeleteBotResultDto } from "../../packages/protocol/src/index.ts";
@@ -54,7 +53,7 @@ async function expectBotDeleted(h: Harness, botId: string, count: number, ...thr
 test("the first durable Turn leaves the old Pi session intact until Bot deletion removes only its recorded path", () => {
   const reply = "The durable Turn continued.";
   return withFakeRuntimeProvider([{ segments: [{ type: "text", text: reply }] }], {}, () => withDaemon(async (h, botId) => {
-    new CredentialStore(h.svc.cfg.stateDir).add({
+    await h.svc.credentials.add({
       id: "fake",
       name: "Fake",
       protocol: "openai-compatible",

@@ -8,6 +8,7 @@ test("Bot deletion results accept the secrets phase and default older counts to 
     failures: [],
   };
   expect(DeleteBotResultDto.parse(result).removed.secrets).toBe(0);
+  expect(DeleteBotResultDto.parse(result).oldSessionFilesRemoved).toBe(0);
   expect(DeleteBotResultDto.parse({
     ...result,
     removed: { ...result.removed, secrets: 1 },

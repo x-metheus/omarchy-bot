@@ -1,7 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { copyFile, mkdtemp, readFile, rm, stat, utimes } from "node:fs/promises";
 import { join } from "node:path";
-import { CredentialStore } from "../../apps/daemon/src/modules/runtime/credentials.ts";
 import { withFakeRuntimeProvider } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 import { setSetting } from "../../apps/daemon/src/persistence/settings.ts";
 import * as fakeProvider from "../../packages/testkit/src/fake-provider.ts";
@@ -33,7 +32,7 @@ async function withMigrationDaemon(check: (h: Harness, botId: string, requests: 
       const h = await startDaemon();
       try {
         const botId = await makeBot(h, "Session migration");
-        new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+        await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
         setSetting(h.svc.db, "default_model", "fake/fake-model");
         await check(h, botId, requests);
       } finally {
