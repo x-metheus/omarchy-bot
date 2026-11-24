@@ -256,6 +256,8 @@ interface SearchProvider {
 const EXA_SEARCH_ENDPOINT = "https://mcp.exa.ai/mcp";
 const EXA_RATE_LIMIT_FLAG = "ai.exa/rateLimited";
 const MAX_EXA_ERROR_BODY_BYTES = 64 * 1024;
+const MAX_EXA_METADATA_DEPTH = 16;
+const MAX_EXA_METADATA_ENTRIES = 1024;
 const SEARCH_TIMEOUT_MS = 20_000;
 const MAX_SEARCH_RESULTS = 20;
 
@@ -341,6 +343,27 @@ function isExaRateLimit(error: unknown) {
     .test(message.replaceAll(EXA_RATE_LIMIT_FLAG, "_"));
 }
 
+function hasExaResultRateLimit(metadata: Record<string, unknown>): boolean {
+  const seen = new WeakSet<object>();
+  let remainingEntries = MAX_EXA_METADATA_ENTRIES;
+
+  function visit(value: unknown, depth: number): boolean {
+    if (typeof value === "string") return interpretExaRateLimitFlag(value) === true;
+    if (value === null || typeof value !== "object" || depth >= MAX_EXA_METADATA_DEPTH || seen.has(value)) return false;
+    seen.add(value);
+    for (const key in value) {
+      if (!Object.hasOwn(value, key)) continue;
+      if (remainingEntries === 0) return false;
+      remainingEntries--;
+      const entry = (value as Record<string, unknown>)[key];
+      if (key === EXA_RATE_LIMIT_FLAG ? entry === true : visit(entry, depth + 1)) return true;
+    }
+    return false;
+  }
+
+  return visit(metadata, 0);
+}
+
 function createExaSearchProvider(endpoint: string, key: string | undefined, timeoutMs: number): SearchProvider {
   return {
     async search(query, numResults, signal) {
@@ -370,9 +393,12 @@ function createExaSearchProvider(endpoint: string, key: string | undefined, time
       const client = new McpClient({ name: "omarchy-web", version: "1.0.0", requestTimeoutMs: timeoutMs });
       try {
         await client.connect(transport);
-        const result = await client.callTool("web_search_exa", { query, ...(numResults === undefined ? {} : { numResults }) }, { signal });
-        if (result.isError) throw new Error("Exa returned a tool error.");
-        return result.content.flatMap((block) => block?.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n\n");
+        const { content, isError, ...metadata } = await client.callTool("web_search_exa", { query, ...(numResults === undefined ? {} : { numResults }) }, { signal });
+        if (hasExaResultRateLimit(metadata)) throw new SearchRateLimitError();
+        const textBlocks = content.flatMap((block) => block?.type === "text" && typeof block.text === "string" ? [block.text] : []);
+        if (isError === true && textBlocks.some((text) => interpretExaRateLimitFlag(text) === true)) throw new SearchRateLimitError();
+        if (isError) throw new Error("Exa returned a tool error.");
+        return textBlocks.join("\n\n");
       } catch (error) {
         if (isExaRateLimit(error)) throw new SearchRateLimitError();
         throw error;

@@ -6,6 +6,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness, ToolResultEntry, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
+import { McpClient } from "@earendil-works/pi-mcp";
 import { setSetting } from "../../../persistence/settings.ts";
 import { createWebExtension, isExternalContentTool, OUTSIDE_CONTENT_NOTICE, readWebExemptRanges, WEB_EXEMPT_RANGES_SETTING, WEB_TOOL_NAMES } from "./web.ts";
 
@@ -556,13 +557,77 @@ test("web_search ignores rate-limit text in a successful notification acknowledg
   expect(mcp.calls).toHaveLength(2);
 });
 
+test("web_search detects true and bare flags in HTTP 200 MCP tool error text", async () => {
+  const flags = ['{"ai.exa/rateLimited":true}', "ai.exa/rateLimited"];
+  using mcp = mcpStub((request) => {
+    const reply = mcpResult(request, "Search unavailable", flags.shift()!);
+    return Response.json({ ...reply, result: { ...reply.result, isError: true } });
+  });
+  for (let i = 0; i < 2; i++) expectRateLimit(await webSearch(searchArgs, mcp.options));
+});
+
+test("web_search reports an HTTP 200 MCP tool error without a flag as a search failure", async () => {
+  using mcp = mcpStub((request) => {
+    const reply = mcpResult(request, "Search unavailable");
+    return Response.json({ ...reply, result: { ...reply.result, isError: true } });
+  });
+  expectSearchFailure(await webSearch(searchArgs, mcp.options));
+});
+
+for (const [field, value] of [
+  ["_meta", { "ai.exa/rateLimited": true }],
+  ["structuredContent", { "ai.exa/rateLimited": true }],
+  ["providerMetadata", { flag: "ai.exa/rateLimited" }],
+] as const) {
+  test(`web_search detects an HTTP 200 MCP result flag in ${field} before reporting empty content`, async () => {
+    using mcp = mcpStub(({ id }) => Response.json({ jsonrpc: "2.0", id, result: { [field]: value } }));
+    expectRateLimit(await webSearch(searchArgs, mcp.options));
+  });
+}
+
+test("web_search detects an HTTP 200 MCP tool error flag in metadata", async () => {
+  using mcp = mcpStub((request) => {
+    const reply = mcpResult(request, "Search unavailable");
+    return Response.json({ ...reply, result: { ...reply.result, isError: true, _meta: { "ai.exa/rateLimited": true } } });
+  });
+  expectRateLimit(await webSearch(searchArgs, mcp.options));
+});
+
+test("web_search reports a truthy non-boolean MCP isError as a generic search failure", async () => {
+  using mcp = mcpStub((request) => {
+    const reply = mcpResult(request, "Search unavailable [ai.exa/rateLimited]");
+    return Response.json({ ...reply, result: { ...reply.result, isError: "true" } });
+  });
+  expectSearchFailure(await webSearch(searchArgs, mcp.options));
+});
+
+test("web_search detects a metadata flag after a cyclic sibling in the MCP tool result", async () => {
+  using mcp = mcpStub((request) => Response.json(mcpResult(request, exaText)));
+  const cyclic: { self?: object } = {};
+  cyclic.self = cyclic;
+  const originalCallTool = McpClient.prototype.callTool;
+  const callTool = spyOn(McpClient.prototype, "callTool").mockImplementation(async function (this: McpClient, ...args) {
+    const result = await originalCallTool.apply(this, args);
+    // A cycle can only be injected after the loopback response has been decoded from JSON.
+    return { ...result, _meta: { cyclic, nested: { "ai.exa/rateLimited": true } } };
+  });
+  try {
+    expectRateLimit(await webSearch(searchArgs, mcp.options));
+  } finally {
+    callTool.mockRestore();
+  }
+});
+
 const quotedMarker = 'Snippet: The docs mention "ai.exa/rateLimited".';
 
 test("web_search preserves a JSON search result that quotes the rate-limit marker", async () => {
-  using mcp = mcpStub((request) => Response.json(mcpResult(request, quotedMarker)));
+  using mcp = mcpStub((request) => {
+    const reply = mcpResult(request, quotedMarker);
+    return Response.json({ ...reply, result: { ...reply.result, isError: false } });
+  });
   const result = await webSearch(searchArgs, mcp.options);
   expect(result.isError).toBeFalsy();
-  expect(text(result)).toContain(quotedMarker);
+  expect(text(result)).toBe(`Search results for "${searchQuery}":\n\n${quotedMarker}\n\n${outsideContentNotice}\nSource: Exa`);
 });
 
 test("web_search preserves an SSE search result that quotes the rate-limit marker", async () => {
@@ -577,6 +642,55 @@ test("web_search ignores a false rate-limit flag on a successful result", async 
   const result = await webSearch(searchArgs, mcp.options);
   expect(result.isError).toBeFalsy();
   expect(text(result)).toContain(exaText);
+});
+
+test("web_search returns results with a false rate-limit flag in MCP result metadata", async () => {
+  using mcp = mcpStub((request) => {
+    const reply = mcpResult(request, exaText);
+    return Response.json({ ...reply, result: { ...reply.result, _meta: { "ai.exa/rateLimited": false } } });
+  });
+  const result = await webSearch(searchArgs, mcp.options);
+  expect(result.isError).toBeFalsy();
+  expect(text(result)).toBe(`Search results for "${searchQuery}":\n\n${exaText}\n\n${outsideContentNotice}\nSource: Exa`);
+});
+
+test("web_search returns results when a raw MCP metadata string contains an explicit false flag", async () => {
+  using mcp = mcpStub((request) => {
+    const reply = mcpResult(request, exaText);
+    return Response.json({ ...reply, result: { ...reply.result, providerMetadata: '{"ai.exa/rateLimited":false}' } });
+  });
+  const result = await webSearch(searchArgs, mcp.options);
+  expect(result.isError).toBeFalsy();
+  expect(text(result)).toBe(`Search results for "${searchQuery}":\n\n${exaText}\n\n${outsideContentNotice}\nSource: Exa`);
+});
+
+test("web_search detects a true flag in a raw string inside nested MCP metadata arrays", async () => {
+  using mcp = mcpStub(({ id }) => Response.json({
+    jsonrpc: "2.0", id, result: { structuredContent: [{ providerMetadata: ['{"ai.exa/rateLimited":true}'] }] },
+  }));
+  expectRateLimit(await webSearch(searchArgs, mcp.options));
+});
+
+test("web_search ignores markers inside non-boolean values assigned to the MCP metadata flag key", async () => {
+  const values = [0, "ai.exa/rateLimited", ["ai.exa/rateLimited"], { "ai.exa/rateLimited": true }];
+  using mcp = mcpStub(({ id }) => Response.json({
+    jsonrpc: "2.0", id, result: { _meta: { "ai.exa/rateLimited": values.shift() } },
+  }));
+  for (let i = 0; i < 4; i++) {
+    const result = await webSearch(searchArgs, mcp.options);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toBe("Web search returned no results.");
+  }
+});
+
+test("web_search reports empty content with a null rate-limit flag in MCP result metadata", async () => {
+  using mcp = mcpStub((request) => {
+    const reply = mcpResult(request);
+    return Response.json({ ...reply, result: { ...reply.result, structuredContent: { "ai.exa/rateLimited": null } } });
+  });
+  const result = await webSearch(searchArgs, mcp.options);
+  expect(result.isError).toBe(true);
+  expect(text(result)).toBe("Web search returned no results.");
 });
 
 test("web_search detects the rate-limit flag in an HTTP error body", async () => {
