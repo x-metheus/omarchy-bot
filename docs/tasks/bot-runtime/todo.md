@@ -214,9 +214,13 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 **Description:** Add the approval flow from the spec. `beforeTool` decides whether approval is needed. The tool then runs as a replay-safe durable tool task that records a pending approval and waits on it with durable sleeps. Migrate the `approvals` table forward. Add the API to list and answer approvals, and the events. Requests expire after 7 days. Files outside the allowed folders are the first user, with Allow once, Always allow this folder, and Deny.
 
 **Acceptance criteria:**
-- [ ] A write outside the allowed folders pauses, survives a restart without asking twice, and after approval writes exactly once
-- [ ] "Always allow this folder" adds the folder; Deny returns an error result to the Bot
-- [ ] A clean shutdown while waiting uses no restart retry, and an expired request returns "no answer"
+- [x] A write outside the allowed folders pauses, survives a restart without asking twice, and after approval writes exactly once — `restart.test.ts`: pending approval survives a hard kill
+- [x] "Always allow this folder" adds the folder; Deny returns an error result to the Bot — `files-shell.test.ts`
+- [x] A clean shutdown while waiting uses no restart retry, and an expired request returns "no answer" — `restart.test.ts`: clean shutdown; `files-shell.test.ts`: expired request
+
+Decided 2026-11-24: a clean shutdown does not abort a reply waiting for approval. The Turn stays working, the Harness closes under it, and the next start resumes the same request. Every other running reply still fails with `daemon restart`.
+
+The wait runs inside the replay-safe tool task, as in the prototype: a tool cannot sleep durably in pi-durable 1.5.2. It wakes on the answer and re-checks the stored request at least once a minute. `write` and `edit` record the file's digest before changing it, so a rerun never applies a change twice. The API is `GET /api/approvals[?threadId=]` and `POST /api/approvals/:id/answer` with `allow_once`, `allow_folder`, or `deny`; Thread events are `approval.requested` and `approval.resolved`.
 
 **Verification:** default commands; prototype check 6 as a test.
 
@@ -288,7 +292,7 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 Mailbox, attachments, and every failure caused by tools not yet built in process move here from Checkpoint B, including tool-call projection, native events, capability inventory, the `process-only` fixture, computer and browser tools, and sidecar tools.
 
 - [ ] Computer, browser, mailbox, and sidecar integration tests pass with the switch on
-- [ ] A write outside the allowed folders asks, survives a restart, and writes once
+- [x] A write outside the allowed folders asks, survives a restart, and writes once (Task 9, `restart.test.ts`)
 - [ ] Review with the human before proceeding
 
 ---

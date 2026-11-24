@@ -90,7 +90,7 @@ This keeps an upgrade of the experimental package to one module.
 
 **Startup:** open the Harness, then call `resume()`. Unfinished replies and tasks continue, and replies that cannot continue end with a visible failure reason.
 
-**Shutdown** stops accepting input, aborts running replies, and closes the Harness. When SIGTERM disconnects the Service for restart, interrupted Turns are recorded as failed with the reason `daemon restart`. A user abort records the Turn as cancelled with the supplied reason. Both remove streaming Response and Thinking blocks and preserve completed blocks.
+**Shutdown** stops accepting input, aborts running replies, and closes the Harness. When SIGTERM disconnects the Service for restart, interrupted Turns are recorded as failed with the reason `daemon restart`. A reply waiting for an [approval](#file-access) is not aborted: it stays working, and the next start resumes it with the same request. A user abort records the Turn as cancelled with the supplied reason. Both remove streaming Response and Thinking blocks and preserve completed blocks.
 
 **Crash safety:** commit-before-show and `resume()` cover a crashed Service. pi-durable's retry and `restartLimit` settings stop a reply that keeps crashing the process from looping forever.
 
@@ -193,10 +193,10 @@ Path checks resolve symbolic links and `..` before comparing.
 
 **Approval flow:** the runtime owns one approval flow, and file access is its first user.
 
-- **How it pauses:** pi-durable 1.5.2's `beforeTool` cannot wait for a person. So `beforeTool` only decides whether approval is needed. A tool that needs it runs as a durable tool task marked safe to replay. The task records a pending approval in Service storage, then waits for its answer with durable sleeps, checking the record each time it wakes, as the prototype did. Waking it as soon as the answer arrives is an implementation improvement, not yet proven.
+- **How it pauses:** pi-durable 1.5.2's `beforeTool` cannot wait for a person. So `beforeTool` only decides whether approval is needed. A tool that needs it runs as a durable tool task marked safe to replay. The task records a pending approval in Service storage, then waits for its answer inside the running tool task, as the prototype did, because a tool cannot sleep durably in pi-durable 1.5.2. It wakes as soon as the answer arrives and checks the stored record at least once a minute.
 - **Clients** show the request on the Thread and in notifications.
 - **Restarts:** the request survives. On `resume()` the task runs again, finds the stored request, and keeps waiting instead of asking twice. Each Service crash while it waits uses one of pi-durable's restarts for that run (5 by default). A Service shutdown is a clean stop and does not use one.
-- **Effects must be safe to repeat:** an approved tool may run again after a crash, so every tool that changes something after approval records its execution and checks it before acting. A file write, for example, uses an execution record and an exclusive create, and checks existing content. "Done once" is a property of each tool, not a general exactly-once guarantee from pi-durable.
+- **Effects must be safe to repeat:** an approved tool may run again after a crash, so every tool that changes something after approval records its execution and checks it before acting. `write` and `edit` record the file's digest before changing it. A rerun applies the change only if the file still has that digest, treats a `write` whose content is already there as done, and otherwise returns an error that asks the Bot to read the file again. "Done once" is a property of each tool, not a general exactly-once guarantee from pi-durable.
 - **Expiry:** an unanswered request expires after 7 days, and the tool returns a "no answer" error to the Bot.
 - The proactive-Bots spec reuses this flow for ask-before-act.
 
@@ -427,6 +427,7 @@ The prototype is in `prototypes/bot-runtime/` on branch `proto/bot-runtime`, wit
   - Bot secrets and one secret store in the OS keychain, replacing the credential file
   - plugins manage accounts and Skills, and every MCP call goes through `mcp`; catalog Skills install into the workspace Skills folder
   - the web tools are built by the app with three pinned libraries, and the Web and Workspaces rules are copied in from the earlier draft
+  - a clean shutdown keeps a reply that is waiting for approval, and the approval wait runs inside its tool task (Task 9)
 
 ## Open questions
 
