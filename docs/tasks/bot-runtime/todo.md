@@ -278,6 +278,12 @@ The wait runs inside the replay-safe tool task, as in the prototype: a tool cann
 - [ ] The Bot's identity comes from the active Turn, never from tool arguments
 - [ ] A Skill installed from the catalog appears in the Bot's Skills list on its next Turn
 
+Durable mailbox dispatch uses one `input` submission with the target Turn ID as its request ID. The notice is placed as a `write` entry with author, text, and delivery ID in its data. Only an `input` can place the notice and start or queue the required reply in the same submission. The model receives the author-labeled text as the input content. Peer mail on an existing Thread uses that conversation's current configuration. A new target Thread gets the current Bot settings when its conversation is created. Mail submits with `whenBusy: "followUp"` so an active run can finish before the mail reply starts. An abort or deadline before submission settles the Turn and delivery with the bounded admission failure reason. Each caller can cancel its own wait on a shared conversation open, which continues for other callers.
+
+A placed or queued submission is durable acceptance. The Service records the Turn association and delivered state together through the shared writer FIFO. If a steer shares the mail reply’s run, the Turn that owns the first placed input projects its reply. Each Turn still settles from its admitted submissions.
+
+Startup can recover an admitted durable reply after a switch back to `worker`. Resuming that reply while new worker mailbox writes run concurrently is a Task 19 cutover concern.
+
 **Verification:** default commands; `bot-mailbox` and `local-sidecar-dispatch` integration tests pass with the switch on.
 
 **Dependencies:** Task 3

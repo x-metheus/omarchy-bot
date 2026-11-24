@@ -167,9 +167,11 @@ export async function main(options: MainOptions = {}): Promise<{
   const deviceLiveness = setInterval(() => devices.expire(), 5_000);
   deviceLiveness.unref?.();
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices, runtime);
-  mailbox = new MailboxService(db, events, threads, agents, turns);
+  mailbox = new MailboxService(db, events, threads, agents, turns, runtime);
   runtime.bindServices({ mailbox });
-  turns.recoverTurns();
+  const recoveringMail = mailbox.recoverAcceptedMail();
+  if (recoveringMail) await recoveringMail;
+  else turns.recoverTurns();
   const lease = new ScreenInputLease({
     grant: async (surfaceId, epoch, generation, kind) => {
       const source = await screens.projectionSource(ownerFor(surfaceId));
@@ -248,6 +250,7 @@ export async function main(options: MainOptions = {}): Promise<{
 
   agents.init();
   mailbox.reconcileStartup();
+  if (recoveringMail) turns.recoverTurns();
 
   // Recheck every agent in the background: probe + conformance gate.
   for (const a of agents.list()) {

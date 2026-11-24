@@ -8,7 +8,13 @@ import type { RuntimeServices } from "../runtime.ts";
 const DEFAULT_MAIL_DEADLINE_MS = 120_000;
 const SEND_BOT_MESSAGE = "send_bot_message";
 
-export function createMailExtension(db: Database | undefined, getMailbox: () => RuntimeServices["mailbox"] | undefined, turnInputs: TurnInputs, deadlineMs = DEFAULT_MAIL_DEADLINE_MS) {
+export function createMailExtension(
+  db: Database | undefined,
+  getMailbox: () => RuntimeServices["mailbox"] | undefined,
+  turnInputs: TurnInputs,
+  deadlineMs = DEFAULT_MAIL_DEADLINE_MS,
+  writeService: <T>(write: () => T) => T | Promise<T> = (write) => write(),
+) {
   const tool = defineTool({
     name: SEND_BOT_MESSAGE,
     description:
@@ -44,7 +50,11 @@ export function createMailExtension(db: Database | undefined, getMailbox: () => 
         }, callContext), callContext);
         const { botId, turnId } = await awaitWithContext(resolveActiveTurnIdentity(api, callContext, db, turnInputs), callContext);
         checkCancellation();
-        const output = mailbox.enqueue({ botId, turnId, toolCallId: `pi-task:${api.taskId}` }, args.targetBotId, args.text);
+        const queued = writeService(() => {
+          checkCancellation();
+          return mailbox.enqueue({ botId, turnId, toolCallId: `pi-task:${api.taskId}` }, args.targetBotId, args.text);
+        });
+        const output = await awaitWithContext(Promise.resolve(queued), callContext);
         return {
           output: [{ type: "text", text: `Bot message ${output.deliveryId} queued. Conclude your response without waiting for the target Bot.` }],
           details: { ...output },

@@ -1,6 +1,7 @@
 // This test helper lives here to satisfy the pi-durable module boundary rule.
 // No production module imports this test-only helper.
-import { Harness, createRegistry, defineExtension, defineTask, defineTool, type Conversation } from "@earendil-works/pi-durable";
+import { Harness, createRegistry, defineExtension, defineTask, defineTool, type Conversation, type SubmissionDraft, type Tx } from "@earendil-works/pi-durable";
+import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -180,6 +181,24 @@ export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: {
 
 /** Child-process-only fake provider and durable timer used by restart tests. */
 export function installDurableCrashProvider(): () => void {
+  let holdRecoveryWrite: (() => Promise<void>) | undefined;
+  if (process.env.OMARCHY_TEST_RECOVERY_WRITE_COLLISION === "1") {
+    const openSqliteStorage = SqliteStorage.open;
+    SqliteStorage.open = (database, options) => {
+      SqliteStorage.open = openSqliteStorage;
+      const holdWrite = async () => {
+        const locked = Promise.withResolvers<void>();
+        void database.transaction(async () => {
+          locked.resolve();
+          // Give the competing Service write a turn while pi still holds SQLite's write lock.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }).catch(locked.reject);
+        await locked.promise;
+      };
+      holdRecoveryWrite = holdWrite;
+      return openSqliteStorage.call(SqliteStorage, database, options);
+    };
+  }
   const sleepTask = defineTask<{ at: number; text: string }, { phase: "wait" } | { phase: "deliver" }, null>({
     name: "test.sleep", version: 1, initial: () => ({ phase: "wait" }),
     phases: {
@@ -213,10 +232,25 @@ export function installDurableCrashProvider(): () => void {
       async execute() { console.log(JSON.stringify({ event: "hang" })); return await new Promise<never>(() => {}); },
     }),
   ] });
-  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }], tokensPerSecond: 15, tokenSize: { min: 1, max: 1 } });
-  fake.setResponses(Array.from({ length: 100 }, () => ({ messages }) => {
+  const fake = fauxProvider({ provider: "fake", api: "openai-completions", tokensPerSecond: 15, tokenSize: { min: 1, max: 1 } });
+  fake.setResponses(Array.from({ length: 100 }, () => async ({ messages }) => {
     const latest = messages.filter((message) => message.role === "user").at(-1);
     const text = typeof latest?.content === "string" ? latest.content : "";
+    if (text.startsWith("send-peer-mail:")) {
+      if (messages.at(-1)?.role === "toolResult") return fauxAssistantMessage("Mail sent.");
+      return fauxAssistantMessage(fauxToolCall("send_bot_message", { targetBotId: text.slice("send-peer-mail:".length), text: "Check the restart." }, { id: "restart-mail" }), { stopReason: "toolUse" });
+    }
+    if (text === "Hold the target reply.") {
+      if (process.env.OMARCHY_TEST_PEER_MAIL_HOLD === "queued") await new Promise<never>(() => {});
+      if (process.env.OMARCHY_TEST_PEER_MAIL_PREDECESSOR_FAILS === "1") {
+        return fauxAssistantMessage("Predecessor partial.", { stopReason: "error", errorMessage: "The predecessor reply failed." });
+      }
+      return fauxAssistantMessage("User reply recovered.");
+    }
+    if (text === "A competing steer." || text.startsWith("Message from Bot ")) {
+      if (process.env.OMARCHY_TEST_PEER_MAIL_HOLD === "placed") await new Promise<never>(() => {});
+      return fauxAssistantMessage("Peer mail survived restart.");
+    }
     if (text === "hang") return fauxAssistantMessage([fauxToolCall("hang", {}, { id: "hang-call" })], { stopReason: "toolUse" });
     if (text === "approval-write") {
       if (messages.at(-1)?.role === "toolResult") return fauxAssistantMessage("Approval write finished.");
@@ -227,19 +261,63 @@ export function installDurableCrashProvider(): () => void {
     return fauxAssistantMessage("A long reply that keeps streaming across the restart and eventually completes.");
   }));
   const originalOpen = Harness.open;
-  Harness.open = (storage, options, context) => {
+  Harness.open = async (storage, options, context) => {
     const runtimeRegistry: unknown = options.registry;
     if (typeof runtimeRegistry !== "object" || runtimeRegistry === null || !("install" in runtimeRegistry) || typeof runtimeRegistry.install !== "function") throw new Error("Expected a mutable registry");
     runtimeRegistry.install(crashExtension);
-    return originalOpen.call(Harness, storage, {
+    const harness = await originalOpen.call(Harness, storage, {
       ...options,
       models: () => {
         const models = typeof options.models === "function" ? options.models() : options.models;
         if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
-        models.setProvider(fake.provider);
+        const provider = models.getProvider(fake.provider.id);
+        if (!provider) throw new Error("Expected stored fake provider");
+        // Preserve runtime model resolution and replace only network streaming.
+        models.setProvider({ ...provider, streamSimple: fake.provider.streamSimple });
         return models;
       },
     }, context);
+    if (holdRecoveryWrite) {
+      const open = harness.conversation.bind(harness);
+      harness.conversation = async (...args) => {
+        const conversation = await open(...args);
+        if (conversation) {
+          const watch = conversation.watch.bind(conversation);
+          conversation.watch = async (...args) => {
+            const attached = await watch(...args);
+            const hold = holdRecoveryWrite;
+            holdRecoveryWrite = undefined;
+            await hold?.();
+            return attached;
+          };
+        }
+        return conversation;
+      };
+    }
+    if (process.env.OMARCHY_TEST_PEER_MAIL_HOLD) {
+      const holdPeerMailBookkeeping = (conversation: Conversation) => {
+        conversation.submit = new Proxy(conversation.submit, {
+          async apply(target, thisArg, args: [SubmissionDraft | Tx, unknown]) {
+            const draft = args[0];
+            const submission: unknown = await Reflect.apply(target, thisArg, args);
+            // Hold the Service between the durable commit and its bookkeeping.
+            if ("type" in draft && draft.type === "input" && draft.entry?.kind === "write") {
+              await new Promise<never>(() => {});
+            }
+            return submission;
+          },
+        });
+        return conversation;
+      };
+      const create = harness.createConversation.bind(harness);
+      harness.createConversation = async (...args) => holdPeerMailBookkeeping(await create(...args));
+      const open = harness.conversation.bind(harness);
+      harness.conversation = async (...args) => {
+        const conversation = await open(...args);
+        return conversation && holdPeerMailBookkeeping(conversation);
+      };
+    }
+    return harness;
   };
   return () => { Harness.open = originalOpen; };
 }

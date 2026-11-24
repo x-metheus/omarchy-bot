@@ -1,16 +1,18 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@earendil-works/chord/context";
-import type { Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
+import type { AgentChange, Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
 
 const pending = new WeakMap<Harness, Map<string, Promise<Conversation>>>();
 
-/** Open the Service-owned index entry, creating it on the first turn. */
+/** Open the Service-owned index entry. The shared open outlives an individual caller's wait. */
 export async function openThreadConversation(
   db: Database,
   harness: Harness,
   threadId: string,
   botId: string,
-  context: Context,
+  runtimeContext: Context,
+  writeService: (write: () => void) => void | Promise<void> = (write) => write(),
+  initialSettings?: () => AgentChange,
 ): Promise<Conversation> {
   let inFlight = pending.get(harness);
   if (!inFlight) {
@@ -25,16 +27,19 @@ export async function openThreadConversation(
       "SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?",
     ).get(threadId, botId);
     if (row) {
-      const conversation = await harness.conversation(row.conversation_id as ConversationId, context);
+      const conversation = await harness.conversation(row.conversation_id as ConversationId, runtimeContext);
       if (!conversation) throw new Error("Indexed durable conversation not found");
       return conversation;
     }
-    const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+    const agent = initialSettings?.();
+    const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, ...(agent ? { agent } : {}) }, runtimeContext);
     // pi-durable 1.5.2 has no conversation deletion API. An insert failure can
     // orphan this conversation; Task 19 must sweep conversations without an index row.
     try {
-      db.query("INSERT INTO pi_thread_conversations (thread_id, bot_id, conversation_id, created_at) VALUES (?, ?, ?, ?)")
-        .run(threadId, botId, conversation.id, new Date().toISOString());
+      await writeService(() => {
+        db.query("INSERT INTO pi_thread_conversations (thread_id, bot_id, conversation_id, created_at) VALUES (?, ?, ?, ?)")
+          .run(threadId, botId, conversation.id, new Date().toISOString());
+      });
     } catch {
       throw new Error("Unable to index durable conversation");
     }
