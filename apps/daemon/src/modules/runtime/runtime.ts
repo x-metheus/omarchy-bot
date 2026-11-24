@@ -10,6 +10,7 @@ import { resolveModelForBot } from "./models.ts";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { CredentialStore } from "./credentials.ts";
+import { ApprovalStore } from "./approvals.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
@@ -33,6 +34,8 @@ export interface BotRuntime {
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
   close(): Promise<void>;
+  /** Requests to use files outside the allowed folders; absent without Service storage and events. */
+  readonly approvals?: ApprovalStore;
 }
 
 function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | undefined): boolean {
@@ -40,7 +43,7 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
   return !entry.model?.some((message) => message.role === "assistant" && message.stopReason === "aborted");
 }
 
-export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database): Promise<BotRuntime> {
+export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: { events?: Pick<EventLog, "append"> } = {}): Promise<BotRuntime> {
   const credentials = new CredentialStore(paths.stateDir);
   const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
   let reportedCredentialsFailure = false;
@@ -49,7 +52,16 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   try {
     const registry = createRegistry();
     registry.install(compactionExtension);
-    registry.install(createFilesShellExtension());
+    const approvals = db && options.events ? new ApprovalStore(db, options.events) : undefined;
+    registry.install(createFilesShellExtension(process.platform, db && approvals ? {
+      store: approvals,
+      paths,
+      settingsFolders: () => readSettingsAllowedFolders(db),
+      owner: (conversationId) => {
+        const row = db.query<{ thread_id: string; bot_id: string }, [number]>("SELECT thread_id, bot_id FROM pi_thread_conversations WHERE conversation_id = ?").get(conversationId);
+        return row ? { threadId: row.thread_id, botId: row.bot_id } : undefined;
+      },
+    } : undefined));
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         if (!reportedCredentialsFailure) {
@@ -86,6 +98,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     let recoveryRegistration: Promise<void> | undefined;
     const active = new Map<string, { db: Database; threadId: string; admitted: Promise<{ conversation: Conversation; submission: Submission }>; pending: Promise<SettledSubmissionRecord | undefined>[]; steers: Submission[]; inputs: Set<number>; lastEntryBeforeAbort: number | undefined; abortCutoffRead?: Promise<void>; recovering?: boolean }>();
     return {
+      ...(approvals ? { approvals } : {}),
       async startTurn(input) {
         let ready!: (value: { conversation: Conversation; submission: Submission }) => void;
         let fail!: (error: unknown) => void;

@@ -1,13 +1,15 @@
+import { createHash } from "node:crypto";
 import { lstatSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitWithContext, type Context } from "@earendil-works/chord/context";
-import { defineExtension, defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
-import { err, ExecutionError, FileError, ok, type Result, type WatchTarget } from "@earendil-works/pi-durable/env";
+import { defineExtension, defineTool, hook, ToolTask, type JsonObject, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
+import { err, ExecutionError, FileError, ok, type ExecutionEnv, type Result, type WatchTarget } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { isHomeDirectory, type PlatformPaths } from "../../workspace/paths.ts";
+import type { ApprovalStore } from "../approvals.ts";
 import { MODEL_CREDENTIALS_FILENAME } from "../credentials.ts";
 
 // Two minutes lets routine shell work finish while bounding commands that omit a timeout.
@@ -236,28 +238,114 @@ export function createFilesEnvironment(
   });
 }
 
-function withFilePolicy<T extends object>(tool: ToolRegistration<T>) {
+/** What the files tools need to ask before using a file outside the allowed folders. */
+export type FileApprovals = {
+  store: ApprovalStore;
+  paths: PlatformPaths;
+  settingsFolders(): readonly string[];
+  /** The Thread and Bot of a conversation; without one, outside paths stay refused. */
+  owner(conversationId: number): { threadId: string; botId: string } | undefined;
+};
+
+type FileTool = "read" | "write" | "edit";
+const FILE_TOOLS = new Set<string>(["read", "write", "edit"] satisfies FileTool[]);
+// Set only by beforeTool and recorded with the call's intent, so a replay keeps the decision made before it.
+const APPROVAL_ARGUMENT = "omarchyApproval";
+const FILE_EFFECT_MEMO = "omarchy.file-effect";
+
+function textResult(text: string, isError = true): ToolExecutionResult {
+  return { isError, output: [{ type: "text", text }] };
+}
+
+function sha256(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function fileDigest(env: ExecutionEnv, file: string, context: Context): Promise<string | null> {
+  const read = await env.readBinaryFile(file, context);
+  if (read.ok) return sha256(read.value);
+  if (read.error.code === "not_found") return null;
+  throw read.error;
+}
+
+/**
+ * A replay-safe file tool may run again after a crash. The file's digest before the change is recorded first, so a rerun
+ * applies the change only if it did not land, and never applies it on top of itself.
+ */
+async function changeOnce(
+  tool: FileTool, args: { path: string; content?: unknown }, env: ExecutionEnv, api: ToolExecutionApi, context: Context,
+  run: () => Promise<ToolExecutionResult>,
+): Promise<ToolExecutionResult> {
+  if (tool === "read") return run();
+  const current = await fileDigest(env, args.path, context);
+  const recorded = await api.memo<{ before: string | null }>(FILE_EFFECT_MEMO, { before: current }, context);
+  if (recorded.before === current) return run();
+  if (tool === "write" && typeof args.content === "string" && current === sha256(args.content)) {
+    return textResult(`Successfully wrote to ${args.path}`, false);
+  }
+  return textResult(`${args.path} changed while this ${tool} was interrupted by a Service restart. Read it before trying again.`);
+}
+
+function withFilePolicy<T extends object>(tool: ToolRegistration<T>, approvals?: FileApprovals) {
+  const name = tool.name as FileTool;
   return defineTool({
     ...tool,
-    async execute(args, api, context) {
+    ...(approvals ? { replay: "safe" as const } : {}),
+    async execute(rawArgs, api, context) {
       try {
-        return await tool.execute(args, api, context);
+        if (!approvals || !api.env) return await tool.execute(rawArgs, api, context);
+        const { [APPROVAL_ARGUMENT]: approval, ...args } = rawArgs as { path: string; content?: unknown; [APPROVAL_ARGUMENT]?: { path: string; folder: string } };
+        let env: ExecutionEnv = api.env;
+        if (approval) {
+          const owner = approvals.owner(api.conversationId);
+          if (!owner) return textResult(`Access refused: outside the allowed folders: ${args.path}`);
+          let record = approvals.store.request({ taskId: api.taskId, callId: api.callId, conversationId: api.conversationId, ...owner, tool: name, path: approval.path, folder: approval.folder });
+          if (record.status === "pending") record = await approvals.store.waitForAnswer(record.id, context.abortSignal);
+          if (record.status === "denied") return textResult(`The user denied access to ${approval.path}.`);
+          if (record.status === "expired") return textResult(`No answer: the request to ${name} ${approval.path} expired after 7 days without an answer.`);
+          if (record.status !== "allowed_once" && record.status !== "allowed_folder") return textResult(`The request to ${name} ${approval.path} was withdrawn.`);
+          env = createFilesEnvironment(approvals.paths, approvals.settingsFolders(), env.cwd, owner.botId, [approval.path]);
+        }
+        const inner = env === api.env ? api : { ...api, env };
+        return await changeOnce(name, args, env, api, context, () => tool.execute(args as typeof rawArgs, inner, context));
       } catch (error) {
         if (!(error instanceof FileAccessError) || context.abortSignal?.aborted) throw error;
-        return { isError: true, output: [{ type: "text", text: error.message }] };
+        return textResult(error.message);
       }
     },
   });
 }
 
-export function createFilesShellExtension(platform = process.platform) {
+function fileApprovalHook(approvals: FileApprovals) {
+  return hook(ToolTask, {
+    beforeTool(call, api) {
+      if (!FILE_TOOLS.has(call.name)) return undefined;
+      // A model cannot approve its own call: drop any approval it wrote into the arguments.
+      const { [APPROVAL_ARGUMENT]: _ignored, ...args } = call.arguments as JsonObject;
+      if (typeof args.path !== "string") return { arguments: args };
+      const owner = approvals.owner(api.conversationId);
+      const access = classifyFileAccess(approvals.paths, approvals.settingsFolders(), owner?.botId, approvals.paths.sharedWorkspaceDir, args.path);
+      if (access.kind === "refused") return { block: access.message };
+      if (access.kind === "allowed" || !owner) return { arguments: args };
+      return { arguments: { ...args, [APPROVAL_ARGUMENT]: { path: access.path, folder: path.dirname(access.path) } } };
+    },
+    afterTool(call, _result, api) {
+      // An aborted or failed call withdraws its request so clients stop showing it.
+      if (FILE_TOOLS.has(call.name)) approvals.store.cancelTask(api.taskId);
+      return undefined;
+    },
+  });
+}
+
+export function createFilesShellExtension(platform = process.platform, approvals?: FileApprovals) {
   const bash = createBashTool();
   return defineExtension({
     name: "omarchy-files-shell",
+    ...(approvals ? { hooks: [fileApprovalHook(approvals)] } : {}),
     tools: [
-      withFilePolicy(createReadTool()),
-      withFilePolicy(createWriteTool()),
-      withFilePolicy(createEditTool()),
+      withFilePolicy(createReadTool(), approvals),
+      withFilePolicy(createWriteTool(), approvals),
+      withFilePolicy(createEditTool(), approvals),
       defineTool({
         ...bash,
         async execute(args, api, context) {

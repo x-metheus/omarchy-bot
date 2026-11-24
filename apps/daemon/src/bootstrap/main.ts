@@ -57,7 +57,8 @@ export async function main(options: MainOptions = {}): Promise<{
   if (options.botScreenRuntimeDir !== undefined) cfg.botScreenRuntimeDir = options.botScreenRuntimeDir;
   const db = openDb(cfg);
   recoverOnStartup(db);
-  const runtime = await openBotRuntime(cfg, db);
+  const events = new EventLog(db);
+  const runtime = await openBotRuntime(cfg, db, { events });
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
@@ -141,7 +142,6 @@ export async function main(options: MainOptions = {}): Promise<{
     },
   );
 
-  const events = new EventLog(db);
   const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
   const threads: ThreadsService = new ThreadsService(db, events, agents);
   const bots = new BotsService(db, events, agents, threads);

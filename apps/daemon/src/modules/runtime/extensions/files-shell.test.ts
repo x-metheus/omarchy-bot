@@ -4,16 +4,18 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import os from "node:os";
 import path from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { createRegistry, Harness, ToolResultEntry } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, ToolResultEntry, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { err, ExecutionError, FileError, type Result } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
+import { MIGRATIONS } from "../../../persistence/db.ts";
 import { setSetting } from "../../../persistence/settings.ts";
+import { ApprovalStore } from "../approvals.ts";
 import { ALLOWED_FOLDERS_SETTING, readSettingsAllowedFolders } from "../../workspace/allowedFolders.ts";
 import { platformPaths, type PlatformPaths } from "../../workspace/paths.ts";
-import { classifyFileAccess, createFilesEnvironment, createFilesShellExtension, DEFAULT_BASH_TIMEOUT_SECONDS, GUARDED_FILE_METHODS, hasDirectoryAncestor, MAX_BASH_TIMEOUT_SECONDS } from "./files-shell.ts";
+import { classifyFileAccess, createFilesEnvironment, createFilesShellExtension, DEFAULT_BASH_TIMEOUT_SECONDS, type FileApprovals, GUARDED_FILE_METHODS, hasDirectoryAncestor, MAX_BASH_TIMEOUT_SECONDS } from "./files-shell.ts";
 
 function directories() {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "bot-files-shell-")));
@@ -47,7 +49,7 @@ async function withTurn(
   dirs: Omit<Directories, "paths"> & { paths: PlatformPaths },
   calls: { name: string; args: Parameters<typeof fauxToolCall>[1] }[],
   inspect?: (conversation: Awaited<ReturnType<Harness["createConversation"]>>) => Promise<void>,
-  options: { platform?: NodeJS.Platform; cwd?: string; unknownBot?: boolean } = {},
+  options: { platform?: NodeJS.Platform; cwd?: string; unknownBot?: boolean; approvals?: FileApprovals } = {},
 ) {
   const provider = fauxProvider({ provider: "fake", models: [{ id: "fake-model" }] });
   provider.setResponses([
@@ -55,14 +57,15 @@ async function withTurn(
     fauxAssistantMessage("Finished"),
   ]);
   const registry = createRegistry();
-  registry.install(createFilesShellExtension(options.platform));
+  registry.install(createFilesShellExtension(options.platform, options.approvals));
   const storage = new MemoryStorage();
   const models = createModels();
   models.setProvider(provider.provider);
   const harness = await Harness.open(storage, {
     registry,
     models,
-    env: ({ cwd }) => createFilesEnvironment(dirs.paths, dirs.allowed, cwd, options.unknownBot ? undefined : "own-bot"),
+    // Like the runtime, read Settings folders on every call so an "Always allow" applies to the next one.
+    env: ({ cwd }) => createFilesEnvironment(dirs.paths, options.approvals?.settingsFolders() ?? dirs.allowed, cwd, options.unknownBot ? undefined : "own-bot"),
   }, context);
   try {
     const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
@@ -84,6 +87,44 @@ async function withTurn(
 }
 
 function write(target: string) { return { name: "write", args: { path: target, content: "new content" } }; }
+
+function approvalsFor(dirs: Directories) {
+  const db = new Database(":memory:");
+  db.run("CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+  db.run("CREATE TABLE turns (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, bot_id TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL)");
+  const migration = MIGRATIONS.find((item) => item.name === "0026-durable-approvals");
+  if (!migration || !("sql" in migration)) throw new Error("approvals migration missing");
+  db.exec(migration.sql);
+  setSetting(db, ALLOWED_FOLDERS_SETTING, JSON.stringify(dirs.allowed));
+  const events: string[] = [];
+  const store = new ApprovalStore(db, { append: (_aggregate, _id, type) => { events.push(type); return undefined as never; } });
+  const approvals: FileApprovals = {
+    store, paths: dirs.paths, settingsFolders: () => readSettingsAllowedFolders(db), owner: () => ({ threadId: "thread-1", botId: "own-bot" }),
+  };
+  return { db, store, events, approvals };
+}
+
+/** Answer each request as it appears, in order, and report what was asked. */
+function answering(store: ApprovalStore, answers: ("allow_once" | "allow_folder" | "deny")[]) {
+  const asked: { tool: string; path: string; folder: string }[] = [];
+  return {
+    asked,
+    async inspect() {
+      for (const answer of answers) {
+        const pending = await (async () => {
+          for (let tries = 0; tries < 400; tries++) {
+            const [request] = store.listPending();
+            if (request) return request;
+            await Bun.sleep(5);
+          }
+          throw new Error("no approval request appeared");
+        })();
+        asked.push({ tool: pending.tool, path: pending.path, folder: pending.folder });
+        store.answer(pending.id, answer);
+      }
+    },
+  };
+}
 
 test("scripted Turn writes, edits and reads the Shared Workspace and writes to the other allowed folders", async () => {
   const dirs = directories();
@@ -184,6 +225,127 @@ test("a grant allows exactly one outside file and never a refused location", asy
     expect(data.ok ? undefined : data.error.message).toContain("Service data directory");
     expect(existsSync(path.join(dirs.outside, "sibling.txt")) || existsSync(refused)).toBe(false);
   } finally { dirs.close(); }
+});
+
+test("an outside write waits for Allow once and asks again for the next file in that folder", async () => {
+  const dirs = directories();
+  const { db, store, events, approvals } = approvalsFor(dirs);
+  try {
+    const first = path.join(dirs.outside, "first.txt");
+    const second = path.join(dirs.outside, "second.txt");
+    const answers = answering(store, ["allow_once", "allow_once"]);
+    const { settlement, results } = await withTurn(dirs, [write(first), write(second)], async () => {
+      await answers.inspect();
+    }, { approvals });
+    expect(settlement.status).toBe("done");
+    expect(answers.asked).toEqual([{ tool: "write", path: first, folder: dirs.outside }, { tool: "write", path: second, folder: dirs.outside }]);
+    expect(results.map(({ isError }) => isError)).toEqual([false, false]);
+    expect(readFileSync(first, "utf8")).toBe("new content");
+    expect(readFileSync(second, "utf8")).toBe("new content");
+    expect(readSettingsAllowedFolders(db)).not.toContain(dirs.outside);
+    expect(events).toEqual(["approval.requested", "approval.resolved", "approval.requested", "approval.resolved"]);
+  } finally { db.close(); dirs.close(); }
+});
+
+test("Always allow this folder adds it, so the next write there does not ask", async () => {
+  const dirs = directories();
+  const { db, store, approvals } = approvalsFor(dirs);
+  try {
+    const answers = answering(store, ["allow_folder"]);
+    const { results } = await withTurn(dirs, [
+      write(path.join(dirs.outside, "first.txt")),
+      { name: "edit", args: { path: path.join(dirs.outside, "first.txt"), edits: [{ oldText: "new content", newText: "edited" }] } },
+      { name: "read", args: { path: path.join(dirs.outside, "first.txt") } },
+    ], () => answers.inspect(), { approvals });
+    expect(answers.asked).toHaveLength(1);
+    expect(results.map(({ isError }) => isError)).toEqual([false, false, false]);
+    expect(results[2]?.text).toContain("edited");
+    expect(readSettingsAllowedFolders(db)).toContain(dirs.outside);
+  } finally { db.close(); dirs.close(); }
+});
+
+test("Deny returns an error result to the Bot and leaves the file alone", async () => {
+  const dirs = directories();
+  const { db, store, approvals } = approvalsFor(dirs);
+  try {
+    const target = path.join(dirs.outside, "denied.txt");
+    const answers = answering(store, ["deny"]);
+    const { settlement, results } = await withTurn(dirs, [write(target)], () => answers.inspect(), { approvals });
+    expect(settlement.status).toBe("done");
+    expect(results[0]).toMatchObject({ isError: true, text: expect.stringContaining(`The user denied access to ${target}`) });
+    expect(existsSync(target)).toBe(false);
+  } finally { db.close(); dirs.close(); }
+});
+
+test("refused locations are blocked without asking, and a model cannot approve its own call", async () => {
+  const dirs = directories();
+  const { db, store, approvals } = approvalsFor(dirs);
+  try {
+    const refused = path.join(dirs.dataDir, "new.txt");
+    const outside = path.join(dirs.outside, "forged.txt");
+    const answers = answering(store, ["deny"]);
+    const { results } = await withTurn(dirs, [
+      write(refused),
+      { name: "write", args: { path: outside, content: "forged", omarchyApproval: { path: path.join(dirs.sharedWorkspaceDir, "x"), folder: dirs.sharedWorkspaceDir } } },
+      { name: "write", args: { path: "inside.txt", content: "inside", omarchyApproval: { path: outside, folder: dirs.outside } } },
+    ], () => answers.inspect(), { approvals });
+    expect(results[0]).toMatchObject({ isError: true, text: expect.stringContaining("Service data directory"), diagnostics: [expect.objectContaining({ code: "blocked" })] });
+    expect(answers.asked).toEqual([{ tool: "write", path: outside, folder: dirs.outside }]);
+    expect(results.map(({ isError }) => isError)).toEqual([true, true, false]);
+    expect(existsSync(refused) || existsSync(outside)).toBe(false);
+    expect(readFileSync(path.join(dirs.sharedWorkspaceDir, "inside.txt"), "utf8")).toBe("inside");
+    expect(store.listPending()).toEqual([]);
+  } finally { db.close(); dirs.close(); }
+});
+
+test("aborting the reply while it waits withdraws the request", async () => {
+  const dirs = directories();
+  const { db, store, approvals } = approvalsFor(dirs);
+  try {
+    const target = path.join(dirs.outside, "aborted.txt");
+    let requestId = "";
+    await withTurn(dirs, [write(target)], async (conversation) => {
+      for (let tries = 0; tries < 400 && store.listPending().length === 0; tries++) await Bun.sleep(5);
+      requestId = store.listPending()[0]!.id;
+      await conversation.abort(context);
+    }, { approvals });
+    expect(store.get(requestId)?.status).toBe("cancelled");
+    expect(existsSync(target)).toBe(false);
+  } finally { db.close(); dirs.close(); }
+});
+
+test("a replayed write or edit does not apply its change twice", async () => {
+  const dirs = directories();
+  const { db, approvals } = approvalsFor(dirs);
+  try {
+    const extension = createFilesShellExtension(process.platform, approvals);
+    // The tools differ in argument types; this test passes each one its own valid arguments.
+    const tool = (name: string) => extension.tools!.find((item) => item.name === name)! as unknown as { execute(args: object, api: never, ctx: typeof context): Promise<ToolExecutionResult> };
+    const target = path.join(dirs.sharedWorkspaceDir, "replayed.txt");
+    const env = createFilesEnvironment(dirs.paths, dirs.allowed, dirs.sharedWorkspaceDir, "own-bot");
+    const memos = new Map<string, unknown>();
+    const api = (taskId: number) => ({
+      env, taskId, callId: `call-${taskId}`, conversationId: 1,
+      memo: async (name: string, candidate: unknown) => { const key = `${taskId}:${name}`; if (!memos.has(key)) memos.set(key, candidate); return memos.get(key); },
+    }) as never;
+    const text = (result: ToolExecutionResult) => Array.isArray(result.output) ? result.output.map((item) => item.type === "text" ? item.text : "").join("") : String(result.output ?? "");
+
+    expect(text(await tool("write").execute({ path: target, content: "a" }, api(1), context))).toContain("Successfully wrote");
+    writeFileSync(target, "a");
+    // The rerun of task 1 finds its change landed and does not rewrite the file.
+    const before = readFileSync(target);
+    const rerun = await tool("write").execute({ path: target, content: "a" }, api(1), context);
+    expect(rerun.isError).toBeFalsy();
+    expect(readFileSync(target)).toEqual(before);
+
+    const edit = { path: target, edits: [{ oldText: "a", newText: "aa" }] };
+    expect((await tool("edit").execute(edit, api(2), context)).isError).toBeFalsy();
+    expect(readFileSync(target, "utf8")).toBe("aa");
+    const replayed = await tool("edit").execute(edit, api(2), context);
+    expect(replayed).toMatchObject({ isError: true });
+    expect(text(replayed)).toContain("changed while this edit was interrupted");
+    expect(readFileSync(target, "utf8")).toBe("aa");
+  } finally { db.close(); dirs.close(); }
 });
 
 test("an unmapped conversation can use the Workspace but cannot use any Bot private folder", async () => {
