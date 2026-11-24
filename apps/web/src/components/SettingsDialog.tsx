@@ -2,6 +2,7 @@ import type { JSX, RefObject } from "react";
 import { useEffect, useState } from "react";
 import { Bell, Bot, Keyboard, Palette } from "lucide-react";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -13,9 +14,11 @@ import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
 import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
+import { useQuery } from "@tanstack/react-query";
 import type { BotViewDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
+import { api } from "../lib/api.ts";
 import { getShell } from "../lib/shell.ts";
 
 export interface SettingsDialogProps {
@@ -234,6 +237,12 @@ function SettingsContent({
   onRequestDelete,
 }: SettingsContentProps): JSX.Element {
   const [section, setSection] = useState<SettingsSectionId>("appearance");
+  const storage = useQuery({
+    queryKey: ["secret-storage-status", getShell().service.baseUrl()],
+    queryFn: () => api.secretStorageStatus(),
+    enabled: open,
+    retry: false,
+  });
   const operationPending = deletingBotId !== undefined;
   const sections = SETTINGS_SECTIONS.filter((entry) => entry.id !== "keyboard" || getShell().keyMapping.platform() === "macos");
 
@@ -282,24 +291,34 @@ function SettingsContent({
           data-testid="settings-dialog"
           aria-busy={botsLoading || operationPending || undefined}
         >
-          {selected.id === "appearance" ? <AppearanceSection /> : null}
-          {selected.id === "keyboard" ? <KeyboardSection /> : null}
-          {selected.id === "notifications" ? (
-            <NotificationsSection
-              notificationPermission={notificationPermission}
-              onRequestNotifications={onRequestNotifications}
-            />
-          ) : null}
-          {selected.id === "bots" ? (
-            <BotsSection
-              bots={bots}
-              botsLoading={botsLoading}
-              {...(botsError !== undefined ? { botsError } : {})}
-              {...(onRetryBots !== undefined ? { onRetryBots } : {})}
-              {...(deletingBotId !== undefined ? { deletingBotId } : {})}
-              onRequestDelete={onRequestDelete}
-            />
-          ) : null}
+          <VStack gap={2}>
+            {storage.data?.backend === "file" ? (
+              <Banner
+                role="status"
+                status="warning"
+                title="The Service has no OS keychain"
+                description="Secrets are kept in a private file that a Bot's shell could read."
+              />
+            ) : null}
+            {selected.id === "appearance" ? <AppearanceSection /> : null}
+            {selected.id === "keyboard" ? <KeyboardSection /> : null}
+            {selected.id === "notifications" ? (
+              <NotificationsSection
+                notificationPermission={notificationPermission}
+                onRequestNotifications={onRequestNotifications}
+              />
+            ) : null}
+            {selected.id === "bots" ? (
+              <BotsSection
+                bots={bots}
+                botsLoading={botsLoading}
+                {...(botsError !== undefined ? { botsError } : {})}
+                {...(onRetryBots !== undefined ? { onRetryBots } : {})}
+                {...(deletingBotId !== undefined ? { deletingBotId } : {})}
+                onRequestDelete={onRequestDelete}
+              />
+            ) : null}
+          </VStack>
         </LayoutContent>
       }
     />

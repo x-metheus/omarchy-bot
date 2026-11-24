@@ -1,5 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { MessageDto, SendMessageBody, ToolCallSummaryDto } from "./api.ts";
+import { DeleteBotResultDto, MessageDto, SendMessageBody, ToolCallSummaryDto } from "./api.ts";
+
+test("Bot deletion results accept the secrets phase and default older counts to zero", () => {
+  const result = {
+    status: "failed", botId: "bot-1", botName: "Bot 1",
+    removed: { threads: 0, messages: 0, turns: 0, attachments: 0, avatar: false, privateFolder: false, computerArtifacts: 0, surface: false },
+    failures: [],
+  };
+  expect(DeleteBotResultDto.parse(result).removed.secrets).toBe(0);
+  expect(DeleteBotResultDto.parse({
+    ...result,
+    removed: { ...result.removed, secrets: 1 },
+    failures: [{ stage: "secrets", resource: result.botId, message: "Unable to delete secret" }],
+  }).removed.secrets).toBe(1);
+});
 
 test("send message preserves and validates the requested busy mode", () => {
   expect(SendMessageBody.parse({ text: "hello", whenBusy: "steer" }).whenBusy).toBe("steer");

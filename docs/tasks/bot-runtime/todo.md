@@ -323,13 +323,23 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** Add the spec's [Secrets](../../specs/bot-runtime.md#secrets): one store in the OS keychain for app secrets (provider keys, MCP sign-ins) and each Bot's private secrets, with the 0600 file only as a fallback that Settings warns about. Add the `secrets` tool (save, list names, delete; never returns a value), `{{secret:name}}` filling in `bash`, `web_fetch`, and `mcp` calls, and replacement of used values in results. Move keys from `model-credentials.json` into the keychain on first start and remove the file. Start `bash` with a clean environment. Keychain access needs a library or each platform's command-line tool: choosing a library is an ask-first dependency decision.
 
 **Acceptance criteria:**
-- [ ] A secret saved by one Bot is filled in at run time for that Bot, replaced in the result, and cannot be listed or used by another Bot
-- [ ] No secret value appears in `pi_` entries, Service Messages, logs, events, or memory
-- [ ] Existing provider keys move into the keychain once, and Turns still complete; without a keychain the fallback file is used and Settings warns
-- [ ] `bash` cannot see the Service's environment variables
-- [ ] Bot Deletion removes the Bot's secrets, and the confirmation says so
+- [x] A secret saved by one Bot is filled in at run time for that Bot, replaced in the result, and cannot be listed or used by another Bot — `bash keeps an out-of-band Bot secret out of entries, messages, console output, and events`; `secrets and bash cannot list, delete, or use another Bot's or the app's secrets`
+- [ ] No secret value appears in `pi_` entries, Service Messages, logs, events, or memory — store values proven by `bash keeps an out-of-band Bot secret out of entries, messages, console output, and events` and `a durable provider failure redacts app and Bot secrets from the Turn and its status event`. Gap: a value the model itself supplies to `secrets` save stays in its assistant tool-call entry, like a secret typed into a Thread; pi-durable's own journal may keep the original provider diagnostic; Bot memory is not implemented yet.
+- [ ] Existing provider keys move into the keychain once, and Turns still complete; without a keychain the fallback file is used and Settings warns — `migrates two legacy providers into app secrets once and reloads them without the file`; `a durable Turn completes with a migrated provider after the legacy file is removed`; `runtime imports a healthy legacy provider when another record fails and retains the file`; `warns about the file backend across Settings sections`. Keychain paths are exercised with the fake backend only; the real OS keychain backend is pending the library/CLI decision.
+- [x] `bash` cannot see the Service's environment variables — `bash starts with PATH and excludes the Service environment marker`
+- [x] Bot Deletion removes the Bot's secrets, and the confirmation says so — `permanent deletion removes only the deleted Bot's private secrets`; `opens the pointer-only Sidebar menu, keeps Bot Settings reachable, cancels unchanged, then deletes and falls back`
 
-**Verification:** default commands; tests with a fake keychain backend, plus one manual run on Linux Secret Service.
+**Decisions (2026-11-24):**
+
+- One `SecretBackend` seam; the OS keychain plugin is pending, so runtime uses the 0600 file fallback and tests use an in-memory fake. Accounts are namespaced by data directory; the metadata index is 0600; fallback values live in a 0700 `secrets/` directory.
+- Fill happens on a copy at execute time; persisted arguments keep `{{secret:name}}`. A call that used a secret emits no live output and keeps a bounded, redacted tail (spill off, since the spill file would hold raw output).
+- The `secrets` tool exposes only the calling Bot's scope; app scope is unreachable. Save rejects empty values and metadata containing the value; delete removes the backend value first, then metadata, and a failed delete stays listed for retry and Bot Deletion.
+- Provider records are app secrets: hashed name, non-secret metadata as the description, key as the value. Migration imports per record, keeps the legacy file if any record fails, and removes it once all are verified.
+- Clean shell environment is an explicit allowlist: `PATH`, `HOME`, `LANG`, `TMPDIR`, `USER`, `SHELL`.
+- Protocol: `removed.secrets` is optional with a default of 0 and `secrets` is a failure stage; `PROTOCOL_VERSION` is not bumped because the web client ships with the daemon. A separately versioned client needs the next bump at cutover.
+- Known limits: shell placeholder substitution is literal, so the Bot's quoting is its responsibility (prefer the environment argument); secret-using calls return bounded output; `secrets` save arguments are model-visible.
+
+**Verification:** default commands; tests with a fake keychain backend, plus one manual run on Linux Secret Service (still manual, pending the backend decision).
 
 **Dependencies:** Tasks 2 and 8. Tasks 14 and 16 use this store.
 

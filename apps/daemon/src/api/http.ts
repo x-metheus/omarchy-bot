@@ -22,6 +22,8 @@ import { handleThreadFeatureRequest } from "./threadRoutes.ts";
 import { handleBotAttentionRequest } from "./botAttentionRoutes.ts";
 import { handleApprovalRequest } from "./approvalRoutes.ts";
 import type { ApprovalStore } from "../modules/runtime/approvals.ts";
+import type { CredentialStore } from "../modules/runtime/credentials.ts";
+import type { SecretStore } from "../modules/runtime/secrets.ts";
 import { handleBotDeletionRequest } from "./botDeletionRoutes.ts";
 import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleProjectionRequest } from "./projectionRoutes.ts";
@@ -59,6 +61,9 @@ export interface DaemonServices {
   pairing: PairingService;
   /** Requests to use files outside the allowed folders; absent without the durable runtime's store. */
   approvals?: ApprovalStore;
+  /** Service-only provider store. HTTP responses use its sanitized projection. */
+  credentials: CredentialStore;
+  secretsBackend: SecretStore["kind"];
   /** Mode-0600 Service Host secret. Required to mint pairing codes; never logged. */
   pairingHostSecret: string;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
@@ -277,6 +282,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     }
 
     if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION, protocol: PROTOCOL_VERSION });
+    if (pathname === "/api/secrets/status" && req.method === "GET") return json({ backend: svc.secretsBackend });
     if (pathname === "/api/host-identity" && req.method === "GET") {
       const identity = hostIdentity(svc.cfg.stateDir);
       return identity ? json(identity) : json({ error: "Service host identity is unavailable" }, 503);

@@ -17,6 +17,8 @@ import { compactionExtension, compactionSettings } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
+import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
+import { SecretStore } from "./secrets.ts";
 import { AssistantEntry, CompactionEntry, ConversationIdle, createRegistry, Harness, type Conversation, type ConversationId, type ConversationWatch, type EntryRecord, type SettledSubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
@@ -54,6 +56,12 @@ export interface BotRuntime {
   close(): Promise<void>;
   /** Requests to use files outside the allowed folders; absent without Service storage and events. */
   readonly approvals?: ApprovalStore;
+  readonly credentials: CredentialStore;
+  readonly secrets: SecretStore;
+}
+
+function failureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | undefined): boolean {
@@ -62,11 +70,21 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
 }
 
 export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: { events?: Pick<EventLog, "append"> } = {}): Promise<BotRuntime> {
-  const credentials = new CredentialStore(paths.stateDir);
-  const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
+  const secretStore = new SecretStore(paths.dataDir);
   let reportedCredentialsFailure = false;
-  const selections: { providerId: string; modelId: string }[] = [];
+  const reportCredentialsFailure = () => {
+    if (reportedCredentialsFailure) return;
+    reportedCredentialsFailure = true;
+    console.warn("Unable to load model credential store; continuing without stored providers");
+  };
+  const credentials = await CredentialStore.open(paths.stateDir, secretStore).catch(() => {
+    reportCredentialsFailure();
+    return new CredentialStore(secretStore);
+  });
   const conversationBots = new Map<ConversationId, string>();
+  const secrets: BotSecretAccess = { store: secretStore, botId: (id) => conversationBots.get(id) };
+  const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
+  const selections: { providerId: string; modelId: string }[] = [];
   try {
     const registry = createRegistry();
     registry.install(compactionExtension);
@@ -79,13 +97,11 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         const row = db.query<{ thread_id: string; bot_id: string }, [number]>("SELECT thread_id, bot_id FROM pi_thread_conversations WHERE conversation_id = ?").get(conversationId);
         return row ? { threadId: row.thread_id, botId: row.bot_id } : undefined;
       },
-    } : undefined));
+    } : undefined, secrets));
+    registry.install(createSecretsExtension(secrets));
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
-        if (!reportedCredentialsFailure) {
-          reportedCredentialsFailure = true;
-          console.warn("Unable to load model credential store; continuing without stored providers");
-        }
+        reportCredentialsFailure();
         return createModels();
       }
     }, registry, env: ({ conversationId, cwd }) => createFilesEnvironment(paths, readSettingsAllowedFolders(db), cwd, conversationBots.get(conversationId)),
@@ -117,6 +133,8 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     const active = new Map<string, { db: Database; threadId: string; admitted: Promise<{ conversation: Conversation; submission: Submission }>; pending: Promise<SettledSubmissionRecord | undefined>[]; steers: Submission[]; inputs: Set<number>; lastEntryBeforeAbort: number | undefined; abortCutoffRead?: Promise<void>; recovering?: boolean }>();
     return {
       ...(approvals ? { approvals } : {}),
+      credentials,
+      secrets: secretStore,
       async startTurn(input) {
         let ready!: (value: { conversation: Conversation; submission: Submission }) => void;
         let fail!: (error: unknown) => void;
@@ -211,8 +229,14 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
             }
           } finally { await watch.stop(); }
         } catch (error) {
-          fail(error);
-          throw error;
+          let failure = error;
+          if (!(error instanceof DurableRunAborted)) {
+            const reason = failureMessage(error);
+            const redacted = await secretStore.redactKnown(reason, input.botId);
+            if (redacted !== reason) failure = new Error(redacted);
+          }
+          fail(failure);
+          throw failure;
         } finally {
           active.delete(input.turnId);
         }
@@ -220,6 +244,9 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       recoverTurns(input) {
         const jobs: Promise<void>[] = [];
         const rows = input.db.query<{ id: string; thread_id: string; bot_id: string }, []>("SELECT id, thread_id, bot_id FROM turns WHERE status = 'working' ORDER BY started_at, id").all();
+        const reportFailure = async (row: (typeof rows)[number], reason: string) => {
+          input.settled(row.id, { status: "failed", reason: await secretStore.redactKnown(reason, row.bot_id) });
+        };
         const registered = (async () => {
           const prepared: {
             row: (typeof rows)[number];
@@ -227,7 +254,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
             owned: Submission;
             associations: { submission_id: number; kind: string }[];
           }[] = [];
-          const failed: { turnId: string; reason: string }[] = [];
+          const failed: { row: (typeof rows)[number]; reason: string }[] = [];
           // Waiting on any submission can resume the global scheduler, so map all Bots first.
           for (const row of rows) {
             try {
@@ -248,10 +275,10 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
               if (!primary) throw new Error("durable submission not found");
               prepared.push({ row, conversation, owned: primary, associations });
             } catch (error) {
-              failed.push({ turnId: row.id, reason: error instanceof Error ? error.message : String(error) });
+              failed.push({ row, reason: failureMessage(error) });
             }
           }
-          for (const { turnId, reason } of failed) input.settled(turnId, { status: "failed", reason });
+          for (const { row, reason } of failed) await reportFailure(row, reason);
           for (const { row, conversation, owned, associations } of prepared) {
             try {
               const turn = { db: input.db, threadId: row.thread_id, admitted: Promise.resolve({ conversation, submission: owned }), pending: [] as Promise<SettledSubmissionRecord | undefined>[], steers: [] as Submission[], inputs: new Set<number>([owned.id]), lastEntryBeforeAbort: undefined as number | undefined, recovering: true };
@@ -347,15 +374,15 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
                     } else {
                       const live = ownedWatch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; detail?: string } } | undefined;
                       const reason = (live?.runFailure?.inputs.includes(failed.id) ? live.runFailure.detail : undefined) ?? (typeof failed.detail === "string" ? failed.detail : failed.reason);
-                      input.settled(row.id, { status: "failed", reason });
+                      await reportFailure(row, reason);
                     }
                   }
-                } catch (error) { input.settled(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) }); }
+                } catch (error) { await reportFailure(row, failureMessage(error)); }
                 finally { await watch?.stop(); active.delete(row.id); }
               })());
             } catch (error) {
               active.delete(row.id);
-              input.settled(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) });
+              await reportFailure(row, failureMessage(error));
             }
           }
         })().finally(resumeScheduler);

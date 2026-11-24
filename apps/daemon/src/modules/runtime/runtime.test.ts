@@ -11,7 +11,9 @@ import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThre
 import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
-import { CredentialStore } from "./credentials.ts";
+import { CredentialStore, MODEL_CREDENTIALS_FILENAME } from "./credentials.ts";
+import { SecretStore } from "./secrets.ts";
+import { createRuntimeModels } from "./models.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { openBotRuntime, type BotRuntime } from "./runtime.ts";
 import { openThreadConversation } from "./conversations.ts";
@@ -21,10 +23,7 @@ test("runtime creates durable tables and can close and reopen", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-"));
   const dbPath = path.join(directory, "service.sqlite");
   const stateDir = path.join(directory, "state");
-  const store = new CredentialStore(stateDir);
-  store.add({ id: "openai", name: "OpenAI", protocol: "built-in", apiKey: "test-key" });
-  expect(existsSync(path.join(stateDir, "model-credentials.json"))).toBe(true);
-  expect(existsSync(path.join(directory, "model-credentials.json"))).toBe(false);
+  mkdirSync(stateDir);
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
@@ -77,6 +76,7 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
   try {
     const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
     try {
+      expect(existsSync(path.join(stateDir, MODEL_CREDENTIALS_FILENAME))).toBeTrue();
       const db = new Database(dbPath, { readonly: true });
       try {
         const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'pi_*'").all();
@@ -91,12 +91,119 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
 });
 
 
+test("a durable Turn completes with a migrated provider after the legacy file is removed", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "migrated reply" }] }], {}, async () => {
+  const h = await startDaemon(undefined, { legacyModelCredentials: [
+    { id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "legacy-fake-key", models: [{ id: "fake-model" }] },
+  ] });
+  try {
+    expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeFalse();
+    expect((await createRuntimeModels(h.svc.credentials).getAuth("fake"))?.auth.apiKey).toBe("legacy-fake-key");
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const botId = await makeBot(h, "Migrated provider");
+    const sent = await sendToBot(h, botId, "Use the migrated provider");
+    await waitThreadIdle(h, sent.threadId);
+    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+    expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeFalse();
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("a durable provider failure redacts app and Bot secrets from the Turn and its status event", () => {
+  const apiKey = "test-provider-key-sentinel";
+  const mcpToken = "test-mcp-token-sentinel";
+  const botToken = "test-bot-token-sentinel";
+  const failure = `Provider rejected ${apiKey}, ${mcpToken}, and ${botToken}`;
+  return withFakeRuntimeProvider([{ segments: [], failure }], {}, async () => {
+    const h = await startDaemon();
+    try {
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey, models: [{ id: "fake-model" }] });
+      const botId = await makeBot(h, "Failed durable");
+      const secrets = new SecretStore(h.svc.cfg.dataDir);
+      const providerSecret = (await secrets.forApp().list())[0]!.name;
+      await secrets.forApp().save("token", "MCP token", mcpToken);
+      await secrets.forBot(botId).save("token", "Bot token", botToken);
+      setSetting(h.svc.db, "default_model", "fake/fake-model");
+      setSetting(h.svc.db, "runtime", "durable");
+
+      const sent = await sendToBot(h, botId, "Run with the fake provider");
+      const assertRedactedFailure = async (daemon: typeof h, afterCursor: number) => {
+        await waitThreadIdle(daemon, sent.threadId);
+        const turn = daemon.svc.threads.turnRow(sent.turnId);
+        const events = daemon.svc.events.replay(afterCursor, daemon.svc.events.oldestCursor()).events;
+        const failedEvent = events.find((event) => event.type === "turn.status" && event.aggregateId === sent.turnId
+          && (event.payload as { to?: string }).to === "failed");
+        expect(turn?.status).toBe("failed");
+        for (const secret of [apiKey, mcpToken, botToken]) {
+          expect(turn?.outcome_reason?.includes(secret)).toBeFalse();
+          expect(JSON.stringify(events)).not.toContain(secret);
+        }
+        const reason = `Provider rejected {{secret:${providerSecret}}}, {{secret:token}}, and {{secret:token}}`;
+        expect(turn?.outcome_reason).toContain(reason);
+        expect(failedEvent?.payload).toMatchObject({ reason: turn?.outcome_reason });
+        return events.at(-1)!.cursor;
+      };
+      const cursor = await assertRedactedFailure(h, 0);
+      // Simulate stopping after the durable submission failed, before the Service recorded that outcome.
+      h.svc.db.run("UPDATE turns SET status = 'working', finished_at = NULL, outcome_reason = NULL WHERE id = ?", [sent.turnId]);
+      await h.stop();
+      const restarted = await startDaemon(h.home);
+      try { await assertRedactedFailure(restarted, cursor); }
+      finally {
+        await restarted.stop();
+        rmSync(restarted.svc.cfg.stateDir, { recursive: true, force: true });
+      }
+    } finally {
+      await h.stop();
+      rmSync(h.home, { recursive: true, force: true });
+      rmSync(h.svc.cfg.stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("runtime imports a healthy legacy provider when another record fails and retains the file", async () => {
+  const healthyKey = "test-healthy-key-sentinel";
+  const invalidKey = "test-invalid-key-sentinel";
+  const warning = spyOn(console, "warn").mockImplementation(() => {});
+  const log = spyOn(console, "log").mockImplementation(() => {});
+  const error = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const h = await startDaemon(undefined, { legacyModelCredentials: [
+      { id: invalidKey, name: "Invalid", protocol: "built-in", apiKey: invalidKey },
+      { id: "healthy", name: "Healthy", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: healthyKey, models: [{ id: "model" }] },
+    ] });
+    try {
+      const models = createRuntimeModels(h.svc.credentials);
+      expect(models.getModel("healthy", "model")?.id).toBe("model");
+      expect((await models.getAuth("healthy"))?.auth.apiKey).toBe(healthyKey);
+      expect(h.svc.credentials.getForRuntime(invalidKey)).toBeUndefined();
+      expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeTrue();
+      expect(warning).toHaveBeenCalledWith("Unable to migrate some model credentials; keeping the legacy file for retry");
+      const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events;
+      const recorded = JSON.stringify([warning.mock.calls, log.mock.calls, error.mock.calls, events]);
+      expect(recorded).not.toContain(healthyKey);
+      expect(recorded).not.toContain(invalidKey);
+    } finally {
+      await h.stop();
+      rmSync(h.home, { recursive: true, force: true });
+      rmSync(h.svc.cfg.stateDir, { recursive: true, force: true });
+    }
+  } finally { warning.mockRestore(); log.mockRestore(); error.mockRestore(); }
+});
+
+test("secret storage status requires authentication and reports the active backend", async () => {
+  const h = await startDaemon();
+  try {
+    expect((await fetch(`${h.baseUrl}/api/secrets/status`)).status).toBe(401);
+    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({ status: 200, body: { backend: "file" } });
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+});
+
 test("configured conversation uses the Service limit for unset and null Bots and the Bot override otherwise", () => withFakeRuntimeProvider(Array.from({ length: 3 }, () => ({ segments: [{ type: "text" as const, text: "ok" }] })), {}, async () => {
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Default limit");
     const custom = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Custom limit", agentId: "pi", maxTurns: 3 });
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     async function limit(threadId: string): Promise<number | undefined> {
@@ -153,7 +260,7 @@ test("the model request contains only the app prompt and Shared Workspace Skills
       rmSync(path.join(workspace, ".agents/skills"), { recursive: true, force: true });
       [workspaceSkill, ...legacyWorkspaceSkills].forEach(writeSkill);
       const { id: botId } = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Prompt Bot", agentId: "pi", instructions: "Keep track of releases." });
-      new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
       setSetting(h.svc.db, "runtime", "durable");
       const extraFolder = path.join(home, "extra-files");
@@ -204,7 +311,7 @@ for (const mode of ["worker", "durable"] as const) {
     try {
       setSetting(h.svc.db, "runtime", mode);
       if (mode === "durable") {
-        new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+        await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
         setSetting(h.svc.db, "default_model", "fake/fake-model");
       }
       const botId = await makeBot(h, "Before rename");
@@ -270,7 +377,7 @@ test("an unreadable SKILL.md is skipped and the durable Turn completes", () => {
         if (name === "Unreadable Skill") chmodSync(skillFile, 0o000);
       }
       const botId = await makeBot(h, "Skill availability");
-      new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
       setSetting(h.svc.db, "runtime", "durable");
       const { threadId } = await sendToBot(h, botId, "Check the available Skills.");
@@ -336,7 +443,8 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
   db.run("CREATE TABLE messages (id TEXT, thread_id TEXT, turn_id TEXT, kind TEXT, author_kind TEXT, payload TEXT)");
   db.run("CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
   db.run("CREATE TABLE bots (id TEXT PRIMARY KEY, model TEXT)");
-  new CredentialStore(paths.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
+  const credentials = await CredentialStore.open(paths.stateDir, new SecretStore(paths.dataDir));
+  await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
   const rows = ["first", "second"].map((name, index) => ({
     thread: `thread-${name}`, bot: `bot-${name}`, turn: `turn-${name}`, submission: index + 1,
     privateFile: path.join(paths.sharedWorkspaceDir, "bots", `bot-${name}`, "notes.txt"),
