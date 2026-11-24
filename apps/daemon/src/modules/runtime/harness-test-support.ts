@@ -1,10 +1,10 @@
 // This test helper lives here to satisfy the pi-durable module boundary rule.
 // No production module imports this test-only helper.
-import { Harness, createRegistry, defineExtension, defineTask, defineTool, type Conversation } from "@earendil-works/pi-durable";
+import { Harness, ToolTask, createRegistry, defineExtension, defineTask, defineTool, hook, type Conversation, type ToolHookCall } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createDurableSuiteFakeProvider, createFakeProvider, type FakeReply } from "../../../../../packages/testkit/src/fake-provider.ts";
+import { createDurableSuiteFakeProvider, createFakeProvider, durableSuiteToolCalls, type FakeReply } from "../../../../../packages/testkit/src/fake-provider.ts";
 
 let durableSuiteHarness: Awaited<ReturnType<typeof Harness.open>> | undefined;
 
@@ -57,19 +57,34 @@ export function installDurableSuiteProvider(): () => void {
     });
     return conversation;
   }
+  async function waitForSteer(conversationId: number, signal: AbortSignal | undefined): Promise<void> {
+    if (!steered.delete(conversationId)) {
+      await new Promise<void>((resolve) => {
+        const done = () => { waiting.delete(conversationId); signal?.removeEventListener("abort", done); resolve(); };
+        waiting.set(conversationId, done);
+        if (signal?.aborted) done();
+        else signal?.addEventListener("abort", done, { once: true });
+      });
+    }
+    boundaries.delete(conversationId);
+  }
+  const fixtureCalls = Object.values(durableSuiteToolCalls);
+  const isFixtureCall = (call: ToolHookCall) => fixtureCalls.some(({ id, name }) => id === call.id && name === call.name);
   const steering = defineExtension({ name: "test-steering", tools: [defineTool({
     name: "steer_boundary", description: "Test steering boundary", parameters: { type: "object", properties: {}, additionalProperties: false },
     async execute(_args, api, context) {
-      if (!steered.delete(api.conversationId)) {
-        await new Promise<void>((resolve) => {
-          const done = () => { waiting.delete(api.conversationId); context.abortSignal?.removeEventListener("abort", done); resolve(); };
-          waiting.set(api.conversationId, done);
-          if (context.abortSignal?.aborted) done();
-          else context.abortSignal?.addEventListener("abort", done, { once: true });
-        });
-      }
-      boundaries.delete(api.conversationId);
+      await waitForSteer(api.conversationId, context.abortSignal);
       return { output: [{ type: "text", text: "boundary completed" }] };
+    },
+  })], hooks: [hook(ToolTask, {
+    // The worker reports these calls without running shell commands or touching the workspace.
+    beforeTool(call) {
+      if (isFixtureCall(call)) return { block: "Use the scripted tool result" };
+    },
+    async afterTool(call, result, api, context) {
+      if (!isFixtureCall(call) || !result.diagnostics?.some(({ code }) => code === "blocked")) return;
+      if (call.id === durableSuiteToolCalls.orderedRead.id) await waitForSteer(api.conversationId, context.abortSignal);
+      if (!context.abortSignal?.aborted) return { output: [] };
     },
   })] });
   const originalOpen = Harness.open;

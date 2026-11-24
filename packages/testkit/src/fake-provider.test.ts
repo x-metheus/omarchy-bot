@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { TranscriptContext } from "@earendil-works/pi-ai";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createDurableSuiteFakeProvider } from "./fake-provider.ts";
@@ -7,7 +8,10 @@ function suite() {
   const fake = createDurableSuiteFakeProvider();
   const models = createModels();
   models.setProvider(fake.provider);
-  return (text: string, signal?: AbortSignal) => models.streamSimple(fake.getModel(), { messages: [{ role: "user", content: text, timestamp: Date.now() }] }, signal ? { signal } : undefined);
+  return (input: string | TranscriptContext["messages"], signal?: AbortSignal) => {
+    const messages = typeof input === "string" ? [{ role: "user" as const, content: input, timestamp: Date.now() }] : input;
+    return models.streamSimple(fake.getModel(), { messages }, signal ? { signal } : undefined);
+  };
 }
 
 test("durable computer directives follow the worker action and argument syntax", async () => {
@@ -49,7 +53,24 @@ test("durable scripts preserve text and thinking block order", async () => {
   const run = suite();
   expect((await run("parity-stream").result()).content).toEqual([{ type: "thinking", thinking: "T" }, { type: "text", text: "R" }]);
   expect((await run("adjacent-responses").result()).content).toEqual([{ type: "text", text: "First block." }, { type: "text", text: "Second block." }]);
-  expect((await run("thinking-order").result()).content.map((part) => part.type)).toEqual(["text", "thinking", "thinking", "text"]);
+  const thinkingOrder = { role: "user", content: "thinking-order", timestamp: Date.now() } as const;
+  const first = await run([thinkingOrder]).result();
+  expect(first.stopReason).toBe("toolUse");
+  expect(first.content).toEqual([
+    { type: "text", text: "Before Thinking." },
+    { type: "thinking", thinking: "**Inspect** the request." },
+    { type: "toolCall", id: expect.any(String), name: "read", arguments: { path: "src/input.ts" } },
+  ]);
+  const read = first.content[2];
+  if (read?.type !== "toolCall") throw new Error("Expected a read tool call");
+  const second = await run([thinkingOrder, first, {
+    role: "toolResult", toolCallId: read.id, toolName: read.name, content: [], isError: false, timestamp: Date.now(),
+  }]).result();
+  expect(second.stopReason).toBe("stop");
+  expect(second.content).toEqual([
+    { type: "thinking", thinking: "Provider-authored summary." },
+    { type: "text", text: "After Thinking." },
+  ]);
   expect((await run("ordinary prompt").result()).content).toEqual([]);
   expect((await run("redirect now").result()).content).toEqual([]);
   expect((await run("say:  hello  ").result()).content).toEqual([{ type: "text", text: "hello" }]);
@@ -86,10 +107,10 @@ test("durable hanging scripts remain open until aborted", async () => {
 
 test("steer fixtures call a boundary before responding", async () => {
   const run = suite();
-  for (const script of ["steer-echo", "ordered-transcript"]) {
+  for (const [script, name] of [["steer-echo", "steer_boundary"], ["ordered-transcript", "read"]] as const) {
     const response = await run(script).result();
     expect(response.stopReason).toBe("toolUse");
-    expect(response.content.at(-1)).toMatchObject({ type: "toolCall", name: "steer_boundary" });
+    expect(response.content.at(-1)).toMatchObject({ type: "toolCall", name });
   }
 }, 20000);
 
