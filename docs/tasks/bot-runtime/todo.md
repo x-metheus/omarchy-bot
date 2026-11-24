@@ -253,19 +253,30 @@ The wait runs inside the replay-safe tool task, as in the prototype: a tool cann
 
 ## Task 11: Computer and browser tools in process
 
-**Description:** Port the computer and browser tools from `workers/pi/src` to runtime extensions that call `ComputerBroker` directly.
+**Description:** Port the computer and browser tools from `workers/pi/src` to runtime extensions that call `ComputerBroker` directly. Also project committed durable tool calls and results into the same tool Messages and events the worker path produces.
 
 **Acceptance criteria:**
-- [ ] Computer and browser tool calls behave as on the worker path
-- [ ] Each tool has a time limit and honors abort
+- [x] Computer and browser tool calls behave as on the worker path — `agent-computer-tool.test.ts` durable 16 passed with 3 workerOnly skips against 19 passed switch-off; `agent-browser-tool.test.ts` durable 10 passed with 1 workerOnly skip against 11 passed switch-off
+- [x] Each tool has a time limit and honors abort — `computer.test.ts` and `browser.test.ts` cover timeout and abort through the Harness; `agent-computer-tool.test.ts` covers a queued press and a grant queued behind a capture; `bot-screen-sway-projection.test.ts` covers an aborted launch and reattach, 16/16 in both modes; `screen-input-lease.test.ts` 19/19 in both modes
 
-**Verification:** default commands; `agent-computer-tool` and `agent-browser-tool` integration tests pass with the switch on.
+**Verification:** default commands and the integration files in both modes. Final: `bun run lint:boundaries` 4/0; `bun test apps/daemon` 158 passed, 1 existing skip; `bun run typecheck` exits 2 on the one pre-existing `daemon.test.ts:289` error, unchanged by this branch. `thinking-blocks.test.ts` passes 7/7 in both modes and Bot Screen lifecycle's first graphical use passes on the durable path. Durable residuals: `ordered-transcript-qa.test.ts` 1 passed, 2 failed and `daemon.test.ts` 16 passed, 2 failed, 2 existing skips — both need native `event` projection, and the Daemon cases also compare the fake worker's `target`/`durationMs`; `permanent-deletion.test.ts` 3 passed, 1 failed, 4 existing skips — the screenshot artifact is created before deletion, and the run fails at the message count (4 against the worker's 5) because the durable fixture has no `attachment-echo` reply, which is Checkpoint C attachment work.
 
 **Dependencies:** Task 3
 
 **Files likely touched:** `apps/daemon/src/modules/runtime/extensions/computer.ts`, `apps/daemon/src/modules/runtime/extensions/browser.ts`, tests
 
 **Estimated scope:** Small
+
+Decided 2026-11-25:
+
+- Tool-call projection is part of this task. A committed tool call becomes one `kind: "tool"` Message at its position in the assistant content with `message.appended`; its committed result updates that row with `tool.updated`, never a new row. Recovery reuses persisted rows and their IDs, renumbers sequence numbers when it repairs order, reconciles stale live text against the journal, places a missing tool after the preceding row of the same assistant entry (so it stays before a later steer), and does not publish a call that an aborted partial never started. Projected tool and block writes commit with their events; EventLog publishes synchronously after the outermost managed commit; replay and retry do not duplicate rows, text or events in the tested cases. The rules use only durable entries, so Task 12's tools can reuse the projector; that reuse is an inference until their tests land.
+- Pi progress is persisted with `progress.persistWithinMs: 0`, which shortens the window where a live partial exists only in memory before a crash. Recovery still removes a Service-only partial with no journal counterpart.
+- Every computer and browser action has a 60-second deadline. Reaching it or aborting the Turn cancels the broker call: queued input is not written, an undispatched routing command is not sent, and cleanup is awaited. A Sway command already written cannot be undone. Standalone snapshot capture has a 5-second deadline and a separate 1-second SIGTERM-to-SIGKILL grace. Application units use `application-${randomUUID()}` so an aborted launch after reattach cannot stop a surviving unit.
+- A queued press is released only after the pointer helper acknowledged it, and Screen authority is released in `finally`. A Web Control claim made while screenshot persistence is pending survives the tool's cleanup.
+- The three computer cases whose subject is the worker transport (forged ToolChannel bindings, worker exit during a held Takeover or tool dispatch) and the browser forged-binding case are `workerOnly`, with a one-line reason. They are the only new skips on this branch and are removed with the worker in Task 20.
+- The held-Takeover restart case uses `disconnectForRestart()` rather than `h.stop()`: a clean shutdown cancels a running Turn by spec, while SIGTERM for restart fails it with `daemon restart`.
+- Durable fixtures parse the worker fixture's computer and browser command syntax instead of test names. The thinking-order reply now ends at its `read` and emits the trailing thinking and text after the result; the ordered-transcript boundary emits `read`; the process-only and tool scripts follow the worker's boundaries. In the fixture commit, the thinking-order assertion, the ordered-transcript boundary assertion and the harness reply list changed to those outputs, and the harness appends two verbatim worker responses. No existing scenario assertion outside the harness changed.
+- Follow-ups outside this task: `bun run typecheck` still exits 2 on the pre-existing `tests/integration/daemon.test.ts:289` approvals-list type, which this branch does not touch; computer and browser each read the active Turn for themselves while sharing the SQL owner resolver (extract one helper); native `event` projection is absent and tracked at Checkpoint C, which blocks the two Ordered Transcript and two Daemon cases; Permanent Deletion's remaining failure is the missing attachment echo tracked with attachments at Checkpoint C; the Daemon tool summary also compares the fake worker's hard-coded `target: "echo fake"` and `durationMs: 12`, while the durable projector carries a duration only when the Harness supplies one.
 
 ---
 
