@@ -1,13 +1,16 @@
 /**
- * Bun-side E2E entrypoint. The parent setup provides isolated storage and the
- * fake workers, while this process runs the real daemon main().
+ * Bun-side E2E entrypoint. The parent setup provides isolated storage, and this
+ * process runs the real daemon with a scripted model provider.
  */
 import "../integration/helpers/headless-keychain.ts";
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import { loadConfig } from "../../apps/daemon/src/bootstrap/config.ts";
 import { main } from "../../apps/daemon/src/bootstrap/main.ts";
+import { installDurableSuiteProvider } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
+import { DEFAULT_MODEL_SETTING } from "../../apps/daemon/src/modules/runtime/models.ts";
 import { applyMigration, MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
+import { setSetting } from "../../apps/daemon/src/persistence/settings.ts";
 import { AVATAR_RENDERER_ID } from "../../packages/protocol/src/index.ts";
 import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
 
@@ -101,8 +104,21 @@ db.query(`DELETE FROM schema_migrations WHERE name = '0014-enforce-current-avata
 db.close();
 
 process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
-const { port } = await main({
+installDurableSuiteProvider();
+const { port, svc } = await main({
   useHostApplicationUnits: false,
   botScreenRuntimeDir: path.join(dataDir, "r"),
 });
+// Model resolution reads the runtime catalog separately from the scripted stream.
+// Supply the fixture there so provider management still starts with an empty store.
+const getAllForRuntime = svc.credentials.getAllForRuntime.bind(svc.credentials);
+svc.credentials.getAllForRuntime = () => [...getAllForRuntime(), {
+  id: "fake",
+  name: "Scripted E2E",
+  protocol: "openai-compatible",
+  baseUrl: "https://scripted-e2e.invalid",
+  apiKey: "fake-key",
+  models: [{ id: "fake-model", reasoning: true }],
+}];
+setSetting(svc.db, DEFAULT_MODEL_SETTING, "fake/fake-model");
 console.log(`E2E_DAEMON_READY ${port}`);

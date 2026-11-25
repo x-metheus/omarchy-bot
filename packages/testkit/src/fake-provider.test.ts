@@ -80,7 +80,7 @@ test("durable scripts fail with worker fixture reasons and retain partial stream
   const run = suite();
   expect((await run("fail-once").result()).errorMessage).toBe("fake failure");
   expect((await run("fail-once").result()).content).toEqual([{ type: "text", text: "recovered" }]);
-  expect((await run("timeout-failure").result()).errorMessage).toBe("fake deadline exceeded");
+  expect((await run("timeout-failure").result()).errorMessage).toBe("timed out after 30s");
   for (const text of ["thinking-fail", "thinking-crash", "partial-fail", "partial-crash"]) {
     const events = [];
     for await (const event of run(text)) events.push(event.type);
@@ -90,6 +90,24 @@ test("durable scripts fail with worker fixture reasons and retain partial stream
     expect((await run(text).result()).content).toEqual([]);
   }
 });
+
+test.each([
+  ["tool adjacent", []],
+  ["tool separated", [{ type: "text", text: "Between tools." }]],
+] as const)("durable %s emits the expected blocks between tool calls", async (prompt, between) => {
+  const run = suite();
+  const user = { role: "user", content: prompt, timestamp: Date.now() } as const;
+  const first = await run([user]).result();
+  expect(first.stopReason).toBe("toolUse");
+  expect(first.content).toMatchObject([{ type: "toolCall", name: "bash" }]);
+  const bash = first.content[0];
+  if (bash?.type !== "toolCall") throw new Error("Expected a bash call");
+  const second = await run([user, first, {
+    role: "toolResult", toolCallId: bash.id, toolName: bash.name, content: [], isError: false, timestamp: Date.now(),
+  }]).result();
+  expect(second.stopReason).toBe("toolUse");
+  expect(second.content).toMatchObject([...between, { type: "toolCall", name: "write" }]);
+}, 10_000);
 
 test.each(["tool-fail", "tool-hang"])("durable %s requests an interrupted bash round", async (prompt) => {
   const reply = await suite()(prompt).result();
@@ -188,7 +206,7 @@ test("timeout failure makes one provider call and is not retryable", async () =>
   const models = createModels();
   models.setProvider(fake.provider);
   const response = await models.streamSimple(fake.getModel(), { messages: [{ role: "user", content: "timeout-failure", timestamp: Date.now() }] }).result();
-  expect(response.errorMessage).toBe("fake deadline exceeded");
+  expect(response).toMatchObject({ stopReason: "aborted", errorMessage: "timed out after 30s" });
   expect(fake.state.callCount).toBe(1);
   expect(isRetryableAssistantError(response)).toBeFalse();
 });

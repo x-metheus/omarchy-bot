@@ -36,6 +36,10 @@ export const durableSuiteToolCalls = {
   orderedRead: fauxToolCall("read", { path: "src/transcript.ts" }, { id: "ordered-steering" }),
   orderedWrite: fauxToolCall("write", { path: "src/transcript.ts", content: "" }, { id: "ordered-final" }),
   bash: fauxToolCall("bash", { command: "echo fake" }, { id: "fixture-bash" }),
+  adjacentBash: fauxToolCall("bash", { command: "echo fake" }, { id: "fixture-adjacent-bash" }),
+  adjacentWrite: fauxToolCall("write", { path: "/tmp/fake.txt", content: "fake\n" }, { id: "fixture-adjacent-write" }),
+  separatedBash: fauxToolCall("bash", { command: "echo fake" }, { id: "fixture-separated-bash" }),
+  separatedWrite: fauxToolCall("write", { path: "/tmp/fake.txt", content: "fake\n" }, { id: "fixture-separated-write" }),
   failingBash: fauxToolCall("bash", { command: "safe interrupted operation" }, { id: "fixture-failing-bash" }),
   interruptedBash: fauxToolCall("bash", { command: "safe interrupted operation" }, { id: "fixture-interrupted-bash" }),
 };
@@ -199,6 +203,17 @@ export function createDurableSuiteFakeProvider() {
       if (continued) return fauxAssistantMessage("tool finished");
       return fauxAssistantMessage(durableSuiteToolCalls.bash, { stopReason: "toolUse" });
     }
+    if (text === "tool adjacent" || text === "tool separated") {
+      const separated = text === "tool separated";
+      const { adjacentBash, adjacentWrite, separatedBash, separatedWrite } = durableSuiteToolCalls;
+      const [bash, write] = separated ? [separatedBash, separatedWrite] : [adjacentBash, adjacentWrite];
+      if (latest?.role !== "toolResult") return fauxAssistantMessage(bash, { stopReason: "toolUse" });
+      if (latest.toolCallId === bash.id) {
+        const content = separated ? [fauxText("Between tools."), write] : [write];
+        return fauxAssistantMessage(content, { stopReason: "toolUse" });
+      }
+      return fauxAssistantMessage("tool finished");
+    }
     if (text === "native-bash-cwd") {
       // The harness intercepts durableSuiteToolCalls. This probe executes the real tool.
       const call = fauxToolCall("bash", { command: "pwd" }, { id: "native-bash-cwd" });
@@ -217,7 +232,9 @@ export function createDurableSuiteFakeProvider() {
       failedSessions.add(session);
       return fauxAssistantMessage([], { stopReason: "error", errorMessage: "fake failure" });
     }
-    if (text === "timeout-failure" || text === "fail") return fauxAssistantMessage([], { stopReason: "error", errorMessage: text === "fail" ? "fake failure" : "fake deadline exceeded" });
+    // The Turn deadline interrupts the stream. This wording would be retryable as a provider error.
+    if (text === "timeout-failure") return fauxAssistantMessage([], { stopReason: "aborted", errorMessage: "timed out after 30s" });
+    if (text === "fail") return fauxAssistantMessage([], { stopReason: "error", errorMessage: "fake failure" });
     if (text === "hang") return fauxAssistantMessage("hanging…");
     return fauxAssistantMessage(text.startsWith("say:") ? [fauxText(text.slice(4).trim())] : []);
   }));
