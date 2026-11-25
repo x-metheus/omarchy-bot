@@ -3,7 +3,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentCapabilityInventory } from "../../packages/agent-contract/src/index.ts";
 import type { AgentDto, AttachmentDto } from "../../packages/protocol/src/index.ts";
-import { api, authedFetch, apiStatus, makeBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, apiStatus, makeBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
 
 async function stage(
   h: Harness,
@@ -183,7 +183,7 @@ describe("agent capability inventory", () => {
     }
   });
 
-  test("drops undeclared Native capabilities and unsafe Tool Call detail with payload-safe diagnostics", async () => {
+  workerOnly("worker agent.event_rejected diagnostics for undeclared native events and unsafe tool detail")("drops undeclared Native capabilities and unsafe Tool Call detail with payload-safe diagnostics", async () => {
     setProbeControl(h, {
       fakeCapabilities: {
         nativeEventFamilies: ["fake.declared"],
@@ -218,7 +218,7 @@ describe("agent capability inventory", () => {
     }
   });
 
-  test("redacts non-public native payloads from transcript and event replay", async () => {
+  workerOnly("worker native event channel and agent.native replay redaction")("redacts non-public native payloads from transcript and event replay", async () => {
     setProbeControl(h);
     await h.svc.agents.recheck("pi");
     const botId = await makeBot(h, "Native privacy Bot");
@@ -309,7 +309,7 @@ describe("agent capability inventory", () => {
     }
   });
 
-  test("quarantines an unabortable timed-out worker before releasing its Thread", async () => {
+  workerOnly("supervisor quarantine of a timed-out worker session without abort capability")("quarantines an unabortable timed-out worker before releasing its Thread", async () => {
     const previousTimeout = h.svc.cfg.turnTimeoutMs;
     setProbeControl(h, { fakeCapabilities: { abort: false } });
     await h.svc.agents.recheck("pi");

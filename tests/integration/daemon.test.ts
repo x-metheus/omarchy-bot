@@ -213,7 +213,7 @@ describe("integration: chat through a bot", () => {
     expect(responses).toContain("two");
   });
 
-  test("Tool Calls, residual Native Events, and Responses remain distinct records", async () => {
+  workerOnly("fake worker fake.progress event and fixed bash summary fields")("Tool Calls, residual Native Events, and Responses remain distinct records", async () => {
     const botId = await makeBot(h, "Tools");
     const sent = await sendToBot(h, botId, "tool please");
     await waitThreadIdle(h, sent.threadId);
@@ -278,7 +278,7 @@ describe("integration: chat through a bot", () => {
     expect(msgs.some((m) => m.author.kind === "system" && m.kind === "text" && (m.text ?? "").includes("cancel"))).toBeTrue();
   });
 
-  test("tool activity remains, the public abort route is absent, and no approval is pending", async () => {
+  workerOnly("fake worker native event in the tool Turn transcript")("tool activity remains, the public abort route is absent, and no approval is pending", async () => {
     const botId = await makeBot(h, "Tool user");
     const sent = await sendToBot(h, botId, "tool");
     await waitThreadIdle(h, sent.threadId);
@@ -288,6 +288,27 @@ describe("integration: chat through a bot", () => {
     // Durable file approvals (bot-runtime Task 9) replaced the legacy worker approval routes.
     expect(await api<unknown[]>(h, "GET", "/api/approvals")).toEqual([]);
     expect((await apiStatus(h, "POST", `/api/turns/${sent.turnId}/abort`)).status).toBe(404);
+  });
+
+  test("a completed Turn keeps its Tool Call and Response separate with no pending approvals or public abort", async () => {
+    const botId = await makeBot(h, "Tool and Response Bot");
+    const sent = await sendToBot(h, botId, "tool");
+    await waitThreadIdle(h, sent.threadId);
+
+    const thread = await api<{ latestTurn?: { id: string; status: string } }>(h, "GET", `/api/threads/${sent.threadId}`);
+    expect(thread.latestTurn).toEqual(expect.objectContaining({ id: sent.turnId, status: "completed" }));
+    const rows = (await messages(sent.threadId)).filter(({ kind }) => kind === "tool" || kind === "response");
+    expect(rows.map(({ kind, threadId, text, toolCall }) => ({ kind, threadId, text, toolStatus: toolCall?.status }))).toEqual([
+      { kind: "tool", threadId: sent.threadId, text: undefined, toolStatus: "completed" },
+      { kind: "response", threadId: sent.threadId, text: "tool finished", toolStatus: undefined },
+    ]);
+    const [tool, response] = rows;
+    expect(tool!.id).not.toEqual(response!.id);
+    expect(tool!.seq).toBeLessThan(response!.seq);
+
+    const approvals = await apiStatus(h, "GET", "/api/approvals");
+    const abort = await apiStatus(h, "POST", `/api/turns/${sent.turnId}/abort`);
+    expect({ approvals, abortStatus: abort.status }).toEqual({ approvals: { status: 200, body: [] }, abortStatus: 404 });
   });
 });
 
