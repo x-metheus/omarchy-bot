@@ -5,7 +5,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { DeleteBotResultDto, ThreadDto } from "../../packages/protocol/src/index.ts";
 import {
   api,
-  authedFetch,
   makeBot,
   sendToBot,
   sendToThread,
@@ -30,20 +29,6 @@ function workerObservations(h: Harness): FakeWorkerObservation[] {
     .split("\n")
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as FakeWorkerObservation);
-}
-
-async function waitForWorkerObservation(
-  h: Harness,
-  predicate: (observation: FakeWorkerObservation) => boolean,
-  timeoutMs = 5_000,
-): Promise<FakeWorkerObservation> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const observation = workerObservations(h).find(predicate);
-    if (observation !== undefined) return observation;
-    if (Date.now() > deadline) throw new Error("fake Agent never observed the expected command");
-    await Bun.sleep(25);
-  }
 }
 
 function sharedWorkspace(h: Harness): string {
@@ -328,27 +313,5 @@ describe("Shared Workspace default cwd", () => {
     } finally {
       rmSync(explicitCwd, { recursive: true, force: true });
     }
-  });
-
-  test("an avatar recipe session uses the Shared Workspace instead of the launch directory", async () => {
-    h = await startDaemon();
-    const workspace = sharedWorkspace(h);
-    const botId = await makeBot(h, "Avatar recipe Bot");
-    const recipe = authedFetch(h, `${h.baseUrl}/api/bots/${botId}/avatar/recipe`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID() },
-      body: JSON.stringify({ prompt: "calm blue teammate" }),
-    });
-    const opened = await waitForWorkerObservation(
-      h,
-      (observation) =>
-        observation.type === "session.open"
-        && observation.botId === botId
-        && typeof observation.threadId === "string"
-        && observation.threadId.startsWith("avatar_profile_"),
-    );
-    expect(opened.options?.cwd).toBe(workspace);
-    expect(opened.options?.cwd).not.toBe(process.cwd());
-    await recipe;
   });
 });

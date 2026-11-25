@@ -1,4 +1,3 @@
-import { AvatarRecipeBody } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
 import { MAX_AVATAR_UPLOAD_BYTES, type AvatarService } from "../modules/avatars/avatarService.ts";
 
@@ -10,7 +9,7 @@ const json = (data: unknown, status = 200): Response => new Response(JSON.string
  * outside this group so the daemon's main router can continue matching.
  */
 export async function handleAvatarRequest(req: Request, svc: AvatarService, pathname: string): Promise<Response | undefined> {
-  const match = pathname.match(/^\/api\/bots\/([\w-]+)\/avatar(?:\/(generate|upload|recipe))?$/);
+  const match = pathname.match(/^\/api\/bots\/([\w-]+)\/avatar(?:\/(generate|upload))?$/);
   if (match === null) return undefined;
   const botId = match[1]!;
   const operation = match[2];
@@ -32,15 +31,6 @@ export async function handleAvatarRequest(req: Request, svc: AvatarService, path
     }
     const bytes = new Uint8Array(await req.arrayBuffer());
     return json(await svc.upload(botId, bytes, req.headers.get("content-type") ?? ""));
-  }
-
-  if (operation === "recipe" && req.method === "POST") {
-    const raw: unknown = await req.json().catch(() => {
-      throw new HttpError(400, "invalid JSON body");
-    });
-    const parsed = AvatarRecipeBody.safeParse(raw);
-    if (!parsed.success) throw new HttpError(400, parsed.error.issues[0]?.message ?? "invalid body");
-    return json(await svc.recipe(botId, parsed.data.prompt));
   }
 
   return undefined;

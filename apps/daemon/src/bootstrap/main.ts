@@ -80,9 +80,7 @@ export async function main(options: MainOptions = {}): Promise<{
       onAgentEvent: (agentId, event) => {
         if (agentId === "pi" && event.type === "native" && event.capability === "mcp.authorization") {
           plugins.handleNativeAuthorization(event.payload);
-          return;
         }
-        avatars.onAgentEvent(agentId, event);
       },
       onWorkerCrash: (agentId, err) => {
         events.append("agent", agentId, "agent.worker_crash", { agentId, message: err.message });
@@ -234,7 +232,7 @@ export async function main(options: MainOptions = {}): Promise<{
   const bots = new BotsService(db, events, threads);
   const attachments = new AttachmentsService(db, cfg.attachmentsDir);
   attachments.gcStaged();
-  const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
+  const avatars = new AvatarService(bots, cfg.avatarsDir);
   plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
     const worker = await supervisor.agentWorker("pi");
     const resources = await worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);

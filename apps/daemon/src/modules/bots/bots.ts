@@ -194,12 +194,6 @@ export class BotsService {
   }
 
 
-  agentId(id: string): AgentId {
-    const r = this.#row(id);
-    if (!r) throw new HttpError(404, `unknown bot ${id}`);
-    return r.agent_id as AgentId;
-  }
-
   avatarFile(id: string): string | undefined {
     const r = this.#row(id);
     if (!r) throw new HttpError(404, `unknown bot ${id}`);
@@ -223,12 +217,6 @@ export class BotsService {
     return this.getDto(id);
   }
 
-  setRecipeAvatar(id: string, recipe: AvatarRecipeDto): BotDto {
-    this.#setAvatar(id, "recipe", recipe, null);
-    this.events.append("bot", id, "bot.avatar_recipe_updated", { avatar: this.getDto(id).avatar });
-    return this.getDto(id);
-  }
-
   setUploadedAvatar(id: string, relativeFile: string): BotDto {
     if (relativeFile !== `${id}.png`) throw new HttpError(400, "invalid local avatar file");
     this.#setAvatar(id, "upload", undefined, relativeFile);
@@ -236,7 +224,7 @@ export class BotsService {
     return this.getDto(id);
   }
 
-  #setAvatar(id: string, kind: "generated" | "recipe" | "upload", recipe: AvatarRecipeDto | undefined, avatarFile: string | null): void {
+  #setAvatar(id: string, kind: "generated" | "upload", recipe: AvatarRecipeDto | undefined, avatarFile: string | null): void {
     if (!this.#row(id)) throw new HttpError(404, `unknown bot ${id}`);
     const now = new Date().toISOString();
     this.db

@@ -17,7 +17,6 @@ import type {
   ApprovalDto,
   AttachmentDto,
   AttachmentDraftTokenDto,
-  AvatarRecipeBodyDto,
   BotDto,
   BotViewDto,
   BuiltinProviderDto,
@@ -320,9 +319,6 @@ export class ApiClient {
       throw err;
     }
     return (await res.json()) as BotDto;
-  }
-  avatarRecipe(id: string, body: AvatarRecipeBodyDto): Promise<BotDto> {
-    return this.req(`/api/bots/${id}/avatar/recipe`, { method: "POST", body: JSON.stringify(body) });
   }
   avatarUrl(id: string): string {
     return this.withToken(`${this.baseUrl}/api/bots/${id}/avatar`);

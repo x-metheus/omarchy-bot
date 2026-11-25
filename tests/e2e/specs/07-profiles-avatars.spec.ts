@@ -135,37 +135,6 @@ test.describe("Bot profiles and avatars", () => {
       .toBe(`/api/bots/${botId}/avatar`);
   });
 
-  test("applies a validated prompt recipe through the profile UI", async ({ page, request }) => {
-    const botId = await createBot(page, "Recipe UI Bot");
-    const currentResponse = await request.get(`/api/bots/${botId}`);
-    const current: unknown = await currentResponse.json();
-    if (current === null || typeof current !== "object") throw new Error("Bot API returned an invalid profile");
-    await page.route(`**/api/bots/${botId}/avatar/recipe`, async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          ...current,
-          avatar: {
-            kind: "recipe",
-            recipe: {
-              rendererVersion: "dicebear-core@10.7.0+styles@10.6.0",
-              style: "thumbs",
-              seed: "e2e-recipe",
-              options: {},
-            },
-          },
-        }),
-      });
-    });
-
-    await openBotSettings(page, "Recipe UI Bot");
-    await page.getByRole("textbox", { name: "Describe avatar" }).fill("A friendly teammate with round glasses");
-    await page.getByRole("button", { name: "Create from description" }).click();
-    await expect(page.getByRole("complementary", { name: "Bot settings" }).getByTestId("avatar-thumbs")).toBeVisible();
-  });
-
-
   test("keeps Sidebar activity independent while one generated working avatar follows the selected Thread", async ({ page }) => {
     const botId = await createBot(page, "Activity Avatar Bot");
     await page.emulateMedia({ reducedMotion: "no-preference" });

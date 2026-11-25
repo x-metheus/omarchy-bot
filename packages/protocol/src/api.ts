@@ -614,9 +614,6 @@ export const DeleteBotResultDto = z.object({
 }).strict();
 export type DeleteBotResultDto = z.infer<typeof DeleteBotResultDto>;
 
-export const AvatarRecipeBody = z.object({ prompt: z.string().trim().min(1).max(2000) });
-export type AvatarRecipeBodyDto = z.infer<typeof AvatarRecipeBody>;
-
 export const AttachmentDraftToken = z.string().max(128).uuid();
 export type AttachmentDraftTokenDto = z.infer<typeof AttachmentDraftToken>;
 
