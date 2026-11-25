@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 
 const conversationDocuments = `SELECT id FROM pi_documents
   WHERE (scope_kind = 'conversation' AND owner_id = ?1)
@@ -43,5 +43,30 @@ export function deleteConversation(db: Database, conversationId: number): void {
     for (const [table, predicate] of Object.entries(conversationPredicates)) {
       if (predicate !== null) db.query(`DELETE FROM ${table} WHERE ${predicate}`).run(conversationId);
     }
+  }).immediate();
+}
+
+function findOrphanedConversations(serviceDb: Database, durableDb: Database): { id: number }[] {
+  if (serviceDb === durableDb) {
+    return durableDb.query<{ id: number }, []>(`
+      SELECT id FROM pi_conversations
+      EXCEPT SELECT conversation_id FROM pi_thread_conversations
+    `).all();
+  }
+  const mapped = new Set(serviceDb.query<{ conversation_id: number }, []>(
+    "SELECT conversation_id FROM pi_thread_conversations",
+  ).all().map(({ conversation_id }) => conversation_id));
+  return durableDb.query<{ id: number }, []>("SELECT id FROM pi_conversations").all().filter(({ id }) => !mapped.has(id));
+}
+
+/** Sweep initialized storage in the runtime writer before opening the Harness. */
+export function sweepOrphanedConversations(serviceDb: Database, dbPath: string): number {
+  using separateDurableDb = serviceDb.filename === dbPath ? undefined : new Database(dbPath, { readwrite: true });
+  const durableDb = separateDurableDb ?? serviceDb;
+  if (findOrphanedConversations(serviceDb, durableDb).length === 0) return 0;
+  return durableDb.transaction(() => {
+    const orphans = findOrphanedConversations(serviceDb, durableDb);
+    for (const { id } of orphans) deleteConversation(durableDb, id);
+    return orphans.length;
   }).immediate();
 }

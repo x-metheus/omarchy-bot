@@ -1,19 +1,23 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, defineDoc, defineTool, Harness } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, defineTool, GenerationTask, Harness, LiveDoc, UserEntry, type Conversation } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { DeleteBotResultDto } from "@omarchy-bot/protocol";
 import { api, makeBot, sendToBot, startDaemon } from "../../../../../tests/integration/helpers/harness.ts";
+import { until } from "../../../../../tests/integration/helpers/bot-screen-load-observe.ts";
+import type { Config } from "../../bootstrap/config.ts";
+import { openDb } from "../../persistence/db.ts";
 import { setSetting } from "../../persistence/settings.ts";
 import { deleteConversation, durableConversationTables } from "./conversationDeletion.ts";
 import { openThreadConversation } from "./conversations.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
+import { openBotRuntime } from "./runtime.ts";
 
 function piTables(db: Database): string[] {
   return db.query<{ name: string }, []>(
@@ -90,6 +94,121 @@ test("a failed mapping insert prevents the first write from persisting message a
   expect(JSON.stringify(after)).not.toContain(attachment);
   expect(after.filter(({ table }) => table !== "pi_durable_metadata")).toEqual(before);
 }));
+
+test.each(["shared database", "split databases"] as const)("runtime startup sweeps unmapped conversations before resuming mapped generation (%s)", async (layout) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "durable-conversation-sweep-"));
+  const paths = {
+    dbPath: path.join(directory, "service.sqlite"), stateDir: directory, homeDir: directory, dataDir: directory,
+    sharedWorkspaceDir: directory, downloadsDir: directory, artifactsDir: path.join(directory, "artifacts"),
+  };
+  const context = BACKGROUND_CONTEXT;
+  const agent = { model: { provider: "fake", modelId: "fake-model" } };
+  const provider = fauxProvider({ provider: "fake", models: [{ id: "fake-model" }] });
+  const providerInputs: string[] = [];
+  const reply = ({ messages }: { messages: readonly unknown[] }) => {
+    providerInputs.push(JSON.stringify(messages));
+    return fauxAssistantMessage("resumed generation");
+  };
+  provider.setResponses([reply, reply]);
+  const models = createModels();
+  models.setProvider(provider.provider);
+  const taskDocument = defineDoc({
+    kind: "test.sweep-task", scope: "task", version: 1, initial: () => ({ input: "" }), checkpointWhen: () => false,
+  });
+  async function seedGeneration(conversation: Conversation, input: string) {
+    // Commit a placed input and its pending generation without enabling the fixture's scheduler.
+    return conversation.commit(async (tx) => {
+      const entry = await tx.appendEntry(UserEntry, conversation.id, { model: [{ role: "user", content: input, timestamp: 0 }] });
+      const submission = await tx.createSubmission({ type: "input", status: "placed", entry: entry.id, requestId: input, conversationId: conversation.id });
+      const taskId = await tx.createTask(GenerationTask, {}, { ownership: { kind: "conversation" } });
+      (await tx.doc(LiveDoc, conversation.id)).run = { first: entry.id, inputs: [submission.id], taskId, turns: 0 };
+      (await tx.doc(taskDocument, taskId)).input = input;
+      return submission.id;
+    }, context);
+  }
+  function conversationRows(db: Database) {
+    return piRows(db).filter(({ table }) => table !== "pi_durable_metadata");
+  }
+
+  try {
+    const servicePath = layout === "split databases" ? path.join(directory, "mapping.sqlite") : paths.dbPath;
+    using db = openDb({ ...paths, dbPath: servicePath } as Config);
+    using separateDurableDb = servicePath === paths.dbPath ? undefined : new Database(paths.dbPath);
+    const durableDb = separateDurableDb ?? db;
+    db.exec(`INSERT INTO agents (id, display_name, updated_at) VALUES ('pi', 'Pi', '');
+      INSERT INTO bots (id, name, agent_id, created_at, updated_at) VALUES ('bot', 'Bot', 'pi', '', '');
+      INSERT INTO threads (id, bot_id, title, created_at, updated_at) VALUES ('mapped-thread', 'bot', 'Mapped', '', '');`);
+    const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
+    const harness = await Harness.open(storage, { registry: createRegistry(), models }, context);
+    const fixture = await (async () => {
+      try {
+        const mapped = await openThreadConversation(db, harness, "mapped-thread", "bot", context, { initialSettings: () => agent });
+        const submissionId = await seedGeneration(mapped, "mapped input");
+        const mappedRows = conversationRows(durableDb);
+        const orphan = await harness.createConversation({ ownership: { kind: "ownerless" }, agent }, context);
+        await seedGeneration(orphan, "orphan input");
+
+        // Simulate a crash at a rejected index insert, before the caller can compensate.
+        const interrupted = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+        expect(() => db.run("INSERT INTO pi_thread_conversations VALUES ('missing-thread', 'bot', ?, '')", [interrupted.id]))
+          .toThrow("FOREIGN KEY constraint failed");
+        expect(durableDb.query("SELECT id FROM pi_conversations ORDER BY id").all()).toEqual([mapped, orphan, interrupted].map(({ id }) => ({ id })));
+        expect(durableDb.query("SELECT conversation_id, json_extract(record, '$.kind') AS kind, status FROM pi_tasks ORDER BY id").all()).toEqual([mapped, orphan].map(({ id }) => ({
+          conversation_id: id, kind: "pi.generation", status: "pending",
+        })));
+        expect(providerInputs).toEqual([]);
+        return { mappedRows, submissionId, mappedId: mapped.id };
+      } finally {
+        await harness.close(context);
+        await storage.close(context);
+      }
+    })();
+
+    const atOpen: ReturnType<typeof conversationRows>[] = [];
+    const atResume: ReturnType<typeof conversationRows>[] = [];
+    const originalOpen = Harness.open;
+    const open = spyOn(Harness, "open").mockImplementation(async (storage, options, context) => {
+      atOpen.push(conversationRows(durableDb));
+      const harness = await originalOpen.call(Harness, storage, { ...options, models }, context);
+      const resume = harness.resume.bind(harness);
+      harness.resume = () => {
+        atResume.push(conversationRows(durableDb));
+        resume();
+      };
+      return harness;
+    });
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const runtime = await openBotRuntime(paths, db);
+      try {
+        // The full snapshot covers entries, submissions, tasks, documents, revisions, and record ID claims.
+        expect(atOpen).toEqual([fixture.mappedRows]);
+        expect(atResume).toEqual([fixture.mappedRows]);
+        await until(
+          () => durableDb.query("SELECT id FROM pi_submissions WHERE id = ? AND status = 'done'").get(fixture.submissionId) ?? undefined,
+          5000, "mapped generation did not finish after startup",
+        );
+      } finally {
+        await runtime.close();
+      }
+      expect(providerInputs).toEqual([expect.stringContaining("mapped input")]);
+      expect(providerInputs[0]).not.toContain("orphan input");
+      expect(db.query("SELECT id FROM turns").all()).toEqual([]);
+      expect(db.query("SELECT conversation_id FROM pi_thread_conversations").all()).toEqual([{ conversation_id: fixture.mappedId }]);
+      expect(durableDb.query("SELECT id FROM pi_conversations").all()).toEqual([{ id: fixture.mappedId }]);
+      const settledRows = conversationRows(durableDb);
+      const reopened = await openBotRuntime(paths, db);
+      await reopened.close();
+      expect(conversationRows(durableDb)).toEqual(settledRows);
+      expect(log.mock.calls).toEqual([["Removed 2 orphaned durable conversations on startup"]]);
+    } finally {
+      log.mockRestore();
+      open.mockRestore();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}, 15_000);
 
 test("permanent Bot deletion removes durable messages and attachment contents while preserving another Bot's conversation", () => {
   const reply = { segments: [{ type: "text" as const, text: "ok" }] };

@@ -10,6 +10,7 @@ import type { SidecarBroker } from "../devices/sidecarBroker.ts";
 import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
 import type { PlatformPaths } from "../workspace/paths.ts";
 import { openThreadConversation } from "./conversations.ts";
+import { sweepOrphanedConversations } from "./conversationDeletion.ts";
 import { DurableTranscript } from "./transcript.ts";
 import { resolveActiveTurnIdentity } from "./active-turn.ts";
 import { resolveModelForBot } from "./models.ts";
@@ -437,6 +438,11 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   }
   let services: RuntimeServices | undefined;
   try {
+    if (db) {
+      // Harness.open loads unfinished tasks into memory, so sweep before it reads storage.
+      const removed = await writeService(() => sweepOrphanedConversations(db, paths.dbPath));
+      if (removed > 0) console.log(`Removed ${removed} orphaned durable conversation${removed === 1 ? "" : "s"} on startup`);
+    }
     const registry = createRegistry();
     registry.install(compactionExtension);
     const approvals = db && options.events ? new ApprovalStore(db, options.events, Date.now, (conversationId) => {
