@@ -93,7 +93,7 @@ test("a failed mapping insert prevents the first write from persisting message a
 test("permanent Bot deletion removes durable messages and attachment contents while preserving another Bot's conversation", () => {
   const reply = { segments: [{ type: "text" as const, text: "ok" }] };
   return withFakeRuntimeProvider([reply, reply, reply], {}, async () => {
-    const h = await startDaemon();
+    const h = await startDaemon(undefined, { seedDurableProvider: false });
     const { db, cfg, credentials, attachments, turns } = h.svc;
     try {
       await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
@@ -146,7 +146,7 @@ test("permanent Bot deletion removes durable messages and attachment contents wh
 test("a failed first-Turn conversation mapping leaves no durable data and the Bot can still be deleted", () => {
   const reply = { segments: [{ type: "text" as const, text: "ok" }] };
   return withFakeRuntimeProvider([reply], {}, async () => {
-    const h = await startDaemon();
+    const h = await startDaemon(undefined, { seedDurableProvider: false });
     const { db, cfg, credentials, attachments, threads, turns } = h.svc;
     try {
       await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -7,8 +7,7 @@ import {
   durableSuiteToolResultEntries,
   durableSuiteToolResults,
 } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
-import { setSetting } from "../../apps/daemon/src/persistence/settings.ts";
-import type { BotDto, BotViewDto, MessageDto, ThreadDto } from "../../packages/protocol/src/index.ts";
+import type { AttachmentDto, BotDto, BotViewDto, MessageDto, ThreadDto } from "../../packages/protocol/src/index.ts";
 import {
   api,
   apiStatus,
@@ -22,20 +21,6 @@ import {
   type Harness,
 } from "./helpers/harness.ts";
 
-interface FakeWorkerObservation {
-  type: "session.open" | "session.resume" | "message.send";
-  requestId: string;
-  botId?: string;
-  threadId?: string;
-  sessionId?: string;
-  nativeSessionId?: string;
-  turnId?: string;
-  options?: { cwd?: string; instructions?: string; model?: string };
-  message?: { text?: string; attachments?: unknown[] };
-  computer?: { botId?: string; turnId?: string; workerSessionId?: string; surfaceId?: string };
-  botMessage?: { botId?: string; turnId?: string; workerSessionId?: string };
-}
-
 interface DeliveryStateRow {
   state: "queued" | "dispatching" | "delivered" | "failed";
   target_turn_id: string | null;
@@ -43,7 +28,6 @@ interface DeliveryStateRow {
 }
 
 const PI_CONFORMANCE_FILE = "pi-fake-pi-1.json";
-const durable = process.env.OMARCHY_TEST_DURABLE === "1";
 const forgedIdentityError = 'Validation failed for tool "send_bot_message":\n  - botId: unknown field\n  - turnId: unknown field';
 
 function setPiProbeCapabilities(
@@ -58,30 +42,6 @@ function setPiProbeCapabilities(
       fakeCapabilities: capabilities,
     }),
   );
-}
-
-function workerObservations(h: Harness): FakeWorkerObservation[] {
-  const log = path.join(h.home, "fake-agent-observations.ndjson");
-  if (!existsSync(log)) return [];
-  return readFileSync(log, "utf8")
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as FakeWorkerObservation);
-}
-
-async function waitForWorkerObservation(
-  h: Harness,
-  predicate: (observation: FakeWorkerObservation) => boolean,
-  timeoutMs = 5_000,
-): Promise<FakeWorkerObservation> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const observation = workerObservations(h).find(predicate);
-    if (observation !== undefined) return observation;
-    if (Date.now() > deadline) throw new Error("fake Agent never observed the expected command");
-    // The worker is a subprocess, so no in-process fake clock can drive its I/O.
-    await Bun.sleep(25);
-  }
 }
 
 function deliveryRow(h: Harness, deliveryId: string): DeliveryStateRow {
@@ -105,7 +65,7 @@ async function waitForDeliveryState(
     if (Date.now() > deadline) {
       throw new Error(`delivery ${deliveryId} remained ${row.state} instead of becoming ${state}`);
     }
-    // Delivery persistence is produced by daemon/worker subprocess I/O, not a local timer.
+    // Wait for the mailbox dispatcher to persist its next state.
     await Bun.sleep(25);
   }
 }
@@ -206,9 +166,7 @@ async function enqueueWhileAgentUnavailable(
   targetBotId: string,
   body: string,
 ): Promise<{ deliveryId: string; threadId: string }> {
-  // Keep the source's independently probed capability inventory available while
-  // interrupting only the target Agent, including its ability to claim new mail.
-  if (!durable) expect(h.svc.agents.capabilityInventory("omp")?.botMail).toBeTrue();
+  // Hold dispatch by marking the target Agent unavailable.
   h.svc.agents.markOffline("pi", "test target readiness interruption");
   const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:${body}`);
   await waitThreadIdle(h, source.threadId);
@@ -222,10 +180,8 @@ async function enqueueWhileAgentUnavailable(
   expect(threads).toHaveLength(1);
   const threadId = threads[0]!.id;
   expect((await messages(h, threadId))[0]?.peerMail?.deliveryId).toBe(deliveryId);
-  if (durable) {
-    await expectDurableMailResult(h, source.threadId, { deliveryId });
-    expectNoDurableDispatch(h, threadId);
-  }
+  await expectDurableMailResult(h, source.threadId, { deliveryId });
+  expectNoDurableDispatch(h, threadId);
   return { deliveryId, threadId };
 }
 
@@ -237,7 +193,7 @@ describe("durable Bot mailbox", () => {
     h = undefined;
   });
 
-  test("a Turn-bound fake worker receives one durable acknowledgement, refuses a repeated send, and creates one visible target exchange", async () => {
+  test("a replayed Bot mail tool call returns the same acknowledgement and creates one visible target exchange", async () => {
     const replays: Array<{ first: unknown; replayed: unknown }> = [];
     h = await startDaemon(undefined, {
       onDurableMailReplay: (first, replayed) => { replays.push({ first, replayed }); },
@@ -266,33 +222,22 @@ describe("durable Bot mailbox", () => {
     expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM bot_mail_deliveries`).get()).toEqual({ count: 1 });
     const deliveryId = /^Bot message acknowledgements: (delivery_[a-f0-9]{32})/.exec(acknowledgement ?? "")?.[1];
     if (deliveryId === undefined) throw new Error("source acknowledgement omitted the delivery ID");
-    const delivered = durable ? await waitForDeliveryState(h, deliveryId, "delivered") : undefined;
-    if (durable) {
-      await expectDurableMailResult(h, source.threadId, { deliveryId });
-      expect(acknowledgements).toEqual([`Bot message acknowledgements: ${deliveryId} queued.`]);
-      expect(replays).toHaveLength(1);
-      expect(replays[0]?.first).toMatchObject({ details: { deliveryId, queued: true } });
-      expect(replays[0]?.replayed).toEqual(replays[0]?.first);
-      expect(h.svc.db.query(`
-        SELECT d.source_turn_id, d.source_tool_call_id, json_extract(t.record, '$.state.outcome.status') AS status
-        FROM pi_tasks t JOIN pi_thread_conversations c ON c.conversation_id = t.conversation_id
-        LEFT JOIN bot_mail_deliveries d ON d.source_tool_call_id = 'pi-task:' || t.id AND d.id = ?
-        WHERE c.thread_id = ? AND json_extract(t.record, '$.kind') = 'pi.tool'
-      `).all(deliveryId, source.threadId)).toEqual([{
-        source_turn_id: source.turnId,
-        source_tool_call_id: expect.stringMatching(/^pi-task:\d+$/),
-        status: "completed",
-      }]);
-    } else {
-      // The repeated Tool Call is refused before the mailbox, so the retry adds no delivery.
-      expect(sourceTranscript).toContainEqual(
-        expect.objectContaining({
-          author: { kind: "bot" },
-          kind: "tool",
-          toolCall: expect.objectContaining({ name: "send_bot_message", status: "completed" }),
-        }),
-      );
-    }
+    const delivered = await waitForDeliveryState(h, deliveryId, "delivered");
+    await expectDurableMailResult(h, source.threadId, { deliveryId });
+    expect(acknowledgements).toEqual([`Bot message acknowledgements: ${deliveryId} queued.`]);
+    expect(replays).toHaveLength(1);
+    expect(replays[0]?.first).toMatchObject({ details: { deliveryId, queued: true } });
+    expect(replays[0]?.replayed).toEqual(replays[0]?.first);
+    expect(h.svc.db.query(`
+      SELECT d.source_turn_id, d.source_tool_call_id, json_extract(t.record, '$.state.outcome.status') AS status
+      FROM pi_tasks t JOIN pi_thread_conversations c ON c.conversation_id = t.conversation_id
+      LEFT JOIN bot_mail_deliveries d ON d.source_tool_call_id = 'pi-task:' || t.id AND d.id = ?
+      WHERE c.thread_id = ? AND json_extract(t.record, '$.kind') = 'pi.tool'
+    `).all(deliveryId, source.threadId)).toEqual([{
+      source_turn_id: source.turnId,
+      source_tool_call_id: expect.stringMatching(/^pi-task:\d+$/),
+      status: "completed",
+    }]);
 
     let targetThreads = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
     expect(targetThreads).toHaveLength(1);
@@ -308,7 +253,7 @@ describe("durable Bot mailbox", () => {
       "GET",
       `/api/threads/${targetThreads[0]!.id}/messages`,
     );
-    if (delivered) await expectDurableDispatch(h, targetThreads[0]!.id, delivered.target_turn_id, deliveryId);
+    await expectDurableDispatch(h, targetThreads[0]!.id, delivered.target_turn_id, deliveryId);
     expect(targetMessages).toEqual([
       expect.objectContaining({
         threadId: targetThreads[0]!.id,
@@ -375,13 +320,11 @@ describe("durable Bot mailbox", () => {
     expect(durableMessages).toHaveLength(1);
     expect(durableMessages[0]?.peerMail?.deliveryId).toBe(deliveryId);
     expect(durableTarget.unreadCount).toBe(1);
-    if (delivered) {
-      expect(deliveryRow(h, deliveryId)).toEqual(delivered);
-      await expectDurableDispatch(h, targetThreads[0]!.id, delivered.target_turn_id, deliveryId);
-    }
+    expect(deliveryRow(h, deliveryId)).toEqual(delivered);
+    await expectDurableDispatch(h, targetThreads[0]!.id, delivered.target_turn_id, deliveryId);
   });
 
-  test("rejects a worker request whose claimed source Bot does not match the active Turn", async () => {
+  test("rejects forged Bot or Turn identity in a mail tool call", async () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Bound source");
     const targetBotId = await makeBot(h, "Unmodified target");
@@ -393,108 +336,42 @@ describe("durable Bot mailbox", () => {
     );
     await waitThreadIdle(h, source.threadId);
 
-    if (durable) {
-      await expectDurableMailResult(h, source.threadId, { error: forgedIdentityError });
-      expect(h.svc.db.query(`SELECT id FROM bot_mail_deliveries`).all()).toEqual([]);
-    } else {
-      expect(await messages(h, source.threadId)).toContainEqual(
-        expect.objectContaining({
-          kind: "tool",
-          toolCall: expect.objectContaining({
-            name: "send_bot_message",
-            status: "error",
-            errorSummary: "Bot message tool context is stale or mismatched",
-          }),
-        }),
-      );
-    }
+    await expectDurableMailResult(h, source.threadId, { error: forgedIdentityError });
+    expect(h.svc.db.query(`SELECT id FROM bot_mail_deliveries`).all()).toEqual([]);
     expect(await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`)).toEqual([]);
     expect(await api<BotViewDto>(h, "GET", `/api/bots/${targetBotId}`)).toMatchObject({
       unreadCount: 0,
     });
-    if (durable) {
-      const accepted = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:Use the active Turn.`);
-      const deliveryId = await durableAcknowledgement(h, accepted.threadId);
-      expect(h.svc.db.query(`
-        SELECT id, source_bot_id, source_turn_id, target_bot_id FROM bot_mail_deliveries
-      `).all()).toEqual([{
-        id: deliveryId, source_bot_id: sourceBotId, source_turn_id: accepted.turnId, target_bot_id: targetBotId,
-      }]);
-    }
+    const accepted = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:Use the active Turn.`);
+    const deliveryId = await durableAcknowledgement(h, accepted.threadId);
+    expect(h.svc.db.query(`
+      SELECT id, source_bot_id, source_turn_id, target_bot_id FROM bot_mail_deliveries
+    `).all()).toEqual([{
+      id: deliveryId, source_bot_id: sourceBotId, source_turn_id: accepted.turnId, target_bot_id: targetBotId,
+    }]);
   });
 
-  test("rejects an authenticated request when the current Agent inventory disables Bot mail", async () => {
+  test("uses the active Turn for mail authorization when the Agent inventory disables Bot mail", async () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Capability-bound source");
     const targetBotId = await makeBot(h, "Capability-bound target");
-    if (durable) {
-      expect(h.svc.agents.capabilityInventory("pi")?.botMail).toBeTrue();
-      setPiProbeCapabilities(h, { botMail: false });
-      await h.svc.agents.recheck("pi");
-      expect(h.svc.agents.capabilityInventory("pi")?.botMail).toBeFalse();
+    expect(h.svc.agents.capabilityInventory("pi")?.botMail).toBeTrue();
+    setPiProbeCapabilities(h, { botMail: false });
+    await h.svc.agents.recheck("pi");
+    expect(h.svc.agents.capabilityInventory("pi")?.botMail).toBeFalse();
 
-      const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:durable authority`);
-      const deliveryId = await durableAcknowledgement(h, source.threadId);
-      const delivered = await waitForDeliveryState(h, deliveryId, "delivered");
-      const threads = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
-      expect(threads).toHaveLength(1);
-      await waitThreadIdle(h, threads[0]!.id);
-      await expectDurableDispatch(h, threads[0]!.id, delivered.target_turn_id, deliveryId);
+    const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:durable authority`);
+    const deliveryId = await durableAcknowledgement(h, source.threadId);
+    const delivered = await waitForDeliveryState(h, deliveryId, "delivered");
+    const threads = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
+    expect(threads).toHaveLength(1);
+    await waitThreadIdle(h, threads[0]!.id);
+    await expectDurableDispatch(h, threads[0]!.id, delivered.target_turn_id, deliveryId);
 
-      const forged = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:unauthorized:forge-source`);
-      await waitThreadIdle(h, forged.threadId);
-      await expectDurableMailResult(h, forged.threadId, { error: forgedIdentityError });
-      expect(h.svc.db.query(`SELECT id FROM bot_mail_deliveries`).all()).toEqual([{ id: deliveryId }]);
-    } else {
-      const releaseFile = `mailbox-capability-${crypto.randomUUID()}.release`;
-      const source = await sendToBot(
-        h,
-        sourceBotId,
-        `send_bot_message_after_release:${releaseFile}:${targetBotId}:must not enqueue`,
-      );
-      await waitForWorkerObservation(
-        h,
-        (observation) =>
-          observation.type === "message.send"
-          && observation.turnId === source.turnId,
-      );
-      const toolDeadline = Date.now() + 5_000;
-      for (;;) {
-        const toolStarted = (await messages(h, source.threadId)).some(
-          (message) =>
-            message.kind === "tool"
-            && message.toolCall?.name === "send_bot_message"
-            && message.toolCall.status === "running",
-        );
-        if (toolStarted) break;
-        if (Date.now() > toolDeadline) {
-          throw new Error("source mailbox Tool Call never started");
-        }
-        // The Tool Call event crosses the fake-worker subprocess boundary.
-        await Bun.sleep(25);
-      }
-
-      setPiProbeCapabilities(h, { botMail: false });
-      await h.svc.agents.recheck("pi");
-      expect(h.svc.agents.capabilityInventory("pi")?.botMail).toBeFalse();
-      writeFileSync(path.join(h.home, releaseFile), "");
-      await waitThreadIdle(h, source.threadId);
-
-      expect(await messages(h, source.threadId)).toContainEqual(
-        expect.objectContaining({
-          kind: "tool",
-          toolCall: expect.objectContaining({
-            name: "send_bot_message",
-            status: "error",
-            errorSummary: "Bot mail is not supported by pi",
-          }),
-        }),
-      );
-      expect(await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`)).toEqual([]);
-      expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM bot_mail_deliveries`).get()).toEqual({
-        count: 0,
-      });
-    }
+    const forged = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:unauthorized:forge-source`);
+    await waitThreadIdle(h, forged.threadId);
+    await expectDurableMailResult(h, forged.threadId, { error: forgedIdentityError });
+    expect(h.svc.db.query(`SELECT id FROM bot_mail_deliveries`).all()).toEqual([{ id: deliveryId }]);
   });
 
   test("rejects self, missing, raw-path, and oversized addressing without delivery artifacts", async () => {
@@ -516,30 +393,16 @@ describe("durable Bot mailbox", () => {
       },
       {
         command: `send_bot_message:${targetBotId}:${"x".repeat(32_001)}`,
-        error: "tool params do not match send_bot_message",
-        durableError: 'Validation failed for tool "send_bot_message":\n  - text: expected at most 32000 characters',
+        error: 'Validation failed for tool "send_bot_message":\n  - text: expected at most 32000 characters',
       },
     ];
 
     for (const testCase of cases) {
       const source = await sendToBot(h, sourceBotId, testCase.command);
       await waitThreadIdle(h, source.threadId);
-      if (durable) {
-        await expectDurableMailResult(h, source.threadId, {
-          error: testCase.durableError ?? testCase.error,
-        });
-      } else {
-        expect(await messages(h, source.threadId)).toContainEqual(
-          expect.objectContaining({
-            kind: "tool",
-            toolCall: expect.objectContaining({
-              name: "send_bot_message",
-              status: "error",
-              errorSummary: testCase.error,
-            }),
-          }),
-        );
-      }
+      await expectDurableMailResult(h, source.threadId, {
+        error: testCase.error,
+      });
     }
 
     expect(await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`)).toEqual([]);
@@ -548,8 +411,8 @@ describe("durable Bot mailbox", () => {
     });
   }, 20_000);
 
-  test("dispatches one accepted delivery through a fresh private target session without disturbing unrelated target work", async () => {
-    h = await startDaemon(undefined, { separateWorkspace: durable });
+  test("dispatches one accepted delivery through a fresh private target conversation without disturbing unrelated target work", async () => {
+    h = await startDaemon(undefined, { separateWorkspace: true });
     const sourceBotId = await makeBot(h, "Source coordinator", "SOURCE-ONLY-INSTRUCTIONS");
     const targetInstructions = "TARGET-CURRENT-INSTRUCTIONS";
     const targetBotId = await makeBot(h, "Target reviewer", targetInstructions);
@@ -563,29 +426,34 @@ describe("durable Bot mailbox", () => {
     const sourceConversation = await sendToBot(h, sourceBotId, `say: ${sourceSecret}`);
     await waitThreadIdle(h, sourceConversation.threadId);
     const sourcePrivateCwd = "/tmp/source-private-workspace";
-    if (durable) writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "mailbox-input"), "Target workspace fixture");
+    writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "mailbox-input"), "Target workspace fixture");
     h.svc.db.query(`UPDATE threads SET cwd = ? WHERE id = ?`).run(
       sourcePrivateCwd,
       sourceConversation.threadId,
     );
     const unrelatedTarget = await sendToBot(h, targetBotId, "hang");
-    if (durable) {
-      expect((await api<ThreadDto>(h, "GET", `/api/threads/${unrelatedTarget.threadId}`)).activeTurn).toMatchObject({
-        id: unrelatedTarget.turnId, status: "working",
-      });
-    } else {
-      await waitForWorkerObservation(
-        h,
-        (observation) => observation.type === "message.send" && observation.turnId === unrelatedTarget.turnId,
-      );
-    }
+    expect((await api<ThreadDto>(h, "GET", `/api/threads/${unrelatedTarget.threadId}`)).activeTurn).toMatchObject({
+      id: unrelatedTarget.turnId, status: "working",
+    });
 
     const body = "mailbox-ordered-output";
+    const attachmentName = "source-only-attachment.txt";
+    const attachmentContents = "SOURCE-ATTACHMENT-SECRET";
+    const draftToken = crypto.randomUUID();
+    const form = new FormData();
+    form.set("file", new Blob([attachmentContents], { type: "text/plain" }), attachmentName);
+    const staged = await authedFetch(h, `${h.baseUrl}/api/attachments/stage`, {
+      method: "POST",
+      headers: { "x-bot-id": sourceBotId, "x-attachment-draft-token": draftToken, "x-command-id": crypto.randomUUID() },
+      body: form,
+    });
+    expect(staged.ok).toBeTrue();
+    const attachment = await staged.json() as AttachmentDto;
     const sourceMailTurn = await api<{ threadId: string; turnId: string }>(
       h,
       "POST",
       `/api/threads/${sourceConversation.threadId}/messages`,
-      { text: `send_bot_message:${targetBotId}:${body}` },
+      { text: `send_bot_message:${targetBotId}:${body}`, attachmentIds: [attachment.id], attachmentDraftToken: draftToken },
     );
     await waitThreadIdle(h, sourceMailTurn.threadId);
 
@@ -606,170 +474,53 @@ describe("durable Bot mailbox", () => {
     await waitThreadIdle(h, mailboxThread.id);
 
     const targetTranscript = await messages(h, mailboxThread.id);
-    if (durable) {
-      await expectDurableMailResult(h, sourceMailTurn.threadId, { deliveryId });
-      const notice = await expectDurableDispatch(h, mailboxThread.id, delivery.target_turn_id, deliveryId);
-      const author = `Message from Bot Source coordinator (${sourceBotId})`;
-      expect(notice).toMatchObject({
-        data: { author, text: body, deliveryId },
-        model: [{ role: "user", content: `${author}: ${body}` }],
-      });
-      expect(targetThreads).toHaveLength(2);
-      expect(targetConversations(h, mailboxThread.id)[0]?.bot_id).toBe(targetBotId);
-      expect(targetConversations(h, mailboxThread.id)[0]?.conversation_id).not.toBe(targetConversations(h, sourceConversation.threadId)[0]?.conversation_id);
-      expect(h.svc.db.query(`SELECT native_session_id FROM turns WHERE id = ?`).get(delivery.target_turn_id)).toEqual({ native_session_id: "" });
-      const agent = await durableSuiteAgent(h.svc.db, mailboxThread.id);
-      expect(agent.cwd).toBe(h.svc.cfg.sharedWorkspaceDir);
-      const entries = await durableSuiteEntries(h.svc.db, mailboxThread.id);
-      const system = entries.flatMap((entry) => entry.model ?? []).findLast((message) => message.role === "system");
-      expect(system?.sections?.instructions).toContain(targetInstructions);
-      expect(system?.sections?.instructions).toContain(path.join(h.svc.cfg.sharedWorkspaceDir, "bots", targetBotId));
-      expect(entries.map(({ kind }) => kind).filter((kind) => kind !== "pi.system")).toEqual([
-        "write", "pi.assistant", "pi.tool-result", "pi.assistant",
-      ]);
-      const targetContext = JSON.stringify({ entries, agent });
-      for (const sourceContext of [sourceConversation.threadId, sourceSecret, "SOURCE-ONLY-INSTRUCTIONS", sourcePrivateCwd]) {
-        expect(targetContext).not.toContain(sourceContext);
-      }
-      expect(h.svc.db.query(`
-        SELECT json_extract(s.record, '$.requestId') AS request_id FROM pi_submissions s
-        JOIN pi_thread_conversations c ON s.conversation_id = c.conversation_id
-        WHERE c.thread_id = ? ORDER BY s.id
-      `).all(sourceConversation.threadId)).toEqual([
-        { request_id: sourceConversation.turnId }, { request_id: sourceMailTurn.turnId },
-      ]);
-      expect(await durableSuiteToolResults(h.svc.db, mailboxThread.id)).toMatchObject([{
-        toolName: "read", isError: false, content: [{ type: "text", text: expect.stringContaining("Target workspace fixture") }],
-      }]);
-      expect(targetTranscript).toEqual([
-        expect.objectContaining({ author: { kind: "system" }, kind: "text", text: body, peerMail: { deliveryId, sourceBotId, sourceName: "Source coordinator" } }),
-        expect.objectContaining({ author: { kind: "bot" }, kind: "thinking", text: "Review the isolated peer mail.", thinking: expect.objectContaining({ state: "completed" }) }),
-        expect.objectContaining({ author: { kind: "bot" }, kind: "tool", toolCall: expect.objectContaining({ name: "read", status: "completed" }) }),
-        expect.objectContaining({ author: { kind: "bot" }, kind: "response", text: "Peer mail handled.", response: expect.objectContaining({ state: "completed" }) }),
-      ]);
-      const unrelatedAfter = await api<ThreadDto>(h, "GET", `/api/threads/${unrelatedTarget.threadId}`);
-      expect(unrelatedAfter.activeTurn).toMatchObject({ id: unrelatedTarget.turnId, status: "working" });
-      expect(h.svc.db.query(`
-        SELECT json_extract(s.record, '$.type') AS type, json_extract(s.record, '$.requestId') AS request_id
-        FROM pi_submissions s JOIN pi_thread_conversations c ON s.conversation_id = c.conversation_id
-        WHERE c.thread_id = ?
-      `).all(unrelatedTarget.threadId)).toEqual([{ type: "input", request_id: unrelatedTarget.turnId }]);
-    } else {
-      expect(targetTranscript).toEqual([
-        expect.objectContaining({
-          author: { kind: "system" },
-          kind: "text",
-          text: body,
-          peerMail: expect.objectContaining({
-            deliveryId,
-            sourceBotId,
-            sourceName: "Source coordinator",
-          }),
-        }),
-        expect.objectContaining({
-          author: { kind: "bot" },
-          kind: "thinking",
-          thinking: expect.objectContaining({ state: "completed" }),
-          text: "Review the isolated peer mail.",
-        }),
-        expect.objectContaining({
-          author: { kind: "bot" },
-          kind: "tool",
-          toolCall: expect.objectContaining({
-            name: "read",
-            status: "completed",
-            target: "mailbox-input",
-          }),
-        }),
-        expect.objectContaining({
-          author: { kind: "bot" },
-          kind: "event",
-          payload: expect.objectContaining({
-            capability: "fake.progress",
-            sensitivity: "public",
-            payload: { stage: "peer-mail" },
-          }),
-        }),
-        expect.objectContaining({
-          author: { kind: "bot" },
-          kind: "response",
-          response: expect.objectContaining({ state: "completed" }),
-          text: "Peer mail handled.",
-        }),
-      ]);
-
-      const persistedTurns = h.svc.db.query(
-        `SELECT id, native_session_id FROM turns WHERE thread_id = ? ORDER BY started_at`,
-      ).all(mailboxThread.id) as Array<{ id: string; native_session_id: string }>;
-      expect(persistedTurns).toEqual([
-        { id: delivery.target_turn_id, native_session_id: expect.stringMatching(/^fake:\/\/s\d+$/) },
-      ]);
-
-      const targetSession = workerObservations(h).filter(
-        (observation) =>
-          observation.type === "session.open"
-          && observation.botId === targetBotId
-          && observation.threadId === mailboxThread.id,
-      );
-      expect(targetSession).toHaveLength(1);
-      expect(targetSession[0]).toMatchObject({
-        botId: targetBotId,
-        threadId: mailboxThread.id,
-        options: { cwd: path.join(h.home, ".omarchy-bot", "workspace"), instructions: targetInstructions },
-      });
-      expect(targetSession[0]?.options).not.toHaveProperty("model");
-
-      const targetInput = workerObservations(h).find(
-        (observation) =>
-          observation.type === "message.send"
-          && observation.turnId === delivery.target_turn_id,
-      );
-      expect(targetInput).toMatchObject({
-        sessionId: targetSession[0]?.sessionId,
-        message: {
-          text: `Message from Bot Source coordinator (${sourceBotId}):\n\n${body}`,
-        },
-        computer: {
-          botId: targetBotId,
-          turnId: delivery.target_turn_id,
-          workerSessionId: targetSession[0]?.sessionId,
-          surfaceId: targetBot.surfaceId,
-        },
-        botMessage: {
-          botId: targetBotId,
-          turnId: delivery.target_turn_id,
-          workerSessionId: targetSession[0]?.sessionId,
-        },
-      });
-      expect(targetInput?.message).not.toHaveProperty("attachments");
-      const serializedTargetInput = JSON.stringify(targetInput);
-      expect(serializedTargetInput).not.toContain(sourceConversation.threadId);
-      expect(serializedTargetInput).not.toContain(sourceSecret);
-      expect(serializedTargetInput).not.toContain("SOURCE-ONLY-INSTRUCTIONS");
-      expect(serializedTargetInput).not.toContain("memory");
-
-      const sourceSessions = workerObservations(h).filter(
-        (observation) =>
-          (observation.type === "session.open" || observation.type === "session.resume")
-          && observation.botId === sourceBotId,
-      );
-      expect(sourceSessions).toHaveLength(2);
-      expect(sourceSessions[1]?.type).toBe("session.resume");
-      expect(sourceSessions[1]?.options).toMatchObject({
-        cwd: sourcePrivateCwd,
-        instructions: "SOURCE-ONLY-INSTRUCTIONS",
-      });
-      expect(targetSession[0]?.nativeSessionId).not.toBe(sourceSessions[1]?.nativeSessionId);
-
-      const unrelatedAfter = await api<ThreadDto>(h, "GET", `/api/threads/${unrelatedTarget.threadId}`);
-      expect(serializedTargetInput).not.toContain(sourcePrivateCwd);
-      expect(unrelatedAfter.activeTurn).toMatchObject({ id: unrelatedTarget.turnId, status: "working" });
-      const controlCommands = existsSync(path.join(h.home, "fake-worker-commands.log"))
-        ? readFileSync(path.join(h.home, "fake-worker-commands.log"), "utf8")
-        : "";
-      expect(controlCommands).not.toContain("message.steer");
-      expect(controlCommands).not.toContain("turn.abort");
+    await expectDurableMailResult(h, sourceMailTurn.threadId, { deliveryId });
+    const notice = await expectDurableDispatch(h, mailboxThread.id, delivery.target_turn_id, deliveryId);
+    const author = `Message from Bot Source coordinator (${sourceBotId})`;
+    expect(notice.data).toEqual({ author, text: body, deliveryId });
+    expect(notice.model).toMatchObject([{ role: "user", content: `${author}: ${body}` }]);
+    expect(targetThreads).toHaveLength(2);
+    expect(targetConversations(h, mailboxThread.id)[0]?.bot_id).toBe(targetBotId);
+    expect(targetConversations(h, mailboxThread.id)[0]?.conversation_id).not.toBe(targetConversations(h, sourceConversation.threadId)[0]?.conversation_id);
+    expect(h.svc.db.query(`SELECT native_session_id FROM turns WHERE id = ?`).get(delivery.target_turn_id)).toEqual({ native_session_id: "" });
+    const agent = await durableSuiteAgent(h.svc.db, mailboxThread.id);
+    expect(agent.cwd).toBe(h.svc.cfg.sharedWorkspaceDir);
+    const entries = await durableSuiteEntries(h.svc.db, mailboxThread.id);
+    const system = entries.flatMap((entry) => entry.model ?? []).findLast((message) => message.role === "system");
+    expect(system?.sections?.instructions).toContain(targetInstructions);
+    expect(system?.sections?.instructions).toContain(path.join(h.svc.cfg.sharedWorkspaceDir, "bots", targetBotId));
+    expect(entries.map(({ kind }) => kind).filter((kind) => kind !== "pi.system")).toEqual([
+      "write", "pi.assistant", "pi.tool-result", "pi.assistant",
+    ]);
+    const sourceEntries = await durableSuiteEntries(h.svc.db, sourceConversation.threadId);
+    expect(JSON.stringify(sourceEntries)).toContain(attachmentContents);
+    const targetContext = JSON.stringify({ entries, agent });
+    for (const sourceContext of [sourceConversation.threadId, sourceSecret, "SOURCE-ONLY-INSTRUCTIONS", sourcePrivateCwd, attachmentName, attachmentContents]) {
+      expect(targetContext).not.toContain(sourceContext);
     }
+    expect(h.svc.db.query(`
+      SELECT json_extract(s.record, '$.requestId') AS request_id FROM pi_submissions s
+      JOIN pi_thread_conversations c ON s.conversation_id = c.conversation_id
+      WHERE c.thread_id = ? ORDER BY s.id
+    `).all(sourceConversation.threadId)).toEqual([
+      { request_id: sourceConversation.turnId }, { request_id: sourceMailTurn.turnId },
+    ]);
+    expect(await durableSuiteToolResults(h.svc.db, mailboxThread.id)).toMatchObject([{
+      toolName: "read", isError: false, content: [{ type: "text", text: expect.stringContaining("Target workspace fixture") }],
+    }]);
+    expect(targetTranscript).toEqual([
+      expect.objectContaining({ author: { kind: "system" }, kind: "text", text: body, peerMail: { deliveryId, sourceBotId, sourceName: "Source coordinator" } }),
+      expect.objectContaining({ author: { kind: "bot" }, kind: "thinking", text: "Review the isolated peer mail.", thinking: expect.objectContaining({ state: "completed" }) }),
+      expect.objectContaining({ author: { kind: "bot" }, kind: "tool", toolCall: expect.objectContaining({ name: "read", status: "completed", target: "mailbox-input" }) }),
+      expect.objectContaining({ author: { kind: "bot" }, kind: "response", text: "Peer mail handled.", response: expect.objectContaining({ state: "completed" }) }),
+    ]);
+    const unrelatedAfter = await api<ThreadDto>(h, "GET", `/api/threads/${unrelatedTarget.threadId}`);
+    expect(unrelatedAfter.activeTurn).toMatchObject({ id: unrelatedTarget.turnId, status: "working" });
+    expect(h.svc.db.query(`
+      SELECT json_extract(s.record, '$.type') AS type, json_extract(s.record, '$.requestId') AS request_id
+      FROM pi_submissions s JOIN pi_thread_conversations c ON s.conversation_id = c.conversation_id
+      WHERE c.thread_id = ?
+    `).all(unrelatedTarget.threadId)).toEqual([{ type: "input", request_id: unrelatedTarget.turnId }]);
   });
 
   test("a private-folder failure uses the same bounded reason for the target Turn and delivery", async () => {
@@ -790,13 +541,11 @@ describe("durable Bot mailbox", () => {
     const targetThreads = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
     expect(targetThreads).toHaveLength(1);
     expect(targetThreads[0]?.latestTurn).toMatchObject({ id: failed.target_turn_id, status: "failed", reason });
-    if (durable) {
-      await expectDurableMailResult(h, source.threadId, { deliveryId });
-      expectNoDurableDispatch(h, targetThreads[0]!.id, failed.target_turn_id!);
-    }
+    await expectDurableMailResult(h, source.threadId, { deliveryId });
+    expectNoDurableDispatch(h, targetThreads[0]!.id, failed.target_turn_id!);
   });
 
-  test("marks delivery on worker acceptance while a later target failure remains only an ordinary failed target Turn", async () => {
+  test("marks delivery on runtime admission while a later target failure remains only an ordinary failed target Turn", async () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Failure source");
     const targetBotId = await makeBot(h, "Failure target");
@@ -842,11 +591,9 @@ describe("durable Bot mailbox", () => {
     expect(
       sourceTranscript.some((message) => message.text?.includes("fake peer-mail failure")),
     ).toBeFalse();
-    if (durable) {
-      await expectDurableMailResult(h, source.threadId, { deliveryId });
-      await expectDurableDispatch(h, failedThread.id, accepted.target_turn_id, deliveryId, "unanswered");
-      expect(await messages(h, source.threadId)).toEqual(sourceTranscript);
-    }
+    await expectDurableMailResult(h, source.threadId, { deliveryId });
+    await expectDurableDispatch(h, failedThread.id, accepted.target_turn_id, deliveryId, "unanswered");
+    expect(await messages(h, source.threadId)).toEqual(sourceTranscript);
   });
 
   test("direct target deletion cascades queued mail and its visible target-owned Thread", async () => {
@@ -860,7 +607,7 @@ describe("durable Bot mailbox", () => {
       "remove this queued exchange",
     );
 
-    const peerMailStarts = durable ? spyOn(h.svc.turns, "startPeerMailTurn") : undefined;
+    const peerMailStarts = spyOn(h.svc.turns, "startPeerMailTurn");
     try {
       const deletion = await api<{ status: string }>(h, "DELETE", `/api/bots/${targetBotId}`, {});
 
@@ -872,17 +619,9 @@ describe("durable Bot mailbox", () => {
       expect(
         h.svc.db.query(`SELECT id FROM bot_mail_deliveries WHERE id = ?`).get(queued.deliveryId),
       ).toBeNull();
-      if (peerMailStarts) {
-        expect(peerMailStarts.mock.calls.filter(([input]) => input.botId === targetBotId)).toEqual([]);
-      } else {
-        expect(
-          workerObservations(h).filter(
-            (observation) => observation.type === "session.open" && observation.botId === targetBotId,
-          ),
-        ).toEqual([]);
-      }
+      expect(peerMailStarts.mock.calls.filter(([input]) => input.botId === targetBotId)).toEqual([]);
     } finally {
-      peerMailStarts?.mockRestore();
+      peerMailStarts.mockRestore();
     }
   });
 
@@ -895,24 +634,13 @@ describe("durable Bot mailbox", () => {
     const releaseAbort = Promise.withResolvers<void>();
     const turns = h.svc.turns;
     const abortTurn = turns.abortTurn;
-    if (durable) {
-      expect((await api<ThreadDto>(h, "GET", `/api/threads/${activeTarget.threadId}`)).activeTurn).toMatchObject({
-        id: activeTarget.turnId, status: "working",
-      });
-      turns.abortTurn = async function (turnId, reason) {
-        if (turnId === activeTarget.turnId) await releaseAbort.promise;
-        return abortTurn.call(this, turnId, reason);
-      };
-    } else {
-      await waitForWorkerObservation(
-        h,
-        (observation) => observation.type === "message.send" && observation.turnId === activeTarget.turnId,
-      );
-      writeFileSync(
-        path.join(h.home, "conformance", "pi-fake-pi-1.json"),
-        JSON.stringify({ ok: true, image: "verified", fakeAbortReleaseFile: "release-mailbox-delete" }),
-      );
-    }
+    expect((await api<ThreadDto>(h, "GET", `/api/threads/${activeTarget.threadId}`)).activeTurn).toMatchObject({
+      id: activeTarget.turnId, status: "working",
+    });
+    turns.abortTurn = async function (turnId, reason) {
+      if (turnId === activeTarget.turnId) await releaseAbort.promise;
+      return abortTurn.call(this, turnId, reason);
+    };
 
     const deletion = authedFetch(h, `${h.baseUrl}/api/bots/${targetBotId}`, {
       method: "DELETE",
@@ -937,33 +665,16 @@ describe("durable Bot mailbox", () => {
         `send_bot_message:${targetBotId}:must not cross deletion`,
       );
       await waitThreadIdle(h, source.threadId);
-      if (durable) {
-        await expectDurableMailResult(h, source.threadId, { error: "target Bot deletion is in progress" });
-        expect((await messages(h, source.threadId)).some((message) => message.text?.startsWith("Bot message acknowledgements:"))).toBeFalse();
-        expect(await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`)).toMatchObject([{ id: activeTarget.threadId }]);
-      } else {
-        expect(await messages(h, source.threadId)).toContainEqual(
-          expect.objectContaining({
-            kind: "tool",
-            toolCall: expect.objectContaining({
-              name: "send_bot_message",
-              status: "error",
-              errorSummary: "target Bot deletion is in progress",
-            }),
-          }),
-        );
-      }
+      await expectDurableMailResult(h, source.threadId, { error: "target Bot deletion is in progress" });
+      expect((await messages(h, source.threadId)).some((message) => message.text?.startsWith("Bot message acknowledgements:"))).toBeFalse();
+      expect(await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`)).toMatchObject([{ id: activeTarget.threadId }]);
       expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM bot_mail_deliveries`).get()).toEqual({
         count: 0,
       });
 
     } finally {
-      if (durable) {
-        releaseAbort.resolve();
-        turns.abortTurn = abortTurn;
-      } else {
-        writeFileSync(path.join(h.home, "release-mailbox-delete"), "release");
-      }
+      releaseAbort.resolve();
+      turns.abortTurn = abortTurn;
       deletionResponse = await deletion;
     }
     expect(deletionResponse.ok).toBeTrue();
@@ -991,17 +702,7 @@ describe("durable Bot mailbox", () => {
       target_turn_id: null,
       failure_reason: null,
     });
-    if (durable) {
-      expectNoDurableDispatch(h, queued.threadId);
-    } else {
-      expect(
-        workerObservations(h).filter(
-          (observation) =>
-            observation.type === "session.open"
-            && observation.threadId === queued.threadId,
-        ),
-      ).toEqual([]);
-    }
+    expectNoDurableDispatch(h, queued.threadId);
 
     h.svc.db.query(`DELETE FROM bot_deletions WHERE bot_id = ?`).run(targetBotId);
     expect((await api<{ status: string }>(h, "DELETE", `/api/bots/${targetBotId}`, {})).status).toBe(
@@ -1036,39 +737,23 @@ describe("durable Bot mailbox", () => {
       unreadThreadId: queued.threadId,
       previewText: `From Readiness source: ${body}`,
     });
-    if (durable) {
-      expectNoDurableDispatch(h, queued.threadId);
-    } else {
-      expect(
-        workerObservations(h).filter(
-          (observation) => observation.type === "session.open" && observation.botId === targetBotId,
-        ),
-      ).toHaveLength(0);
-    }
+    expectNoDurableDispatch(h, queued.threadId);
 
     await h.svc.agents.recheck("pi");
     const delivered = await waitForDeliveryState(h, queued.deliveryId, "delivered");
     await waitThreadIdle(h, queued.threadId);
     expect(delivered.target_turn_id).not.toBeNull();
-    if (durable) {
-      await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
-    } else {
-      expect(
-        workerObservations(h).filter(
-          (observation) => observation.type === "session.open" && observation.botId === targetBotId,
-        ),
-      ).toHaveLength(1);
-    }
+    await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
   });
 
-  if (durable) test("dispatches queued peer mail durably after a worker Turn and reuses the conversation for a user Turn", async () => {
+  test("dispatches queued peer mail on a Thread with a historical session and reuses its conversation for a user Turn", async () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Queued mail source");
     const targetBotId = await makeBot(h, "Queued mail target");
     const body = "mailbox-ordered-output";
     writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "mailbox-input"), "Target workspace fixture");
 
-    // Hold dispatch while the source enqueues mail, then let the worker run a user Turn on the target.
+    // Hold dispatch while the source enqueues mail, then seed a historical target Turn.
     const agents = h.svc.agents;
     const isReady = agents.isReady.bind(agents);
     const readiness = spyOn(agents, "isReady").mockImplementation((id) => id !== "pi" && isReady(id));
@@ -1084,14 +769,15 @@ describe("durable Bot mailbox", () => {
     if (!thread) throw new Error("Expected a target mailbox Thread");
     const threadId = thread.id;
 
-    setSetting(h.svc.db, "runtime", "worker");
-    const worker = await sendToThread(h, threadId, "say:Worker Turn complete.");
-    expect((await h.svc.turns.waitForTerminal(worker.turnId)).status).toBe("completed");
-    expect(h.svc.threads.getNativeSession(threadId)).toMatch(/^fake:\/\/s\d+$/);
-    expectNoDurableDispatch(h, threadId, worker.turnId);
+    const historicalTurnId = `turn_${crypto.randomUUID().replace(/-/g, "")}`;
+    const nativeSessionId = "fake://s1";
+    h.svc.threads.setNativeSession(threadId, nativeSessionId);
+    h.svc.threads.insertTurnRow({ id: historicalTurnId, threadId, botId: targetBotId, nativeSessionId });
+    h.svc.db.query("UPDATE turns SET status = 'completed', finished_at = started_at WHERE id = ?").run(historicalTurnId);
+    expect((await h.svc.turns.waitForTerminal(historicalTurnId)).status).toBe("completed");
+    expect(h.svc.threads.getNativeSession(threadId)).toBe(nativeSessionId);
+    expectNoDurableDispatch(h, threadId, historicalTurnId);
     expect(deliveryRow(h, deliveryId).state).toBe("queued");
-
-    setSetting(h.svc.db, "runtime", "durable");
     agents.markOffline("pi", "trigger the queued delivery on readiness");
     await agents.recheck("pi");
 
@@ -1108,6 +794,7 @@ describe("durable Bot mailbox", () => {
     const followUp = await sendToThread(h, threadId, "say:Continue after peer mail.");
     expect((await h.svc.turns.waitForTerminal(followUp.turnId)).status).toBe("completed");
     expect(targetConversations(h, threadId)).toEqual(conversations);
+    expect(h.svc.threads.getNativeSession(threadId)).toBe(nativeSessionId);
   });
 
   test("dispatches queued mail after source deletion without inventing a live source ID", async () => {
@@ -1134,22 +821,10 @@ describe("durable Bot mailbox", () => {
     const delivered = await waitForDeliveryState(h, queued.deliveryId, "delivered");
     await waitThreadIdle(h, queued.threadId);
     expect(delivered.target_turn_id).not.toBeNull();
-    if (durable) {
-      const notice = await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
-      const author = "Message from Bot Deleted queue source";
-      expect(notice.data).toEqual({ author, text: body, deliveryId: queued.deliveryId });
-      expect(notice.model).toMatchObject([{ role: "user", content: `${author}: ${body}` }]);
-    } else {
-      const targetInput = workerObservations(h).find(
-        (observation) =>
-          observation.type === "message.send"
-          && observation.turnId === delivered.target_turn_id,
-      );
-      expect(targetInput?.message?.text).toBe(
-        `Message from Bot Deleted queue source:\n\n${body}`,
-      );
-      expect(targetInput?.message?.text).not.toContain("(null)");
-    }
+    const notice = await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
+    const author = "Message from Bot Deleted queue source";
+    expect(notice.data).toEqual({ author, text: body, deliveryId: queued.deliveryId });
+    expect(notice.model).toMatchObject([{ role: "user", content: `${author}: ${body}` }]);
   });
 
   test("recovers an acknowledged delivery when the daemon restarts before queue claim", async () => {
@@ -1178,18 +853,8 @@ describe("durable Bot mailbox", () => {
     const delivered = await waitForDeliveryState(h, queued.deliveryId, "delivered");
     await waitThreadIdle(h, queued.threadId);
     expect(delivered.target_turn_id).not.toBeNull();
-    if (durable) {
-      await waitThreadIdle(h, queued.threadId);
-      await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
-    } else {
-      expect(
-        workerObservations(h).filter(
-          (observation) =>
-            observation.type === "message.send"
-            && observation.turnId === delivered.target_turn_id,
-        ),
-      ).toHaveLength(1);
-    }
+    await waitThreadIdle(h, queued.threadId);
+    await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
   });
 
   test("atomically claims once when startup and concurrent readiness triggers converge", async () => {
@@ -1216,18 +881,8 @@ describe("durable Bot mailbox", () => {
     await waitThreadIdle(h, queued.threadId);
     const turns = h.svc.db.query(`SELECT id FROM turns WHERE thread_id = ?`).all(queued.threadId);
     expect(turns).toEqual([{ id: delivered.target_turn_id }]);
-    if (durable) {
-      await waitThreadIdle(h, queued.threadId);
-      await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
-    } else {
-      expect(
-        workerObservations(h).filter(
-          (observation) =>
-            observation.type === "message.send"
-            && observation.turnId === delivered.target_turn_id,
-        ),
-      ).toHaveLength(1);
-    }
+    await waitThreadIdle(h, queued.threadId);
+    await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
   });
 
   test("startup resets an orphaned dispatch claim and dispatches it exactly once", async () => {
@@ -1250,18 +905,8 @@ describe("durable Bot mailbox", () => {
 
     const delivered = await waitForDeliveryState(h, queued.deliveryId, "delivered");
     expect(delivered.target_turn_id).not.toBeNull();
-    if (durable) {
-      await waitThreadIdle(h, queued.threadId);
-      await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
-    } else {
-      expect(
-        workerObservations(h).filter(
-          (observation) =>
-            observation.type === "message.send"
-            && observation.turnId === delivered.target_turn_id,
-        ),
-      ).toHaveLength(1);
-    }
+    await waitThreadIdle(h, queued.threadId);
+    await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
   });
 
   test("startup fails an uncertain external dispatch without creating another target Turn", async () => {
@@ -1305,29 +950,19 @@ describe("durable Bot mailbox", () => {
     expect(
       h.svc.db.query(`SELECT id FROM turns WHERE thread_id = ?`).all(queued.threadId),
     ).toEqual([{ id: targetTurnId }]);
-    if (durable) {
-      expectNoDurableDispatch(h, queued.threadId, targetTurnId);
-    } else {
-      expect(
-        workerObservations(h).filter(
-          (observation) => observation.type === "session.open" && observation.botId === targetBotId,
-        ),
-      ).toHaveLength(0);
-    }
+    expectNoDurableDispatch(h, queued.threadId, targetTurnId);
   });
 
-  test("worker-start rejection becomes one bounded visible failure without replay", async () => {
+  test("runtime configuration rejection becomes one bounded visible failure without replay", async () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Rejected source");
-    const targetBotId = await makeBot(h, "Rejected target", "fake-session-open-failure");
-    if (durable) {
-      // Fail durable conversation configuration before any model input can be admitted.
-      h.svc.db.query(`UPDATE bots SET model = ? WHERE id = ?`).run("missing-provider/private-model-selection", targetBotId);
-    }
+    const targetBotId = await makeBot(h, "Rejected target");
+    // Fail durable conversation configuration before any model input can be admitted.
+    h.svc.db.query(`UPDATE bots SET model = ? WHERE id = ?`).run("missing-provider/private-model-selection", targetBotId);
     const source = await sendToBot(
       h,
       sourceBotId,
-      `send_bot_message:${targetBotId}:reject target worker start`,
+      `send_bot_message:${targetBotId}:reject target conversation configuration`,
     );
     await waitThreadIdle(h, source.threadId);
     const deliveryId = acknowledgementDeliveryId(await messages(h, source.threadId));
@@ -1348,11 +983,9 @@ describe("durable Bot mailbox", () => {
     expect(
       h.svc.db.query(`SELECT id FROM turns WHERE thread_id = ?`).all(targetThreads[0]!.id),
     ).toEqual([{ id: failed.target_turn_id }]);
-    if (durable) {
-      await expectDurableMailResult(h, source.threadId, { deliveryId });
-      expect(failed.failure_reason).not.toContain("private-model-selection");
-      expect(deliveryRow(h, deliveryId)).toEqual(failed);
-      expectNoDurableDispatch(h, targetThreads[0]!.id, failed.target_turn_id);
-    }
+    await expectDurableMailResult(h, source.threadId, { deliveryId });
+    expect(failed.failure_reason).not.toContain("private-model-selection");
+    expect(deliveryRow(h, deliveryId)).toEqual(failed);
+    expectNoDurableDispatch(h, targetThreads[0]!.id, failed.target_turn_id);
   });
 });

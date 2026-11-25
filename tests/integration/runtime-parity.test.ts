@@ -1,91 +1,93 @@
 import { expect, spyOn, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { Config } from "../../apps/daemon/src/bootstrap/config.ts";
 import { withBlockingRuntimeTool, withFakeRuntimeProvider } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
-import { deleteSetting, setSetting } from "../../apps/daemon/src/persistence/settings.ts";
-import { recoverOnStartup } from "../../apps/daemon/src/persistence/db.ts";
+import { setSetting } from "../../apps/daemon/src/persistence/settings.ts";
+import { openDb, recoverOnStartup } from "../../apps/daemon/src/persistence/db.ts";
+import { MessageDto } from "../../packages/protocol/src/index.ts";
 import { api, apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "./helpers/harness.ts";
 
 const parityScript = { input: "parity-stream", thinking: "T", response: "R" };
 const script = [{ segments: [{ type: "thinking" as const, text: parityScript.thinking }, { type: "text" as const, text: parityScript.response }] }];
 
-// Generated identifiers and lifecycle timestamps vary between independent runs; cursors identify their event positions.
-const normalizedKeys = new Set(["id", "threadId", "turnId", "botId", "messageId", "blockId", "startedAt", "completedAt", "createdAt", "finishedAt", "cursor", "eventId"]);
-
-function normalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalize);
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-    key,
-    normalizedKeys.has(key) ? `<${key}>` : normalize(item),
-  ]));
-  return value;
-}
-
-test("durable and worker turns produce the same transcript and events; switch off retains worker behavior", () => withFakeRuntimeProvider(script, {}, async () => {
-  const h = await startDaemon();
+test("a durable Turn preserves the ordered transcript and events without Agent readiness", () => withFakeRuntimeProvider(script, {}, async () => {
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
+  const ready = spyOn(h.svc.agents, "isReady");
+  const inventory = spyOn(h.svc.agents, "capabilityInventory");
   try {
     const botId = await makeBot(h, "Parity");
+    ready.mockReturnValue(false);
+    inventory.mockReturnValue(undefined);
+    expect(h.svc.agents.isReady("pi")).toBeFalse();
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    async function run(runtime: string | null) {
-      if (runtime === null) deleteSetting(h.svc.db, "runtime");
-      else setSetting(h.svc.db, "runtime", runtime);
-      const cursor = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.at(-1)?.cursor ?? 0;
-      const sent = await sendToBot(h, botId, parityScript.input);
-      await waitThreadIdle(h, sent.threadId);
-      const row = h.svc.threads.turnRow(sent.turnId);
-      expect(row?.status).toBe("completed");
-      expect(Number.isFinite(Date.parse(row?.started_at ?? ""))).toBeTrue();
-      expect(Number.isFinite(Date.parse(row?.finished_at ?? ""))).toBeTrue();
-      const transcript = await messages(h, sent.threadId);
-      const events = h.svc.events.replay(cursor, h.svc.events.oldestCursor()).events
-        .filter((event) => event.aggregateId === sent.threadId || event.aggregateId === sent.turnId || event.aggregateId === botId)
-        .map(({ aggregateType, type, payload }) => {
-          if (aggregateType === "bot" && type === "bot.attention") {
-            const attention = payload as { at: unknown };
-            expect(typeof attention.at).toBe("string");
-            const at = Date.parse(attention.at as string);
-            expect(Number.isFinite(at)).toBeTrue();
-            expect(at).toBeGreaterThanOrEqual(Date.parse(row!.started_at));
-            expect(at).toBeLessThanOrEqual(Date.now());
-            // at is the wall-clock time of the run and cannot match across sequential runs.
-            return { aggregateType, type, payload: normalize({ ...attention, at: "<at>" }) };
-          }
-          return { aggregateType, type, payload: normalize(payload) };
-        });
-      return { transcript: normalize(transcript), events };
-    }
-    const worker = await run(null);
-    expect((worker.transcript as { kind: string; seq: number; thinking?: { state: string }; response?: { state: string } }[]).map((message) => ({ kind: message.kind, seq: message.seq, state: message.thinking?.state ?? message.response?.state }))).toEqual([
-      { kind: "text", seq: 1, state: undefined },
-      { kind: "thinking", seq: 2, state: "completed" },
-      { kind: "response", seq: 3, state: "completed" },
-    ]);
-    expect(worker.events.map(({ aggregateType, type }) => `${aggregateType}:${type}`)).toEqual([
+    const cursor = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.at(-1)?.cursor ?? 0;
+    const { turnId, threadId, messageId } = await sendToBot(h, botId, parityScript.input);
+    await waitThreadIdle(h, threadId);
+    const row = h.svc.threads.turnRow(turnId);
+    expect(row?.status).toBe("completed");
+    expect(Number.isFinite(Date.parse(row?.started_at ?? ""))).toBeTrue();
+    expect(Number.isFinite(Date.parse(row?.finished_at ?? ""))).toBeTrue();
+
+    const user: MessageDto = {
+      id: messageId, threadId, seq: 1, author: { kind: "user" }, kind: "text", text: parityScript.input,
+      createdAt: expect.any(String),
+    };
+    const thinking: MessageDto = {
+      id: expect.any(String), threadId, seq: 2, author: { kind: "bot" }, kind: "thinking", text: parityScript.thinking,
+      thinking: { blockId: expect.any(String), state: "completed", startedAt: expect.any(String), completedAt: expect.any(String) },
+      createdAt: expect.any(String),
+    };
+    const response: MessageDto = {
+      id: expect.any(String), threadId, seq: 3, author: { kind: "bot" }, kind: "response", text: parityScript.response,
+      response: { blockId: expect.any(String), state: "completed", startedAt: expect.any(String), completedAt: expect.any(String) },
+      createdAt: expect.any(String),
+    };
+    const transcript = (await messages(h, threadId)).map((message) => MessageDto.parse(message));
+    expect(transcript).toEqual([user, thinking, response]);
+    const events = h.svc.events.replay(cursor, h.svc.events.oldestCursor()).events
+      .filter(({ aggregateId }) => [threadId, turnId, botId].includes(aggregateId));
+    expect(events.map(({ aggregateType, type }) => `${aggregateType}:${type}`)).toEqual([
       "thread:thread.created", "thread:message.appended", "turn:turn.created", "bot:bot.activity", "bot:bot.attention",
       "thread:message.appended", "thread:thinking.updated", "thread:thinking.updated",
       "thread:message.appended", "thread:response.updated", "thread:response.updated", "bot:bot.attention", "turn:turn.status", "bot:bot.activity",
     ]);
-    const ready = spyOn(h.svc.agents, "isReady").mockReturnValue(false);
-    const inventory = spyOn(h.svc.agents, "capabilityInventory").mockReturnValue(undefined);
-    const durable = await run("durable");
+    const ids = { turnId, threadId, botId };
+    function streaming(message: MessageDto, kind: "thinking" | "response", text: string) {
+      const { completedAt, ...lifecycle } = message[kind]!;
+      return { ...message, text, [kind]: { ...lifecycle, state: "streaming" } };
+    }
+    for (const { payload } of events.filter(({ type }) => type === "bot.attention")) {
+      const at = (payload as { at: unknown }).at;
+      expect(typeof at).toBe("string");
+      expect(Number.isFinite(Date.parse(at as string))).toBeTrue();
+      expect(Date.parse(at as string)).toBeGreaterThanOrEqual(Date.parse(row!.started_at));
+      expect(Date.parse(at as string)).toBeLessThanOrEqual(Date.now());
+    }
+    expect(events.map(({ payload }) => payload)).toEqual([
+      ids, user, ids, { status: "active", threadId, turnId }, { threadId, at: expect.any(String) },
+      streaming(thinking, "thinking", ""), streaming(thinking, "thinking", parityScript.thinking), thinking,
+      streaming(response, "response", ""), streaming(response, "response", parityScript.response), response,
+      { threadId, preview: parityScript.response, at: expect.any(String) },
+      { ...ids, from: "working", to: "completed" }, { status: "inactive", threadId, turnId },
+    ]);
+    expect(h.svc.db.query<{ count: number }, []>("SELECT count(*) AS count FROM pi_thread_conversations").get()?.count).toBe(1);
+  } finally {
     ready.mockRestore();
     inventory.mockRestore();
-    expect(h.svc.db.query<{ count: number }, []>("SELECT count(*) AS count FROM pi_thread_conversations").get()?.count).toBe(1);
-    expect(durable).toEqual(worker);
-    expect(await run(null)).toEqual(worker);
-  } finally {
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
   }
 }));
 
 test("durable steering is accepted during a reply", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "a long streamed reply" }] }, { segments: [{ type: "text", text: "redirected" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Steer durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
     const streaming = new Promise<void>((resolve) => { observed = resolve; });
     const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
@@ -106,12 +108,11 @@ test("durable steering is accepted during a reply", () => withFakeRuntimeProvide
 }));
 
 test("durable steering during a tool call lands after the tool result", () => withBlockingRuntimeTool(async (tool) => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Tool steering durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const first = await sendToBot(h, botId, "first");
     await tool.started;
     const steered = await sendToThread(h, first.threadId, "redirect after tool");
@@ -127,12 +128,11 @@ test("durable steering during a tool call lands after the tool result", () => wi
 }));
 
 test("steering targets the running durable turn when a follow-up is queued", () => withBlockingRuntimeTool(async (tool) => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Queued steering durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const first = await sendToBot(h, botId, "first");
     await tool.started;
     const second = await api<{ turnId: string }>(h, "POST", `/api/threads/${first.threadId}/messages`, { text: "second", whenBusy: "followUp" });
@@ -146,12 +146,11 @@ test("steering targets the running durable turn when a follow-up is queued", () 
 }));
 
 test("a durable follow-up runs as its own turn after the first reply", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "first reply is long" }] }, { segments: [{ type: "text", text: "second reply" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Follow-up durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
     const streaming = new Promise<void>((resolve) => { observed = resolve; });
     const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
@@ -170,12 +169,11 @@ test("a durable follow-up runs as its own turn after the first reply", () => wit
 }));
 
 test("a queued durable follow-up runs after a model failure", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "before failure" }], failure: "queued failure" }, { segments: [{ type: "text", text: "recovered" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Failure queue durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
     const streaming = new Promise<void>((resolve) => { observed = resolve; });
     const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
@@ -191,14 +189,13 @@ test("a queued durable follow-up runs after a model failure", () => withFakeRunt
 }));
 
 test("a durable follow-up that loses the idle race starts normally", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "first reply is long" }] }, { segments: [{ type: "text", text: "second reply" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   try {
     const botId = await makeBot(h, "Follow-up idle race");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
     const streaming = new Promise<void>((resolve) => { observed = resolve; });
     const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
@@ -228,12 +225,11 @@ test("a durable follow-up that loses the idle race starts normally", () => withF
 }));
 
 test("failed durable run removes streaming blocks and preserves completed thinking", () => withFakeRuntimeProvider([{ segments: [{ type: "thinking", text: "finished thought" }, { type: "text", text: "partial failure response" }], failure: "stream failed" }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Failed streaming");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const sent = await sendToBot(h, botId, "fail while streaming");
     await waitThreadIdle(h, sent.threadId);
     expect(h.svc.threads.turnRow(sent.turnId)).toMatchObject({ status: "failed", outcome_reason: "stream failed" });
@@ -243,12 +239,11 @@ test("failed durable run removes streaming blocks and preserves completed thinki
 }));
 
 test("same-turn steering can recover from a failed durable run", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "before failure" }], failure: "failed primary" }, { segments: [{ type: "text", text: "recovered response" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Steer recovery");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
     const streaming = new Promise<void>((resolve) => { observed = resolve; });
     const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
@@ -264,12 +259,11 @@ test("same-turn steering can recover from a failed durable run", () => withFakeR
 }));
 
 test("aborting an active durable turn also cancels its queued follow-up", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "first reply is long" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Abort active with queue");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
     const streaming = new Promise<void>((resolve) => { observed = resolve; });
     const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
@@ -286,12 +280,11 @@ test("aborting an active durable turn also cancels its queued follow-up", () => 
 }));
 
 test("aborting a queued durable follow-up leaves the active reply running", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "first reply is long" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Abort queued durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
     const streaming = new Promise<void>((resolve) => { observed = resolve; });
     const unsubscribe = h.svc.events.subscribe((event) => { if (event.type === "response.updated" && (event.payload as { text?: string }).text) observed(); });
@@ -308,12 +301,11 @@ test("aborting a queued durable follow-up leaves the active reply running", () =
 }));
 
 test("aborting a durable turn records cancellation and removes the incomplete reply", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "a long streamed reply" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Abort durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
     const streaming = new Promise<void>((resolve) => { observed = resolve; });
     const unsubscribe = h.svc.events.subscribe((event) => {
@@ -338,7 +330,7 @@ test("aborting a durable turn records cancellation and removes the incomplete re
 test("durable turns configure the default tool-round limit", async () => {
   const limits: (number | null | undefined)[] = [];
   await withFakeRuntimeProvider(Array.from({ length: 4 }, () => ({ segments: [{ type: "text" as const, text: "ok" }] })), { onMaxTurns: (limit) => limits.push(limit) }, async () => {
-    const h = await startDaemon();
+    const h = await startDaemon(undefined, { seedDurableProvider: false });
     try {
       const botId = await makeBot(h, "Limited durable");
       const created = await api<{ id: string; maxTurns: number | null }>(h, "POST", "/api/bots", { name: "Custom limit", agentId: "pi", maxTurns: 3 });
@@ -349,7 +341,6 @@ test("durable turns configure the default tool-round limit", async () => {
       }
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
-      setSetting(h.svc.db, "runtime", "durable");
       const sent = await sendToBot(h, botId, "hello");
       await waitThreadIdle(h, sent.threadId);
       expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
@@ -375,12 +366,11 @@ test("durable turns configure the default tool-round limit", async () => {
 });
 
 test("durable turn reports the model failure reason", () => withFakeRuntimeProvider([{ segments: [], failure: "scripted model failure" }], {}, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Failed durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const sent = await sendToBot(h, botId, "fail");
     await waitThreadIdle(h, sent.threadId);
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("failed");
@@ -395,7 +385,6 @@ test("durable turn fails closed when its selected provider has no credentials", 
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Missing credential");
-    setSetting(h.svc.db, "runtime", "durable");
     setSetting(h.svc.db, "default_model", "missing/model");
     const sent = await sendToBot(h, botId, parityScript.input);
     await waitThreadIdle(h, sent.threadId);
@@ -408,12 +397,11 @@ test("durable turn fails closed when its selected provider has no credentials", 
 });
 
 test("durable streams committed partials and resolves the Bot model again on the next turn", () => withFakeRuntimeProvider([{ segments: [{ type: "thinking", text: "think" }, { type: "text", text: "reply" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Live durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const observed: string[] = [];
     const responseUpdates: { text: string; state: string }[] = [];
     const unsubscribe = h.svc.events.subscribe((event) => {
@@ -450,34 +438,35 @@ test("durable streams committed partials and resolves the Bot model again on the
   }
 }));
 
-test("unrecognized runtime values use the worker and warn once", async () => {
-  const h = await startDaemon();
-  const warning = spyOn(console, "warn").mockImplementation(() => {});
+test.each(["worker", "unexpected"])("historical runtime setting %s leaves Turns on the durable path", async (setting) => {
+  const home = mkdtempSync(path.join(tmpdir(), "omarchy-bot-historical-runtime-"));
   try {
-    const botId = await makeBot(h, "Fallback");
-    setSetting(h.svc.db, "runtime", "unexpected");
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const sent = await sendToBot(h, botId, parityScript.input);
-      await waitThreadIdle(h, sent.threadId);
-      expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
-      expect((await messages(h, sent.threadId)).map((message) => message.kind)).toEqual(["text", "thinking", "response"]);
+    {
+      using db = openDb({ dbPath: path.join(home, "db.sqlite"), artifactsDir: path.join(home, "artifacts") } as Config);
+      setSetting(db, "runtime", setting);
     }
-    expect(warning).toHaveBeenCalledTimes(1);
-    expect(warning).toHaveBeenCalledWith("Unrecognized runtime setting; using worker");
+    const h = await startDaemon(home);
+    try {
+      const botId = await makeBot(h, "Historical runtime settings");
+      const sent = await sendToBot(h, botId, parityScript.input);
+      expect(await h.svc.turns.waitForTerminal(sent.turnId)).toMatchObject({ status: "completed" });
+      expect((await messages(h, sent.threadId)).map(({ kind }) => kind)).toEqual(["text", "thinking", "response"]);
+      expect(h.svc.db.query("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?").get(sent.threadId))
+        .toEqual({ conversation_id: expect.any(Number) });
+    } finally {
+      await h.stop();
+    }
   } finally {
-    warning.mockRestore();
-    await h.stop();
-    rmSync(h.home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
 test("a durable turn streams and completes with an empty Agent registry", () => withFakeRuntimeProvider(script, {}, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "No Agent");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     h.svc.db.exec("CREATE TEMP TABLE saved_agents AS SELECT * FROM agents");
     h.svc.db.exec("PRAGMA foreign_keys = OFF");
     h.svc.db.exec("DELETE FROM agents");
@@ -501,12 +490,11 @@ test("a durable turn streams and completes with an empty Agent registry", () => 
 }));
 
 test("startup preserves a working Turn with a durable submission association", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], {}, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Recovery association");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const sent = await sendToBot(h, botId, "hello");
     await waitThreadIdle(h, sent.threadId);
     h.svc.db.query("UPDATE turns SET status = 'working', finished_at = NULL WHERE id = ?").run(sent.turnId);
@@ -517,12 +505,11 @@ test("startup preserves a working Turn with a durable submission association", (
 }));
 
 test("shutdown aborts and awaits a running durable turn", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "a long streamed reply" }] }], { tokensPerSecond: 10 }, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Shutdown durable");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
     const streaming = new Promise<void>((resolve) => { observed = resolve; });
     const unsubscribe = h.svc.events.subscribe((event) => {

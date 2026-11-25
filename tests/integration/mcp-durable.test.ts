@@ -2,7 +2,6 @@ import { expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { deleteSetting, setSetting } from "../../apps/daemon/src/persistence/settings.ts";
 import { PLUGIN_PROVIDERS, type PluginStateDto } from "../../packages/protocol/src/index.ts";
 import { api, makeBot, messages, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
@@ -10,9 +9,6 @@ const publisher = "https://durable-mcp-publisher.invalid";
 const daemon = path.resolve(import.meta.dir, "../../apps/daemon");
 
 async function withDurableDaemon(root: string, run: (h: Harness) => Promise<void>) {
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  // Like other durable integration tests, exercise the durable path in the default suite too.
-  process.env.OMARCHY_TEST_DURABLE = "1";
   let h: Harness | undefined;
   try {
     h = await startDaemon(root);
@@ -21,8 +17,6 @@ async function withDurableDaemon(root: string, run: (h: Harness) => Promise<void
     try {
       await h?.stop();
     } finally {
-      if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-      else process.env.OMARCHY_TEST_DURABLE = previous;
       if (h) await rm(h.svc.cfg.stateDir, { recursive: true, force: true });
     }
   }
@@ -111,10 +105,6 @@ await server.connect(new StdioServerTransport());
           source: ".mcp.json, .codex/config.toml", transport: { type: "stdio", command: process.execPath, args: [script], envKeys: ["SERVICE_TOKEN"] } }),
       ]);
       expect(JSON.stringify(state)).not.toContain(token);
-      deleteSetting(h.svc.db, "runtime");
-      const worker = await api<PluginStateDto>(h, "GET", "/api/plugins");
-      expect(worker.mcp.find(({ name }) => name === "local")).toMatchObject({ status: "not-connected", toolCount: 0, pendingReload: false });
-      setSetting(h.svc.db, "runtime", "durable");
 
       const aborted = await sendToThread(h, sent.threadId, "mcp-durable: block");
       await waitUntil(() => Bun.file(blocked).exists(), "MCP fixture never entered the blocking call");

@@ -15,7 +15,7 @@ import { FakeBotScreenRuntimeAdapter } from "../computer/fakeBotScreenRuntime.ts
 import { ThreadsService } from "../threads/threads.ts";
 import type { DeleteBotResultDto, DeviceServerFrame, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
-import { installDurableSuiteProvider, withFakeRuntimeProvider } from "./harness-test-support.ts";
+import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore } from "./credentials.ts";
 import { fallbackSecretValuesPath, SecretStore } from "./secrets.ts";
 import { createRuntimeModels } from "./models.ts";
@@ -250,7 +250,7 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
 
 
 test("a durable Turn completes with a stored provider", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "provider reply" }] }], {}, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const apiKey = "test-fake-provider-key";
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey, models: [{ id: "fake-model" }] });
@@ -271,7 +271,7 @@ test("durable user input retains managed text and JSON attachments across restar
     return fauxAssistantMessage("ok");
   };
   return withFakeRuntimeProvider([capture, capture], {}, async () => {
-    const first = await startDaemon();
+    const first = await startDaemon(undefined, { seedDurableProvider: false });
     let daemon = first;
     const stateDir = first.svc.cfg.stateDir;
     try {
@@ -286,7 +286,7 @@ test("durable user input retains managed text and JSON attachments across restar
       expect(first.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
       await first.stop();
 
-      daemon = await startDaemon(first.home, { stateDir });
+      daemon = await startDaemon(first.home, { stateDir, seedDurableProvider: false });
       const followUp = await sendToThread(daemon, sent.threadId, "Recall the files");
       await waitThreadIdle(daemon, sent.threadId);
       expect(daemon.svc.threads.turnRow(followUp.turnId)?.status).toBe("completed");
@@ -322,7 +322,7 @@ test("a durable Turn times out a hung provider while a completed Turn stays comp
       return fauxAssistantMessage([], { stopReason: "aborted" });
     },
   ], {}, async () => {
-    const h = await startDaemon();
+    const h = await startDaemon(undefined, { seedDurableProvider: false });
     try {
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
@@ -350,7 +350,7 @@ async function withFakeProviderDaemon(
   run: (h: Awaited<ReturnType<typeof startDaemon>>) => Promise<void>,
   options: Parameters<typeof startDaemon>[1] = {},
 ) {
-  const h = await startDaemon(undefined, { separateWorkspace: true, ...options });
+  const h = await startDaemon(undefined, { separateWorkspace: true, seedDurableProvider: false, ...options });
   try {
     if (!h.svc.credentials.getForRuntime("fake")) {
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
@@ -652,39 +652,33 @@ test.each(["replies", "times out"] as const)("the next ordinary send %s after a 
 });
 
 test("the durable tool-fail fixture faults the run after its bash call starts", async () => {
-  const restore = installDurableSuiteProvider();
-  try {
-    await withFakeProviderDaemon(async (h) => {
-      const sent = await sendToBot(h, await makeBot(h, "Failed tool round"), "tool-fail");
-      await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "failed", reason: "fake failure" });
-      const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.filter(({ aggregateId }) => aggregateId === sent.threadId);
-      expect(events).toContainEqual(expect.objectContaining({ type: "message.appended", payload: expect.objectContaining({ toolCall: expect.objectContaining({ name: "bash", status: "running" }) }) }));
-      expect(events).toContainEqual(expect.objectContaining({ type: "tool.updated", payload: expect.objectContaining({ toolCall: expect.objectContaining({ name: "bash", status: "error", errorSummary: "Interrupted before completion." }) }) }));
-      expect(h.svc.db.query(`SELECT t.id FROM pi_tasks t JOIN pi_thread_conversations c ON c.conversation_id = t.conversation_id
-        WHERE c.thread_id = ? AND json_extract(t.record, '$.input.callId') = 'fixture-failing-bash'`).all(sent.threadId)).toHaveLength(1);
-    });
-  } finally { restore(); }
+  await withFakeProviderDaemon(async (h) => {
+    const sent = await sendToBot(h, await makeBot(h, "Failed tool round"), "tool-fail");
+    await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "failed", reason: "fake failure" });
+    const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.filter(({ aggregateId }) => aggregateId === sent.threadId);
+    expect(events).toContainEqual(expect.objectContaining({ type: "message.appended", payload: expect.objectContaining({ toolCall: expect.objectContaining({ name: "bash", status: "running" }) }) }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "tool.updated", payload: expect.objectContaining({ toolCall: expect.objectContaining({ name: "bash", status: "error", errorSummary: "Interrupted before completion." }) }) }));
+    expect(h.svc.db.query(`SELECT t.id FROM pi_tasks t JOIN pi_thread_conversations c ON c.conversation_id = t.conversation_id
+      WHERE c.thread_id = ? AND json_extract(t.record, '$.input.callId') = 'fixture-failing-bash'`).all(sent.threadId)).toHaveLength(1);
+  }, { seedDurableProvider: true });
 });
 
 test("durable native bash uses the Shared Workspace cwd with a Sidecar online and sends no Sidecar jobs", async () => {
-  const restore = installDurableSuiteProvider();
-  try {
-    await withFakeProviderDaemon(async (h) => {
-      const deviceId = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-      const frames: DeviceServerFrame[] = [];
-      const port = { send: (frame: DeviceServerFrame) => { frames.push(frame); }, close: () => {} };
-      expect(h.svc.devices.register(port, {
-        type: "register", deviceId, hostname: "laptop", os: "linux", shell: "posix-sh", capabilities: ["shell"],
-      }).ok).toBeTrue();
+  await withFakeProviderDaemon(async (h) => {
+    const deviceId = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const frames: DeviceServerFrame[] = [];
+    const port = { send: (frame: DeviceServerFrame) => { frames.push(frame); }, close: () => {} };
+    expect(h.svc.devices.register(port, {
+      type: "register", deviceId, hostname: "laptop", os: "linux", shell: "posix-sh", capabilities: ["shell"],
+    }).ok).toBeTrue();
 
-      const sent = await sendToBot(h, await makeBot(h, "Native cwd Bot"), "native-bash-cwd", deviceId);
-      await waitThreadIdle(h, sent.threadId);
-      const transcript = await messages(h, sent.threadId);
-      expect(transcript.find(({ toolCall }) => toolCall?.name === "bash")?.toolCall?.status).toBe("completed");
-      expect(transcript.find(({ kind }) => kind === "response")?.text?.trim()).toBe(h.svc.cfg.sharedWorkspaceDir);
-      expect(frames).toEqual([]);
-    });
-  } finally { restore(); }
+    const sent = await sendToBot(h, await makeBot(h, "Native cwd Bot"), "native-bash-cwd", deviceId);
+    await waitThreadIdle(h, sent.threadId);
+    const transcript = await messages(h, sent.threadId);
+    expect(transcript.find(({ toolCall }) => toolCall?.name === "bash")?.toolCall?.status).toBe("completed");
+    expect(transcript.find(({ kind }) => kind === "response")?.text?.trim()).toBe(h.svc.cfg.sharedWorkspaceDir);
+    expect(frames).toEqual([]);
+  }, { seedDurableProvider: true });
 });
 
 test("a durable provider failure redacts app and Bot secrets from the Turn and its status event", () => {
@@ -693,7 +687,7 @@ test("a durable provider failure redacts app and Bot secrets from the Turn and i
   const botToken = "test-bot-token-sentinel";
   const failure = `Provider rejected ${apiKey}, ${mcpToken}, and ${botToken}`;
   return withFakeRuntimeProvider([{ segments: [], failure }], {}, async () => {
-    const h = await startDaemon();
+    const h = await startDaemon(undefined, { seedDurableProvider: false });
     try {
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey, models: [{ id: "fake-model" }] });
       const botId = await makeBot(h, "Failed durable");
@@ -724,7 +718,7 @@ test("a durable provider failure redacts app and Bot secrets from the Turn and i
       // Simulate stopping after the durable submission failed, before the Service recorded that outcome.
       h.svc.db.run("UPDATE turns SET status = 'working', finished_at = NULL, outcome_reason = NULL WHERE id = ?", [sent.turnId]);
       await h.stop();
-      const restarted = await startDaemon(h.home);
+      const restarted = await startDaemon(h.home, { seedDurableProvider: false });
       try { await assertRedactedFailure(restarted, cursor); }
       finally {
         await restarted.stop();
@@ -742,7 +736,7 @@ test.each(["new", "recovered"])("a throwing durable tool finalizer fails a %s Tu
   withFakeRuntimeProvider([{ segments: [{ type: "text", text: "Finished" }] }], {}, async () => {
     const secret = "test-tool-finalizer-secret";
     const reason = "Tool finalization failed for {{secret:finalizer}}";
-    const h = await startDaemon();
+    const h = await startDaemon(undefined, { seedDurableProvider: false });
     const stateDir = h.svc.cfg.stateDir;
     let restarted: typeof h | undefined;
     try {
@@ -766,7 +760,7 @@ test.each(["new", "recovered"])("a throwing durable tool finalizer fails a %s Tu
         throw new Error(`Tool finalization failed for ${secret}`);
       });
       try {
-        if (recovered) restarted = await startDaemon(h.home, { stateDir });
+        if (recovered) restarted = await startDaemon(h.home, { stateDir, seedDurableProvider: false });
         const daemon = restarted ?? h;
         const sent = recovered ?? await send();
         const turn = await daemon.svc.turns.waitForTerminal(sent.turnId, 2_000);
@@ -833,7 +827,7 @@ test("secret storage status reports Bun keychain use and fail-closed restart", a
 });
 
 test("configured conversation uses the Service limit for unset and null Bots and the Bot override otherwise", () => withFakeRuntimeProvider(Array.from({ length: 3 }, () => ({ segments: [{ type: "text" as const, text: "ok" }] })), {}, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Default limit");
     const custom = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Custom limit", agentId: "pi", maxTurns: 3 });
@@ -864,20 +858,17 @@ test("configured conversation uses the Service limit for unset and null Bots and
 }));
 
 test("a steer placed at a final Harness boundary resolves its owning Omarchy turn for computer", async () => {
-  const restore = installDurableSuiteProvider();
   const adapter = new FakeBotScreenRuntimeAdapter();
-  try {
-    await withFakeProviderDaemon(async (h) => {
-      const botId = await makeBot(h, "Steered computer Bot");
-      const sent = await sendToBot(h, botId, `say: ${"initial reply ".repeat(3)}`);
-      await until(() => h.svc.db.query("SELECT 1 FROM messages WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming'").get(sent.turnId), 3_000, "initial reply did not start streaming");
-      const steered = await sendToThread(h, sent.threadId, "computer:click:first");
-      expect(steered).toMatchObject({ turnId: sent.turnId, action: "steered" });
-      await waitThreadIdle(h, sent.threadId);
-      expect(adapter.inputEvents).toHaveLength(3);
-      expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
-    }, { botScreenAdapter: adapter });
-  } finally { restore(); }
+  await withFakeProviderDaemon(async (h) => {
+    const botId = await makeBot(h, "Steered computer Bot");
+    const sent = await sendToBot(h, botId, `say: ${"initial reply ".repeat(3)}`);
+    await until(() => h.svc.db.query("SELECT 1 FROM messages WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming'").get(sent.turnId), 3_000, "initial reply did not start streaming");
+    const steered = await sendToThread(h, sent.threadId, "computer:click:first");
+    expect(steered).toMatchObject({ turnId: sent.turnId, action: "steered" });
+    await waitThreadIdle(h, sent.threadId);
+    expect(adapter.inputEvents).toHaveLength(3);
+    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+  }, { botScreenAdapter: adapter, seedDurableProvider: true });
 });
 
 test("the model request contains the app prompt, Shared Workspace Skills, and Local Sidecar, Bot mail, computer, and browser guidance", () => {
@@ -905,7 +896,7 @@ test("the model request contains the app prompt, Shared Workspace Skills, and Lo
     process.env.PI_CODING_AGENT_DIR = path.join(home, ".pi/agent");
     let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
     try {
-      h = await startDaemon(home);
+      h = await startDaemon(home, { seedDurableProvider: false });
       // Boot seeds a starter Skill. Use only the explicit workspace fixtures in this request.
       rmSync(path.join(workspace, ".agents/skills"), { recursive: true, force: true });
       [workspaceSkill, ...legacyWorkspaceSkills].forEach(writeSkill);
@@ -1026,7 +1017,7 @@ test("a catalog Skill installed with manage_plugins appears in the next durable 
   }, context));
   let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
   try {
-    h = await startDaemon();
+    h = await startDaemon(undefined, { seedDurableProvider: false });
     h.svc.plugins.configure(publisher);
     const botId = await makeBot(h, "Catalog Skill Bot");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
@@ -1059,7 +1050,7 @@ test("a catalog Skill installed with manage_plugins appears in the next durable 
 });
 
 test("the first Turn creates the private folder that survives rename and is removed on deletion", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], {}, async () => {
-  const h = await startDaemon();
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
@@ -1114,7 +1105,7 @@ test("deletion refuses to traverse a symlinked bots folder and can retry", async
 test("an unreadable SKILL.md is skipped and the durable Turn completes", () => {
   const prompts: string[] = [];
   return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
-    const h = await startDaemon();
+    const h = await startDaemon(undefined, { seedDurableProvider: false });
     try {
       const workspace = h.svc.cfg.sharedWorkspaceDir;
       for (const name of ["Available Skill", "Unreadable Skill"]) {

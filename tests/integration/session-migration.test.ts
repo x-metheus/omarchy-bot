@@ -28,7 +28,7 @@ async function withRecordingDaemon(check: (h: Harness, botId: string, requests: 
   });
   try {
     await withFakeRuntimeProvider([{ segments: [{ type: "text", text: reply }] }], {}, async () => {
-      const h = await startDaemon();
+      const h = await startDaemon(undefined, { seedDurableProvider: false });
       try {
         const botId = await makeBot(h, "New durable Thread");
         await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
@@ -44,7 +44,6 @@ async function withRecordingDaemon(check: (h: Harness, botId: string, requests: 
 }
 
 test("a new durable Thread without a legacy session sends only its first user message", () => withRecordingDaemon(async (h, botId, requests) => {
-  setSetting(h.svc.db, "runtime", "durable");
   const current = "Start a new conversation.";
   const { threadId, turnId } = await sendToBot(h, botId, current);
   expect((await h.svc.turns.waitForTerminal(turnId)).status).toBe("completed");

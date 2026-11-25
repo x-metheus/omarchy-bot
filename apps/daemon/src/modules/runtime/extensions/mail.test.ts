@@ -202,7 +202,7 @@ async function withMailDaemon(
   };
   let daemon: Awaited<ReturnType<typeof startDaemon>> | undefined;
   try {
-    daemon = await startDaemon(undefined, botScreenAdapter ? { botScreenAdapter } : {});
+    daemon = await startDaemon(undefined, { seedDurableProvider: false, ...(botScreenAdapter ? { botScreenAdapter } : {}) });
     if (!daemon.svc.credentials.getForRuntime("fake")) {
       await daemon.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     }
