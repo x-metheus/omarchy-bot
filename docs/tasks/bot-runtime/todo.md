@@ -342,7 +342,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
   - Measured on main at `bcfaaf9` (2026-11-25) with the switch on: agent-computer-tool 16 pass and 3 skip, agent-browser-tool 10 pass and 1 skip, bot-mailbox 18 pass, local-sidecar-dispatch 2 pass. All pass with the switch off. The skips are the approved `workerOnly` cases.
   - Closed on this branch: the four remaining Thread and lifecycle failures from the Checkpoint B list, and every other switch-on-only failure, are now either fixed on the durable path or marked `workerOnly` with a reason. The decisions, the resulting totals, and the known limits are recorded under “Checkpoint C closure (2026-11-25)” below.
 - [x] A write outside the allowed folders asks, survives a restart, and writes once (Task 9, `restart.test.ts`)
-- [ ] Review with the human before proceeding
+- [x] Review with the human before proceeding: approved 2026-11-25, and Task 19 started
   - After the Checkpoint C fixes and the removal of every migration, a full sweep of all 104 files ran on main at `e9b0205` (2026-11-25):
     - Switch on: 829 pass, 10 fail, 58 skip.
     - Switch off: 862 pass, 10 fail, 24 skip.

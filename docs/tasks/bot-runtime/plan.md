@@ -87,7 +87,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 - [x] Agent computer, browser, mailbox, and sidecar integration tests pass with the switch on. Across all integration files, no test fails only with the switch on (see todo.md).
 - [x] A write outside the allowed folders asks, survives a restart, and writes once
-- [ ] Review with the human
+- [x] Review with the human (approved 2026-11-25)
 
 ### Phase 4: MCP, web, and workspace
 - [x] Task 13: MCP through `pi-mcp`
