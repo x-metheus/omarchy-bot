@@ -238,11 +238,13 @@ The wait runs inside the replay-safe tool task, as in the prototype: a tool cann
 **Description:** Show pending approvals on the Thread and as notifications, naming the Bot, the action, and the path, with the three answers. Follow `apps/web/AGENTS.md`.
 
 **Acceptance criteria:**
-- [ ] A pending request appears on its Thread and in notifications, and answering it updates the Thread
-- [ ] Keyboard-operable with accessible labels
-- [ ] A request answered on another client disappears here
+- [x] A pending request appears on its Thread and in notifications, and answering it updates the Thread — `19-approvals.spec.ts`: the card names the Bot, action, and path; `events.test.ts`: `approval.requested` notification copy
+- [x] Keyboard-operable with accessible labels — `19-approvals.spec.ts`: Tab order, Enter answers, focus moves to the next card or composer, and an error restores it; `approvalFocus.test.ts`
+- [x] A request answered on another client disappears here — `19-approvals.spec.ts`: an authenticated POST removes the card within the shared 8-second deadline, shorter than the 15-second poll
 
-**Verification:** default commands plus `bun run test:e2e` with one Playwright flow.
+**Verification:** `bun run typecheck`, `bun run lint:boundaries`, `bun test apps/daemon`, `bun test apps/web`, and `bun run test:e2e`. While iterating, `bun run test:e2e -- specs/19-approvals.spec.ts` runs the approval flow alone. The flow creates its Bot and two Threads through the Service API. The Bun helper in `tests/e2e/seed-approval.ts` inserts only pending approval rows into the isolated e2e database because the Service has no route that creates approvals. Listing, answering, and resolution events use the real Service. The typecheck error at `tests/integration/daemon.test.ts:289` came from Task 9 and was fixed on main in `5a92a12`. At the Task 9 baseline (`05f2ad0`), the full `bun run test:e2e` already failed the same 8 tests in `02-chat.spec.ts` and `13-responsive-accessible-visual-qa.spec.ts`; the approval flow passes both inside the full suite and alone, and again after the merge into main.
+
+Decided 2026-11-24: the approval UI reuses the inline `Banner` + `Button` composer-error pattern, so the plan's design-pass question does not need a new screen or visual pattern. Desktop notifications fire for live `approval.requested` events only; events replayed after a reconnect stay quiet and still invalidate the approvals query, so the Thread recovers the current state without alerting for requests already answered, expired, or deleted. Existing turn-completion replay notifications are unchanged. The pending list is the plain `["approvals", threadId]` query with a 15-second refetch, and both approval events invalidate it. A 409 answer means the request was already answered, so the card refreshes instead of showing an error. Control and bidi characters in paths render as labelled `\uXXXX` escapes with literal backslashes doubled, so the displayed path cannot be confused with another; the Service still receives the raw path. After a keyboard answer, focus moves to the first surviving following approval, then the composer, then the conversation-history button, and is not stolen if it moved elsewhere. The e2e seed helper is test-only; no product route was added.
 
 **Dependencies:** Task 9
 
@@ -333,15 +335,25 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** Add the MCP extension: servers from `<workspace>/.mcp.json` and service accounts connected in the plugins panel, stdio and Streamable HTTP, connected on first use, exposed as one `mcp` tool with search, describe, and call. Keep the Services panel's status behavior.
 
 **Acceptance criteria:**
-- [ ] A Bot calls a tool on a configured MCP service through the `mcp` tool
-- [ ] stdio servers run as child processes that are killed on abort and shutdown
-- [ ] The Services panel shows each server's status as today
+- [x] A Bot calls a tool on a configured MCP service through the `mcp` tool — `mcp-durable.test.ts`: durable MCP journals the redacted result, reports Services status, and releases children on abort and shutdown
+- [x] stdio servers run as child processes that are killed on abort and shutdown — same test (live PID, `ESRCH` after abort and after `services.stop()`); `mcp.test.ts`: abort, timeout and failed-handshake cleanup
+- [x] The Services panel shows each server's status as today — same test: `GET /api/plugins` returns `connected` with the tool count and `disabled`, with `pendingReload: false`; the worker value is returned unchanged when the switch is off
 
-**Verification:** default commands; an integration test with a local test MCP server.
+Decided 2026-11-25: servers come from one bounded snapshot of the files the panel already reconciles (`.mcp.json`, `.pi/mcp.json`, the Codex config, and service accounts), with the same private-credential projection the worker uses. The runtime reads no other configuration. Only `stdio` and Streamable HTTP are supported; `sse`, socket and malformed entries return a sanitized error.
+
+Decided: one `mcp` tool with `search`, `describe` and `call`, as today, so many services do not fill the prompt. Server and tool names are identifiers and are not redacted; descriptions, schemas and results are. Servers connect on first use and stay connected; calls are serialized per server, have a 20-second connect/list limit and a 120-second call limit (injectable in tests), and an aborted or timed-out call retires the connection, which kills a stdio child. `close()` refuses new calls, waits for in-flight credential preparation, then closes every connection.
+
+Decided: the runtime derives `NativeMcpStatus[]` from the same revision the panel compares, and the bootstrap substitutes it for the worker's `mcp` array only while the `runtime` setting is `durable`, so the panel DTO, route and UI are unchanged. A snapshot-level error reports enabled servers as `failed` with no tools instead of a stale `connected`. The durable supplier awaits the same per-account service-credential preparation `acquire()` uses, so two concurrent calls refresh a grant once. The panel still needs a successful worker `resources.list` for its other fields until Task 20.
+
+Decided: resolved placeholder values, service bearer tokens, credential-named environment and header values, bearer token portions and cookie values are redacted from every model-visible string, including quoted and escaped forms, without re-serializing JSON. Task 22 generalises this to `{{secret:name}}` and Bot secrets; images, embedded blobs, JSON keys, literal stdio arguments and identifiers are left to it. The `fillSecrets` and `authProvider` options are the seams; a server that needs sign-in reports `needs-auth` and no OAuth flow runs here (Task 14).
+
+Decided: to follow the spec's Hangs rule, the runtime snapshot and the store's document reads accept only regular files up to 1 MiB, so a FIFO or an oversized file becomes a sanitized configuration error instead of blocking the Service. A shared deletion with a concurrent `.pi` edit reports the same conflict the panel shows instead of silently hiding the server.
+
+**Verification:** `bun run typecheck` (only the pre-existing `tests/integration/daemon.test.ts` TS2769, reproduced at HEAD without this change), `bun run lint:boundaries` (4 pass), `bun test apps/daemon` (155 pass, 1 existing skip), the focused MCP suites (37 pass), and `OMARCHY_TEST_DURABLE=1 bun test tests/integration/mcp-durable.test.ts` (2 pass, local fixtures only).
 
 **Dependencies:** Task 3
 
-**Files likely touched:** `apps/daemon/src/modules/runtime/extensions/mcp.ts`, `apps/daemon/src/modules/plugins/nativeMcp.ts`, tests
+**Files likely touched:** `apps/daemon/src/modules/runtime/extensions/mcp.ts`, `apps/daemon/src/modules/runtime/runtime.ts`, `apps/daemon/src/bootstrap/main.ts`, `apps/daemon/src/modules/plugins/nativeMcp.ts`, `apps/daemon/src/modules/plugins/plugins.ts`, `packages/agent-contract/src/native-mcp-config.ts`, `packages/agent-contract/src/native-mcp-revision.ts`, `packages/testkit/src/fake-provider.ts`, tests
 
 **Estimated scope:** Medium
 
@@ -352,13 +364,23 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** Add the spec's [Secrets](../../specs/bot-runtime.md#secrets): one store in the OS keychain for app secrets (provider keys, MCP sign-ins) and each Bot's private secrets, with the 0600 file only as a fallback that Settings warns about. Add the `secrets` tool (save, list names, delete; never returns a value), `{{secret:name}}` filling in `bash`, `web_fetch`, and `mcp` calls, and replacement of used values in results. Move keys from `model-credentials.json` into the keychain on first start and remove the file. Start `bash` with a clean environment. Keychain access needs a library or each platform's command-line tool: choosing a library is an ask-first dependency decision.
 
 **Acceptance criteria:**
-- [ ] A secret saved by one Bot is filled in at run time for that Bot, replaced in the result, and cannot be listed or used by another Bot
-- [ ] No secret value appears in `pi_` entries, Service Messages, logs, events, or memory
-- [ ] Existing provider keys move into the keychain once, and Turns still complete; without a keychain the fallback file is used and Settings warns
-- [ ] `bash` cannot see the Service's environment variables
-- [ ] Bot Deletion removes the Bot's secrets, and the confirmation says so
+- [x] A secret saved by one Bot is filled in at run time for that Bot, replaced in the result, and cannot be listed or used by another Bot — `bash keeps an out-of-band Bot secret out of entries, messages, console output, and events`; `secrets and bash cannot list, delete, or use another Bot's or the app's secrets`
+- [ ] No secret value appears in `pi_` entries, Service Messages, logs, events, or memory — store values proven by `bash keeps an out-of-band Bot secret out of entries, messages, console output, and events` and `a durable provider failure redacts app and Bot secrets from the Turn and its status event`. Gap: a value the model itself supplies to `secrets` save stays in its assistant tool-call entry, like a secret typed into a Thread; pi-durable's own journal may keep the original provider diagnostic; Bot memory is not implemented yet.
+- [ ] Existing provider keys move into the keychain once, and Turns still complete; without a keychain the fallback file is used and Settings warns — `migrates two legacy providers into app secrets once and reloads them without the file`; `a durable Turn completes with a migrated provider after the legacy file is removed`; `runtime imports a healthy legacy provider when another record fails and retains the file`; `warns about the file backend across Settings sections`. Keychain paths are exercised with the fake backend only; the real OS keychain backend is pending the library/CLI decision.
+- [x] `bash` cannot see the Service's environment variables — `bash starts with PATH and excludes the Service environment marker`
+- [x] Bot Deletion removes the Bot's secrets, and the confirmation says so — `permanent deletion removes only the deleted Bot's private secrets`; `opens the pointer-only Sidebar menu, keeps Bot Settings reachable, cancels unchanged, then deletes and falls back`
 
-**Verification:** default commands; tests with a fake keychain backend, plus one manual run on Linux Secret Service.
+**Decisions (2026-11-24):**
+
+- One `SecretBackend` seam; the OS keychain plugin is pending, so runtime uses the 0600 file fallback and tests use an in-memory fake. Accounts are namespaced by data directory; the metadata index is 0600; fallback values live in a 0700 `secrets/` directory.
+- Fill happens on a copy at execute time; persisted arguments keep `{{secret:name}}`. A call that used a secret emits no live output and keeps a bounded, redacted tail (spill off, since the spill file would hold raw output).
+- The `secrets` tool exposes only the calling Bot's scope; app scope is unreachable. Save rejects empty values and metadata containing the value; delete removes the backend value first, then metadata, and a failed delete stays listed for retry and Bot Deletion.
+- Provider records are app secrets: hashed name, non-secret metadata as the description, key as the value. Migration imports per record, keeps the legacy file if any record fails, and removes it once all are verified.
+- Clean shell environment is an explicit allowlist: `PATH`, `HOME`, `LANG`, `TMPDIR`, `USER`, `SHELL`.
+- Protocol: `removed.secrets` is optional with a default of 0 and `secrets` is a failure stage; `PROTOCOL_VERSION` is not bumped because the web client ships with the daemon. A separately versioned client needs the next bump at cutover.
+- Known limits: shell placeholder substitution is literal, so the Bot's quoting is its responsibility (prefer the environment argument); secret-using calls return bounded output; `secrets` save arguments are model-visible.
+
+**Verification:** default commands; tests with a fake keychain backend, plus one manual run on Linux Secret Service (still manual, pending the backend decision).
 
 **Dependencies:** Tasks 2 and 8. Tasks 14 and 16 use this store.
 
@@ -373,11 +395,39 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** Add an `McpOAuthStateStore` backed by the secret store (Task 22), a loopback callback listener on `127.0.0.1`, and a sign-in action in the Services panel. On first start, import `pi-mcp-adapter` tokens from the system keyring once, read-only, converting expiry from seconds to milliseconds. A token that fails shows "needs sign-in".
 
 **Acceptance criteria:**
-- [ ] Signing in to an OAuth MCP service from the Services panel completes and the tool works
-- [ ] Imported tokens that work are used; others show "needs sign-in"
-- [ ] The keyring is never written
+- [x] Signing in to an OAuth MCP service from the Services panel completes and the tool works — `mcp-oauth-durable.test.ts`: "durable MCP browser sign-in publishes completion and enables tool calls" (Services status `connected` with one tool, then a Bot Turn calls that tool) and "durable MCP manual sign-in accepts the browser redirect URL and enables tool calls" (headless paste); both against a local OAuth + MCP fixture, no live network. `plugin-services.test.ts` "native standalone consent completes over the event stream without checking by hand" passes with the switch on (1 pass, 17 filtered) and off.
+- [x] Imported tokens that work are used; others show "needs sign-in" — fixture-verified; production import awaits the Task 22 reader. `mcpOAuthImport.test.ts`: "adapter import maps tokens, client information, expiry in milliseconds, and the shared issuer"; "the durable tool refreshes an imported token with the imported client ID"; "adapter import clears a rejected token, keeps discovery, and retries a later import"; "adapter import reports an expired entry as needs-auth and leaves a missing entry unchecked"; `runtime.test.ts`: "a plain 403 during OAuth import leaves the MCP service needing sign-in". The panel's existing "Authorization required" label is the needs sign-in state; no new label.
+- [x] The keyring is never written — scoped to the Task 14 importer and its tests; the existing worker adapter has its own keyring backend and is unchanged. The reader interface has one read method and no write/delete; `pendingPiMcpAdapterTokenReader` has `available: false` and is the only product wiring, so import is dormant until the Task 22 decision; "adapter import uses the read-only reader and the manager's app OAuth account" fails on any non-read access; `git diff` shows no dependency, manifest or lockfile change and no keychain API/tool in the diff.
 
-**Verification:** default commands; a test against a local OAuth test server; one manual sign-in to a real service.
+Carried from Task 13 (2026-11-25): with the switch on, the Services panel takes MCP status from the runtime, which has no OAuth until this task. So `plugin-services.test.ts` "native standalone consent completes over the event stream without checking by hand" fails with the switch on: the old worker completes the sign-in, and the panel reports `not-connected`. It passes with the switch off. This task owns making it pass with the switch on. Resolved: both carried consent cases pass with the switch on (whole file 18/18), and the durable tests drive the real runtime sign-in instead of the fake worker.
+
+**Decisions (2026-11-25):**
+
+- State store: one app secret per connection, `mcp-oauth-` plus the first 54 hex characters of SHA-256 over `JSON.stringify([name, new URL(url).href])`, holding the whole `McpOAuthState` as JSON. The canonical URL fixes pi-mcp's trailing-slash normalization; a stored `serverUrl` mismatch, malformed JSON, or a malformed known field returns undefined without a write or delete. The refresh lock is per connection; sign-in completion is wrapped in it because pi-mcp's `completeMcpSignIn` does not take it, while `startMcpSignIn` does. Only the app scope is written.
+- Loopback listener: our own `Bun.serve` bound explicitly to `127.0.0.1`, ephemeral port by default, exact state match, and only GET on the callback path. A wrong browser callback state responds 400 and leaves the attempt pending, while invalid manual input through Services cancels it. OAuth error codes are allowlisted with a fixed fallback; the description is never echoed. Responses are `no-store`, CSP, referrer-policy; code and state are never in the body. Single use, deadline, abort, and close all settle or clean up. A configured `callbackUrl` with an explicit authority port is advertised byte-for-byte (including `localhost` for a registered redirect) while the socket stays on `127.0.0.1`; without an explicit authority port, the advertised URL uses the bound port; no configured URL keeps `127.0.0.1`; `https` and non-loopback callback URLs are rejected.
+- Manager: one pending attempt per connection; one deadline from `start()` through the post-persistence check; manual denial is terminal `auth_failed`; a manual paste joins an in-flight browser exchange; cancel, replacement, and shutdown emit zero outcomes (the plugin already owns those attempts). `close()` drains token exchanges and providers but not outcome handlers, so a handler may call back into `close()`. Tokens are app secrets, never Bot secrets.
+- Extension: `authProvider(name, url)`; an explicit `Authorization` header (any case) suppresses the OAuth provider and the import, though an explicit `auth-start` can still run; `McpOAuthAuthorizationRequiredError` maps to `needs-auth` on discovery and calls. `check()` runs in the per-server call queue, reconnects HTTP, and only discovers stdio when a workspace cwd is supplied. `markNeedsAuth()` records a failure without connecting or closing a live or retiring client. Issued access tokens are redacted from model-visible results and errors (raw, JSON-escaped, and escaped-slash forms), retained per name (last 4) past connection retirement, and cleared on close. Server names stay identifiers except inside redacted messages.
+- OAuth settings: carried from the existing workspace `.mcp.json` `oauth` block (clientId, clientSecret, adapter `redirectUri` → callbackUrl + callbackPort, authServerMetadataUrl, scope), with explicit daemon fields winning; malformed settings become a sanitized configuration error; clientSecret joins the redaction secrets. Account isolation keys state, provider, and challenge by connection name plus URL, so two accounts at one endpoint never share tokens. No Service database schema change.
+- Plugin: `mcp.control` goes to the runtime only while `runtime` is `durable`; the worker path and timeout are unchanged. Completion is deduped per authorizationId across the inline `authenticated` result and the native event. A failed manual completion cancels the attempt; the bounded error is returned even if the event already removed the attempt; `connect_failed` is preserved in the event.
+- Import: one-time marker `mcpOAuthAdapterImport`, set only after a run with no reader error and no snapshot or per-server `configurationError`, so a fixed or newly readable entry can import later. Reader unavailable means no reads and no marker. Only HTTP servers that are enabled and have no explicit Authorization header are considered. Adapter access/refresh/scope/expiry convert with expiry seconds → milliseconds; clientInfo maps only when it is a real registration; the issuer becomes `discovery.authorizationServerUrl`, and mismatched, invalid-scheme, or unrepresentable issuers mean needs sign-in with no write. Existing tokens or PKCE sign-in state block import; discovery-only state does not, and signing in again may refresh the existing account. After a token is staged, a failing check clears it only when tokens still match and only `discovery` differs; browser fields or other changes survive. A failed staged token (including a plain 403) or a conversion failure marks the service needs-auth without closing a live call; a reader exception falls back to a real connection check rather than forcing needs-auth; servers with no adapter entry are not checked.
+- Test-only: the real-worker Services case now uses `PI_MCP_ADAPTER_TEST_AUTH_STORE=memory`; the previous temp path fell through to the real keyring. Six worker-protocol cases in `plugin-services.test.ts` explicitly select the worker runtime under the durable switch, each with a comment. Existing-test changes, all reviewed: those six worker-runtime selections; the memory-store fixture line; the two carried consent cases' durable fixture branch and browser-completion assertions (the original event, payload, and connected assertions are preserved); comparison and schema-tightening rewrites in `extensions/mcp.test.ts` (object type and non-array `properties`; no expectation relaxed); and the existing runtime reopen test's added unknown-service `mcpMarkNeedsAuth` assertion.
+
+**Known limits:**
+
+- The real keyring reader is pending the Task 22 backend decision. Production import is a no-op (`available: false`); Task 14 adds no keychain tool or dependency (the existing worker adapter has its own keyring backend and is unchanged). This is the only unfinished code part of the task; the manual sign-in to a real service is a user check, not run here.
+- An issuer-bound entry requires fresh sign-in when the connection also sets `authServerMetadataUrl`, because pi-mcp ignores stored discovery in that mode. Entries with no issuer are imported best-effort.
+- The future reader must assemble the adapter's chunked entries; the product importer treats a chunk manifest as needs sign-in.
+- Token redaction catches exact, JSON-escaped, and escaped-slash copies, not re-encoded values (the spec's stated limit). OAuth tokens are not added to the Task 13 snapshot secrets list; they are tracked as issued.
+- The listener is IPv4 loopback only; a browser that resolves `localhost` to `::1` first may retry, and remote or headless users need the manual paste field. A loopback `https` callback URL is unsupported.
+- No sign-out or credential-delete action for an MCP OAuth connection; signing in again overwrites the state.
+- A manual paste after the whole flow has settled returns 400 rather than replaying.
+- Check for stdio spawns the server to discover tools (the panel "Check" action); passive status reads never spawn.
+
+**Verification:** `bun run typecheck` (pass, 0 diagnostics); `bun run lint:boundaries` (4 pass); `bun test apps/daemon` (422 pass, 0 fail, 1 pre-existing skip); `bun test apps/web` (79 pass); `bun test tests/integration/mcp-oauth-durable.test.ts` (11 pass, also with `OMARCHY_TEST_DURABLE=1`); `bun test tests/integration/plugin-services.test.ts` (18 pass, also 18 pass with the durable switch); the carried standalone case passes in both switch modes (1 pass, 17 filtered), as does the provider case; `OMARCHY_TEST_DURABLE=1 bun test tests/integration/mcp-durable.test.ts` (2 pass); the focused Task 14 files pass individually (import 42, extension 28, state store 65, sign-in 40, runtime 20). These counts ran with the final code tree at `15b3c09`/`e3a72ed`; an earlier focused `bun test apps/daemon/src/modules/runtime` directory run at `1ed150f` hit the verification tool's 90 s limit without a summary, and its files are inside the 422-pass daemon run. Task 14's OAuth exchanges used loopback fixtures or intercepted endpoints; the listener binding test also probed the host's own non-loopback IPv4 addresses, and the logs contain test results, not a suite-wide traffic trace. No skipped, only, or todo tests were added (the single `.skipped` grep hit is a report property), and no dependency, manifest, or lockfile change. Every `pi-durable`/`chord` import in the changed files is under `apps/daemon/src/modules/runtime/`. The manual sign-in to a real service was not run here; the steps are in the handoff.
+
+**Pending decision:** the keyring reader's access mechanism (platform CLI, native library, or `Bun.secrets`) follows Task 22's backend choice; implement `PiMcpAdapterTokenReader` for the adapter service `pi-mcp-adapter.oauth` and its hashed accounts, including chunk assembly, then delete the pending stub. The import, conversion, guards, marker, and wiring are already in place and fixture-verified; production import stays a no-op until then.
+
+**Files:** `apps/daemon/src/modules/runtime/mcpOAuth.ts`, `apps/daemon/src/modules/runtime/mcpOAuthImport.ts`, `apps/daemon/src/modules/runtime/runtime.ts`, `apps/daemon/src/modules/runtime/extensions/mcp.ts`, `apps/daemon/src/modules/runtime/testing/oauthMcpServer.ts`, `apps/daemon/src/modules/plugins/plugins.ts`, `apps/daemon/src/modules/plugins/nativeMcp.ts`, `apps/daemon/src/modules/plugins/nativeMcpOAuth.ts`, `apps/daemon/src/bootstrap/main.ts`, tests.
 
 **Dependencies:** Tasks 13 and 22
 
@@ -412,18 +462,49 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** On first start, copy keys from `~/.pi/agent/auth.json` and providers from `~/.pi/agent/models.json` into the secret store (Task 22), read-only, and seed the Service default model from the Pi default. Add a Settings screen to add, edit, and remove providers by protocol, a list of allowed folders to add and remove, and a model picker in Bot Settings.
 
 **Acceptance criteria:**
-- [ ] The import runs once, never writes `~/.pi`, and leaves existing Bots on their current model
-- [ ] A provider added in Settings completes a Turn, for both an OpenAI-compatible and a built-in `pi-ai` provider
-- [ ] Keys are never shown after saving
-- [ ] A folder added in Settings is allowed on the next tool call, and a removed one is not
+- [x] The import runs once, never writes `~/.pi`, and leaves existing Bots on their current model. In `apps/daemon/src/modules/runtime/providerImport.test.ts`, `skips a second pass after deletion and leaves the Pi file contents and mtimes intact` compares bytes and mtimes for all three files and checks that the removed provider stays removed. `preserves pre-existing provider credentials, the Service default, and the Bot model` checks the persisted values, and `a model-level proxy leaves a pinned Anthropic Bot on the native route` checks resolution for an existing override. `imports custom and built-in providers, prefers literal auth keys, and seeds the Service default` verifies seeding. In `tests/integration/provider-import.test.ts`, `daemon startup imports Pi credentials and runs an unset Bot on the seeded default only once` boots with fixture files under a temporary `HOME`, completes a durable Turn on the seeded default, and verifies that a restart leaves the removed provider absent.
+- [x] A provider added in Settings completes a Turn, for both an OpenAI-compatible and a built-in `pi-ai` provider. In `tests/integration/providers.test.ts`, `an HTTP-added openai-compatible provider completes a durable Turn` and `an HTTP-added built-in provider completes a durable Turn` create providers through the Settings HTTP API and assert completed Turns and transcript replies using an offline model stub.
+- [x] Keys are never shown after saving. In `tests/integration/providers.test.ts`, `custom provider CRUD preserves an omitted key and hides credentials in raw JSON` checks raw and parsed responses for the absence of key fields and credential sentinels, and `built-in catalog projection omits model metadata containing a stored key` checks for a key sentinel in catalog metadata. `invalid provider requests return 400 without echoing request values, and unknown IDs return 404` and `provider listing omits a legacy base URL containing userinfo` cover error responses and legacy URLs. `provider writes reject encoded keys in base URLs without echoing credentials` checks HTTP 400 responses for submitted and stored keys. `provider listing hides legacy metadata containing an encoded stored key` checks that HTTP and store listings omit a legacy provider with an encoded key in its URL and omit a model with an encoded key in its name. `apps/daemon/src/api/providerRoutes.ts` returns the key-free projection with `hasKey`. In `tests/e2e/specs/16-providers-and-folders.spec.ts`, `a custom provider persists and can be renamed without reentering its key` and `a built-in provider uses the searchable catalog and a key-only form` verify that saved keys are absent from page HTML and that the key input is blank on edit. The custom flow also checks after reload and verifies that the rename request omits the key.
+- [x] A folder added in Settings is allowed on the next tool call, and a removed one requires approval again. In `tests/integration/allowed-folders.test.ts`, `adding and removing a folder affects file access on the next Turn` verifies that the next Turn reads the fixture with no approval after addition, then requests approval for the same file on the next Turn after removal. Denial produces an access-denied reply.
 
-**Verification:** default commands; a migration test with fixture `~/.pi` files; one Playwright flow.
+**Verification:** Default commands, a migration test with fixture `~/.pi` files, and the providers and folders Playwright spec.
 
 **Dependencies:** Tasks 2 and 22
 
 **Files likely touched:** `apps/daemon/src/modules/runtime/providerImport.ts`, `apps/daemon/src/api/`, `apps/web/src/routes/`, `apps/web/src/components/`, tests
 
 **Estimated scope:** Medium
+
+### Decisions
+
+- **v1.** Resolve `PI_CODING_AGENT_DIR` when set. Expand `~` and `~/` against the Service home, resolve `file://` URLs, and use relative paths from the process working directory. Fall back to `~/.pi/agent` under the Service home. Read `auth.json`, `models.json`, and `settings.json` without writing to the Pi directory. Strip a leading BOM in all three files. For `models.json`, accept line comments and trailing commas as Pi does, plus block comments. Treat missing or malformed JSON as empty. Other read failures leave the import eligible to retry on the next startup.
+- **v2.** Import literal API keys into the Service secret store, preferring `auth.json` over `models.json`. Skip OAuth credentials, `!` commands, and unescaped environment references. Interpret Pi's escaped dollar and bang sequences as literals. Import built-in IDs on their native `pi-ai` route when there is no provider-level base URL. A supported provider-level proxy on a built-in ID imports as custom under the same ID. Map Pi `openai-completions` to `openai-compatible` and `anthropic-messages` to `anthropic-messages` for custom routes.
+- **v3.** For configured models, take the API and base URL from the model, the provider, or the matching or first composed catalog model, in that order. A custom provider can infer a missing base URL from its model definitions when they resolve to one URL, and infer a missing API when the model APIs agree. Keep catalog entries whose API and base URL match the imported route. For a native built-in, compare with the matching stock model or the first stock model for a new ID.
+- **v4.** Any existing `service_settings.pi_provider_import` value skips the pass. After provider writes succeed, set the marker to `1` in the same database transaction as any `default_model` seed, including on an empty import. Seed only when the Service default is unset and the selected model is available on a stored provider whose route preserves the Pi selection. Keep existing provider records and Bot overrides. Bots without overrides use the Service default.
+- **v5.** The provider API serializes mutations. It derives custom IDs from lowercase name slugs with numeric collision suffixes, reserving every built-in ID. Built-in creation requires `pi-ai` `auth.apiKey` eligibility and returns HTTP 409 for a duplicate. Updates keep an omitted key and replace the stored model list when supplied. Create, update, and projection keep the first occurrence of each model ID. Built-in updates accept key and model changes, and the projected stock catalog takes precedence over extra models with the same ID.
+- **v6.** Provider responses use a key-free DTO with `hasKey` and projected model metadata. The store filters projected metadata containing literal or percent-encoded copies of stored keys. The API accepts HTTP(S) base URLs without userinfo and rejects base URLs containing literal or percent-encoded copies of the submitted key or an existing provider key. Responses omit legacy URLs that fail HTTP(S) or userinfo validation. Pending removals keep the record available for deletion retry while excluding its credentials from runtime lookups.
+- **v7.** Allowed-folder responses return normalized Settings entries in `folders` and the implicit Shared Workspace and eligible Downloads directory in `alwaysAllowed`. POST and DELETE on implicit paths are no-ops. The removal helper validates and normalizes absolute paths, rejects NUL, and rewrites the Settings array only when a matching entry exists. Durable file policy reads Settings on each tool call, so the next call picks up additions and removals.
+- **v8.** `BotDto.model` is nullable. PATCH validates the reference at the first slash, leaving any later slashes in the model ID. Omission keeps the override and `null` clears it. The next durable Turn resolves the current Bot override or Service default. `bot.updated` includes the model and invalidates the web Bot cache.
+- **v9.** Providers and Allowed folders reuse the Settings dialog and mobile sheet with existing Astryx components. The built-in catalog uses searchable Typeahead. Provider forms use a password input, clear the submitted key after save, and open with a blank key on edit. Saved rows show key status only.
+- **v10.** Bot Settings saves model choices immediately, with `Service default` sending `null`. On failure, rollback applies only when the latest cached model still equals the attempted value, preserving other fields and any newer model selection. Profile name and instructions sync independently when their corresponding drafts still match the previous server values.
+
+### Evidence
+
+- `bun run typecheck` exited 0 with 0 TypeScript errors. `bun run lint:boundaries` passed 4 tests in 1 file with 0 failures.
+- `bun test apps/daemon` passed 253 tests in 19 files with 1 skip and 0 failures on an isolated rerun that took 67.61 seconds. The skip requires a case-insensitive filesystem. The initial run reached the tool's 60-second limit before Bun printed totals.
+- `bun test apps/web` passed 109 tests in 13 files with 0 failures.
+- The pre-audit-fix run of `bun test apps/daemon/src/modules/runtime/providerImport.test.ts tests/integration/provider-import.test.ts tests/integration/providers.test.ts tests/integration/allowed-folders.test.ts tests/integration/bot-model.test.ts apps/daemon/src/modules/workspace/allowedFolders.test.ts` passed 42 tests in 6 files with 0 failures. The respective file counts were 20, 1, 11, 4, 2, and 4.
+- The post-audit-fix run of `bun test apps/daemon/src/modules/runtime/credentials.test.ts tests/integration/providers.test.ts tests/integration/provider-import.test.ts` passed 22 tests in 3 files with 0 failures, including all 15 tests in `providers.test.ts`.
+- `bunx playwright test -c tests/e2e specs/16-providers-and-folders.spec.ts` passed all 4 Chromium tests with 0 failures in an isolated run.
+
+### Not done / residual risks
+
+- Settings displays the base URL, including its query string. An unrelated secret in a query parameter, such as a token separate from the provider key, can still be displayed.
+- The Pi import drops `modelOverrides` and the provider options `headers`, `authHeader`, and `compat`.
+- A partial import that fails before setting the marker can re-create a provider deleted between attempts.
+- Model-level proxy entries on built-in providers that differ from the native route are dropped when there is no provider-level proxy.
+- The OS keychain backend is still Task 22's pending decision. The Service uses the private-file fallback.
+- Earlier Playwright cold starts intermittently hit Vite readiness timeouts. All four tests passed on the first isolated run for this verification.
 
 ---
 
@@ -432,11 +513,34 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** Implement the one-time workspace cleanup from the spec: one Skills folder and one `.mcp.json`, merging servers and Skills from `.pi`, `.codex`, and `.claude`, moving those folders to a dated backup in the data directory, changing nothing if any step fails, and writing a marker file.
 
 **Acceptance criteria:**
-- [ ] Skills and MCP servers from the three old folders end up in the one Skills folder and `.mcp.json`
-- [ ] A failure at any step leaves every folder unchanged
-- [ ] A second start does nothing
+- [x] Skills and MCP servers from the three old folders end up in the one Skills folder and `.mcp.json` — MCP merge, conflict handling, Codex conversion, Skills migration, alias replacement, duplicate basenames, and case-folded allocation ([cleanup.test.ts](../../../apps/daemon/src/modules/workspace/cleanup.test.ts)). The integration test verifies migration on the first Service start ([workspace-cleanup.test.ts](../../../tests/integration/workspace-cleanup.test.ts)).
+- [x] A failure at any step leaves every folder unchanged — full snapshot restoration after throws at `folders`, `skills`, `mcp`, and `marker`, plus journal undo before a fresh migration ([cleanup.test.ts](../../../apps/daemon/src/modules/workspace/cleanup.test.ts)).
+- [x] A second start does nothing — cleanup returns `skipped` when the marker exists and preserves the full snapshot ([cleanup.test.ts](../../../apps/daemon/src/modules/workspace/cleanup.test.ts)). The second Service boot preserves the marker, backups, and `.mcp.json` ([workspace-cleanup.test.ts](../../../tests/integration/workspace-cleanup.test.ts)).
 
-**Verification:** default commands; tests on temporary workspaces.
+**Decisions**
+
+- Cleanup runs unconditionally once per Service start, after `openBotRuntime` and before `PluginsService` construction. Failures are logged and retried on the next start.
+- `<dataDir>/workspace-cleanup.json` stores `{version: 1, completedAt, backup}`. The backup at `<dataDir>/workspace-backup-YYYY-MM-DD` includes all unrecognized content. On collision, suffixes start at `-2`.
+- Cleanup plans in memory, stages merged Skills and `.mcp.json` in `<dataDir>/workspace-cleanup-<random-suffix>`, and commits with ordered renames, publishing the marker last. A small journal records pending and completed renames so the next start can undo them if the marker is absent.
+- `.mcp.json` wins same-name conflicts, and warnings name servers only. The Codex allowlist is `type`, `command`, `args`, `env`, `url`, `headers`, `enabled`, and `http_headers`. Entries using `env_vars`, `env_http_headers`, `bearer_token_env_var`, `enable`, SSE, `cwd`, or other unsupported fields stay only in the backup.
+- Skill identity comes from the `SKILL.md` frontmatter name or the directory basename. `.agents/skills` wins, and an existing `NativeSkills` alias into a legacy root is replaced only by its exact matching source. Duplicate basenames get deterministic suffixes through case-folded allocation. Cleanup copies symlinked legacy Skills and Skills in linked roots, preserving the targets.
+- `NativeSkills` scans only `.agents/skills` and the private disabled folder. It creates no `.claude` aliases, reconciles pre-upgrade disabled entries to `.agents/skills`, and ignores directories resolving into legacy roots.
+
+**Known limits**
+
+- Cleanup assumes one Service starts before clients write. Concurrent writers and editors are out of scope.
+- Recovery covers one interrupted journaled commit. A kill before the first journal write or after marker publication can leave staging. Repeated interruption and power-loss durability are out of scope.
+- Cross-device moves copy, publish, then remove the source. A further failure during recovery can leave a partial copy.
+- Unmatched dangling legacy Skill aliases may remain.
+- `NativeMcpStore` may still recreate `.pi/settings.json` until the MCP adapter is retired in the later runtime tasks (Task 20 checks its removal). Later legacy writes persist after cleanup.
+
+**Verification:**
+
+- `bun test apps/daemon` — 158 passed, 1 pre-existing platform skip.
+- `bun test apps/daemon/src/modules/workspace/cleanup.test.ts` — 33 passed.
+- `bun test tests/integration/workspace-cleanup.test.ts` — 1 passed.
+- `bun run lint:boundaries` — 4 passed.
+- `bun run typecheck` — one pre-existing failure at `tests/integration/daemon.test.ts:289`, unrelated to Task 17; fixed on main in `5a92a12`, and typecheck passes after the merge.
 
 **Dependencies:** Task 7
 
@@ -457,9 +561,9 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Description:** On a Thread's first Turn on the new runtime, read its old Pi session file read-only, and write the latest compaction summary and later messages into a new conversation with native roles. Unmappable messages become labeled text; old thinking is not replayed; metadata is dropped. If that fails, seed from the Service transcript.
 
 **Acceptance criteria:**
-- [ ] A Thread with an old session continues with its history
-- [ ] A broken session file falls back to the transcript seed and logs it
-- [ ] Old session files are untouched until their Bot is deleted, and deletion removes only the recorded path
+- [x] A Thread with an old session continues with its history. In `tests/integration/session-migration.test.ts`, `a Thread continues its old Pi session in the first durable model request` verifies that the provider request contains the latest compaction summary, post-compaction user, assistant, and tool-result history, and the native `toolCall`/`toolResult` pair. The reply reaches the transcript. The native mapping is also covered in `apps/daemon/src/modules/runtime/sessionMigration.test.ts`.
+- [x] A broken session file falls back to the transcript seed and logs it. The same integration suite covers this in `a broken old Pi session seeds prior Service transcript messages and warns`. The unit suite covers missing, unsupported, and malformed files, an empty transcript, a failed transcript commit, and path-free reasons.
+- [x] Old session files are untouched until their Bot is deleted, and deletion removes only the recorded path. The 12 tests in `tests/integration/old-session-deletion.test.ts` verify that bytes and mtime stay unchanged across the first durable Turn and that deletion removes only the recorded file. They cover preservation or a zero count for a sibling, another Bot's session, unrelated files, paths with `..`, symlinked ancestors, directories, relative paths, missing files, shared paths, and unlink failures. The sole change to `tests/integration/permanent-deletion.test.ts` adds the count to one exact DTO expectation.
 
 **Verification:** default commands; tests with copies of real session files from the current release.
 
@@ -468,6 +572,34 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 **Files likely touched:** `apps/daemon/src/modules/runtime/conversations.ts`, `apps/daemon/src/modules/runtime/sessionMigration.ts`, `tests/integration/fixtures/`, tests
 
 **Estimated scope:** Medium
+
+### Decisions
+
+- **v1.** In `conversations.ts`, a lazy seed callback runs only when creating a conversation, before the index row is inserted. An indexed conversation bypasses transcript and session reads. A seed failure still allows indexing and the Turn to proceed.
+- **v2.** Migration accepts only header version 3 from `pi-coding-agent` 0.84.4. Older versions fail closed to the transcript seed.
+- **v3.** Use the last compaction entry and every subsequent entry in file order. Without compaction, migrate all messages. Ignore parent and branch pointers.
+- **v4.** Preserve native user messages and assistant text for `stop`, `length`, and `toolUse`. Keep native `toolCall` blocks and `toolResult` messages only in complete, ordered runs matched by `toolCallId` and tool name, including across dropped non-message entries. Label `error` and `aborted` assistant messages and their results. Strip thinking and all signatures, convert unmappable messages to labeled user text such as `[old tool result: name]`, and drop and count metadata and non-message entries.
+- **v5.** Write the compaction summary as a user message labeled `Previous conversation compaction summary:`, matching the prototype.
+- **v6.** Flatten the transcript fallback into labeled user text and skip old thinking. Use the persisted user message `seq` to exclude the current message and later queued rows. A missing `seq` disables transcript seeding. Session migration can still proceed.
+- **v7.** Log `Migrated old Pi session for thread <id>: user=.. assistant=.. toolResult=.. labeled=.. thinking=.. dropped=..` via `console.log`. Use `console.warn` to describe the actual fallback outcome. Filesystem reasons contain only the error code.
+- **v8.** Bot deletion unlinks only the exact distinct absolute paths recorded in `thread_sessions` for the Bot's Threads. It skips paths still recorded by another Bot and refuses `..`, symlinked ancestors, directories, and relative paths. With `unlink`, `ENOENT` counts as zero. Failures log codes only, deletion continues, and the result reports `oldSessionFilesRemoved`.
+- **v9.** The approved protocol change adds the required non-negative integer `oldSessionFilesRemoved` to `DeleteBotResultDto`. Old session cleanup contributes only a count to the DTO.
+- **v10.** All fixtures are synthetic and follow the pinned 0.84.4 format exactly. The repository contains no copied real session content.
+
+### Evidence
+
+- `bun run typecheck` reported one pre-existing failure, TS2769 at `tests/integration/daemon.test.ts(289,59)`, from Task 9; it was fixed on main in `5a92a12`, and typecheck passes after the merge. With the switch on, `permanent-deletion.test.ts` still fails the Bot-owned cleanup case on the missing computer screenshot artifact, a Checkpoint B item that Task 11 owns.
+- `bun run lint:boundaries` passed 4 tests with 0 failures. `bun test apps/daemon` passed 167 tests with 1 pre-existing skip and 0 failures. The `sessionMigration` unit suite passed 39 tests.
+- `bun test tests/integration/session-migration.test.ts` passed 3 tests, and the same command with `OMARCHY_TEST_DURABLE=1` passed 3. The suite also covers `a new durable Thread without a legacy session sends only its first user message and logs no migration`.
+- `bun test tests/integration/old-session-deletion.test.ts` passed 12 tests, and the same command with `OMARCHY_TEST_DURABLE=1` passed 12. `bun test tests/integration/permanent-deletion.test.ts` passed 8 tests.
+
+### Not done / residual risks
+
+- An external process can swap an ancestor between validation and `unlink` (TOCTOU).
+- Concurrent deletions of two Bots sharing a path can both skip the file, leaving it for Task 19's orphan sweep and avoiding deletion while either Bot records it.
+- A crash between the seed commit and index insert can leave a seeded orphan conversation for Task 19 to sweep.
+- The recorded-path deletion test exercises the HTTP endpoint. Live-provider coverage is outstanding.
+- The spec asks for copies of real 0.84.4 session files. Verification used only synthetic fixtures that follow that format exactly.
 
 ---
 

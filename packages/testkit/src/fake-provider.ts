@@ -1,15 +1,21 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall, type FauxResponseFactory, type TranscriptContext } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 
-export type FakeSegment = { type: "text" | "thinking"; text: string };
-export type FakeReply = { segments: FakeSegment[]; failure?: string };
+export { fauxAssistantMessage, fauxToolCall };
 
-/** A network-free pi-ai provider whose responses emit ordered text/thinking deltas. */
+export type FakeSegment = { type: "text" | "thinking"; text: string };
+export type FakeReply = { segments: FakeSegment[]; failure?: string } | FauxResponseFactory;
+
+/** A network-free pi-ai provider with scripted responses. */
 export function createFakeProvider(replies: FakeReply[], options: { tokensPerSecond?: number } = {}) {
   const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }], ...options, tokenSize: { min: 1, max: 1 } });
-  fake.setResponses(replies.map((reply) => fauxAssistantMessage(reply.segments.map((s) => s.type === "text" ? fauxText(s.text) : fauxThinking(s.text)), reply.failure === undefined ? {} : { stopReason: "error", errorMessage: reply.failure })));
+  fake.setResponses(replies.map((reply) => {
+    if (typeof reply === "function") return reply;
+    const content = reply.segments.map((segment) => segment.type === "text" ? fauxText(segment.text) : fauxThinking(segment.text));
+    return fauxAssistantMessage(content, reply.failure === undefined ? {} : { stopReason: "error", errorMessage: reply.failure });
+  }));
   return fake;
 }
 
@@ -51,6 +57,20 @@ export function createDurableSuiteFakeProvider() {
         ? { action: "run", command: localRun[2]!, ...(localRun[1] === undefined ? {} : { target: localRun[1] }) }
         : { action: "run", command: text.slice("local.run.forged:".length), botId: "wrong-bot", turnId: "wrong-turn" };
       return fauxAssistantMessage(fauxToolCall("local", args, { id: "local-run" }), { stopReason: "toolUse" });
+    }
+    if (text.startsWith("mcp-durable: ")) {
+      const action = text.slice("mcp-durable: ".length);
+      const latest = context.messages.at(-1);
+      const result = action === "recall" ? context.messages.slice(0, lastUser).findLast((message) => message.role === "toolResult" && message.toolName === "mcp") : latest;
+      if (result?.role === "toolResult" && result.toolName === "mcp") {
+        return fauxAssistantMessage(result.content.flatMap((part) => part.type === "text" ? [fauxText(action === "recall" ? `Recalled ${part.text}` : part.text)] : []));
+      }
+      if (action === "recall") return fauxAssistantMessage("MCP result missing from history");
+      const account = action === "account";
+      return fauxAssistantMessage([fauxToolCall("mcp", {
+        action: "call", service: account ? "service-fixture-github" : "local", tool: "reflect",
+        arguments: account ? {} : { message: action === "block" ? "block" : "hello" },
+      })], { stopReason: "toolUse" });
     }
     if (text === "parity-stream") return fauxAssistantMessage([fauxThinking("T"), fauxText("R")]);
     // The worker inserts a read tool between these thinking blocks; asserting it is Checkpoint C.

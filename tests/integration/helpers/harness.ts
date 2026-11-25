@@ -8,6 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
+import { MODEL_CREDENTIALS_FILENAME, type StoredProvider } from "../../../apps/daemon/src/modules/runtime/credentials.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
@@ -41,6 +42,9 @@ export interface HarnessOptions {
   botComputerAssetSupply?: BotComputerAssetSupply;
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
+  legacyModelCredentials?: readonly StoredProvider[];
+  dataDir?: string;
+  stateDir?: string;
   /** Worker tree override; defaults to the shared fake workers. */
   workersDir?: string;
   onDurableMailReplay?: DurableMailReplayObserver;
@@ -98,83 +102,107 @@ export function authedFetch(h: Harness, input: string, init: RequestInit = {}): 
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
   const home = existingHome ?? path.join(os.tmpdir(), `omarchy-bot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  const state = path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const data = options.dataDir ?? home;
+  const state = options.stateDir ?? path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const profile = options.separateWorkspace ? `${home}-profile` : home;
+  const agentDir = path.join(profile, ".pi", "agent");
   mkdirSync(home, { recursive: true });
   mkdirSync(state, { recursive: true });
+  process.env.OMARCHY_BOT_STATE = state;
+  mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+  if (options.legacyModelCredentials) {
+    writeFileSync(path.join(state, MODEL_CREDENTIALS_FILENAME), JSON.stringify(options.legacyModelCredentials), { mode: 0o600 });
+  }
   // Fake conformance record so the fake pi worker probes to `ready`.
-  const conf = path.join(home, "conformance");
+  const conf = path.join(data, "conformance");
   mkdirSync(conf, { recursive: true });
   writeFileSync(
     path.join(conf, "pi-fake-pi-1.json"),
     JSON.stringify({ ok: true, image: "verified" }),
   );
 
-  process.env.HOME = options.separateWorkspace ? `${home}-profile` : home;
-  process.env.OMARCHY_BOT_HOME = home;
-  process.env.OMARCHY_BOT_STATE = state;
+  process.env.HOME = profile;
+  process.env.OMARCHY_BOT_HOME = data;
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_BOT_WORKERS_DIR = options.workersDir ?? path.resolve(import.meta.dir, "../fake-workers");
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
     options.botDeletionTerminalTimeoutMs ?? 30_000,
   );
 
-  // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
-  const durableSuite = process.env.OMARCHY_TEST_DURABLE === "1";
-  let restoreRuntime = durableSuite
-    ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider(options.onDurableMailReplay)
-    : undefined;
-  const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
-  const daemon = options.useProductionBotScreen
-    ? await main({
-        useHostApplicationUnits: options.useHostApplicationUnits === true,
-        botScreenRuntimeDir: path.join(home, "r"),
-        ...(options.botComputerAssetSupply === undefined ? {} : { botComputerAssetSupply: options.botComputerAssetSupply }),
-        ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
-      })
-    : await main({
-        useHostApplicationUnits: options.useHostApplicationUnits === true,
-        botScreenRuntimeDir: path.join(home, "r"),
-        botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
-        botScreenCapacity: options.botScreenCapacity ?? 8,
-      });
-  const { stop, disconnectForRestart, port, svc } = daemon;
-  if (durableSuite) {
-    const { CredentialStore } = await import("../../../apps/daemon/src/modules/runtime/credentials.ts");
-    const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
-    new CredentialStore(svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
-    setSetting(svc.db, "default_model", "fake/fake-model");
-    setSetting(svc.db, "runtime", "durable");
-  }
-  async function close(action: () => Promise<void>): Promise<void> {
-    try {
-      await action();
-    } finally {
-      restoreRuntime?.();
-      restoreRuntime = undefined;
-    }
-  }
-  const base: Harness = {
-    baseUrl: `http://127.0.0.1:${port}`,
-    port,
-    token: "",
-    home,
-    svc,
-    stop: () => close(stop),
-    disconnectForRestart: () => close(disconnectForRestart),
+  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  let restoredPiAgentDir = false;
+  const restorePiAgentDir = () => {
+    if (restoredPiAgentDir) return;
+    restoredPiAgentDir = true;
+    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
   };
-  base.token = await pairForToken(base.baseUrl, state);
-  if (options.waitForAgentReady !== false) {
-    // Wait until the fake pi agent finishes its probe and reports ready.
-    const deadline = Date.now() + 20_000;
-    for (;;) {
-      const agents = (await fetch(`${base.baseUrl}/api/agents`, { headers: authHeaders(base) }).then((r) => r.json())) as { id: string; status: string }[];
-      const pi = agents.find((a) => a.id === "pi");
-      if (pi?.status === "ready") break;
-      if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
-      await Bun.sleep(150);
+
+  let restoreRuntime: (() => void) | undefined;
+  const restoreFixtures = () => {
+    restorePiAgentDir();
+    restoreRuntime?.();
+    restoreRuntime = undefined;
+  };
+
+  try {
+    // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
+    const durableSuite = process.env.OMARCHY_TEST_DURABLE === "1";
+    restoreRuntime = durableSuite
+      ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider(options.onDurableMailReplay)
+      : undefined;
+    const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
+    const daemon = options.useProductionBotScreen
+      ? await main({
+          useHostApplicationUnits: options.useHostApplicationUnits === true,
+          botScreenRuntimeDir: path.join(home, "r"),
+          ...(options.botComputerAssetSupply === undefined ? {} : { botComputerAssetSupply: options.botComputerAssetSupply }),
+          ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
+        })
+      : await main({
+          useHostApplicationUnits: options.useHostApplicationUnits === true,
+          botScreenRuntimeDir: path.join(home, "r"),
+          botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
+          botScreenCapacity: options.botScreenCapacity ?? 8,
+        });
+    const { stop, disconnectForRestart, port, svc } = daemon;
+    if (durableSuite) {
+      const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
+      if (!svc.credentials.getForRuntime("fake")) await svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      setSetting(svc.db, "default_model", "fake/fake-model");
+      setSetting(svc.db, "runtime", "durable");
     }
+    const base: Harness = {
+      baseUrl: `http://127.0.0.1:${port}`,
+      port,
+      token: "",
+      home,
+      svc,
+      stop: async () => {
+        try { await stop(); } finally { restoreFixtures(); }
+      },
+      disconnectForRestart: async () => {
+        try { await disconnectForRestart(); } finally { restoreFixtures(); }
+      },
+    };
+    base.token = await pairForToken(base.baseUrl, state);
+    if (options.waitForAgentReady !== false) {
+      // Wait until the fake pi agent finishes its probe and reports ready.
+      const deadline = Date.now() + 20_000;
+      for (;;) {
+        const agents = (await fetch(`${base.baseUrl}/api/agents`, { headers: authHeaders(base) }).then((r) => r.json())) as { id: string; status: string }[];
+        const pi = agents.find((a) => a.id === "pi");
+        if (pi?.status === "ready") break;
+        if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
+        await Bun.sleep(150);
+      }
+    }
+    return base;
+  } catch (error) {
+    restoreFixtures();
+    throw error;
   }
-  return base;
 }
 
 export async function api<T>(h: Harness, method: string, p: string, body?: unknown): Promise<T> {

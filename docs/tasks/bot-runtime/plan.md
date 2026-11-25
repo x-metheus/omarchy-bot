@@ -78,7 +78,7 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 - [x] Task 7: App prompt sections, Skills list, and private folders
 - [x] Task 8: Files and shell tools with allowed folders
 - [x] Task 9: Approval flow on the Service
-- [ ] Task 10: Approval UI in the web client
+- [x] Task 10: Approval UI in the web client
 - [ ] Task 11: Computer and browser tools in process
 - [ ] Task 12: Bot mail, Local Sidecar, and plugin tools in process
 
@@ -90,19 +90,19 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 - [ ] Review with the human
 
 ### Phase 4: MCP, web, and workspace
-- [ ] Task 13: MCP through `pi-mcp`
-- [ ] Task 22: Secret store, secrets tool, and a clean shell environment
-- [ ] Task 14: MCP OAuth sign-in and token import
+- [x] Task 13: MCP through `pi-mcp`
+- [ ] Task 22: Secret store, secrets tool, and a clean shell environment (merged on the fallback file; `Bun.secrets` keychain backend chosen 2026-11-25, in progress)
+- [ ] Task 14: MCP OAuth sign-in and token import (merged; the `Bun.secrets` keyring reader for the token import is in progress)
 - [ ] Task 15: `web_fetch` and `web_search`
-- [ ] Task 16: Provider import, Settings providers screen, and per-Bot model
-- [ ] Task 17: Workspace cleanup
+- [x] Task 16: Provider import, Settings providers screen, and per-Bot model
+- [x] Task 17: Workspace cleanup
 
 ### Checkpoint D
 - [ ] Every tool in the spec's tools table works with the switch on
 - [ ] Settings can add an OpenAI-compatible provider and a built-in `pi-ai` provider, and each completes a Turn
 
 ### Phase 5: Migration and cutover
-- [ ] Task 18: Old session migration on a Thread's first Turn
+- [x] Task 18: Old session migration on a Thread's first Turn
 - [ ] Task 19: Cutover and deletion
 - [ ] Task 20: Remove the Pi worker, agent protocol, and Agent UI
 - [ ] Task 21: Real scenarios, end-to-end tests, and docs

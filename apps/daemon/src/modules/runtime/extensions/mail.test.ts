@@ -9,7 +9,6 @@ import { AssistantEntry, createRegistry, Harness, ToolResultEntry, type Conversa
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { api, makeBot, messages, sendToBot, sendToThread, startDaemon } from "../../../../../../tests/integration/helpers/harness.ts";
 import { setSetting } from "../../../persistence/settings.ts";
-import { CredentialStore } from "../credentials.ts";
 import type { RuntimeServices } from "../runtime.ts";
 import { createMailExtension } from "./mail.ts";
 
@@ -202,7 +201,7 @@ async function withMailDaemon(
   try {
     daemon = await startDaemon();
     if (process.env.OMARCHY_TEST_DURABLE !== "1") {
-      new CredentialStore(daemon.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      await daemon.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(daemon.svc.db, "default_model", "fake/fake-model");
       setSetting(daemon.svc.db, "runtime", "durable");
     }
@@ -568,7 +567,7 @@ test("peer mail resolves the current Bot's custom model outside the provider cat
       expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
       const { thread_id: threadId } = h.svc.db.query<{ thread_id: string }, []>("SELECT thread_id FROM bot_mail_deliveries").get()!;
       const model = { provider: "custom", modelId: "uncatalogued-model" };
-      new CredentialStore(h.svc.cfg.stateDir).add({ id: model.provider, name: "Custom", protocol: "openai-compatible", baseUrl: endpoint.url.href, apiKey: "test-key" });
+      await h.svc.credentials.add({ id: model.provider, name: "Custom", protocol: "openai-compatible", baseUrl: endpoint.url.href, apiKey: "test-key" });
       h.svc.db.query("UPDATE bots SET model = ? WHERE id = ?").run(`${model.provider}/${model.modelId}`, targetBotId);
       const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "fake", modelId: "fake-model" } } }, BACKGROUND_CONTEXT);
       h.svc.db.query("INSERT INTO pi_thread_conversations (thread_id, bot_id, conversation_id, created_at) VALUES (?, ?, ?, ?)")

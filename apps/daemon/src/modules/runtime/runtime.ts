@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import type { AgentBotMessageToolOutput, AgentCommand, NativeMcpControlResult, NativeMcpStatus } from "@omarchy-bot/agent-contract";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
@@ -7,11 +8,11 @@ import type { SidecarBroker } from "../devices/sidecarBroker.ts";
 import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
 import type { PlatformPaths } from "../workspace/paths.ts";
 import { openThreadConversation } from "./conversations.ts";
+import { seedFirstTurnConversation, transcriptBeforeTurn } from "./sessionMigration.ts";
 import { DurableTranscript } from "./transcript.ts";
 import { resolveModelForBot } from "./models.ts";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { awaitWithContext, BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
-import type { AgentBotMessageToolOutput } from "@omarchy-bot/agent-contract";
 import { CredentialStore } from "./credentials.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { createRuntimeModels } from "./models.ts";
@@ -19,10 +20,15 @@ import { compactionExtension, compactionSettings, formatAuthorText } from "./com
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
 import { createLocalExtension } from "./extensions/local.ts";
 import { createMailExtension } from "./extensions/mail.ts";
+import { createMcpExtension, type McpExtensionDeps } from "./extensions/mcp.ts";
 import { DispatchedCallIds } from "./extensions/model-call.ts";
 import { createPluginsExtension } from "./extensions/plugins.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
+import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
+import { importPiProviders } from "./providerImport.ts";
+import { SecretStore } from "./secrets.ts";
+import { McpOAuthManager, type McpOAuthManagerDeps } from "./mcpOAuth.ts";
 import { AssistantEntry, configure, ConversationIdle, createRegistry, Harness, InboxDoc, LiveDoc, type AgentChange, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type LiveState, type SettledSubmissionRecord, type SubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -34,6 +40,9 @@ const context = BACKGROUND_CONTEXT;
 export class DurableRunAborted extends Error {
   constructor() { super("aborted"); }
 }
+
+type McpControlInput = Pick<Extract<AgentCommand, { type: "mcp.control" }>, "action" | "server" | "redirectUrl" | "authorizationId" | "expiresAt">;
+type McpAuthorizationOutcome = Omit<Parameters<NonNullable<McpOAuthManagerDeps["onComplete"]>>[0], "name"> & { server: string };
 
 export interface RuntimeServices {
   mailbox: {
@@ -56,7 +65,15 @@ interface DurableTurnStart {
   working(): void;
 }
 
-type UserTurnStart = DurableTurnStart & { text: string; instructions: string; privateDir: string; deviceId?: string; whenBusy?: "followUp" };
+type UserTurnStart = DurableTurnStart & {
+  text: string;
+  /** Sequence of the persisted user message. Omitting it disables transcript fallback seeding. */
+  userMessageSeq?: number;
+  instructions: string;
+  privateDir: string;
+  deviceId?: string;
+  whenBusy?: "followUp";
+};
 type PeerMailTurnStart = DurableTurnStart & {
   peerMail: { author: string; text: string; deliveryId: string };
   admissionTimeoutMs: number;
@@ -90,9 +107,18 @@ export interface BotRuntime {
   activeTurn(threadId: string): Promise<string | undefined>;
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
+  mcpStatus(): NativeMcpStatus[];
+  mcpMarkNeedsAuth(name: string): NativeMcpStatus | undefined;
+  mcpControl(input: McpControlInput): Promise<NativeMcpControlResult>;
   close(): Promise<void>;
   /** Requests to use files outside the allowed folders; absent without Service storage and events. */
   readonly approvals?: ApprovalStore;
+  readonly credentials: CredentialStore;
+  readonly secrets: SecretStore;
+}
+
+function failureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | undefined): boolean {
@@ -100,8 +126,63 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
   return !entry.model?.some((message) => message.role === "assistant" && message.stopReason === "aborted");
 }
 
-export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: { events?: Pick<EventLog, "append"> } = {}): Promise<BotRuntime> {
-  const credentials = new CredentialStore(paths.stateDir);
+export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: {
+  events?: Pick<EventLog, "append">;
+  mcp?: Pick<McpExtensionDeps, "servers" | "prepareServers" | "fillSecrets" | "authProvider">;
+  mcpOAuth?: { onAuthorization?: (outcome: McpAuthorizationOutcome) => void };
+} = {}): Promise<BotRuntime> {
+  const secretStore = new SecretStore(paths.dataDir);
+  const mcpOptions = options.mcp;
+  const manager = mcpOptions ? new McpOAuthManager({
+    secrets: secretStore,
+    settings({ name, serverUrl }) {
+      const { servers, configurationError } = mcpOptions.servers();
+      const entry = Object.hasOwn(servers, name) ? servers[name] : undefined;
+      const transport = entry?.transport;
+      if (configurationError || entry?.disabled || transport?.type !== "http" || new URL(transport.url).href !== serverUrl) {
+        throw new Error("The MCP connection configuration changed.");
+      }
+      if (!transport.oauth) return {};
+      const { clientId, clientSecret, callbackPort, callbackUrl, scope, clientName, authServerMetadataUrl, clientRegistration } = transport.oauth;
+      return {
+        ...(clientId === undefined ? {} : { clientId }),
+        ...(clientSecret === undefined ? {} : { clientSecret }),
+        ...(callbackPort === undefined ? {} : { callbackPort }),
+        ...(callbackUrl === undefined ? {} : { callbackUrl }),
+        ...(scope === undefined ? {} : { scope }),
+        ...(clientName === undefined ? {} : { clientName }),
+        ...(authServerMetadataUrl === undefined ? {} : { authServerMetadataUrl: new URL(authServerMetadataUrl) }),
+        ...(clientRegistration === undefined ? {} : { clientRegistration }),
+      };
+    },
+    async onComplete({ name, authorizationId, ...outcome }) {
+      if (outcome.status === "completed") {
+        const entry = await mcp?.check(name).catch(() => undefined);
+        if (entry?.status !== "connected") outcome = { status: "failed", reason: "connect_failed" };
+      }
+      try { await options.mcpOAuth?.onAuthorization?.({ ...outcome, authorizationId, server: name }); }
+      catch { /* Event consumers must not interrupt OAuth completion. */ }
+      return outcome;
+    },
+  }) : undefined;
+  const mcp = mcpOptions && manager ? createMcpExtension({
+    ...mcpOptions,
+    authProvider: (name, url) => manager.authProvider(name, url),
+  }) : undefined;
+  let reportedCredentialsFailure = false;
+  const reportCredentialsFailure = () => {
+    if (reportedCredentialsFailure) return;
+    reportedCredentialsFailure = true;
+    console.warn("Unable to load model credential store; continuing without stored providers");
+  };
+  const credentials = await CredentialStore.open(paths.stateDir, secretStore).catch(() => {
+    reportCredentialsFailure();
+    return new CredentialStore(secretStore);
+  });
+  if (db && !reportedCredentialsFailure) {
+    try { await importPiProviders({ db, credentials, homeDir: paths.homeDir }); }
+    catch { console.warn("Unable to import Pi model providers; continuing startup"); }
+  }
   const sqlite = await openNodeSqliteDatabase(paths.dbPath);
   // A Bun SQLite busy wait would block the JS thread holding the durable connection's lock.
   let writer = Promise.resolve();
@@ -251,7 +332,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     };
   }
 
-  let reportedCredentialsFailure = false;
   const selections: { providerId: string; modelId: string }[] = [];
   function rememberModelSelection(providerId: string, modelId: string): void {
     if (!selections.some((selection) => selection.providerId === providerId && selection.modelId === modelId)) {
@@ -259,6 +339,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     }
   }
   const conversationBots = new Map<ConversationId, string>();
+  const secrets: BotSecretAccess = { store: secretStore, botId: (id) => conversationBots.get(id) };
   const active = new Map<string, ActiveTurn>();
   const dispatched = new DispatchedCallIds();
   function releaseTurn(turnId: string): void {
@@ -269,9 +350,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   try {
     const registry = createRegistry();
     registry.install(compactionExtension);
-    registry.install(createLocalExtension(db, () => services?.sidecars, active, dispatched));
-    registry.install(createMailExtension(db, () => services?.mailbox, active, undefined, writeService));
-    registry.install(createPluginsExtension(db, () => services?.plugins, active, dispatched));
     const approvals = db && options.events ? new ApprovalStore(db, options.events) : undefined;
     registry.install(createFilesShellExtension(process.platform, db && approvals ? {
       store: approvals,
@@ -281,13 +359,15 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         const row = db.query<{ thread_id: string; bot_id: string }, [number]>("SELECT thread_id, bot_id FROM pi_thread_conversations WHERE conversation_id = ?").get(conversationId);
         return row ? { threadId: row.thread_id, botId: row.bot_id } : undefined;
       },
-    } : undefined));
+    } : undefined, secrets));
+    registry.install(createSecretsExtension(secrets));
+    if (mcp) registry.install(mcp);
+    registry.install(createLocalExtension(db, () => services?.sidecars, active, dispatched));
+    registry.install(createMailExtension(db, () => services?.mailbox, active, undefined, writeService));
+    registry.install(createPluginsExtension(db, () => services?.plugins, active, dispatched));
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
-        if (!reportedCredentialsFailure) {
-          reportedCredentialsFailure = true;
-          console.warn("Unable to load model credential store; continuing without stored providers");
-        }
+        reportCredentialsFailure();
         return createModels();
       }
     }, registry, env: ({ conversationId, cwd }) => createFilesEnvironment(paths, readSettingsAllowedFolders(db), cwd, conversationBots.get(conversationId)),
@@ -304,13 +384,15 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         for (const { bot_id } of recoveringBots) {
           try {
             const model = resolveModelForBot(db, credentials, bot_id);
-            selections.push({ providerId: model.provider, modelId: model.id });
+            rememberModelSelection(model.provider, model.id);
           } catch { /* Recovery will report an unavailable model on the Turn. */ }
         }
       }
       // Recovery maps the owners before the scheduler can replay their tool calls.
       if (recoveringBots.length === 0) resumeScheduler();
     } catch (error) {
+      await manager?.close();
+      await mcp?.close();
       await harness.close(context);
       throw error;
     }
@@ -359,10 +441,23 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         let configuredOnCreate = false;
         waitingContext.abortSignal?.throwIfAborted();
         const conversation = await awaitWithContext(
-          openThreadConversation(input.db, harness, input.threadId, input.botId, context, writeService, peerMail ? () => {
-            configuredOnCreate = true;
-            return currentSettings();
-          } : undefined),
+          openThreadConversation(input.db, harness, input.threadId, input.botId, context, {
+            writeService,
+            async seed(conversation, seedContext) {
+              const userMessageSeq = "userMessageSeq" in input ? input.userMessageSeq : undefined;
+              await seedFirstTurnConversation(conversation, seedContext, {
+                threadId: input.threadId,
+                legacySessionPath: input.threads.getNativeSession(input.threadId),
+                transcript: () => transcriptBeforeTurn(() => input.threads.listMessages(input.threadId), userMessageSeq),
+              });
+            },
+            ...(peerMail ? {
+              initialSettings() {
+                configuredOnCreate = true;
+                return currentSettings();
+              },
+            } : {}),
+          }),
           waitingContext,
         );
         conversationBots.set(conversation.id, input.botId);
@@ -451,8 +546,14 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           throw new Error(runFailure?.detail ?? (typeof failed.detail === "string" ? failed.detail : failed.reason));
         }
       } catch (error) {
-        admission.reject(error);
-        throw error;
+        let failure = error;
+        if (!(error instanceof DurableRunAborted)) {
+          const reason = failureMessage(error);
+          const redacted = await secretStore.redactKnown(reason, input.botId);
+          if (redacted !== reason) failure = new Error(redacted);
+        }
+        admission.reject(failure);
+        throw failure;
       } finally {
         clearTimeout(admissionTimer);
         try { await watch?.stop(); }
@@ -465,6 +566,8 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
 
     return {
       ...(approvals ? { approvals } : {}),
+      credentials,
+      secrets: secretStore,
       bindServices(bound) { services = bound; },
       startTurn,
       startPeerMailTurn: startTurn,
@@ -494,6 +597,10 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         const jobs: Promise<void>[] = [];
         const rows = input.db.query<{ id: string; thread_id: string; bot_id: string }, []>("SELECT id, thread_id, bot_id FROM turns WHERE status = 'working' ORDER BY started_at, id").all();
         const settleTurn = (...args: Parameters<typeof input.settled>) => writeService(() => input.settled(...args));
+        const reportFailure = async (row: (typeof rows)[number], reason: string) => {
+          const redacted = await secretStore.redactKnown(reason, row.bot_id);
+          await settleTurn(row.id, { status: "failed", reason: redacted });
+        };
         const registered = (async () => {
           const prepared: {
             row: (typeof rows)[number];
@@ -501,13 +608,13 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
             owned: Submission;
             associations: { submission_id: number; kind: string }[];
           }[] = [];
-          const failed: { turnId: string; reason: string }[] = [];
+          const failed: { row: (typeof rows)[number]; reason: string }[] = [];
           // Waiting on any submission can resume the global scheduler, so map all Bots and remember their conversations' models first.
           for (const row of rows) {
             try {
               const indexed = input.db.query<{ conversation_id: number }, [string, string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?").get(row.thread_id, row.bot_id);
               if (!indexed) throw new Error("durable conversation not found");
-              const conversation = await openThreadConversation(input.db, harness, row.thread_id, row.bot_id, context, writeService);
+              const conversation = await openThreadConversation(input.db, harness, row.thread_id, row.bot_id, context, { writeService });
               conversationBots.set(conversation.id, row.bot_id);
               const associations = input.db.query<{ submission_id: number; kind: string }, [string]>("SELECT submission_id, kind FROM pi_turn_submissions WHERE turn_id = ? ORDER BY submission_id").all(row.id);
               const association = associations.find((item) => item.kind === "input");
@@ -526,10 +633,10 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
               if (model) rememberModelSelection(model.provider, model.modelId);
               prepared.push({ row, conversation, owned: primary, associations });
             } catch (error) {
-              failed.push({ turnId: row.id, reason: error instanceof Error ? error.message : String(error) });
+              failed.push({ row, reason: failureMessage(error) });
             }
           }
-          for (const { turnId, reason } of failed) await settleTurn(turnId, { status: "failed", reason });
+          for (const { row, reason } of failed) await reportFailure(row, reason);
           for (const { row, conversation, owned, associations } of prepared) {
             try {
               const admission = { conversation, submission: owned };
@@ -588,10 +695,10 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
                     } else {
                       const live = ownedWatch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; detail?: string } } | undefined;
                       const reason = (live?.runFailure?.inputs.includes(failed.id) ? live.runFailure.detail : undefined) ?? (typeof failed.detail === "string" ? failed.detail : failed.reason);
-                      await settleTurn(row.id, { status: "failed", reason });
+                      await reportFailure(row, reason);
                     }
                   }
-                } catch (error) { await settleTurn(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) }); }
+                } catch (error) { await reportFailure(row, failureMessage(error)); }
                 finally {
                   try { await watch?.stop(); }
                   finally { releaseTurn(row.id); }
@@ -599,7 +706,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
               })());
             } catch (error) {
               releaseTurn(row.id);
-              await settleTurn(row.id, { status: "failed", reason: error instanceof Error ? error.message : String(error) });
+              await reportFailure(row, failureMessage(error));
             }
           }
         })().finally(resumeScheduler);
@@ -661,9 +768,58 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           if (result === "already_placed" || (result === "settled" && (turn.pending.length > 0 || turn.recovering))) await conversation.abort(context);
         }
       },
+      mcpStatus() {
+        return mcp?.status() ?? [];
+      },
+      mcpMarkNeedsAuth(name) {
+        return mcp?.markNeedsAuth(name);
+      },
+      async mcpControl({ action, server, redirectUrl, authorizationId, expiresAt }) {
+        const status = () => mcp?.status() ?? [];
+        const respond = (result: Record<string, unknown>) => ({ servers: status(), result });
+        if (action === "status") return { servers: status() };
+        if (typeof server !== "string" || !server.trim()) return respond({ error: "invalid_request" });
+        switch (action) {
+          case "connect": {
+            try {
+              await mcp?.prepare();
+              const entry = await mcp?.check(server, paths.sharedWorkspaceDir);
+              if (!entry) return respond({ error: "not_configured" });
+              if (entry.status === "connected") return respond({});
+              const message = "error" in entry && typeof entry.error === "string" ? entry.error : undefined;
+              return respond({ error: entry.status === "needs-auth" ? "auth_required" : "connect_failed", ...(message === undefined ? {} : { message }) });
+            } catch { return respond({ error: "connect_failed" }); }
+          }
+          case "auth-start": {
+            if (typeof authorizationId !== "string" || !authorizationId.trim()) return respond({ error: "invalid_request" });
+            if (!mcp || !manager) return respond({ error: "not_configured" });
+            try {
+              const effective = await mcp.prepare();
+              const entry = Object.hasOwn(effective.servers, server) ? effective.servers[server] : undefined;
+              if (effective.configurationError || entry?.disabled || entry?.transport?.type !== "http") return respond({ error: "not_configured" });
+              const result = await manager.start({ name: server, serverUrl: entry.transport.url, authorizationId, ...(expiresAt === undefined ? {} : { expiresAt }) });
+              return respond("authorizationUrl" in result ? { authorizationUrl: result.authorizationUrl } : { authenticated: true });
+            } catch { return respond({ error: "authorization_failed" }); }
+          }
+          case "auth-complete": {
+            if (typeof redirectUrl !== "string" || !redirectUrl.trim()) return respond({ error: "invalid_request" });
+            if (!manager) return respond({ error: "not_configured" });
+            try {
+              const outcome = await manager.complete({ name: server, redirectUrl });
+              return respond(outcome.status === "completed" ? { authenticated: true } : { error: outcome.reason });
+            } catch { return respond({ error: "auth_failed" }); }
+          }
+          case "auth-cancel":
+            await manager?.cancel({ name: server, ...(authorizationId === undefined ? {} : { authorizationId }) });
+            return respond({});
+          default:
+            return respond({ error: "invalid_request" });
+        }
+      },
       close() {
         closing ??= (async () => {
           try {
+            await Promise.all([manager?.close(), mcp?.close()]);
             await harness.close(context);
           } finally {
             await storage.close(context);
