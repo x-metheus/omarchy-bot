@@ -425,11 +425,34 @@ Carried from Task 13 (2026-11-25): with the switch on, the Services panel takes 
 **Description:** Implement the one-time workspace cleanup from the spec: one Skills folder and one `.mcp.json`, merging servers and Skills from `.pi`, `.codex`, and `.claude`, moving those folders to a dated backup in the data directory, changing nothing if any step fails, and writing a marker file.
 
 **Acceptance criteria:**
-- [ ] Skills and MCP servers from the three old folders end up in the one Skills folder and `.mcp.json`
-- [ ] A failure at any step leaves every folder unchanged
-- [ ] A second start does nothing
+- [x] Skills and MCP servers from the three old folders end up in the one Skills folder and `.mcp.json` — MCP merge, conflict handling, Codex conversion, Skills migration, alias replacement, duplicate basenames, and case-folded allocation ([cleanup.test.ts](../../../apps/daemon/src/modules/workspace/cleanup.test.ts)). The integration test verifies migration on the first Service start ([workspace-cleanup.test.ts](../../../tests/integration/workspace-cleanup.test.ts)).
+- [x] A failure at any step leaves every folder unchanged — full snapshot restoration after throws at `folders`, `skills`, `mcp`, and `marker`, plus journal undo before a fresh migration ([cleanup.test.ts](../../../apps/daemon/src/modules/workspace/cleanup.test.ts)).
+- [x] A second start does nothing — cleanup returns `skipped` when the marker exists and preserves the full snapshot ([cleanup.test.ts](../../../apps/daemon/src/modules/workspace/cleanup.test.ts)). The second Service boot preserves the marker, backups, and `.mcp.json` ([workspace-cleanup.test.ts](../../../tests/integration/workspace-cleanup.test.ts)).
 
-**Verification:** default commands; tests on temporary workspaces.
+**Decisions**
+
+- Cleanup runs unconditionally once per Service start, after `openBotRuntime` and before `PluginsService` construction. Failures are logged and retried on the next start.
+- `<dataDir>/workspace-cleanup.json` stores `{version: 1, completedAt, backup}`. The backup at `<dataDir>/workspace-backup-YYYY-MM-DD` includes all unrecognized content. On collision, suffixes start at `-2`.
+- Cleanup plans in memory, stages merged Skills and `.mcp.json` in `<dataDir>/workspace-cleanup-<random-suffix>`, and commits with ordered renames, publishing the marker last. A small journal records pending and completed renames so the next start can undo them if the marker is absent.
+- `.mcp.json` wins same-name conflicts, and warnings name servers only. The Codex allowlist is `type`, `command`, `args`, `env`, `url`, `headers`, `enabled`, and `http_headers`. Entries using `env_vars`, `env_http_headers`, `bearer_token_env_var`, `enable`, SSE, `cwd`, or other unsupported fields stay only in the backup.
+- Skill identity comes from the `SKILL.md` frontmatter name or the directory basename. `.agents/skills` wins, and an existing `NativeSkills` alias into a legacy root is replaced only by its exact matching source. Duplicate basenames get deterministic suffixes through case-folded allocation. Cleanup copies symlinked legacy Skills and Skills in linked roots, preserving the targets.
+- `NativeSkills` scans only `.agents/skills` and the private disabled folder. It creates no `.claude` aliases, reconciles pre-upgrade disabled entries to `.agents/skills`, and ignores directories resolving into legacy roots.
+
+**Known limits**
+
+- Cleanup assumes one Service starts before clients write. Concurrent writers and editors are out of scope.
+- Recovery covers one interrupted journaled commit. A kill before the first journal write or after marker publication can leave staging. Repeated interruption and power-loss durability are out of scope.
+- Cross-device moves copy, publish, then remove the source. A further failure during recovery can leave a partial copy.
+- Unmatched dangling legacy Skill aliases may remain.
+- `NativeMcpStore` may still recreate `.pi/settings.json` until the MCP adapter is retired in the later runtime tasks (Task 20 checks its removal). Later legacy writes persist after cleanup.
+
+**Verification:**
+
+- `bun test apps/daemon` — 158 passed, 1 pre-existing platform skip.
+- `bun test apps/daemon/src/modules/workspace/cleanup.test.ts` — 33 passed.
+- `bun test tests/integration/workspace-cleanup.test.ts` — 1 passed.
+- `bun run lint:boundaries` — 4 passed.
+- `bun run typecheck` — one pre-existing failure at `tests/integration/daemon.test.ts:289`, unrelated to Task 17.
 
 **Dependencies:** Task 7
 
