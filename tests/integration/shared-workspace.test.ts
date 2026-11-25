@@ -12,23 +12,6 @@ import {
   type Harness,
 } from "./helpers/harness.ts";
 
-interface FakeWorkerObservation {
-  type: "session.open" | "session.resume" | "message.send";
-  botId?: string;
-  threadId?: string;
-  nativeSessionId?: string;
-  options?: { cwd?: string; instructions?: string; model?: string };
-}
-
-function workerObservations(h: Harness): FakeWorkerObservation[] {
-  const log = path.join(h.home, "fake-agent-observations.ndjson");
-  if (!existsSync(log)) return [];
-  return readFileSync(log, "utf8")
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as FakeWorkerObservation);
-}
-
 function sharedWorkspace(h: Harness): string {
   return path.join(h.home, ".omarchy-bot", "workspace");
 }
@@ -67,11 +50,8 @@ describe("Shared Workspace default cwd", () => {
         const thread = await api<ThreadDto>(h, "GET", `/api/threads/${sent.threadId}`);
         expect(thread.latestTurn?.status).toBe("failed");
         expect(thread.latestTurn?.reason).toContain("Shared Workspace is unavailable");
-        expect(
-          workerObservations(h).filter(
-            (observation) => observation.threadId === sent.threadId && observation.type === "session.open",
-          ),
-        ).toEqual([]);
+        const conversation = h.svc.db.query("SELECT 1 FROM pi_thread_conversations WHERE thread_id = ?").get(sent.threadId);
+        expect(conversation).toBeNull();
         expect(readFileSync(path.join(sourceDir, "install-sentinel.txt"), "utf8")).toBe("keep");
         expect(readFileSync(path.join(retained, "keep-me.txt"), "utf8")).toBe("prior work");
         expect(existsSync(path.join(h.home, "db.sqlite"))).toBeTrue();
