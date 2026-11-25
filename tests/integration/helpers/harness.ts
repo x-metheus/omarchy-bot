@@ -8,7 +8,6 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
-import { MODEL_CREDENTIALS_FILENAME, type StoredProvider } from "../../../apps/daemon/src/modules/runtime/credentials.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
@@ -43,7 +42,6 @@ export interface HarnessOptions {
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
   seedDurableProvider?: boolean;
-  legacyModelCredentials?: readonly StoredProvider[];
   dataDir?: string;
   stateDir?: string;
   /** Worker tree override; defaults to the shared fake workers. */
@@ -111,9 +109,6 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   mkdirSync(state, { recursive: true });
   process.env.OMARCHY_BOT_STATE = state;
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-  if (options.legacyModelCredentials) {
-    writeFileSync(path.join(state, MODEL_CREDENTIALS_FILENAME), JSON.stringify(options.legacyModelCredentials), { mode: 0o600 });
-  }
   // Fake conformance record so the fake pi worker probes to `ready`.
   const conf = path.join(data, "conformance");
   mkdirSync(conf, { recursive: true });
