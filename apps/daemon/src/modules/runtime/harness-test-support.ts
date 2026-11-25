@@ -1,7 +1,7 @@
 // This test helper lives here to satisfy the pi-durable module boundary rule.
 // No production module imports this test-only helper.
 import type { Database } from "bun:sqlite";
-import { Harness, createRegistry, defineExtension, defineTask, defineTool, hook, ToolTask, ToolResultEntry, type Conversation, type ConversationId, type SubmissionDraft, type ToolExecutionApi, type ToolExecutionResult, type ToolHookCall, type Tx } from "@earendil-works/pi-durable";
+import { Harness, createRegistry, defineExtension, defineTask, defineTool, hook, GenerationTask, LiveDoc, ToolTask, ToolResultEntry, type Conversation, type ConversationId, type SubmissionDraft, type TaskId, type ToolExecutionApi, type ToolExecutionResult, type ToolHookCall, type Tx } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
@@ -58,6 +58,12 @@ export type DurableMailReplayObserver = (first: ToolExecutionResult, replayed: T
 export function installDurableSuiteProvider(onMailReplay?: DurableMailReplayObserver): () => void {
   const fake = createDurableSuiteFakeProvider();
   durableSuiteCallCount = fake.getCallCount;
+  const toolFailureTasks = new Set<TaskId>();
+  const generationAbort = GenerationTask.definition.abort;
+  GenerationTask.definition.abort = async (task, runtime, context) => {
+    if (toolFailureTasks.delete(runtime.taskId)) throw new Error("fake failure");
+    return generationAbort(task, runtime, context);
+  };
   const waiting = new Map<number, () => void>();
   const steered = new Set<number>();
   const boundaries = new Set<number>();
@@ -111,11 +117,32 @@ export function installDurableSuiteProvider(onMailReplay?: DurableMailReplayObse
     },
   })], hooks: [hook(ToolTask, {
     // The worker reports these calls without running shell commands or touching the workspace.
-    beforeTool(call) {
+    async beforeTool(call, api, context) {
+      if (call.id === durableSuiteToolCalls.failingBash.id && isFixtureCall(call)) {
+        const live = await api.snapshot(LiveDoc, api.conversationId, context);
+        const owner = live?.tools?.some(({ taskId }) => taskId === api.taskId) ? live?.run?.taskId : undefined;
+        const harness = durableSuiteHarness;
+        if (owner === undefined || !harness) throw new Error("Expected the tool-fail fixture's owning generation");
+        toolFailureTasks.add(owner);
+        // Pi waits for all tool results before its next request. Fault this generation while its bash task is held here.
+        const signal = context.abortSignal;
+        if (!signal) throw new Error("Expected the tool-fail fixture's tool signal");
+        const interrupted = signal.aborted ? Promise.resolve() : new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+        await Promise.race([interrupted, harness.abortTask(owner, BACKGROUND_CONTEXT).then(() => interrupted)]);
+        signal.throwIfAborted();
+      }
       if (isFixtureCall(call)) return { block: "Use the scripted tool result" };
     },
     async afterTool(call, result, api, context) {
       if (!isFixtureCall(call) || !result.diagnostics?.some(({ code }) => code === "blocked")) return;
+      if (call.id === durableSuiteToolCalls.interruptedBash.id) {
+        const signal = context.abortSignal;
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return;
+      }
       if (call.id === durableSuiteToolCalls.orderedRead.id) await waitForSteer(api.conversationId, context.abortSignal);
       if (!context.abortSignal?.aborted) return { output: [] };
     },
@@ -158,7 +185,7 @@ export function installDurableSuiteProvider(onMailReplay?: DurableMailReplayObse
     };
     return harness;
   };
-  return () => { for (const release of waiting.values()) release(); durableSuiteCallCount = undefined; durableSuiteHarness = undefined; Harness.open = originalOpen; };
+  return () => { for (const release of waiting.values()) release(); durableSuiteCallCount = undefined; durableSuiteHarness = undefined; Harness.open = originalOpen; GenerationTask.definition.abort = generationAbort; };
 }
 
 export async function withBlockingRuntimeTool<T>(fn: (tool: { started: Promise<void>; release(): void; seen(): string }) => Promise<T>): Promise<T> {
@@ -300,7 +327,7 @@ export function installDurableCrashProvider(): () => void {
     }),
   ] });
   const fake = fauxProvider({ provider: "fake", api: "openai-completions", tokensPerSecond: 15, tokenSize: { min: 1, max: 1 } });
-  fake.setResponses(Array.from({ length: 100 }, () => async ({ messages }) => {
+  fake.setResponses(Array.from({ length: 100 }, () => async ({ messages }, options) => {
     const latest = messages.filter((message) => message.role === "user").at(-1);
     const text = typeof latest?.content === "string" ? latest.content : "";
     if (text.startsWith("send-peer-mail:")) {
@@ -317,6 +344,11 @@ export function installDurableCrashProvider(): () => void {
     if (text === "A competing steer." || text.startsWith("Message from Bot ")) {
       if (process.env.OMARCHY_TEST_PEER_MAIL_HOLD === "placed") await new Promise<never>(() => {});
       return fauxAssistantMessage("Peer mail survived restart.");
+    }
+    if (text === "timeout-recovery") {
+      console.log(JSON.stringify({ event: "recovered-provider-started" }));
+      if (!options?.signal?.aborted) await new Promise<void>((resolve) => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return fauxAssistantMessage([], { stopReason: "aborted" });
     }
     if (text === "hang") return fauxAssistantMessage([fauxToolCall("hang", {}, { id: "hang-call" })], { stopReason: "toolUse" });
     if (text === "approval-write") {

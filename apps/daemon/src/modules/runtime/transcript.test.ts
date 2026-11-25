@@ -9,7 +9,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { AssistantEntry, createRegistry, defineTool, Harness, LiveDoc, ToolResultEntry, UserEntry, type ConversationView, type EntryDraft, type SubmissionId, type TaskId, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "@omarchy-bot/domain";
+import { TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "@omarchy-bot/domain";
 import { applyMigration, MIGRATIONS } from "../../persistence/db.ts";
 import { Supervisor } from "../../supervision/supervisor.ts";
 import { AgentsRegistry } from "../agents/registry.ts";
@@ -50,7 +50,7 @@ function transcriptFor(db: Database, initial: ConversationView) {
   };
 }
 
-async function committedTurn(assistant: AssistantMessage, execute: (signal: AbortSignal | undefined) => Promise<ToolExecutionResult> = async () => ({ output: [fauxText("private output")] }), abort = false) {
+async function committedConversation(assistant: AssistantMessage, execute: (signal: AbortSignal | undefined) => Promise<ToolExecutionResult>, abort = false) {
   const provider = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }] });
   provider.setResponses([assistant, fauxAssistantMessage("After result")]);
   const models = createModels();
@@ -58,7 +58,7 @@ async function committedTurn(assistant: AssistantMessage, execute: (signal: Abor
   const registry = createRegistry();
   const started = Promise.withResolvers<void>();
   registry.install({ name: "transcript-test", tools: [defineTool({
-    name: "check", description: "Check a test input", parameters: { type: "object" },
+    name: assistant.content.find((part) => part.type === "toolCall")?.name ?? "check", description: "Check a test input", parameters: { type: "object" },
     async execute(_args, _api, toolContext) { started.resolve(); return execute(toolContext.abortSignal); },
   })] });
   const storage = new MemoryStorage();
@@ -74,21 +74,26 @@ async function committedTurn(assistant: AssistantMessage, execute: (signal: Abor
       await started.promise;
       await conversation.abort(context);
     }
-    expect((await submission.wait(context)).status).toBe(abort ? "unanswered" : "done");
+    expect((await submission.wait(context)).status).toBe(abort || assistant.stopReason === "error" ? "unanswered" : "done");
     const { items } = await conversation.entries({ order: "ascending" }, 100, undefined, context);
-    const firstAssistant = items.find(AssistantEntry.is)!;
-    const result = items.find(ToolResultEntry.is)!;
-    const modelResult = result.model?.find((message) => message.role === "toolResult");
-    expect(modelResult).toBeDefined();
-    const beforeResult = { ...initial, entries: items.filter((entry) => entry.id < result.id) };
-    const throughResult = { ...initial, entries: items.filter((entry) => entry.id <= result.id) };
-    const committed = { ...initial, entries: items };
-    const live = { ...initial, docs: JSON.parse(JSON.stringify({ "pi.live": { generation: { attempt: 0, message: firstAssistant.model?.[0] } } })) };
-    return { initial, beforeResult, throughResult, committed, live, modelResult: modelResult! };
+    return { initial, committed: { ...initial, entries: items } };
   } finally {
     await harness.close(context);
     await storage.close(context);
   }
+}
+
+async function committedTurn(assistant: AssistantMessage, execute: (signal: AbortSignal | undefined) => Promise<ToolExecutionResult> = async () => ({ output: [fauxText("private output")] }), abort = false) {
+  const { initial, committed } = await committedConversation(assistant, execute, abort);
+  const items = committed.entries;
+  const firstAssistant = items.find(AssistantEntry.is)!;
+  const result = items.find(ToolResultEntry.is)!;
+  const modelResult = result.model?.find((message) => message.role === "toolResult");
+  expect(modelResult).toBeDefined();
+  const beforeResult = { ...initial, entries: items.filter((entry) => entry.id < result.id) };
+  const throughResult = { ...initial, entries: items.filter((entry) => entry.id <= result.id) };
+  const live = { ...initial, docs: JSON.parse(JSON.stringify({ "pi.live": { generation: { attempt: 0, message: firstAssistant.model?.[0] } } })) };
+  return { initial, beforeResult, throughResult, committed, live, modelResult: modelResult! };
 }
 
 test("DurableTranscript orders committed text, tool calls, later text and thinking", async () => {
@@ -140,18 +145,160 @@ test("DurableTranscript updates the existing tool row with the committed result 
   expect(events()).toHaveLength(2);
 });
 
+test.each([
+  ["bash", { command: "echo ok", unrelated: "ignored" }, undefined, "echo ok", "echo ok"],
+  ["read", { path: "a".repeat(600) }, undefined, "a".repeat(500), "a".repeat(500)],
+  ["glob", { pattern: "reports/[0-9].txt" }, undefined, "reports/[0-9].txt", "reports/[0-9].txt"],
+  ["local", { action: "run", command: "pwd" }, { hostname: "laptop" }, "pwd", "laptop pwd"],
+] as const)("DurableTranscript keeps the safe target for a %s call", async (name, args, details, started, finished) => {
+  using db = new Database(":memory:");
+  const assistant = fauxAssistantMessage(fauxToolCall(name, args, { id: callId }), { stopReason: "toolUse" });
+  const { initial, beforeResult, throughResult, modelResult } = await committedTurn(assistant, async () => ({ output: [], ...(details ? { details } : {}) }));
+  const { projector, messages } = transcriptFor(db, initial);
+  const transcript = projector();
+  transcript.update(beforeResult);
+  expect(messages()[0]?.toolCall).toEqual({ id: callId, name, status: "running", target: started });
+  transcript.update(throughResult);
+  expect(messages()[0]?.toolCall).toEqual({ id: callId, name, status: "completed", target: finished, durationMs: modelResult.durationMs });
+});
+
+test("DurableTranscript omits absent targets and durations", async () => {
+  using db = new Database(":memory:");
+  const assistant = fauxAssistantMessage(fauxToolCall("bash", { unrelated: "ignored" }, { id: callId }), { stopReason: "toolUse" });
+  const { initial, throughResult } = await committedTurn(assistant);
+  const withoutDuration = structuredClone(throughResult);
+  const result = withoutDuration.entries.find(ToolResultEntry.is)?.model?.find((message) => message.role === "toolResult");
+  if (!result) throw new Error("Expected a tool result");
+  delete result.durationMs;
+  const { projector, messages } = transcriptFor(db, initial);
+  projector().update(withoutDuration);
+  expect(messages()[0]?.toolCall).toEqual({ id: callId, name: "bash", status: "completed" });
+});
+
 test("DurableTranscript projects the worker-safe summary for a committed tool error", async () => {
   using db = new Database(":memory:");
+  const failure = "Sidecar result exceeds the limit. Bearer private-credential  ";
+  const { initial, throughResult, modelResult } = await committedTurn(fauxAssistantMessage(fauxToolCall("local", {}, { id: callId }), { stopReason: "toolUse" }), async () => ({
+    isError: true, output: [fauxText("private tool output")], details: { publicError: failure + "x".repeat(600), secret: "private details" },
+  }));
+  const { projector, messages, events } = transcriptFor(db, initial);
+  projector().update(throughResult);
+  const prefix = "Sidecar result exceeds the limit. Bearer [redacted] ";
+  const errorSummary = prefix + "x".repeat(TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH - prefix.length);
+  const toolCall = { id: callId, name: "local", status: "error", errorSummary, durationMs: modelResult.durationMs } as const;
+  expect(messages()).toHaveLength(1);
+  expect(messages()[0]?.toolCall).toEqual(toolCall);
+  expect(events()[1]).toMatchObject({ type: "tool.updated", payload: { threadId, messageId: messages()[0]!.id, toolCall } });
+  expect(JSON.stringify([messages(), events()])).not.toContain("private");
+});
+
+test.each([
+  ["plain private output", "private failure detail", undefined],
+  ["inline JSON", 'Request failed: {"payload":"private JSON"}', undefined],
+  ["attached JSON", 'Unable to complete the request.\n{"payload":"private JSON"}', undefined],
+  ["error diagnostics", "private tool output", [{ severity: "error", message: "private diagnostic" }]],
+] as const)("DurableTranscript keeps %s out of the row and tool.updated", async (_label, text, diagnostics) => {
+  using db = new Database(":memory:");
   const { initial, throughResult, modelResult } = await committedTurn(fauxAssistantMessage(tool(), { stopReason: "toolUse" }), async () => ({
-    isError: true, output: [fauxText("private failure detail")], details: { secret: "private details" },
+    isError: true,
+    output: [fauxText(text)],
+    details: { publicError: "private data in unclassified details" },
+    ...(diagnostics ? { diagnostics: [...diagnostics] } : {}),
   }));
   const { projector, messages, events } = transcriptFor(db, initial);
   projector().update(throughResult);
   const toolCall = { id: callId, name: "check", status: "error", errorSummary: "Tool call failed.", durationMs: modelResult.durationMs } as const;
   expect(messages()).toHaveLength(1);
   expect(messages()[0]?.toolCall).toEqual(toolCall);
+  expect(events()[1]?.type).toBe("tool.updated");
   expect(events()[1]?.payload).toEqual({ threadId, messageId: messages()[0]!.id, toolCall });
-  expect(JSON.stringify(events())).not.toContain("private");
+  expect(JSON.stringify([messages(), events()])).not.toContain("private");
+});
+
+test.each([
+  ["bash", { command: `echo '{"password":"private-credential","payload":"private JSON"}'` }],
+  ["web_search", { query: 'Search for {"password":"private-marker"}' }],
+  ["read", { path: 'files/{"password":"private-marker"}' }],
+  ["computer", { action: '{"password":"private-marker"}' }],
+  ["glob", { pattern: 'files/{"password":"private-marker"}' }],
+  ["bash", { command: `echo '[1,"password","private-marker"]'` }],
+  ["web_search", { query: '["a",{"password":"private-marker"}]' }],
+  ["read", { path: '"private-marker"' }],
+  ["local", { command: '[null,"password","private-marker"]', action: "run" }],
+] as const)("DurableTranscript omits a %s target containing a credential JSON blob", async (name, args) => {
+  using db = new Database(":memory:");
+  const assistant = fauxAssistantMessage(fauxToolCall(name, args, { id: callId }), { stopReason: "toolUse" });
+  const { initial, beforeResult, throughResult, modelResult } = await committedTurn(assistant);
+  const { projector, messages, events } = transcriptFor(db, initial);
+  const transcript = projector();
+  transcript.update(beforeResult);
+  expect(messages()).toHaveLength(1);
+  expect(messages()[0]?.toolCall).toEqual({ id: callId, name, status: "running" });
+  transcript.update(throughResult);
+  const toolCall = { id: callId, name, status: "completed", durationMs: modelResult.durationMs } as const;
+  expect(messages()).toHaveLength(1);
+  expect(messages()[0]?.toolCall).toEqual(toolCall);
+  expect(events()[1]?.type).toBe("tool.updated");
+  expect(events()[1]?.payload).toEqual({ threadId, messageId: messages()[0]!.id, toolCall });
+  expect(JSON.stringify([messages(), events()])).not.toContain("private");
+});
+
+test.each([
+  ["bash", { command: "curl https://fixture:sample-pass@example.invalid/v1" }, undefined, "curl https://[redacted]@example.invalid/v1", "curl https://[redacted]@example.invalid/v1"],
+  ["bash", { command: "curl https://example.invalid/v1" }, undefined, "curl https://example.invalid/v1", "curl https://example.invalid/v1"],
+  ["web_search", { query: "Find https://fixture:sample-pass@example.invalid/v1" }, undefined, "Find https://[redacted]@example.invalid/v1", "Find https://[redacted]@example.invalid/v1"],
+  ["web_search", { query: "Find https://example.invalid/users/@fixture?email=fixture@example.invalid" }, undefined, "Find https://example.invalid/users/@fixture?email=fixture@example.invalid", "Find https://example.invalid/users/@fixture?email=fixture@example.invalid"],
+  ["read", { path: "https://fixture:sample-pass@example.invalid/v1" }, undefined, "https://[redacted]@example.invalid/v1", "https://[redacted]@example.invalid/v1"],
+  ["computer", { action: "open https://fixture:sample-pass@example.invalid/v1" }, undefined, "open https://[redacted]@example.invalid/v1", "open https://[redacted]@example.invalid/v1"],
+  ["glob", { pattern: "https://fixture:sample-pass@example.invalid/v1/*" }, undefined, "https://[redacted]@example.invalid/v1/*", "https://[redacted]@example.invalid/v1/*"],
+  ["local", { action: "run", command: "pwd" }, { hostname: "https://fixture:sample-pass@example.invalid/v1" }, "pwd", "https://[redacted]@example.invalid/v1 pwd"],
+] as const)("DurableTranscript keeps URL userinfo out of a %s target (%j)", async (name, args, details, started, finished) => {
+  using db = new Database(":memory:");
+  const assistant = fauxAssistantMessage(fauxToolCall(name, args, { id: callId }), { stopReason: "toolUse" });
+  const { initial, beforeResult, throughResult, modelResult } = await committedTurn(assistant, async () => ({ output: [], ...(details ? { details } : {}) }));
+  const { projector, messages, events } = transcriptFor(db, initial);
+  const transcript = projector();
+  transcript.update(beforeResult);
+  expect(messages()).toHaveLength(1);
+  const running = messages()[0]!;
+  expect(running.toolCall).toEqual({ id: callId, name, status: "running", target: started });
+  expect(events()).toHaveLength(1);
+  expect(events()[0]?.type).toBe("message.appended");
+  expect(events()[0]?.payload).toEqual(running);
+  transcript.update(throughResult);
+  const toolCall = { id: callId, name, status: "completed", target: finished, durationMs: modelResult.durationMs } as const;
+  expect(messages()).toEqual([{ ...running, toolCall }]);
+  expect(events()).toHaveLength(2);
+  expect(events()[1]?.type).toBe("tool.updated");
+  expect(events()[1]?.payload).toEqual({ threadId, messageId: running.id, toolCall });
+  expect(JSON.stringify([messages(), events()])).not.toContain("sample-pass");
+});
+
+test.each(['{"password":"private-marker"}', '[1,"password","private-marker"]'])("DurableTranscript excludes credential JSON from a Local Sidecar target prefix (%s)", async (hostname) => {
+  using db = new Database(":memory:");
+  const assistant = fauxAssistantMessage(fauxToolCall("local", { action: "run", command: "pwd" }, { id: callId }), { stopReason: "toolUse" });
+  const { initial, throughResult, modelResult } = await committedTurn(assistant, async () => ({
+    output: [], details: { hostname },
+  }));
+  const { projector, messages, events } = transcriptFor(db, initial);
+  projector().update(throughResult);
+  const toolCall = { id: callId, name: "local", status: "completed", target: "pwd", durationMs: modelResult.durationMs } as const;
+  expect(messages()).toHaveLength(1);
+  expect(messages()[0]?.toolCall).toEqual(toolCall);
+  expect(events()[1]?.type).toBe("tool.updated");
+  expect(events()[1]?.payload).toEqual({ threadId, messageId: messages()[0]!.id, toolCall });
+  expect(JSON.stringify([messages(), events()])).not.toContain("private");
+});
+
+test("DurableTranscript never starts a tool call carried by a terminal provider error", async () => {
+  using db = new Database(":memory:");
+  const assistant = fauxAssistantMessage([fauxText("Partial response"), tool()], { stopReason: "error", errorMessage: "test failure" });
+  const { initial, committed } = await committedConversation(assistant, async () => { throw new Error("Tool execution must not start"); });
+  expect(committed.entries.filter(ToolResultEntry.is)).toEqual([]);
+  const { projector, messages, events } = transcriptFor(db, initial);
+  projector().update(committed);
+  expect(messages().map(({ kind, text }) => ({ kind, text }))).toEqual([{ kind: "response", text: "Partial response" }]);
+  expect(events().filter(({ type }) => type === "tool.updated" || type === "message.appended").map(({ payload }) => (payload as { kind: string }).kind)).toEqual(["response"]);
 });
 
 test("DurableTranscript reuses persisted rows and events when a new projector replays committed entries", async () => {

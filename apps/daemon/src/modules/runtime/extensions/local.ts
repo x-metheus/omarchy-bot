@@ -3,6 +3,7 @@ import { awaitWithContext, withAbortSignal } from "@earendil-works/chord/context
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { AGENT_LOCAL_TOOL, LOCAL_SCHEMA } from "@omarchy-bot/agent-contract";
 import { LOCAL_RESULT_TEXT_MAX } from "@omarchy-bot/protocol";
+import { PublicSidecarError } from "../../devices/sidecarBroker.ts";
 import { resolveActiveTurnIdentity } from "../active-turn.ts";
 import type { RuntimeServices } from "../runtime.ts";
 import { rejectAmbiguousModelCallId, type DispatchedCallIds } from "./model-call.ts";
@@ -67,6 +68,9 @@ export function createLocalExtension(
         return { output: [{ type: "text", text: result.text }], details: result };
       } catch (error) {
         if (!renameSubmitted) checkCancellation();
+        if (error instanceof PublicSidecarError) {
+          return { isError: true, output: [{ type: "text", text: error.message }], details: { publicError: error.message } };
+        }
         throw error;
       } finally {
         clearTimeout(timer);

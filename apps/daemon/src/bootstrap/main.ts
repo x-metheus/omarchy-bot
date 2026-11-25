@@ -246,6 +246,7 @@ export async function main(options: MainOptions = {}): Promise<{
   }
   await screens.recover();
   const runtime = await openBotRuntime(cfg, db, {
+    get turnTimeoutMs() { return cfg.turnTimeoutMs; },
     events,
     mcp: {
       servers: mcpServers,

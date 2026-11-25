@@ -102,6 +102,25 @@ test("hard kill resumes a reply and its sleeping task posts once in the same con
   } finally { if (child) await stop(child); rmSync(home, { recursive: true, force: true }); }
 }, 60000);
 
+test("hard restart fails a recovered user Turn whose provider exceeds the execution budget", async () => {
+  const home = setup(); let child: Child | undefined;
+  try {
+    const first = await boot(home, 0, true); child = first.child;
+    const sent = await send(first.port, home, "timeout-recovery");
+    await waitFor(() => first.events.includes("before-request") ? true : undefined);
+    await stop(child); child = undefined;
+    expect(first.child.signalCode).toBe("SIGKILL");
+    expect(query<{ status: string }>(home, "SELECT status FROM turns WHERE id = ?", sent.turnId)).toEqual({ status: "working" });
+    const second = await boot(home, 0, false, { OMARCHY_BOT_TURN_TIMEOUT_MS: "1000" }); child = second.child;
+    await waitFor(() => second.events.includes("recovered-provider-started") ? true : undefined, 4_000);
+    const row = await waitFor(() => {
+      const value = query<{ status: string; outcome_reason: string | null }>(home, "SELECT status, outcome_reason FROM turns WHERE id = ?", sent.turnId);
+      return value?.status === "failed" || value?.status === "cancelled" ? value : undefined;
+    }, 4_000);
+    expect(row).toEqual({ status: "failed", outcome_reason: "timed out after 1s" });
+  } finally { if (child) await stop(child); rmSync(home, { recursive: true, force: true }); }
+}, 20000);
+
 test("recovery preserves the first request partial before the continued answer", async () => {
   const home = setup(); let child: Child | undefined;
   try {

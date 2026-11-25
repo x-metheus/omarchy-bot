@@ -35,6 +35,8 @@ export const durableSuiteToolCalls = {
   orderedRead: fauxToolCall("read", { path: "src/transcript.ts" }, { id: "ordered-steering" }),
   orderedWrite: fauxToolCall("write", { path: "src/transcript.ts", content: "" }, { id: "ordered-final" }),
   bash: fauxToolCall("bash", { command: "echo fake" }, { id: "fixture-bash" }),
+  failingBash: fauxToolCall("bash", { command: "safe interrupted operation" }, { id: "fixture-failing-bash" }),
+  interruptedBash: fauxToolCall("bash", { command: "safe interrupted operation" }, { id: "fixture-interrupted-bash" }),
 };
 
 function orderedTranscriptFixture(context: TranscriptContext) {
@@ -100,10 +102,34 @@ function graphicalToolFixture(context: TranscriptContext) {
   return fauxAssistantMessage([fauxToolCall(toolName, params)], { stopReason: "toolUse" });
 }
 
+function localFixture(text: string, context: TranscriptContext) {
+  const run = /^local\.run(?:@(dev_[0-9a-f]{32}|this-device))?:(.*)$/.exec(text);
+  const transfer = /^local\.transfer(?:@(dev_[0-9a-f]{32}|this-device))?:(to-workspace|from-workspace):([^:]*):(.*)$/.exec(text);
+  const forgedRun = text.startsWith("local.run.forged:");
+  if (!run && !transfer && !forgedRun) return undefined;
+  const latest = context.messages.at(-1);
+  if (latest?.role === "toolResult" && latest.toolName === "local") {
+    if (latest.isError) {
+      if (!transfer) return fauxAssistantMessage("Local call finished.");
+      const errorMessage = latest.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
+        .replace(/^<harness>\n\[error\] ([\s\S]*)\n<\/harness>$/, "$1");
+      return fauxAssistantMessage([], { stopReason: "error", errorMessage });
+    }
+    return fauxAssistantMessage(latest.content.flatMap((part) => part.type === "text" ? [fauxText(part.text)] : []));
+  }
+  const target = (run ?? transfer)?.[1];
+  const args = run
+    ? { action: "run", command: run[2]! }
+    : transfer
+      ? { action: "transfer", direction: transfer[2]!, path: transfer[3]!, destination: transfer[4]! }
+      : { action: "run", command: text.slice("local.run.forged:".length), botId: "wrong-bot", turnId: "wrong-turn" };
+  return fauxAssistantMessage(fauxToolCall("local", { ...args, ...(target === undefined ? {} : { target }) }, { id: "local-run" }), { stopReason: "toolUse" });
+}
+
 /** The durable suite's scripted replies. */
 export function createDurableSuiteFakeProvider() {
   const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }], tokensPerSecond: 20, tokenSize: { min: 1, max: 1 } });
-  // The worker emits graphical responses and ordered transcript blocks at once.
+  // The worker emits scripted tool calls and ordered transcript blocks at once.
   const immediate = fauxProvider({ provider: "fake" });
   const failedSessions = new Set<string>();
   fake.setResponses(Array.from({ length: 1000 }, () => (context: TranscriptContext, options) => {
@@ -113,16 +139,6 @@ export function createDurableSuiteFakeProvider() {
     const boundary = priorAssistant?.role === "assistant" ? priorAssistant.content.find((part) => part.type === "toolCall" && part.name === "steer_boundary") : undefined;
     if (boundary?.type === "toolCall" && boundary.id === "steer-boundary") return fauxAssistantMessage(`steered: ${text}`);
     if (text === "steer-echo") return fauxAssistantMessage([fauxToolCall("steer_boundary", {}, { id: "steer-boundary" })], { stopReason: "toolUse" });
-    const localRun = /^local\.run(?:@(dev_[0-9a-f]{32}|this-device))?:(.*)$/.exec(text);
-    const forgedLocalRun = text.startsWith("local.run.forged:");
-    if (localRun || forgedLocalRun) {
-      const latest = context.messages.at(-1);
-      if (latest?.role === "toolResult" && latest.toolName === "local") return fauxAssistantMessage("Local call finished.");
-      const args = localRun
-        ? { action: "run", command: localRun[2]!, ...(localRun[1] === undefined ? {} : { target: localRun[1] }) }
-        : { action: "run", command: text.slice("local.run.forged:".length), botId: "wrong-bot", turnId: "wrong-turn" };
-      return fauxAssistantMessage(fauxToolCall("local", args, { id: "local-run" }), { stopReason: "toolUse" });
-    }
     if (text.startsWith("mcp-durable: ")) {
       const action = text.slice("mcp-durable: ".length);
       const latest = context.messages.at(-1);
@@ -214,12 +230,21 @@ export function createDurableSuiteFakeProvider() {
   }));
   const base = fake.provider;
   const streamSimple: typeof base.streamSimple = (model, context, options) => {
-    const reply = graphicalToolFixture(context) ?? orderedTranscriptFixture(context);
+    const text = userTexts(context).at(-1) ?? "";
+    const latest = context.messages.at(-1);
+    const failingBash = durableSuiteToolCalls.failingBash;
+    const interruptedBash = text === "tool-fail"
+      ? latest?.role === "toolResult" && latest.toolCallId === failingBash.id
+        ? fauxAssistantMessage([], { stopReason: "error", errorMessage: "fake failure" })
+        : fauxAssistantMessage(failingBash, { stopReason: "toolUse" })
+      : text === "tool-hang"
+        ? fauxAssistantMessage(durableSuiteToolCalls.interruptedBash, { stopReason: "toolUse" })
+        : undefined;
+    const reply = interruptedBash ?? localFixture(text, context) ?? graphicalToolFixture(context) ?? orderedTranscriptFixture(context);
     if (reply !== undefined) {
       immediate.appendResponses([reply]);
       return immediate.provider.streamSimple(model, context, options);
     }
-    const text = userTexts(context).at(-1);
     if (text?.startsWith("send_bot_message:") || text?.startsWith("Message from Bot ")) {
       return mailbox.provider.streamSimple(model, context, options);
     }
