@@ -28,10 +28,25 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip tar xz-utils libx11-6 \
-  && rm -rf /var/lib/apt/lists/* \
-  && curl -fsSL https://bun.sh/install | BUN_INSTALL=/opt/bun bash -s "bun-v1.4.4" \
-  && ln -s /opt/bun/bin/bun /usr/local/bin/bun \
-  && chmod -R a+rX /opt/bun
+  && rm -rf /var/lib/apt/lists/*
+
+# Bun 1.4.5 official release digests for the Linux glibc builds.
+RUN case "$(uname -m)" in \
+      aarch64|arm64) asset=bun-linux-aarch64; checksum=18656a3bf0ea5641f5796ae4213b75255579a70a0fded2f337933785568cdf84 ;; \
+      x86_64) \
+        if grep -qw avx2 /proc/cpuinfo; then \
+          asset=bun-linux-x64; checksum=94559b3b528995a49452f9f2404cec74f2efd7d06e0a000a8cd214b02c3666eb; \
+        else \
+          asset=bun-linux-x64-baseline; checksum=dcb23a18a1c2fff12d57bcef696dbbb42eb67fde29f43816ecb595459a24c463; \
+        fi ;; \
+      *) exit 2 ;; \
+    esac \
+    && curl -fL --retry 3 "https://github.com/oven-sh/bun/releases/download/bun-v1.4.5/$asset.zip" -o /tmp/bun.zip \
+    && echo "$checksum  /tmp/bun.zip" | sha256sum -c - \
+    && unzip -q /tmp/bun.zip -d /opt \
+    && ln -s "/opt/$asset/bun" /usr/local/bin/bun \
+    && chmod -R a+rX "/opt/$asset" \
+    && rm /tmp/bun.zip
 
 COPY --from=fixture-builder /out/x11-fixture /usr/local/bin/x11-fixture
 

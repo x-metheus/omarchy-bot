@@ -19,7 +19,7 @@ for (const required of ["scripts/serve.sh", "sway/.omarchy-bot-runtime", "fonts"
 }
 // Browser pins come from the supplied archive; the builder verifies every copied input.
 const assets = [
-  { name: "bun", url: "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip", sha256: "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913" },
+  { name: "bun", url: "https://github.com/oven-sh/bun/releases/download/bun-v1.4.5/bun-linux-x64.zip", sha256: "94559b3b528995a49452f9f2404cec74f2efd7d06e0a000a8cd214b02c3666eb" },
 ];
 // The caller-selected runtime archive supplies the exact browser pins to package.
 const { BROWSER_ASSET, BROWSER_LIBRARY_ASSETS } = await import(path.join(runtime, "apps/daemon/src/modules/computer/botComputerAssets.ts"));

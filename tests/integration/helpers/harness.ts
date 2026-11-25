@@ -41,6 +41,7 @@ export interface HarnessOptions {
   botComputerAssetSupply?: BotComputerAssetSupply;
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
+  seedDurableProvider?: boolean;
   legacyModelCredentials?: readonly StoredProvider[];
   /** Worker tree override; defaults to the shared fake workers. */
   workersDir?: string;
@@ -139,12 +140,6 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
         botScreenCapacity: options.botScreenCapacity ?? 8,
       });
   const { stop, disconnectForRestart, port, svc } = daemon;
-  if (durableSuite) {
-    const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
-    if (!svc.credentials.getForRuntime("fake")) await svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
-    setSetting(svc.db, "default_model", "fake/fake-model");
-    setSetting(svc.db, "runtime", "durable");
-  }
   const base: Harness = {
     baseUrl: `http://127.0.0.1:${port}`,
     port,
@@ -154,19 +149,32 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     stop: async () => { try { await stop(); } finally { restoreRuntime?.(); } },
     disconnectForRestart,
   };
-  base.token = await pairForToken(base.baseUrl, state);
-  if (options.waitForAgentReady !== false) {
-    // Wait until the fake pi agent finishes its probe and reports ready.
-    const deadline = Date.now() + 20_000;
-    for (;;) {
-      const agents = (await fetch(`${base.baseUrl}/api/agents`, { headers: authHeaders(base) }).then((r) => r.json())) as { id: string; status: string }[];
-      const pi = agents.find((a) => a.id === "pi");
-      if (pi?.status === "ready") break;
-      if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
-      await Bun.sleep(150);
+  try {
+    if (durableSuite) {
+      const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
+      if (options.seedDurableProvider !== false) {
+        if (!svc.credentials.getForRuntime("fake")) await svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+        setSetting(svc.db, "default_model", "fake/fake-model");
+      }
+      setSetting(svc.db, "runtime", "durable");
     }
+    base.token = await pairForToken(base.baseUrl, state);
+    if (options.waitForAgentReady !== false) {
+      // Wait until the fake pi agent finishes its probe and reports ready.
+      const deadline = Date.now() + 20_000;
+      for (;;) {
+        const agents = (await fetch(`${base.baseUrl}/api/agents`, { headers: authHeaders(base) }).then((r) => r.json())) as { id: string; status: string }[];
+        const pi = agents.find((a) => a.id === "pi");
+        if (pi?.status === "ready") break;
+        if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
+        await Bun.sleep(150);
+      }
+    }
+    return base;
+  } catch (error) {
+    await base.stop();
+    throw error;
   }
-  return base;
 }
 
 export async function api<T>(h: Harness, method: string, p: string, body?: unknown): Promise<T> {

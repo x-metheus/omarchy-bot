@@ -12,7 +12,7 @@ import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore, MODEL_CREDENTIALS_FILENAME } from "./credentials.ts";
-import { SecretStore } from "./secrets.ts";
+import { fallbackSecretValuesPath, SecretStore } from "./secrets.ts";
 import { createRuntimeModels } from "./models.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { openBotRuntime, type BotRuntime } from "./runtime.ts";
@@ -195,8 +195,44 @@ test("secret storage status requires authentication and reports the active backe
   const h = await startDaemon();
   try {
     expect((await fetch(`${h.baseUrl}/api/secrets/status`)).status).toBe(401);
-    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({ status: 200, body: { backend: "file" } });
+    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({
+      status: 200, body: { backend: "file", reason: "No OS keychain is available." },
+    });
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+});
+
+test("secret storage status reports Bun keychain use and fail-closed restart", async () => {
+  const values = new Map<string, string>();
+  const get = spyOn(Bun.secrets, "get").mockImplementation(async ({ name }) => values.get(name) ?? null);
+  const set = spyOn(Bun.secrets, "set").mockImplementation(async ({ name, value }) => { values.set(name, value); });
+  const remove = spyOn(Bun.secrets, "delete").mockImplementation(async ({ name }) => values.delete(name));
+  const value = "keychain-runtime-sentinel";
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  let restarted: typeof h;
+  try {
+    h = await startDaemon(undefined, { seedDurableProvider: false });
+    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({ status: 200, body: { backend: "keychain" } });
+    await h.svc.credentials.add({ id: "keychain-provider", name: "Test provider", protocol: "built-in", apiKey: value });
+    expect([...values.values()].includes(value)).toBeTrue();
+    expect(existsSync(fallbackSecretValuesPath(h.svc.cfg.dataDir))).toBeFalse();
+    await h.stop();
+    get.mockImplementation(async () => { throw new Error(value, { cause: value }); });
+
+    restarted = await startDaemon(h.home, { seedDurableProvider: false });
+    expect(await apiStatus(restarted, "GET", "/api/secrets/status")).toEqual({
+      status: 200, body: { backend: "unavailable", reason: "The OS keychain is unavailable." },
+    });
+    expect(restarted.svc.credentials.getForRuntime("keychain-provider")).toBeUndefined();
+    expect(existsSync(fallbackSecretValuesPath(restarted.svc.cfg.dataDir))).toBeFalse();
+  } finally {
+    get.mockRestore(); set.mockRestore(); remove.mockRestore();
+    for (const daemon of [restarted, h]) {
+      if (!daemon) continue;
+      await daemon.stop();
+      rmSync(daemon.home, { recursive: true, force: true });
+      rmSync(daemon.svc.cfg.stateDir, { recursive: true, force: true });
+    }
+  }
 });
 
 test("configured conversation uses the Service limit for unset and null Bots and the Bot override otherwise", () => withFakeRuntimeProvider(Array.from({ length: 3 }, () => ({ segments: [{ type: "text" as const, text: "ok" }] })), {}, async () => {

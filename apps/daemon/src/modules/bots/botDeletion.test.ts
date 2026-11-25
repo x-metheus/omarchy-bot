@@ -34,7 +34,7 @@ async function withBotDeletion(run: (fixture: {
         values.delete(account);
       },
     };
-    const secrets = new SecretStore(path.join(dir, "data"), backend);
+    const secrets = new SecretStore(path.join(dir, "data"), { backend, probe: async () => ({ available: true }) });
     await secrets.forBot("first").save("token", "First Bot token", "first-value");
     await secrets.forBot("second").save("token", "Second Bot token", "second-value");
     const deletions = new BotDeletionService(

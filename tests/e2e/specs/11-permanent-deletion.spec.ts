@@ -27,19 +27,43 @@ test.describe("Settings secret storage", () => {
     await page.goto("/");
     await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings" });
-    const warning = settings.getByRole("status").filter({ hasText: "The Service has no OS keychain" });
-    await expect(warning).toContainText("Secrets are kept in a private file that a Bot's shell could read.");
+    const warning = settings.getByRole("status").filter({ hasText: "No OS keychain is available." });
+    await expect(warning).toContainText("Secrets are stored in a private plaintext file readable by your user, including commands run by a Bot. Protection from other OS users is enforced on POSIX; it is unverified on Windows.");
+    await expect(warning).toContainText("0700/0600");
     await settings.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Bots" }).click();
     await expect(warning).toBeVisible();
   });
 
-  test("omits the file warning when Settings reports a keychain backend", async ({ page }) => {
-    await page.route("**/api/secrets/status", (route) => route.fulfill({ json: { backend: "keychain" } }));
+  test("shows a checking status and then the keychain same-user note", async ({ page }) => {
+    let complete!: () => void;
+    const pending = new Promise<void>((resolve) => { complete = resolve; });
+    await page.route("**/api/secrets/status", async (route) => {
+      await pending;
+      await route.fulfill({ json: { backend: "keychain" } });
+    });
     await page.goto("/");
-    const response = page.waitForResponse((response) => response.url().endsWith("/api/secrets/status"));
     await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
-    await response;
-    await expect(page.getByText("The Service has no OS keychain", { exact: false })).toHaveCount(0);
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    try {
+      await expect(settings.getByRole("status").filter({ hasText: "Checking secret storage…" })).toBeVisible();
+    } finally {
+      complete();
+    }
+    await expect(settings.getByText("Commands run by a Bot as your user may be able to access the keychain.")).toBeVisible();
+    await expect(settings.getByText("No OS keychain is available.", { exact: true })).toHaveCount(0);
+  });
+
+  test("shows the secret storage error across Settings sections when the keychain is unavailable", async ({ page }) => {
+    await page.route("**/api/secrets/status", (route) => route.fulfill({
+      json: { backend: "unavailable", reason: "The OS keychain is unavailable." },
+    }));
+    await page.goto("/");
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    const error = settings.getByRole("alert").filter({ hasText: "Unable to access secret storage" });
+    await expect(error).toContainText("The OS keychain is unavailable.");
+    await settings.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Bots" }).click();
+    await expect(error).toBeVisible();
   });
 });
 
