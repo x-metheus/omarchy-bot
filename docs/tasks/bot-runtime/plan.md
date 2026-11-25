@@ -98,8 +98,8 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 - [x] ~~Task 17: Workspace cleanup~~ (removed 2026-11-25: no migration before public release)
 
 ### Checkpoint D
-- [ ] Every tool in the spec's tools table works with the switch on
-- [ ] Settings can add an OpenAI-compatible provider and a built-in `pi-ai` provider, and each completes a Turn
+- [x] Every tool in the spec's tools table works with the switch on
+- [x] Settings can add an OpenAI-compatible provider and a built-in `pi-ai` provider, and each completes a Turn
 
 ### Phase 5: Migration and cutover
 - [x] ~~Task 18: Old session migration on a Thread's first Turn~~ (removed 2026-11-25: no migration before public release)

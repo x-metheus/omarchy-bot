@@ -686,8 +686,8 @@ Carried from Task 13 (2026-11-25): with the switch on, the Services panel takes 
 ---
 
 ## Checkpoint D: after Tasks 13–17
-- [ ] Every tool in the spec's tools table works with the switch on
-- [ ] Both kinds of provider added in Settings complete a Turn
+- [x] Every tool in the spec's tools table works with the switch on (all integration files for the spec's tools pass with the switch on; full sweep at `fde4a64` has no switch-on-only failures)
+- [x] Both kinds of provider added in Settings complete a Turn (`providers.test.ts`: "an HTTP-added openai-compatible provider completes a durable Turn" and "an HTTP-added built-in provider completes a durable Turn")
 
 ---
 
