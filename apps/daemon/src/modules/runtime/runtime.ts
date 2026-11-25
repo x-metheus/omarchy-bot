@@ -31,7 +31,6 @@ import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { createWebExtension, EXA_SEARCH_KEY_SECRET, readWebExemptRanges } from "./extensions/web.ts";
-import { importPiProviders } from "./providerImport.ts";
 import { BunSecretsBackend, probeBunSecrets } from "./bunSecrets.ts";
 import { SecretStore } from "./secrets.ts";
 import { McpOAuthManager, type McpOAuthManagerDeps } from "./mcpOAuth.ts";
@@ -193,10 +192,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     reportCredentialsFailure();
     return new CredentialStore(secretStore, credentialOptions);
   });
-  if (db && !reportedCredentialsFailure) {
-    try { await importPiProviders({ db, credentials, homeDir: paths.homeDir }); }
-    catch { console.warn("Unable to import Pi model providers; continuing startup"); }
-  }
   const sqlite = await openNodeSqliteDatabase(paths.dbPath);
   // A Bun SQLite busy wait would block the JS thread holding the durable connection's lock.
   let writer = Promise.resolve();
