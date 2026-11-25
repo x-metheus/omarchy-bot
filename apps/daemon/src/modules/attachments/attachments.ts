@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
-import type { WorkerUserMessage } from "@omarchy-bot/agent-contract";
+import type { UserTurnMessage } from "@omarchy-bot/agent-contract";
 import type { AttachmentDto } from "@omarchy-bot/protocol";
 import { confinedPath } from "@omarchy-bot/domain";
 import { HttpError } from "../bots/bots.ts";
@@ -178,7 +178,7 @@ export class AttachmentsService {
     threadId: string;
     messageId: string;
     draftToken: string | undefined;
-  }): NonNullable<WorkerUserMessage["attachments"]> {
+  }): NonNullable<UserTurnMessage["attachments"]> {
     if (input.attachmentIds.length === 0) return [];
     const draftToken = input.draftToken;
     if (draftToken === undefined) throw new HttpError(400, "attachmentDraftToken is required");

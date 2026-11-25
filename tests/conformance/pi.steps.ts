@@ -16,7 +16,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync, readdirSync 
 import os from "node:os";
 import path from "node:path";
 import { WorkerClient } from "../../apps/daemon/src/supervision/workerClient.ts";
-import { isAgentCapabilityInventory } from "../../packages/agent-contract/src/agent-protocol.ts";
+import { isAgentCapabilityInventory } from "../../packages/agent-contract/src/agent-capabilities.ts";
 import { RED_PIXEL_PNG, startBrowserConformanceFixture, startConformanceDaemon, type ConformanceDaemon } from "./helpers.ts";
 import { normalizeSessionEvent } from "../../workers/pi/src/normalize.ts";
 import type { SurfaceId } from "../../packages/domain/src/index.ts";

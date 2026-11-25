@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { BROWSER_ACTION_NAMES, type BrowserActionName } from "@omarchy-bot/domain";
-import type { AgentComputerToolOutput } from "./agent-protocol.ts";
+import type { AgentComputerToolOutput } from "./computer-tool.ts";
 
 export { BROWSER_ACTION_NAMES, type BrowserActionName };
 export const BROWSER_TOOL_SCHEMA = Type.Object({

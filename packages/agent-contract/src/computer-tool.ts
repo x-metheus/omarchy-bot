@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { COMPUTER_ACTION_NAMES, type ComputerActionName } from "@omarchy-bot/domain";
+import { COMPUTER_ACTION_NAMES, type ComputerActionName, type SurfaceId } from "@omarchy-bot/domain";
 
 export interface AgentComputerToolDefinition {
   readonly name: "computer";
@@ -36,3 +36,19 @@ export const AGENT_COMPUTER_TOOL: AgentComputerToolDefinition = Object.freeze({
     ]),
   }),
 });
+
+export interface AgentComputerToolOutput {
+  /** Identity of the desktop that produced this result, not the Agent's Native Session. */
+  desktopSession: {
+    botId: string;
+    surfaceId: SurfaceId;
+    runtimeGeneration: number;
+  };
+  text?: string;
+  imageFile?: {
+    mediaType: "image/png" | "image/jpeg";
+    path: string;
+  };
+  imageRef?: string;
+  windowList?: unknown;
+}

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { redactToolErrorSummary, type AgentCommand, type AgentPluginSnapshot, type AgentPluginToolOutput, type NativeMcpControlResult, type NativePluginResources } from "@omarchy-bot/agent-contract";
+import { redactToolErrorSummary, type AgentPluginSnapshot, type AgentPluginToolOutput, type NativeMcpControlInput, type NativeMcpControlResult, type NativePluginResources } from "@omarchy-bot/agent-contract";
 import {
   HttpsOrigin, PLUGIN_OPERATIONS, PLUGIN_PROVIDERS, MANAGE_PLUGINS_SCHEMA,
   PluginManageInput, PluginProviderId, McpDefinition, SaveMcpBody,
@@ -76,7 +76,7 @@ export class PluginsService {
   readonly packages: McpPackages;
 
   constructor(private readonly rootDir: string, private readonly cwd: string, private readonly nativeResources: () => NativePluginResources,
-    private readonly nativeControl?: (input: Pick<Extract<AgentCommand, { type: "mcp.control" }>, "action" | "server" | "redirectUrl" | "authorizationId" | "expiresAt">) => Promise<NativeMcpControlResult>,
+    private readonly nativeControl?: (input: NativeMcpControlInput) => Promise<NativeMcpControlResult>,
     private readonly serviceOrigin?: () => string, private readonly authorizationEvent?: (event: PluginAuthorizationEvent) => void) {
     mkdirSync(rootDir, { recursive: true, mode: 0o700 });
     if (!lstatSync(rootDir).isDirectory() || lstatSync(rootDir).isSymbolicLink()) throw new Error("Plugin state directory must be a private real directory");

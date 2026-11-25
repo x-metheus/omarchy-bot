@@ -26,10 +26,10 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
   AGENT_CAPABILITY_INVENTORY_VERSION,
-  redactToolErrorSummary,
   type AgentCapabilityInventory,
-  type ProbePayload,
-} from "../../../../../packages/agent-contract/src/agent-protocol.ts";
+} from "../../../../../packages/agent-contract/src/agent-capabilities.ts";
+import type { ProbePayload } from "../../../../../packages/agent-contract/src/agent-protocol.ts";
+import { redactToolErrorSummary } from "../../../../../packages/agent-contract/src/tool-call-error.ts";
 import {
   createToolChannelWorker,
   type ToolChannelFrame,
