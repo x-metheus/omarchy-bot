@@ -22,6 +22,14 @@ import { NativeMcpStore } from "./nativeMcp.ts";
 import { McpPackages } from "./mcpPackages.ts";
 
 const DEFAULT_PUBLISHER_ORIGIN = "https://omarchy-bot-site-ymlq.vercel.app";
+const WRONG_MANAGEMENT_TOOL = "Plugin management tool does not belong to this turn";
+
+export const PLUGIN_TOOL_OUTPUT_MAX_BYTES = 2 * 1024 * 1024;
+export const PLUGIN_MANAGEMENT_TOOL = {
+  name: "manage_plugins",
+  description: "Inspect shared Services, native MCP connections and Skills. inspect reads installed inventory; inspect_skill reads catalog source and content. Search and install complete independent Skills from the catalog or explicit sources; update Skills, and enable, disable or remove Skills and custom MCPs without a product approval gate. Authorize, enable, disable, remove or update Services; label or disconnect exact account ids. Updates preserve local modifications. Changes affect subsequent native resource reloads; actual reload and native/provider authorization still apply. authorize_service returns a real URL pending user authorization, never completed consent. Never claim an unprobed MCP is connected. Use the mcp tool to discover and call connected-service tools. Use the default official skill-creator for local authoring.",
+  inputSchema: MANAGE_PLUGINS_SCHEMA,
+} as const;
 
 const Account = z.object({
   id: z.string(), providerId: PluginProviderId, label: z.string(), identity: z.string(), enabledServices: z.array(z.string()),
@@ -466,7 +474,7 @@ export class PluginsService {
 
   async #toolOutput(result: AgentPluginToolOutput): Promise<AgentPluginToolOutput> {
     const encoded = JSON.stringify(result);
-    if (Buffer.byteLength(encoded) > 2 * 1024 * 1024) {
+    if (Buffer.byteLength(encoded) > PLUGIN_TOOL_OUTPUT_MAX_BYTES) {
       const directory = path.join(this.rootDir, "results");
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const file = path.join(directory, `${randomUUID()}.json`);
@@ -479,6 +487,20 @@ export class PluginsService {
       ...(result.structuredContent ? { structuredContent: result.structuredContent } : {}) };
   }
 
+  async callManage(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<AgentPluginToolOutput> {
+    signal.throwIfAborted();
+    if (name !== PLUGIN_MANAGEMENT_TOOL.name) throw new Error(WRONG_MANAGEMENT_TOOL);
+    const input = PluginManageInput.parse(args);
+    const row = toolOperation(input.action);
+    if (!row) throw new HttpError(404, "Unknown plugin operation");
+    const { action, ...fields } = input;
+    const result = await row.handler(this, {
+      ...fields, ...(input.id === undefined ? {} : { accountId: input.id }),
+      tool: true, signal,
+    } as Parameters<typeof row.handler>[1]);
+    return this.#toolOutput({ content: [{ type: "text", text: JSON.stringify(result) }] });
+  }
+
   async acquire(): Promise<PluginLease> {
     if (this.#stopping) throw new Error("Plugin runtime is stopping");
     await this.prepareServiceCredentials();
@@ -487,11 +509,7 @@ export class PluginsService {
       revision: this.#state.revision,
       diagnostics: [...this.mcp.errors, ...this.skills.list().filter((skill) => skill.error).map((skill) => `${skill.name}: ${skill.error}`),
         ...this.#state.accounts.map((account) => `Service account ${account.id}: ${account.label}; ${account.identity}. Native MCP server names are ${account.enabledServices.map((serviceId) => this.bundles.serviceName(account, serviceId)).join(", ") || "none enabled"}.${account.error ? ` Needs attention: ${account.error}` : ""}`)],
-      tools: [{
-        name: "manage_plugins",
-        description: "Inspect shared Services, native MCP connections and Skills. inspect reads installed inventory; inspect_skill reads catalog source and content. Search and install complete independent Skills from the catalog or explicit sources; update Skills, and enable, disable or remove Skills and custom MCPs without a product approval gate. Authorize, enable, disable, remove or update Services; label or disconnect exact account ids. Updates preserve local modifications. Changes affect subsequent native resource reloads; actual reload and native/provider authorization still apply. authorize_service returns a real URL pending user authorization, never completed consent. Never claim an unprobed MCP is connected. Use Pi's native mcp tool for provider business operations, and the default official skill-creator for local authoring.",
-        inputSchema: MANAGE_PLUGINS_SCHEMA,
-      }],
+      tools: [{ ...PLUGIN_MANAGEMENT_TOOL }],
     };
     let released = false;
     return {
@@ -499,16 +517,8 @@ export class PluginsService {
       call: async (name, args, signal) => {
         signal.throwIfAborted();
         if (released) throw new Error("Plugin turn snapshot was released");
-        if (name !== "manage_plugins") throw new Error("Plugin management tool does not belong to this turn");
-        const input = PluginManageInput.parse(args);
-        const row = toolOperation(input.action);
-        if (!row) throw new HttpError(404, "Unknown plugin operation");
-        const { action, ...fields } = input;
-        const result = await row.handler(this, {
-          ...fields, ...(input.id === undefined ? {} : { accountId: input.id }),
-          tool: true, signal,
-        } as Parameters<typeof row.handler>[1]);
-        return this.#toolOutput({ content: [{ type: "text", text: JSON.stringify(result) }] });
+        if (name !== PLUGIN_MANAGEMENT_TOOL.name) throw new Error(WRONG_MANAGEMENT_TOOL);
+        return this.callManage(name, args, signal);
       },
       release: () => { released = true; },
     };

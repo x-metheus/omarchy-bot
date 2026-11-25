@@ -9,6 +9,8 @@ import type { EventLog } from "../events/eventLog.ts";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { TurnService } from "../turns/turns.ts";
+import type { BotRuntime } from "../runtime/runtime.ts";
+import { getSetting } from "../../persistence/settings.ts";
 
 interface DeliveryRow {
   id: string;
@@ -60,6 +62,7 @@ export class MailboxService {
     private readonly threads: ThreadsService,
     private readonly agents: AgentsRegistry,
     private readonly turns: TurnService,
+    private readonly runtime: Pick<BotRuntime, "recoverPeerMailAcceptance" | "writeService">,
   ) {
     this.agents.subscribe(({ agentId, to }) => {
       if (to === "ready") this.#scheduleAgentDispatch(agentId);
@@ -71,7 +74,7 @@ export class MailboxService {
   }
 
   enqueue(
-    context: AgentBotMessageToolContext,
+    context: Pick<AgentBotMessageToolContext, "botId" | "turnId" | "toolCallId">,
     targetBotId: string,
     text: string,
   ): AgentBotMessageToolOutput {
@@ -161,10 +164,25 @@ export class MailboxService {
     return { deliveryId: delivery.id, queued: true };
   }
 
-  /**
-   * Reconciles the only two interrupted claim shapes before startup probes can
-   * make Agents ready. Existing target Turns are failed, never replayed.
-   */
+  recoverAcceptedMail(): Promise<void> | undefined {
+    const candidates = this.db.query<{ id: string; target_turn_id: string; thread_id: string; target_bot_id: string }, []>(
+      `SELECT d.id, d.target_turn_id, d.thread_id, d.target_bot_id FROM bot_mail_deliveries d
+       JOIN turns t ON t.id = d.target_turn_id
+       JOIN pi_thread_conversations c ON c.thread_id = d.thread_id AND c.bot_id = d.target_bot_id
+       WHERE d.state IN ('queued', 'dispatching') AND t.native_session_id = ''`,
+    ).all();
+    if (candidates.length === 0) return;
+    return (async () => {
+      for (const row of candidates) {
+        await this.runtime.recoverPeerMailAcceptance({
+          db: this.db, turnId: row.target_turn_id, threadId: row.thread_id, botId: row.target_bot_id,
+          markDelivered: () => this.#markDelivered(row.id, row.target_turn_id),
+        });
+      }
+    })();
+  }
+
+  /** Reconcile remaining claims before startup probes can make Agents ready. */
   reconcileStartup(): void {
     const now = new Date().toISOString();
     this.db.transaction(() => {
@@ -267,6 +285,7 @@ export class MailboxService {
     const queued = this.#dispatchRow(deliveryId);
     if (queued === undefined || !this.agents.isReady(queued.agent_id)) return;
 
+    const durable = getSetting(this.db, "runtime") === "durable";
     const turnId = `turn_${randomUUID().replace(/-/g, "")}`;
     const now = new Date().toISOString();
     const claim = this.db.transaction(() => {
@@ -279,7 +298,7 @@ export class MailboxService {
              WHERE bot_id = bot_mail_deliveries.target_bot_id AND state = 'cleaning'
            )`,
       ).run(now, queued.id);
-      if (claimed.changes !== 1) return false;
+      if (claimed.changes !== 1) return;
       this.threads.insertTurnRow({
         id: turnId,
         threadId: queued.thread_id,
@@ -289,35 +308,53 @@ export class MailboxService {
       this.db.query(
         `UPDATE bot_mail_deliveries SET target_turn_id = ?, updated_at = ? WHERE id = ?`,
       ).run(turnId, now, queued.id);
-      return true;
+      if (!durable) return queued;
+      return this.db.query<{ source_bot_id: string | null; source_name: string }, [string]>(
+        "SELECT source_bot_id, source_name FROM bot_mail_deliveries WHERE id = ?",
+      ).get(queued.id);
     });
-    if (!claim()) return;
+    const claimed = durable ? await this.runtime.writeService(() => {
+      if (!this.#stopping && this.agents.isReady(queued.agent_id)) return claim();
+    }) : claim();
+    if (!claimed) return;
 
-    const source = queued.source_bot_id === null
-      ? queued.source_name
-      : `${queued.source_name} (${queued.source_bot_id})`;
-    const envelope = `Message from Bot ${source}:\n\n${queued.text}`;
     try {
       await this.turns.startPeerMailTurn({
         turnId,
         threadId: queued.thread_id,
         botId: queued.target_bot_id,
         agentId: queued.agent_id,
-        envelope,
+        sourceName: claimed.source_name,
+        ...(claimed.source_bot_id === null ? {} : { sourceBotId: claimed.source_bot_id }),
+        text: queued.text,
+        deliveryId: queued.id,
+        durable,
         acceptanceFailureReason: WORKER_ACCEPTANCE_FAILURE,
+        markDelivered: () => this.#markDelivered(queued.id, turnId),
       });
-      this.db.query(
-        `UPDATE bot_mail_deliveries
-         SET state = 'delivered', failure_reason = NULL, updated_at = ?
-         WHERE id = ? AND state = 'dispatching' AND target_turn_id = ?`,
-      ).run(new Date().toISOString(), queued.id, turnId);
+      if (!durable) {
+        this.db.query(
+          `UPDATE bot_mail_deliveries
+           SET state = 'delivered', failure_reason = NULL, updated_at = ?
+           WHERE id = ? AND state = 'dispatching' AND target_turn_id = ?`,
+        ).run(new Date().toISOString(), queued.id, turnId);
+      }
     } catch {
-      this.db.query(
+      const fail = () => this.db.query(
         `UPDATE bot_mail_deliveries
          SET state = 'failed', failure_reason = ?, updated_at = ?
          WHERE id = ? AND state = 'dispatching' AND target_turn_id = ?`,
       ).run(WORKER_ACCEPTANCE_FAILURE, new Date().toISOString(), queued.id, turnId);
+      if (durable) await this.runtime.writeService(fail);
+      else fail();
     }
+  }
+
+  #markDelivered(deliveryId: string, turnId: string): void {
+    this.db.query(
+      `UPDATE bot_mail_deliveries SET state = 'delivered', failure_reason = NULL, updated_at = ?
+       WHERE id = ? AND state IN ('queued', 'dispatching') AND target_turn_id = ?`,
+    ).run(new Date().toISOString(), deliveryId, turnId);
   }
 
   #dispatchRow(deliveryId: string): DispatchRow | undefined {

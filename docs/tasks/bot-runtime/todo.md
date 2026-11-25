@@ -129,6 +129,7 @@ A second message during a durable Turn is refused with 409 and writes nothing; r
 - [x] A transcript notice appears and older entries stay in storage
 - [x] Exact provider/model overrides are supported and isolated by model
 - [ ] Bot mail and Group Thread durable entry write sites use visible author labels
+  - [x] Bot mail done in Task 12. The “durable peer-mail dispatch” cases in `extensions/mail.test.ts` check the labeled `write` entry for live and deleted senders. The “dispatches one accepted delivery through a fresh private target session without disturbing unrelated target work” case in `bot-mailbox.test.ts` checks the entry and model content. Group Threads remain.
 - [ ] A manual run on each default model is recorded
 
 Per-model `modelOverrides` budgets are not set: no small-context model or values are named in the spec or plan, and inventing them is forbidden. The plumbing and its test are in place; naming the models and values needs a human decision.
@@ -276,11 +277,41 @@ Decided 2026-11-24: the approval UI reuses the inline `Banner` + `Button` compos
 **Description:** Port the Bot mail, local, and plugin tools to runtime extensions that call `MailboxService`, `SidecarBroker`, and `PluginsService` directly. Bot mail notices reach the target as `write` entries with author labels. The plugins tool keeps only managing actions (connect and sign in to accounts; install, enable, and remove Skills and MCP servers); calls to a connected service go through `mcp` (Task 13). Skills installed from the catalog go into `<workspace>/.agents/skills`.
 
 **Acceptance criteria:**
-- [ ] Mail, sidecar, and plugin tool calls behave as on the worker path
-- [ ] The Bot's identity comes from the active Turn, never from tool arguments
-- [ ] A Skill installed from the catalog appears in the Bot's Skills list on its next Turn
+- [x] Mail, sidecar, and plugin tool calls behave as on the worker path
+  - `extensions/mail.test.ts` verifies “send_bot_message enqueues with active Turn identity and returns one acknowledgement and details”, “durable peer-mail dispatch includes the live sender ID and does not redispatch delivered mail after readiness rechecks”, and both “durable peer-mail dispatch omits a sender ID deleted” cases (before dispatch and inside the claim transaction). The `bot-mailbox` suite passed in both modes.
+  - `extensions/local.test.ts` verifies “local dispatches with the active Turn and its originating device and returns text and details” and “the local deadline cancels a pending job and returns a timeout error”. The `local-sidecar-dispatch` suite passed in both modes with the Rust Sidecar.
+  - `extensions/plugins.test.ts` verifies “manage_plugins dispatches from the active Turn and preserves content and details”. The `PluginsService.callManage` tests in `modules/plugins/plugins.test.ts` cover authorization parity with `lease.call`, signal forwarding and credential omission, and the 2 MiB spill threshold.
+- [x] The Bot's identity comes from the active Turn, never from tool arguments
+  - `active-turn.test.ts` verifies “active Turn identity comes from the owning run with a later working follow-up queued”. The `local-sidecar-dispatch` case “forged bot or turn identity is rejected before any extra Sidecar job” checks the dispatch boundary. The mail and plugin extension tests reject caller-supplied identity fields.
+- [x] A Skill installed from the catalog appears in the Bot's Skills list on its next Turn
+  - `runtime.test.ts` verifies “a catalog Skill installed with manage_plugins appears in the next durable Turn's model system prompt” for a user Turn. `extensions/mail.test.ts` verifies “peer mail preserves an active user reply's configuration and refreshes its own model prompt with new instructions and Skills”.
 
-**Verification:** default commands; `bot-mailbox` and `local-sidecar-dispatch` integration tests pass with the switch on.
+The owning pi-durable run's primary placed input identifies the active Service Turn. All placed inputs must agree on that owner, and the working Turn must match the conversation's Bot and Thread. Tool schemas reject caller-supplied identity fields.
+
+Bot mail uses one `input` submission with the target Turn ID as its request ID. It places a `write` entry with `author`, `text`, and `deliveryId` in its data and `formatAuthorText` as the source of its author-labeled model content. A standalone `write` submission only appends an entry. Before sending the `input` on an existing Thread, the runtime waits for the conversation to be idle and refreshes the model, thinking level, Turn limit, and prompt from current Bot settings and workspace Skills. The configuration commit retries if a run has started. New conversations receive this configuration in their creation commit. The `input` starts the reply or queues it with `whenBusy: "followUp"` if a run starts after configuration.
+
+Durable admission, whether placed or queued, marks the delivery `delivered`. The Service records the Turn association and delivered state together through the shared writer FIFO. Bookkeeping is idempotent and recovers by the Turn request ID. When a steer shares the mail reply's run, the Turn owning the first placed input projects the reply. Each Turn settles from its admitted submissions. Restart tests cover queued, placed, and already-answered peer-mail input recovery. Concurrent recovery of a durable reply while new worker mailbox writes run after a switch back to `worker` is deferred to Task 19 cutover.
+
+The registry offers `local` globally with a shared description free of per-device OS and shell suffixes. `SidecarBroker` checks device availability and capability at execution. `this-device` uses the originating device ID from the HTTP send for that Turn. The binding lives only in memory and is lost on restart, matching the worker `TurnContext`. A peer-mail Turn or a recovered Turn requires an explicit online device ID. Abort or timeout before dispatch prevents `local.job`. The broker sends `local.cancel` for a pending job and when it observes abort immediately after the result arrives. Once workspace writing begins, cancellation can stop replacement without another frame.
+
+Durable transfers into the Shared Workspace reject the workspace root and symlink destinations. The broker stages a `0600` temporary file in the destination directory, preserves an existing file's mode, and checks cancellation before submitting the atomic rename. The rename outcome determines the result once submitted. The broker removes the staged file if preparation or rename fails or cancellation prevents the rename.
+
+The runtime registers one sequential, replay-unsafe `manage_plugins` tool for inventory, Skill management, and Service-account and MCP configuration or authorization. It calls `PluginsService.callManage`, shared with the worker lease, and spills encoded output above 2 MiB. Calls to connected services use Task 13's `mcp`. Catalog Skills install under `<workspace>/.agents/skills`, and `listWorkspaceSkills` adds their name, description, and relative path to the next Turn's model system prompt. Plugin snapshot diagnostics remain a worker prompt feature.
+
+Mail, local, and plugin calls honor abort and have 120-second deadlines. Abort or timeout before peer-mail admission settles the Turn and delivery with the same bounded failure reason, including while a configuration commit is queued. A caller can cancel its own wait on a shared conversation open while the open continues for other callers.
+
+Ambiguous call IDs in the same assistant response are rejected. `local` and `manage_plugins` share an in-memory, per-Turn registry that rejects reuse of dispatched IDs in later responses with `tool call was already dispatched`. The registry releases IDs when the Turn settles and resets on restart, matching the worker channel's lifetime. Mail uses the durable pi task key. Replaying the same task returns the original delivery, and distinct tasks reusing a call ID can enqueue separately.
+
+Service transcript tool records wait on Task 11. Durable tests assert committed pi tool results. The six `bot-mailbox.test.ts` cases that rely on Service tool projection cover the acknowledgement and repeated send, a forged source Bot, disabled Agent inventory, invalid addressing, the isolated target session's `read`, and enqueue during target deletion.
+
+**Verification:** recorded final matrix.
+
+- `bun run typecheck` exited 2 with only baseline TS2769 at `tests/integration/daemon.test.ts:289`, reproduced byte-for-byte on `05f2ad0`.
+- `bun run lint:boundaries` passed 4 tests.
+- `bun test apps/daemon` passed 210 tests with one existing case-sensitive-filesystem skip. The peer-mail prompt regression covers the configuration race with an active user reply, and the queued-commit regression verifies that admission settles before the held commit is released.
+- `bun test tests/integration/bot-mailbox.test.ts` passed 17/17 with the switch off and 17/17 with `OMARCHY_TEST_DURABLE=1`.
+- `bun test tests/integration/local-sidecar-dispatch.test.ts` passed 2/2 with the switch off and 2/2 with `OMARCHY_TEST_DURABLE=1`, using the Rust Sidecar in both modes.
+- `bun test` across `tests/integration/plugin-skills.test.ts`, `tests/integration/plugin-services.test.ts`, `tests/integration/shared-plugins.test.ts`, and `tests/integration/runtime-parity.test.ts` passed 49 tests.
 
 **Dependencies:** Task 3
 
