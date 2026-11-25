@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { McpOAuthProvider } from "@earendil-works/pi-mcp/oauth";
+import { McpOAuthProvider, OAuthIssuerMismatchError } from "@earendil-works/pi-mcp/oauth";
 import type { ToolExecutionApi } from "@earendil-works/pi-durable";
 import { createMcpExtension } from "./extensions/mcp.ts";
 import { McpOAuthManager, mcpOAuthSecretName, resolveCallbackBinding, SecretMcpOAuthStateStore, type McpOAuthManagerDeps } from "./mcpOAuth.ts";
@@ -363,6 +363,54 @@ test.each([1, 3600])("durable MCP refreshes a rotated OAuth token with a %i seco
     expect(Boolean(before && after && before !== after)).toBe(true);
     const visible = JSON.stringify({ status: mcp.status(), outcomes: testMcp.outcomes });
     expect(visible.includes(before!) || visible.includes(after!)).toBe(false);
+  } finally {
+    await testMcp.close();
+  }
+});
+
+test("pi-mcp rejects a later authorization-server issuer change before refreshing a stored token", async () => {
+  const testMcp = await setup();
+  const { manager, name, fixture, secrets } = testMcp;
+  try {
+    expect(await manager.complete({ name, redirectUrl: await callbackLocation(await testMcp.start()) }))
+      .toEqual({ status: "completed" });
+    const store = new SecretMcpOAuthStateStore({ secrets, name, server: fixture.url });
+    const stored = await store.load();
+    if (!stored?.tokens?.refresh_token) throw new Error("Expected a stored refresh token.");
+    expect(stored.discovery?.authorizationServerUrl).toBe(fixture.origin);
+    // Keep the signed-in issuer binding while forcing refresh to discover its current metadata.
+    await store.save({ ...stored, discovery: { authorizationServerUrl: fixture.origin } });
+
+    const resourceMetadata = `${fixture.origin}/.well-known/oauth-protected-resource`;
+    const replacementIssuer = `${fixture.origin}/replacement`;
+    let replacementTokenRequests = 0;
+    const provider = manager.authProvider(name, fixture.url);
+    const refresh = provider.onUnauthorized!({
+      response: new Response(null, {
+        status: 401, headers: { "www-authenticate": `Bearer resource_metadata="${resourceMetadata}"` },
+      }),
+      serverUrl: new URL(fixture.url),
+      token: stored.tokens.access_token,
+      async fetch(input) {
+        switch (new URL(input).pathname) {
+          case "/.well-known/oauth-protected-resource":
+            return Response.json({ resource: fixture.url, authorization_servers: [replacementIssuer] });
+          case "/.well-known/oauth-authorization-server":
+          case "/.well-known/oauth-authorization-server/replacement":
+            return Response.json({
+              issuer: replacementIssuer, authorization_endpoint: `${replacementIssuer}/authorize`,
+              token_endpoint: `${replacementIssuer}/token`, response_types_supported: ["code"],
+            });
+          case "/replacement/token":
+            replacementTokenRequests++;
+            return Response.json({ access_token: "fixture-replacement-token", token_type: "Bearer" });
+          default:
+            return new Response(null, { status: 404 });
+        }
+      },
+    });
+    await expect(refresh).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
+    expect(replacementTokenRequests).toBe(0);
   } finally {
     await testMcp.close();
   }

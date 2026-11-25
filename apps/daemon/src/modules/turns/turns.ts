@@ -334,7 +334,7 @@ export class TurnService {
         resolveWorkCwd(this.threads.getThread(result.threadId)!.cwd);
         return runtime.startTurn({
           db: this.db, threads: this.threads, bots: this.bots, events: this.events,
-          threadId: result.threadId, botId, turnId, text, userMessageSeq: userMsgDto.seq, instructions: bot.instructions,
+          threadId: result.threadId, botId, turnId, text, instructions: bot.instructions,
           workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, admitted, working,
           ...(opts.deviceId === undefined ? {} : { deviceId: opts.deviceId }),
           ...(durableFollowUp ? { whenBusy: "followUp" } : {}),

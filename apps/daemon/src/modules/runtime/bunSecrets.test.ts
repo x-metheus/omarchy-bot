@@ -1,4 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { BunSecretsBackend, probeBunSecrets, type BunSecretsApi } from "./bunSecrets.ts";
 
 type Account = Parameters<BunSecretsApi["get"]>[0];
@@ -194,4 +196,46 @@ test("probeBunSecrets shares the time limit across successive calls", async () =
   } finally {
     clock.mockRestore();
   }
+});
+
+function countBunSecretsGetCalls(source: string, file = "source.ts"): number {
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest);
+  let count = 0;
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "get") {
+      const receiver = node.expression.expression;
+      if (ts.isPropertyAccessExpression(receiver) && receiver.name.text === "secrets" &&
+        ts.isIdentifier(receiver.expression) && receiver.expression.text === "Bun") {
+        count++;
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return count;
+}
+
+test("countBunSecretsGetCalls counts calls and ignores comments and strings", () => {
+  expect(countBunSecretsGetCalls("Bun.secrets.get(options); // Bun.secrets.get(")).toBe(1);
+  expect(countBunSecretsGetCalls("// Bun.secrets.get(")).toBe(0);
+  expect(countBunSecretsGetCalls('const text = "Bun.secrets.get(";')).toBe(0);
+});
+
+test("daemon product source confines Bun.secrets to runtime keychain files", async () => {
+  const sourceDir = new URL("../../", import.meta.url);
+  const sourceFiles = new Bun.Glob("**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}");
+  const secretReferences = /\bBun\s*(?:\.\s*secrets\b|\[\s*["']secrets["']\s*\])/;
+  const mentioningFiles: string[] = [];
+  const directGetFiles: string[] = [];
+  for await (const file of sourceFiles.scan({ cwd: fileURLToPath(sourceDir), dot: true })) {
+    if (/\.(test|spec)\.[^.]+$/.test(file)) continue;
+    const source = await Bun.file(new URL(file, sourceDir)).text();
+    if (secretReferences.test(source)) mentioningFiles.push(file);
+    if (countBunSecretsGetCalls(source, file) > 0) directGetFiles.push(file);
+  }
+  expect(directGetFiles.sort()).toEqual([]);
+  expect(mentioningFiles.sort()).toEqual([
+    "modules/runtime/bunSecrets.ts",
+    "modules/runtime/runtime.ts",
+  ]);
 });
