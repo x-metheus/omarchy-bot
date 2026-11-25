@@ -352,7 +352,10 @@ test("a failed secret write can retry without overwriting providers imported on 
     },
     async delete(account) { values.delete(account); },
   };
-  credentials = await CredentialStore.open(homeDir, new SecretStore(homeDir, backend));
+  credentials = await CredentialStore.open(homeDir, new SecretStore(homeDir, {
+    backend,
+    probe: async () => ({ available: true }),
+  }));
   await expect(runImport()).rejects.toThrow("Unable to import Pi model providers");
   expect(getSetting(db, PI_PROVIDER_IMPORT_SETTING)).toBeNull();
   expect(credentials.getForRuntime(gatewayId)?.apiKey === authKey).toBeTrue();

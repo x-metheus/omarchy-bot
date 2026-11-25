@@ -19,6 +19,7 @@ import type { BotViewDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 import { api } from "../lib/api.ts";
+import { secretStorageNotice } from "../lib/secretStorageNotice.ts";
 import { getShell } from "../lib/shell.ts";
 import { AllowedFoldersSection } from "./settings/AllowedFoldersSection.tsx";
 import { ProvidersSection } from "./settings/ProvidersSection.tsx";
@@ -247,6 +248,7 @@ function SettingsContent({
     enabled: open,
     retry: false,
   });
+  const storageNotice = secretStorageNotice(storage.data, storage.isError);
   const operationPending = deletingBotId !== undefined;
   const sections = SETTINGS_SECTIONS.filter((entry) => entry.id !== "keyboard" || getShell().keyMapping.platform() === "macos");
 
@@ -296,14 +298,16 @@ function SettingsContent({
           aria-busy={botsLoading || operationPending || undefined}
         >
           <VStack gap={2}>
-            {storage.data?.backend === "file" ? (
+            {storageNotice.kind === "banner" ? (
               <Banner
-                role="status"
-                status="warning"
-                title="The Service has no OS keychain"
-                description="Secrets are kept in a private file that a Bot's shell could read."
+                role={storageNotice.role}
+                status={storageNotice.status}
+                title={storageNotice.title}
+                description={storageNotice.description}
               />
-            ) : null}
+            ) : (
+              <Text role="status" color="secondary">{storageNotice.text}</Text>
+            )}
             {selected.id === "appearance" ? <AppearanceSection /> : null}
             {open && selected.id === "providers" ? <ProvidersSection /> : null}
             {open && selected.id === "allowed-folders" ? <AllowedFoldersSection /> : null}

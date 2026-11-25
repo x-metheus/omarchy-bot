@@ -66,7 +66,7 @@ async function withSecretStore(
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "mcp-oauth-secrets-"));
   const backend = new MemoryKeychain();
   try {
-    await run(new SecretStore(dataDir, backend));
+    await run(new SecretStore(dataDir, { backend, probe: async () => ({ available: true }) }));
     const namespace = createHash("sha256").update(realpathSync(dataDir)).digest("hex");
     // The keychain account hashes the scope and name, then prefixes the data-directory namespace.
     const appAccounts = servers.map((url) => {

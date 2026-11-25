@@ -2,6 +2,7 @@
   "name": "omarchy-bot",
   "private": true,
   "type": "module",
+  "engines": { "bun": "1.4.5" },
   "workspaces": ["packages/*", "workers/*", "apps/*", "tests/*"],
   "scripts": {
     "dev": "bun run --filter='@omarchy-bot/daemon' --filter='@omarchy-bot/web' dev",

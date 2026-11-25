@@ -171,7 +171,7 @@ export class ApiClient {
     return health;
   }
 
-  secretStorageStatus(): Promise<{ backend: "keychain" | "file" }> {
+  secretStorageStatus(): Promise<{ backend: "keychain" | "file" | "unavailable"; reason?: string }> {
     return this.req("/api/secrets/status");
   }
 

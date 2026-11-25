@@ -28,6 +28,7 @@ import { createSecretsExtension, type BotSecretAccess } from "./extensions/secre
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { createWebExtension, EXA_SEARCH_KEY_SECRET, readWebExemptRanges } from "./extensions/web.ts";
 import { importPiProviders } from "./providerImport.ts";
+import { BunSecretsBackend, probeBunSecrets } from "./bunSecrets.ts";
 import { SecretStore } from "./secrets.ts";
 import { McpOAuthManager, type McpOAuthManagerDeps } from "./mcpOAuth.ts";
 import { AssistantEntry, configure, ConversationIdle, createRegistry, Harness, InboxDoc, LiveDoc, type AgentChange, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type LiveState, type SettledSubmissionRecord, type SubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
@@ -132,7 +133,12 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   mcp?: Pick<McpExtensionDeps, "servers" | "prepareServers" | "fillSecrets" | "authProvider">;
   mcpOAuth?: { onAuthorization?: (outcome: McpAuthorizationOutcome) => void };
 } = {}): Promise<BotRuntime> {
-  const secretStore = new SecretStore(paths.dataDir);
+  const secretsApi = typeof Bun === "undefined" ? undefined : Bun.secrets;
+  const secretStore = new SecretStore(paths.dataDir, secretsApi ? {
+    backend: new BunSecretsBackend(secretsApi),
+    probe: () => probeBunSecrets(secretsApi),
+  } : undefined);
+  const redactFailure = (reason: string, botId: string) => secretStore.redactKnown(reason, botId).catch(() => "[redacted]");
   const mcpOptions = options.mcp;
   const manager = mcpOptions ? new McpOAuthManager({
     secrets: secretStore,
@@ -556,7 +562,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         let failure = error;
         if (!(error instanceof DurableRunAborted)) {
           const reason = failureMessage(error);
-          const redacted = await secretStore.redactKnown(reason, input.botId);
+          const redacted = await redactFailure(reason, input.botId);
           if (redacted !== reason) failure = new Error(redacted);
         }
         admission.reject(failure);
@@ -605,7 +611,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         const rows = input.db.query<{ id: string; thread_id: string; bot_id: string }, []>("SELECT id, thread_id, bot_id FROM turns WHERE status = 'working' ORDER BY started_at, id").all();
         const settleTurn = (...args: Parameters<typeof input.settled>) => writeService(() => input.settled(...args));
         const reportFailure = async (row: (typeof rows)[number], reason: string) => {
-          const redacted = await secretStore.redactKnown(reason, row.bot_id);
+          const redacted = await redactFailure(reason, row.bot_id);
           await settleTurn(row.id, { status: "failed", reason: redacted });
         };
         const registered = (async () => {

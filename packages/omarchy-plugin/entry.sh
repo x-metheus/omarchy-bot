@@ -59,7 +59,7 @@ if [[ -z $bun_bin ]] && command -v mise >/dev/null; then
   bun_bin=$(mise which bun 2>/dev/null || true)
 fi
 if [[ -z $bun_bin ]]; then
-  pinned=$omarchy_home/runtime/bun/1.4.2/bin/bun
+  pinned=$omarchy_home/runtime/bun/1.4.5/bin/bun
   if [[ ! -x $pinned ]]; then
     mkdir -p "$omarchy_home/runtime"
     exec {bun_lock_fd}>>"$omarchy_home/runtime/bun.lock"
@@ -67,8 +67,8 @@ if [[ -z $bun_bin ]]; then
     if [[ ! -x $pinned ]]; then
       work=$(mktemp -d "$omarchy_home/runtime/.bun-XXXXXX")
       trap 'rm -rf -- "$work"' EXIT
-      download "${OMARCHY_BOT_PLUGIN_BUN_URL:-https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip}" "$work/bun.zip"
-      expected=${OMARCHY_BOT_PLUGIN_BUN_SHA256:-36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913}
+      download "${OMARCHY_BOT_PLUGIN_BUN_URL:-https://github.com/oven-sh/bun/releases/download/bun-v1.4.5/bun-linux-x64.zip}" "$work/bun.zip"
+      expected=${OMARCHY_BOT_PLUGIN_BUN_SHA256:-94559b3b528995a49452f9f2404cec74f2efd7d06e0a000a8cd214b02c3666eb}
       printf '%s  %s\n' "$expected" "$work/bun.zip" | sha256sum --check --status
       unzip -q "$work/bun.zip" -d "$work"
       mkdir -p "$(dirname -- "$pinned")"

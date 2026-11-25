@@ -42,6 +42,7 @@ export interface HarnessOptions {
   botComputerAssetSupply?: BotComputerAssetSupply;
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
+  seedDurableProvider?: boolean;
   legacyModelCredentials?: readonly StoredProvider[];
   dataDir?: string;
   stateDir?: string;
@@ -139,6 +140,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
   };
 
+  let base: Harness | undefined;
   let restoreRuntime: (() => void) | undefined;
   const restoreFixtures = () => {
     restorePiAgentDir();
@@ -167,13 +169,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
           botScreenCapacity: options.botScreenCapacity ?? 8,
         });
     const { stop, disconnectForRestart, port, svc } = daemon;
-    if (durableSuite) {
-      const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
-      if (!svc.credentials.getForRuntime("fake")) await svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
-      setSetting(svc.db, "default_model", "fake/fake-model");
-      setSetting(svc.db, "runtime", "durable");
-    }
-    const base: Harness = {
+    base = {
       baseUrl: `http://127.0.0.1:${port}`,
       port,
       token: "",
@@ -186,6 +182,14 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
         try { await disconnectForRestart(); } finally { restoreFixtures(); }
       },
     };
+    if (durableSuite) {
+      const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
+      if (options.seedDurableProvider !== false) {
+        if (!svc.credentials.getForRuntime("fake")) await svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+        setSetting(svc.db, "default_model", "fake/fake-model");
+      }
+      setSetting(svc.db, "runtime", "durable");
+    }
     base.token = await pairForToken(base.baseUrl, state);
     if (options.waitForAgentReady !== false) {
       // Wait until the fake pi agent finishes its probe and reports ready.
@@ -200,7 +204,8 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     }
     return base;
   } catch (error) {
-    restoreFixtures();
+    if (base) await base.stop();
+    else restoreFixtures();
     throw error;
   }
 }

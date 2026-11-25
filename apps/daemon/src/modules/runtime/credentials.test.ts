@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { CredentialStore, MODEL_CREDENTIALS_FILENAME, type StoredProvider } from "./credentials.ts";
 import { EXA_SEARCH_KEY_DESCRIPTION, EXA_SEARCH_KEY_SECRET } from "./extensions/web.ts";
-import { SecretStore, type SecretBackend } from "./secrets.ts";
+import { fallbackSecretValuesPath, SecretStore, type SecretBackend } from "./secrets.ts";
 
 const providers = [
   { id: "Custom.Provider", name: "Custom", protocol: "openai-compatible", baseUrl: "https://example.test", apiKey: "secret-example", models: [{ id: "model" }] },
@@ -44,6 +44,31 @@ test("migrates two legacy providers into app secrets once and reloads them witho
   expect(existsSync(file)).toBeFalse();
   await reopened.remove(providers[0].id);
   expect((await CredentialStore.open(dir, secrets)).getAllForRuntime()).toEqual([providers[1]]);
+}));
+
+test("CredentialStore promotes imported provider keys and resolves them after removing the fallback", () => withCredentialDirectory(async (dir, legacyFile) => {
+  writeFileSync(legacyFile, JSON.stringify(providers), { mode: 0o600 });
+  await CredentialStore.open(dir, new SecretStore(dir));
+  expect(existsSync(legacyFile)).toBeFalse();
+  expect(existsSync(fallbackSecretValuesPath(dir))).toBeTrue();
+  const values = new Map<string, string>();
+  const backend: SecretBackend = {
+    kind: "keychain",
+    async get(account) { return values.get(account); },
+    async set(account, value) { values.set(account, value); },
+    async delete(account) { values.delete(account); },
+  };
+  const secrets = new SecretStore(dir, { backend, probe: async () => ({ available: true }) });
+  const promoted = await CredentialStore.open(dir, secrets);
+  expect(existsSync(fallbackSecretValuesPath(dir))).toBeFalse();
+  expect(await secrets.status()).toEqual({ backend: "keychain" });
+  expect(values.size).toBe(providers.length);
+  const projection = JSON.stringify(promoted.list());
+  for (const { id, apiKey } of providers) {
+    expect(promoted.getForRuntime(id)?.apiKey === apiKey).toBeTrue();
+    expect([...values.values()].includes(apiKey)).toBeTrue();
+    expect(projection.includes(apiKey)).toBeFalse();
+  }
 }));
 
 test("provider listings hide model metadata containing the Exa app secret", () => withCredentialDirectory(async (dir) => {
@@ -159,7 +184,7 @@ test("keeps the legacy file until every provider verifies and retries without du
     async set(account, value) { values.set(account, value); },
     async delete(account) { values.delete(account); },
   };
-  const secrets = new SecretStore(dir, backend);
+  const secrets = new SecretStore(dir, { backend, probe: async () => ({ available: true }) });
   const partiallyMigrated = await CredentialStore.open(dir, secrets);
   expect(partiallyMigrated.getAllForRuntime()).toEqual([providers[0]]);
   expect(readFileSync(file, "utf8")).toBe(legacy);
@@ -182,7 +207,7 @@ test("a failed provider removal keeps the ID listed for retry and hides the key 
       values.delete(account);
     },
   };
-  const secrets = new SecretStore(dir, backend);
+  const secrets = new SecretStore(dir, { backend, probe: async () => ({ available: true }) });
   const store = await CredentialStore.open(dir, secrets);
   const { apiKey, ...provider } = providers[0];
   await store.add({ ...provider, apiKey });
@@ -229,7 +254,7 @@ test("an index write failure after provider key deletion keeps the cached key ou
       }
     },
   };
-  const secrets = new SecretStore(dir, backend);
+  const secrets = new SecretStore(dir, { backend, probe: async () => ({ available: true }) });
   const store = await CredentialStore.open(dir, secrets);
   const { apiKey, ...provider } = providers[0];
   await store.add({ ...provider, apiKey });

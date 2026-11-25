@@ -1,2 +1,3 @@
 [test]
+preload = ["./tests/integration/helpers/headless-keychain.ts"]
 pathIgnorePatterns = ["tests/e2e/**"]

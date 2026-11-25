@@ -73,7 +73,7 @@ export interface DaemonServices {
   approvals?: ApprovalStore;
   /** Service-only provider store. HTTP responses use its sanitized projection. */
   credentials: CredentialStore;
-  secretsBackend: SecretStore["kind"];
+  secrets: Pick<SecretStore, "status">;
   /** Mode-0600 Service Host secret. Required to mint pairing codes; never logged. */
   pairingHostSecret: string;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
@@ -293,7 +293,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     }
 
     if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION, protocol: PROTOCOL_VERSION });
-    if (pathname === "/api/secrets/status" && req.method === "GET") return json({ backend: svc.secretsBackend });
+    if (pathname === "/api/secrets/status" && req.method === "GET") return json(await svc.secrets.status());
 
     if (pathname === "/api/settings/allowed-folders" && (req.method === "GET" || req.method === "POST" || req.method === "DELETE")) {
       const alwaysAllowed = readAllowedFolders(undefined, { ...svc.cfg, downloadsDir: resolveImplicitDownloads(svc.cfg) });
