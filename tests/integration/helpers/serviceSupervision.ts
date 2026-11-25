@@ -292,12 +292,15 @@ export async function startManagedService(input: {
   workersDir: string;
   runtimeRoot: string;
 }): Promise<ManagedService> {
+  const agentDir = path.join(input.home, "pi-agent");
+  mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   const environment: Record<string, string> = {
     ...(process.env as Record<string, string>),
     PATH: `${input.manager.binDir}:${process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`,
     ...input.binEnv,
     XDG_RUNTIME_DIR: input.manager.runtimeDir,
     HOME: input.home,
+    PI_CODING_AGENT_DIR: agentDir,
     OMARCHY_BOT_HOME: input.home,
     OMARCHY_BOT_STATE: input.state,
     OMARCHY_BOT_PORT: "0",

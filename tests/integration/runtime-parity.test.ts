@@ -1,7 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { withBlockingRuntimeTool, withFakeRuntimeProvider } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
-import { CredentialStore } from "../../apps/daemon/src/modules/runtime/credentials.ts";
 import { deleteSetting, setSetting } from "../../apps/daemon/src/persistence/settings.ts";
 import { recoverOnStartup } from "../../apps/daemon/src/persistence/db.ts";
 import { api, apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "./helpers/harness.ts";
@@ -25,7 +24,7 @@ test("durable and worker turns produce the same transcript and events; switch of
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Parity");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     async function run(runtime: string | null) {
       if (runtime === null) deleteSetting(h.svc.db, "runtime");
@@ -84,7 +83,7 @@ test("durable steering is accepted during a reply", () => withFakeRuntimeProvide
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Steer durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
@@ -110,7 +109,7 @@ test("durable steering during a tool call lands after the tool result", () => wi
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Tool steering durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     const first = await sendToBot(h, botId, "first");
@@ -131,7 +130,7 @@ test("steering targets the running durable turn when a follow-up is queued", () 
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Queued steering durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     const first = await sendToBot(h, botId, "first");
@@ -150,7 +149,7 @@ test("a durable follow-up runs as its own turn after the first reply", () => wit
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Follow-up durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
@@ -174,7 +173,7 @@ test("a queued durable follow-up runs after a model failure", () => withFakeRunt
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Failure queue durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
@@ -197,7 +196,7 @@ test("a durable follow-up that loses the idle race starts normally", () => withF
   const gate = new Promise<void>((resolve) => { release = resolve; });
   try {
     const botId = await makeBot(h, "Follow-up idle race");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
@@ -232,7 +231,7 @@ test("failed durable run removes streaming blocks and preserves completed thinki
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Failed streaming");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     const sent = await sendToBot(h, botId, "fail while streaming");
@@ -247,7 +246,7 @@ test("same-turn steering can recover from a failed durable run", () => withFakeR
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Steer recovery");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
@@ -268,7 +267,7 @@ test("aborting an active durable turn also cancels its queued follow-up", () => 
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Abort active with queue");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
@@ -290,7 +289,7 @@ test("aborting a queued durable follow-up leaves the active reply running", () =
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Abort queued durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
@@ -312,7 +311,7 @@ test("aborting a durable turn records cancellation and removes the incomplete re
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Abort durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;
@@ -348,7 +347,7 @@ test("durable turns configure the default tool-round limit", async () => {
         expect((await apiStatus(h, "PATCH", `/api/bots/${created.id}`, { maxTurns: value })).status).toBe(400);
         expect((await apiStatus(h, "POST", "/api/bots", { name: "Invalid limit", agentId: "pi", maxTurns: value })).status).toBe(400);
       }
-      new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
       setSetting(h.svc.db, "runtime", "durable");
       const sent = await sendToBot(h, botId, "hello");
@@ -379,7 +378,7 @@ test("durable turn reports the model failure reason", () => withFakeRuntimeProvi
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Failed durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     const sent = await sendToBot(h, botId, "fail");
@@ -412,7 +411,7 @@ test("durable streams committed partials and resolves the Bot model again on the
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Live durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     const observed: string[] = [];
@@ -476,7 +475,7 @@ test("a durable turn streams and completes with an empty Agent registry", () => 
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "No Agent");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     h.svc.db.exec("CREATE TEMP TABLE saved_agents AS SELECT * FROM agents");
@@ -505,7 +504,7 @@ test("startup preserves a working Turn with a durable submission association", (
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Recovery association");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     const sent = await sendToBot(h, botId, "hello");
@@ -521,7 +520,7 @@ test("shutdown aborts and awaits a running durable turn", () => withFakeRuntimeP
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Shutdown durable");
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     let observed!: () => void;

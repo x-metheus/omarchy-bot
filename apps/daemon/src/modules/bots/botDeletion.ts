@@ -1,4 +1,5 @@
-import { rm } from "node:fs/promises";
+import { lstat, realpath, rm, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, sep } from "node:path";
 import type { Database } from "bun:sqlite";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import type { DeleteBotFailureDto, DeleteBotResultDto, TurnDto } from "@omarchy-bot/protocol";
@@ -6,6 +7,7 @@ import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { AvatarService } from "../avatars/avatarService.ts";
 import type { BotScreenManager } from "../computer/botScreenManager.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import type { SecretStore } from "../runtime/secrets.ts";
 import { removePrivateFolder } from "../workspace/sharedWorkspace.ts";
 import { HttpError } from "./bots.ts";
 
@@ -42,22 +44,24 @@ function errorMessage(error: unknown): string {
 
 /**
  * Coordinates irreversible Bot-owned cleanup. Filesystem work finishes before
- * the SQLite delete transaction, so any local failure keeps a visible Bot
- * record that can be retried without claiming success. Agent workers and
- * Agent-owned Native Sessions are deliberately outside this boundary.
+ * the SQLite delete transaction. Required cleanup failures leave a Bot record
+ * for retry. Recorded old Pi session paths are cleaned up on a best-effort basis.
  */
 export class BotDeletionService {
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
-    private readonly attachments: AttachmentsService,
-    private readonly avatars: AvatarService,
+    private readonly attachments: Pick<AttachmentsService, "deleteOwnedFiles">,
+    private readonly avatars: Pick<AvatarService, "deleteUploadedFile">,
     private readonly turns: BotTurnAborter,
     private readonly threads: BotThreadTurns,
-    private readonly screens: BotScreenManager,
+    private readonly screens: Pick<BotScreenManager, "destroy">,
     private readonly workspaceDir: string,
-    private readonly terminalWaitTimeoutMs = 30_000,
-    private readonly projections?: BotScreenProjectionCleanup,
+    private readonly options: {
+      secrets: Pick<SecretStore, "deleteAll">;
+      terminalWaitTimeoutMs?: number;
+      projections?: BotScreenProjectionCleanup;
+    },
   ) {}
 
   async delete(botId: string): Promise<DeleteBotResultDto> {
@@ -91,7 +95,7 @@ export class BotDeletionService {
       }
 
       const terminalResults = await Promise.allSettled(
-        activeTurnIds.map((turnId) => this.turns.waitForTerminal(turnId, this.terminalWaitTimeoutMs)),
+        activeTurnIds.map((turnId) => this.turns.waitForTerminal(turnId, this.options.terminalWaitTimeoutMs ?? 30_000)),
       );
       const terminalFailures = terminalResults.flatMap((result, index) =>
         result.status === "rejected"
@@ -130,12 +134,13 @@ export class BotDeletionService {
 
     let attachmentFilesRemoved = 0;
     let avatarRemoved = false;
+    let secretsRemoved = 0;
     let privateFolderRemoved = false;
     let computerArtifactsRemoved = 0;
     const failures: DeleteBotFailureDto[] = [];
 
     try {
-      await this.projections?.closeSurface(bot.surface_id as SurfaceId);
+      await this.options.projections?.closeSurface(bot.surface_id as SurfaceId);
     } catch (error) {
       failures.push({ stage: "surface", resource: bot.surface_id, message: errorMessage(error) });
     }
@@ -172,6 +177,14 @@ export class BotDeletionService {
 
     if (failures.length === 0) {
       try {
+        secretsRemoved = await this.options.secrets.deleteAll(botId);
+      } catch (error) {
+        failures.push({ stage: "secrets", resource: botId, message: errorMessage(error) });
+      }
+    }
+
+    if (failures.length === 0) {
+      try {
         privateFolderRemoved = removePrivateFolder(botId, this.workspaceDir);
       } catch (error) {
         failures.push({ stage: "private_folder", resource: botId, message: errorMessage(error) });
@@ -183,12 +196,14 @@ export class BotDeletionService {
         status: "failed",
         botId,
         botName: bot.name,
+        oldSessionFilesRemoved: 0,
         removed: {
           threads: 0,
           messages: 0,
           turns: 0,
           attachments: attachmentFilesRemoved,
           avatar: avatarRemoved,
+          secrets: secretsRemoved,
           privateFolder: privateFolderRemoved,
           computerArtifacts: computerArtifactsRemoved,
           surface: false,
@@ -199,16 +214,19 @@ export class BotDeletionService {
       return failed;
     }
 
+    const oldSessionFilesRemoved = await this.#removeOldSessionFiles(botId);
     const deleted: DeleteBotResultDto = {
       status: "deleted",
       botId,
       botName: bot.name,
+      oldSessionFilesRemoved,
       removed: {
         threads: threadCount,
         messages: messageCount,
         turns: turnCount,
         attachments: attachmentCount,
         avatar: avatarRemoved,
+        secrets: secretsRemoved,
         privateFolder: privateFolderRemoved,
         computerArtifacts: computerArtifacts.length,
         surface: true,
@@ -258,6 +276,66 @@ export class BotDeletionService {
     return deleted;
   }
 
+  async #removeOldSessionFiles(botId: string): Promise<number> {
+    const sessions = this.db.query<{ native_session_id: string }, [string]>(`
+      SELECT DISTINCT thread_sessions.native_session_id
+      FROM thread_sessions
+      JOIN threads ON threads.id = thread_sessions.thread_id
+      WHERE threads.bot_id = ? AND thread_sessions.native_session_id <> ''
+    `).all(botId);
+
+    const otherBotSession = this.db.query<{ owned: number }, [string, string]>(`
+      SELECT 1 AS owned
+      FROM thread_sessions
+      JOIN threads ON threads.id = thread_sessions.thread_id
+      WHERE thread_sessions.native_session_id = ? AND threads.bot_id <> ?
+      LIMIT 1
+    `);
+
+    let removed = 0;
+    for (const { native_session_id: path } of sessions) {
+      if (!isAbsolute(path)) continue;
+      if (path.split(sep === "\\" ? /[\\/]/ : "/").includes("..")) {
+        console.warn("OLD_SESSION_PARENT_TRAVERSAL");
+        continue;
+      }
+
+      let entry;
+      try {
+        const parent = dirname(path);
+        const resolvedParent = await realpath(parent).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOTDIR") return undefined;
+          throw error;
+        });
+        if (resolvedParent === undefined) continue;
+        if (resolvedParent !== parent) {
+          console.warn("OLD_SESSION_PARENT_MISMATCH");
+          continue;
+        }
+        entry = await lstat(path);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
+        if (code !== "ENOENT") console.warn(code);
+        continue;
+      }
+      if (entry.isDirectory()) {
+        console.warn("EISDIR");
+        continue;
+      }
+      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+      if (otherBotSession.get(path, botId) !== null) continue;
+
+      try {
+        await unlink(path);
+        removed += 1;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
+        if (code !== "ENOENT") console.warn(code);
+      }
+    }
+    return removed;
+  }
+
   #count(sql: string, botId: string): number {
     const row = this.db.query(sql).get(botId) as CountRow;
     return row.count;
@@ -274,12 +352,14 @@ export class BotDeletionService {
       status: "failed",
       botId,
       botName,
+      oldSessionFilesRemoved: 0,
       removed: {
         threads: 0,
         messages: 0,
         turns: 0,
         attachments: 0,
         avatar: false,
+        secrets: 0,
         privateFolder: false,
         computerArtifacts: 0,
         surface: false,

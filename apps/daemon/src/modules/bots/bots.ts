@@ -20,7 +20,7 @@ import type { ThreadsService } from "../threads/threads.ts";
 
 interface BotRow {
   surface_id: string;
-  id: string; name: string; instructions: string; agent_id: string;
+  id: string; name: string; instructions: string; agent_id: string; model: string | null;
   avatar_kind: string; avatar_recipe: string; avatar_file: string | null;
   pinned: number;
   show_tool_calls: number; show_thinking: number; max_turns: number | null;
@@ -82,7 +82,7 @@ export class BotsService {
     const now = new Date().toISOString();
     const tx = this.db.transaction(() => {
       this.db
-        .query(`INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at, max_turns) VALUES (?, ?, ?, ?, 'generated', ?, ?, ?, ?)`)
+        .query(`INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at, max_turns, model) VALUES (?, ?, ?, ?, 'generated', ?, ?, ?, ?, NULL)`)
         .run(id, input.name, input.instructions ?? "", input.agentId, defaultAvatarRecipe(id), now, now, input.maxTurns ?? null);
       this.db.query(`INSERT INTO bot_state (bot_id) VALUES (?)`).run(id);
       this.db.query(`INSERT INTO bot_surfaces (surface_id, bot_id, transitioned_at) VALUES (?, ?, ?)`).run(surfaceId, id, now);
@@ -105,6 +105,7 @@ export class BotsService {
         : { kind: r.avatar_kind === "recipe" ? "recipe" : "generated", recipe: JSON.parse(r.avatar_recipe || defaultAvatarRecipe(r.id)) };
     return {
       id: r.id, surfaceId: r.surface_id as SurfaceId, name: r.name, instructions: r.instructions, agentId: r.agent_id as AgentId,
+      model: r.model,
       avatar,
       pinned: Boolean(r.pinned),
       showToolCalls: Boolean(r.show_tool_calls),
@@ -180,6 +181,7 @@ export class BotsService {
           show_tool_calls = COALESCE(?, show_tool_calls),
           show_thinking = COALESCE(?, show_thinking),
           max_turns = CASE WHEN ? THEN ? ELSE max_turns END,
+          model = CASE WHEN ? THEN ? ELSE model END,
           updated_at = ?
       WHERE id = ?
     `).run(
@@ -189,6 +191,8 @@ export class BotsService {
       body.showThinking === undefined ? null : body.showThinking ? 1 : 0,
       body.maxTurns === undefined ? 0 : 1,
       body.maxTurns ?? null,
+      body.model === undefined ? 0 : 1,
+      body.model ?? null,
       new Date().toISOString(),
       id,
     );
@@ -199,6 +203,7 @@ export class BotsService {
       showToolCalls: updated.showToolCalls,
       showThinking: updated.showThinking,
       maxTurns: updated.maxTurns ?? null,
+      model: updated.model,
     };
     this.events.append("bot", id, "bot.updated", payload);
     return updated;

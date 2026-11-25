@@ -22,6 +22,27 @@ function deletionConfirmation(page: Page, botName: string): Locator {
   return page.getByRole("alertdialog", { name: `Delete ${botName}?` });
 }
 
+test.describe("Settings secret storage", () => {
+  test("warns about the file backend across Settings sections", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    const warning = settings.getByRole("status").filter({ hasText: "The Service has no OS keychain" });
+    await expect(warning).toContainText("Secrets are kept in a private file that a Bot's shell could read.");
+    await settings.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Bots" }).click();
+    await expect(warning).toBeVisible();
+  });
+
+  test("omits the file warning when Settings reports a keychain backend", async ({ page }) => {
+    await page.route("**/api/secrets/status", (route) => route.fulfill({ json: { backend: "keychain" } }));
+    await page.goto("/");
+    const response = page.waitForResponse((response) => response.url().endsWith("/api/secrets/status"));
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    await response;
+    await expect(page.getByText("The Service has no OS keychain", { exact: false })).toHaveCount(0);
+  });
+});
+
 test.describe("direct local Bot deletion", () => {
   test("opens the pointer-only Sidebar menu, keeps Bot Settings reachable, cancels unchanged, then deletes and falls back", async ({ page, context, request }) => {
     await page.goto("/");
@@ -71,7 +92,7 @@ test.describe("direct local Bot deletion", () => {
     await expect(confirmation).toContainText(botName);
     await expect(confirmation).toContainText("conversations");
     await expect(confirmation).toContainText("managed attachments");
-    await expect(confirmation).toContainText("private folder");
+    await expect(confirmation).toContainText("private folder, and its private secrets");
     await expect(confirmation).toContainText("Agent-owned Native Sessions may remain");
 
     await page.getByRole("button", { name: "Cancel" }).click();
@@ -172,6 +193,7 @@ test.describe("direct local Bot deletion", () => {
             turns: 0,
             attachments: 0,
             avatar: false,
+            secrets: 0,
             privateFolder: false,
             computerArtifacts: 0,
             surface: false,

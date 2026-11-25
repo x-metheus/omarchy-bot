@@ -1,14 +1,19 @@
 import { installDurableCrashProvider } from "../../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 import { CredentialStore } from "../../../apps/daemon/src/modules/runtime/credentials.ts";
+import { SecretStore } from "../../../apps/daemon/src/modules/runtime/secrets.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import { setSetting } from "../../../apps/daemon/src/persistence/settings.ts";
+import { mkdtemp } from "node:fs/promises";
 import path from "node:path";
 
 installDurableCrashProvider();
+const home = process.env.OMARCHY_BOT_HOME!;
 const state = process.env.OMARCHY_BOT_STATE!;
-new CredentialStore(state).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+process.env.PI_CODING_AGENT_DIR = await mkdtemp(path.join(home, "empty-pi-agent-"));
+const credentials = await CredentialStore.open(state, new SecretStore(home));
+await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
 const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
-const daemon = await main({ useHostApplicationUnits: false, botScreenAdapter: new FakeBotScreenRuntimeAdapter(), botScreenRuntimeDir: path.join(process.env.OMARCHY_BOT_HOME!, "r") });
+const daemon = await main({ useHostApplicationUnits: false, botScreenAdapter: new FakeBotScreenRuntimeAdapter(), botScreenRuntimeDir: path.join(home, "r") });
 setSetting(daemon.svc.db, "default_model", "fake/fake-model");
 setSetting(daemon.svc.db, "runtime", "durable");
 console.log(JSON.stringify({ event: "ready", port: daemon.port, pid: process.pid }));

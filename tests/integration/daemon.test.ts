@@ -286,7 +286,7 @@ describe("integration: chat through a bot", () => {
     expect(msgs.some((m) => m.kind === "tool")).toBeTrue();
     expect(msgs.some((m) => m.kind === "event")).toBeTrue();
     // Durable file approvals (bot-runtime Task 9) replaced the legacy worker approval routes.
-    expect(await api(h, "GET", "/api/approvals")).toEqual([]);
+    expect(await api<unknown[]>(h, "GET", "/api/approvals")).toEqual([]);
     expect((await apiStatus(h, "POST", `/api/turns/${sent.turnId}/abort`)).status).toBe(404);
   });
 });

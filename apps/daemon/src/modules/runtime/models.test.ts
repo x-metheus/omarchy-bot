@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -8,19 +8,20 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createFakeProvider } from "../../../../../packages/testkit/src/fake-provider.ts";
 import { setSetting } from "../../persistence/settings.ts";
 import { CredentialStore } from "./credentials.ts";
+import { SecretStore } from "./secrets.ts";
 import { createRuntimeModels, DEFAULT_MODEL_METADATA, DEFAULT_MODEL_SETTING, resolveModelForBot } from "./models.ts";
 
-test("provider protocols, catalog metadata, defaults, and live model selection", () => {
+test("provider protocols, catalog metadata, defaults, and live model selection", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "models-"));
   const db = new Database(":memory:");
   db.exec("CREATE TABLE bots (id TEXT PRIMARY KEY, model TEXT); CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO bots VALUES ('bot', NULL)");
   try {
-    const store = new CredentialStore(dir);
-    store.add({ id: "compatible", name: "Compatible", protocol: "openai-compatible", baseUrl: "https://example.test", apiKey: "secret-example", models: [{ id: "catalog/model", contextWindow: 256000, maxTokens: 16000, reasoning: true }] });
-    store.add({ id: "messages", name: "Messages", protocol: "anthropic-messages", baseUrl: "https://example.test", apiKey: "other-secret" });
+    const store = await CredentialStore.open(dir, new SecretStore(dir));
+    await store.add({ id: "compatible", name: "Compatible", protocol: "openai-compatible", baseUrl: "https://example.test", apiKey: "secret-example", models: [{ id: "catalog/model", contextWindow: 256000, maxTokens: 16000, reasoning: true }] });
+    await store.add({ id: "messages", name: "Messages", protocol: "anthropic-messages", baseUrl: "https://example.test", apiKey: "other-secret" });
     const builtin = builtinProviders().find((p) => p.getModels().length > 0)!;
     const builtModel = builtin.getModels()[0]!;
-    store.add({ id: builtin.id, name: builtin.id, protocol: "built-in", apiKey: "builtin-secret" });
+    await store.add({ id: builtin.id, name: builtin.id, protocol: "built-in", apiKey: "builtin-secret" });
     setSetting(db, DEFAULT_MODEL_SETTING, "compatible/catalog/model");
     expect(resolveModelForBot(db, store, "bot").contextWindow).toBe(256000);
     db.query("UPDATE bots SET model = ? WHERE id = 'bot'").run("messages/arbitrary/model");
@@ -54,9 +55,9 @@ test("fake provider streams ordered thinking and response and scripted failure",
 test("stored credentials drive provider auth and request overrides", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "models-auth-"));
   try {
-    const store = new CredentialStore(dir);
-    store.add({ id: "anthropic", name: "Anthropic", protocol: "built-in", apiKey: "builtin-secret" });
-    store.add({ id: "custom", name: "Custom", protocol: "openai-compatible", baseUrl: "https://example.test", apiKey: "custom-secret", models: [{ id: "model" }] });
+    const store = await CredentialStore.open(dir, new SecretStore(dir));
+    await store.add({ id: "anthropic", name: "Anthropic", protocol: "built-in", apiKey: "builtin-secret" });
+    await store.add({ id: "custom", name: "Custom", protocol: "openai-compatible", baseUrl: "https://example.test", apiKey: "custom-secret", models: [{ id: "model" }] });
     const models = createRuntimeModels(store);
     expect((await models.getAuth("anthropic"))?.auth.apiKey === "builtin-secret").toBe(true);
     expect((await models.getAuth("custom"))?.auth.apiKey === "custom-secret").toBe(true);
@@ -66,12 +67,12 @@ test("stored credentials drive provider auth and request overrides", async () =>
     models.setProvider({ ...provider, streamSimple(_model, context, options) { usedKey = options?.apiKey; return fake.provider.streamSimple(fake.getModel(), context, options); } });
     await models.streamSimple(models.getModel("custom", "model")!, { messages: [] }, { apiKey: "request-secret" }).result();
     expect(usedKey === "request-secret").toBe(true);
-    store.remove("custom");
+    await store.remove("custom");
     expect(await models.getAuth("custom")).toBeUndefined();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("resolution fails closed and redacts every stored key including causes", () => {
+test("resolution fails closed and redacts every stored key including causes", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "models-errors-"));
   const db = new Database(":memory:");
   db.exec("CREATE TABLE bots (id TEXT PRIMARY KEY, model TEXT); CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO bots VALUES ('bot', NULL)");
@@ -87,40 +88,37 @@ test("resolution fails closed and redacts every stored key including causes", ()
       expect(String((error as Error).cause).includes(key)).toBe(false);
     }
   };
-  const store = new CredentialStore(dir);
+  const store = await CredentialStore.open(dir, new SecretStore(dir));
   try {
     assertFailure("missing", "provider/model");
     assertFailure("bot", "provider/model");
     const select = (value: string) => db.query("UPDATE bots SET model = ? WHERE id = 'bot'").run(value);
     select("bare"); assertFailure("bot", "provider/model");
     select("provider/"); assertFailure("bot", "provider/model");
-    select("missing/model"); assertFailure("bot", "missing/model"); // missing file
-    writeFileSync(path.join(dir, "model-credentials.json"), "");
-    assertFailure("bot", "provider/model"); // empty file
-    unlinkSync(path.join(dir, "model-credentials.json"));
-    store.add({ id: "custom", name: "Custom", protocol: "openai-compatible", baseUrl: "https://example.test", apiKey: keys[0]! });
-    store.add({ id: "other", name: "Other", protocol: "anthropic-messages", baseUrl: "https://example.test", apiKey: keys[1]! });
-    store.add({ id: "anthropic", name: "Anthropic", protocol: "built-in", apiKey: keys[2]! });
+    select("missing/model"); assertFailure("bot", "missing/model");
+    await store.add({ id: "custom", name: "Custom", protocol: "openai-compatible", baseUrl: "https://example.test", apiKey: keys[0]! });
+    await store.add({ id: "other", name: "Other", protocol: "anthropic-messages", baseUrl: "https://example.test", apiKey: keys[1]! });
+    await store.add({ id: "anthropic", name: "Anthropic", protocol: "built-in", apiKey: keys[2]! });
     select("anthropic/not-a-real-model"); assertFailure("bot", "anthropic/not-a-real-model");
     for (const key of keys) { select(`missing/${key}`); assertFailure("bot", "[redacted]"); }
-    store.add({ id: "my-copy", name: "openai", protocol: "built-in", apiKey: "copy-key" });
+    await store.add({ id: "my-copy", name: "openai", protocol: "built-in", apiKey: "copy-key" });
     select("my-copy/model"); assertFailure("bot", "my-copy/model");
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("custom endpoints validate URL and avoid metadata from a different native API", () => {
+test("custom endpoints validate URL and avoid metadata from a different native API", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "models-custom-"));
   try {
-    const store = new CredentialStore(dir);
+    const store = await CredentialStore.open(dir, new SecretStore(dir));
     const native = builtinProviders().find((p) => p.id === "openai")!.getModels().find((m) => m.api !== "openai-completions")!;
-    store.add({ id: "openai", name: "Custom", protocol: "openai-compatible", baseUrl: "https://example.test", apiKey: "key", models: [{ id: native.id }] });
+    await store.add({ id: "openai", name: "Custom", protocol: "openai-compatible", baseUrl: "https://example.test", apiKey: "key", models: [{ id: native.id }] });
     const model = createRuntimeModels(store).getModel("openai", native.id)!;
     expect(model.contextWindow).toBe(DEFAULT_MODEL_METADATA.contextWindow);
     expect(model.maxTokens).toBe(DEFAULT_MODEL_METADATA.maxTokens);
     expect(model.reasoning).toBe(DEFAULT_MODEL_METADATA.reasoning);
     expect(model.input).toEqual(DEFAULT_MODEL_METADATA.input);
     expect(model.cost).toEqual(DEFAULT_MODEL_METADATA.cost);
-    store.add({ id: "invalid", name: "Invalid", protocol: "openai-compatible", baseUrl: "relative", apiKey: "url-secret" });
+    await store.add({ id: "invalid", name: "Invalid", protocol: "openai-compatible", baseUrl: "relative", apiKey: "url-secret" });
     expect(() => createRuntimeModels(store)).toThrow("Invalid custom provider base URL");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

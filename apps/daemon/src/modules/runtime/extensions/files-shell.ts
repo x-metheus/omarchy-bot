@@ -4,18 +4,22 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitWithContext, type Context } from "@earendil-works/chord/context";
-import { defineExtension, defineTool, hook, ToolTask, type JsonObject, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
+import { OutputBuffer, sanitizeOutput, type BoundedOutput } from "@earendil-works/chord/output";
+import { defineExtension, defineTool, hook, ToolTask, type JsonObject, type ToolDiagnostic, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import { err, ExecutionError, FileError, ok, type ExecutionEnv, type Result, type WatchTarget } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
+import { createBashTool, createEditTool, createReadTool, createWriteTool, type BashToolInput } from "@earendil-works/pi-durable/tools";
 import { isHomeDirectory, type PlatformPaths } from "../../workspace/paths.ts";
 import type { ApprovalStore } from "../approvals.ts";
 import { MODEL_CREDENTIALS_FILENAME } from "../credentials.ts";
+import { fallbackSecretValuesPath, fillSecretPlaceholders, redactSecretValues, secretPlaceholderNames } from "../secrets.ts";
+import type { BotSecretAccess } from "./secrets.ts";
 
 // Two minutes lets routine shell work finish while bounding commands that omit a timeout.
 export const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
 export const MAX_BASH_TIMEOUT_SECONDS = 600;
 const BASH_SETTLEMENT_GRACE_MS = 500;
+const BASH_INHERITED_ENV = ["PATH", "HOME", "LANG", "TMPDIR", "USER", "SHELL"] as const;
 
 // pi-durable 1.5.2 resolves paths within each method; guarding absolutePath alone does not guard I/O.
 export const GUARDED_FILE_METHODS = [
@@ -103,9 +107,9 @@ function policy(paths: PlatformPaths, settingsFolders: readonly string[], botId:
     const resolved = canonicalPath(absolute);
     return absolute === resolved ? [absolute] : [absolute, resolved];
   };
-  const credentialFile = path.join(paths.stateDir, MODEL_CREDENTIALS_FILENAME);
-  const credentials = protectedPath(credentialFile);
-  const credentialIdentity = fileStat(credentialFile);
+  const credentialFiles = [path.join(paths.stateDir, MODEL_CREDENTIALS_FILENAME), fallbackSecretValuesPath(paths.dataDir)];
+  const credentials = credentialFiles.flatMap(protectedPath);
+  const credentialIdentities = credentialFiles.map(fileStat);
   const serviceData = protectedPath(paths.dataDir);
   const serviceState = protectedPath(paths.stateDir);
   const botsRoot = path.join(paths.sharedWorkspaceDir, "bots");
@@ -143,7 +147,7 @@ function policy(paths: PlatformPaths, settingsFolders: readonly string[], botId:
     const denied = (why: string) => err<string, FileAccessError>(new FileAccessError("permission_denied", `Access refused: ${why}: ${input}`, input));
     const containsProtected = (name: string, root: string) => includesDescendants && withinProtectedDirectory(name, root);
     const overlapsProtected = (root: string, name: string) => withinProtectedDirectory(root, name) || containsProtected(name, root);
-    if (hasIdentity(resolved, credentialIdentity) ||
+    if (credentialIdentities.some((identity) => hasIdentity(resolved, identity)) ||
       credentials.some((root) => names.some((name) => path.relative(root, name) === "" || containsProtected(name, root)))) return denied("credential store");
     if (serviceData.some((root) => names.some((name) => overlapsProtected(root, name)))) return denied("Service data directory");
     if (serviceState.some((root) => names.some((name) => overlapsProtected(root, name)))) return denied("Service state directory");
@@ -337,8 +341,33 @@ function fileApprovalHook(approvals: FileApprovals) {
   });
 }
 
-export function createFilesShellExtension(platform = process.platform, approvals?: FileApprovals) {
-  const bash = createBashTool();
+function shellEnvironment(env: ExecutionEnv, variables: Record<string, string>, usesSecrets: boolean): ExecutionEnv {
+  return new Proxy(env, {
+    get(target, property) {
+      if (property !== "exec") return Reflect.get(target, property);
+      return (...[command, options, context]: Parameters<ExecutionEnv["exec"]>) => {
+        const { spill, ...execOptions } = options ?? {};
+        return target.exec(command, {
+          ...execOptions,
+          env: { ...options?.env, ...variables },
+          // A spill file would contain unredacted output from commands that use secrets.
+          ...(spill && !usesSecrets ? { spill } : {}),
+        }, context);
+      };
+    },
+  });
+}
+
+export function createFilesShellExtension(platform = process.platform, approvals?: FileApprovals, secrets?: BotSecretAccess) {
+  const bash = createBashTool({
+    prepare(execution) {
+      execution.inheritEnv = false;
+      for (const key of BASH_INHERITED_ENV) {
+        const value = process.env[key];
+        if (value !== undefined) execution.env[key] = value;
+      }
+    },
+  });
   return defineExtension({
     name: "omarchy-files-shell",
     ...(approvals ? { hooks: [fileApprovalHook(approvals)] } : {}),
@@ -348,29 +377,99 @@ export function createFilesShellExtension(platform = process.platform, approvals
       withFilePolicy(createEditTool(), approvals),
       defineTool({
         ...bash,
-        async execute(args, api, context) {
-          if (platform === "win32") {
-            return { isError: true, output: [{ type: "text", text: "bash is unsupported on Windows." }] };
+        description: `${bash.description} Optionally provide env variables. Use {{secret:name}} in the command or env values. Commands using a secret keep only the bounded output.`,
+        parameters: {
+          ...bash.parameters,
+          properties: {
+            ...(bash.parameters.properties as Record<string, object>),
+            env: { type: "object", additionalProperties: { type: "string" }, description: "Environment variables for this command" },
+          },
+        },
+        async execute(args: BashToolInput & { env?: Record<string, string> }, api, context) {
+          if (platform === "win32") return textResult("bash is unsupported on Windows.");
+          const variables = Object.entries(args.env ?? {});
+          const names = new Set([args.command, ...variables.map(([, value]) => value)].flatMap(secretPlaceholderNames));
+          const used = new Map<string, string>();
+          if (names.size > 0) {
+            const botId = secrets?.botId(api.conversationId);
+            try {
+              for (const name of names) {
+                const value = botId && secrets
+                  ? await awaitWithContext(secrets.store.getBotSecretForRuntime(botId, name), context)
+                  : undefined;
+                if (value === undefined) return textResult(`Missing secret: {{secret:${name}}}`);
+                used.set(name, value);
+              }
+            } catch {
+              context.abortSignal?.throwIfAborted();
+              return textResult("Unable to resolve bash secrets.");
+            }
           }
+          const fill = (text: string) => fillSecretPlaceholders(text, (name) => used.get(name)).text;
+          // Command placeholders are literal. The Bot handles shell quoting and should prefer env.
+          const command = fill(args.command);
+          const environment = Object.fromEntries(variables.map(([name, value]) => [name, fill(value)]));
+
           const timeout = Math.min(args.timeout ?? DEFAULT_BASH_TIMEOUT_SECONDS, MAX_BASH_TIMEOUT_SECONDS);
+          const usesSecrets = used.size > 0;
+          const window = api.outputWindow;
+          // Keep secret-using output in a bounded private tail until the final result.
+          const privateOutput = usesSecrets && window ? new OutputBuffer({ ...window, retain: "tail" }) : undefined;
+          let retained: BoundedOutput | undefined;
+          const redact = (text: string) => redactSecretValues(text, used);
+          const redactDiagnostic = (item: ToolDiagnostic) => ({ ...item, message: redact(item.message), ...(item.code === undefined ? {} : { code: redact(item.code) }) });
           let finished = false;
           let timer: ReturnType<typeof setTimeout> | undefined;
+          const canPublish = () => !finished && !context.abortSignal?.aborted;
           try {
-            const deadline = new Promise<Awaited<ReturnType<typeof bash.execute>>>((resolve) => {
+            const deadline = new Promise<ToolExecutionResult>((resolve) => {
               timer = setTimeout(() => {
                 finished = true;
-                // A descendant outside the process group can keep pi-durable's pipe readers and spill stream active
-                // after settlement by holding the output pipe open. Closing those streams requires an upstream change.
+                // A detached descendant can keep pi-durable's pipe readers active after settlement.
                 void api.env?.cleanup(context).catch(() => {});
-                resolve({ isError: true, output: [{ type: "text", text: `Command timed out after ${timeout} seconds` }] });
+                resolve(textResult(`Command timed out after ${timeout} seconds`));
               }, timeout * 1000 + BASH_SETTLEMENT_GRACE_MS);
             });
-            const running = bash.execute({ ...args, timeout }, {
+            const running = bash.execute({ command, timeout }, {
               ...api,
-              output(...output) { if (!finished && !context.abortSignal?.aborted) api.output(...output); },
-              diagnostic(diagnostic) { if (!finished && !context.abortSignal?.aborted) api.diagnostic(diagnostic); },
+              env: api.env && (variables.length > 0 || usesSecrets ? shellEnvironment(api.env, environment, usesSecrets) : api.env),
+              outputWindow: usesSecrets ? undefined : window,
+              output(chunk, skipped) {
+                if (!canPublish()) return;
+                if (usesSecrets) privateOutput?.push(chunk, skipped);
+                else api.output(chunk, skipped);
+              },
+              retainedOutput() {
+                if (!usesSecrets) return api.retainedOutput();
+                privateOutput?.end();
+                const snapshot = privateOutput?.snapshot();
+                if (!snapshot) return { text: "", truncated: false };
+                // The snapshot strips control codes, so redact that same form of each value.
+                const outputValues = new Map([...used].map(([name, value]) => [name, sanitizeOutput(value)]));
+                retained = { ...snapshot, text: redactSecretValues(snapshot.text, outputValues) };
+                return { text: retained.text, truncated: retained.droppedBytes > 0 };
+              },
+              diagnostic(item) { if (canPublish()) api.diagnostic(redactDiagnostic(item)); },
             }, context);
-            return await awaitWithContext(Promise.race([running, deadline]), context);
+            const result = await awaitWithContext(Promise.race([running, deadline]), context);
+            if (!usesSecrets) return result;
+            const structured = result.structuredOutput;
+            const output = result.output?.map((item) => item.type === "text" ? { ...item, text: redact(item.text) } : item)
+              ?? (retained?.text ? [{ type: "text" as const, text: retained.text }] : []);
+            const diagnostics = result.diagnostics?.map(redactDiagnostic) ?? [];
+            if (retained?.droppedBytes) {
+              diagnostics.push({ severity: "warn", code: "truncated", message: `Output truncated to its end: ${retained.droppedLines} lines, ${retained.droppedBytes} bytes dropped` });
+            }
+            return {
+              ...result,
+              output,
+              diagnostics,
+              ...(structured && typeof structured === "object" && "fullOutputPath" in structured && typeof structured.fullOutputPath === "string"
+                ? { structuredOutput: { ...structured, fullOutputPath: redact(structured.fullOutputPath) } } : {}),
+            };
+          } catch (error) {
+            if (!usesSecrets) throw error;
+            throw new Error(redact(error instanceof Error ? error.message : "Unable to execute bash command."));
           } finally {
             finished = true;
             clearTimeout(timer);

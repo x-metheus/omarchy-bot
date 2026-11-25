@@ -1,21 +1,30 @@
 import { Database } from "bun:sqlite";
 import { expect, spyOn, test } from "bun:test";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { inspect } from "node:util";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { createRegistry, Harness, ToolResultEntry, type ToolExecutionResult } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, ToolResultEntry, type ConversationId, type ConversationView, type ConversationWatch, type LiveState, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { err, ExecutionError, FileError, type Result } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { MIGRATIONS } from "../../../persistence/db.ts";
+import { applyMigration, MIGRATIONS } from "../../../persistence/db.ts";
 import { setSetting } from "../../../persistence/settings.ts";
+import { Supervisor } from "../../../supervision/supervisor.ts";
 import { ApprovalStore } from "../approvals.ts";
+import { AgentsRegistry } from "../../agents/registry.ts";
+import { BotsService } from "../../bots/bots.ts";
+import { EventLog } from "../../events/eventLog.ts";
+import { ThreadsService } from "../../threads/threads.ts";
+import { SecretStore, type SecretBackend } from "../secrets.ts";
+import { DurableTranscript } from "../transcript.ts";
 import { ALLOWED_FOLDERS_SETTING, readSettingsAllowedFolders } from "../../workspace/allowedFolders.ts";
 import { platformPaths, type PlatformPaths } from "../../workspace/paths.ts";
 import { classifyFileAccess, createFilesEnvironment, createFilesShellExtension, DEFAULT_BASH_TIMEOUT_SECONDS, type FileApprovals, GUARDED_FILE_METHODS, hasDirectoryAncestor, MAX_BASH_TIMEOUT_SECONDS } from "./files-shell.ts";
+import { createSecretsExtension, type BotSecretAccess } from "./secrets.ts";
 
 function directories() {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "bot-files-shell-")));
@@ -49,15 +58,35 @@ async function withTurn(
   dirs: Omit<Directories, "paths"> & { paths: PlatformPaths },
   calls: { name: string; args: Parameters<typeof fauxToolCall>[1] }[],
   inspect?: (conversation: Awaited<ReturnType<Harness["createConversation"]>>) => Promise<void>,
-  options: { platform?: NodeJS.Platform; cwd?: string; unknownBot?: boolean; approvals?: FileApprovals } = {},
+  options: {
+    platform?: NodeJS.Platform;
+    cwd?: string;
+    unknownBot?: boolean;
+    approvals?: FileApprovals;
+    secretStore?: SecretStore;
+    botId?: string;
+    observe?(view: ConversationView): void;
+    echoToolResult?: boolean;
+  } = {},
 ) {
   const provider = fauxProvider({ provider: "fake", models: [{ id: "fake-model" }] });
   provider.setResponses([
     ...calls.map(({ name, args }) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" })),
-    fauxAssistantMessage("Finished"),
+    options.echoToolResult ? ({ messages }) => {
+      const result = messages.at(-1);
+      return fauxAssistantMessage(result?.role === "toolResult"
+        ? result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
+        : "Finished");
+    } : fauxAssistantMessage("Finished"),
   ]);
   const registry = createRegistry();
-  registry.install(createFilesShellExtension(options.platform, options.approvals));
+  let conversationId: ConversationId | undefined;
+  const secrets: BotSecretAccess | undefined = options.secretStore && {
+    store: options.secretStore,
+    botId: (id) => id === conversationId ? options.botId : undefined,
+  };
+  registry.install(createFilesShellExtension(options.platform, options.approvals, secrets));
+  if (secrets) registry.install(createSecretsExtension(secrets));
   const storage = new MemoryStorage();
   const models = createModels();
   models.setProvider(provider.provider);
@@ -67,9 +96,16 @@ async function withTurn(
     // Like the runtime, read Settings folders on every call so an "Always allow" applies to the next one.
     env: ({ cwd }) => createFilesEnvironment(dirs.paths, options.approvals?.settingsFolders() ?? dirs.allowed, cwd, options.unknownBot ? undefined : "own-bot"),
   }, context);
+  let watch: ConversationWatch | undefined;
   try {
     const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+    conversationId = conversation.id;
     await conversation.configure({ cwd: options.cwd ?? dirs.sharedWorkspaceDir, model: { provider: "fake", modelId: "fake-model" } }, context);
+    if (options.observe) {
+      watch = await conversation.watch(context);
+      options.observe(watch.value);
+      watch.start(async (call) => { if (call.kind === "value") options.observe?.(call.value); });
+    }
     const submission = await conversation.submit({ type: "input", content: "Run the scripted tool calls" }, context);
     await inspect?.(conversation);
     const settlement = await submission.wait(context);
@@ -79,8 +115,10 @@ async function withTurn(
       if (!result || result.role !== "toolResult") throw new Error("Missing model tool result");
       return { ...result, diagnostics: item.data.diagnostics, text: result.content.map((content) => content.type === "text" ? content.text : "").join("\n") };
     });
-    return { settlement, results };
+    if (watch) options.observe?.({ ...watch.value, entries: items, docs: {} });
+    return { settlement, results, entries: items };
   } finally {
+    await watch?.stop();
     await harness.close(context);
     await storage.close(context);
   }
@@ -514,6 +552,247 @@ test("bash passes the default, requested and capped seconds to the execution env
   } finally { exec.mockRestore(); dirs.close(); }
 });
 
+function fakeSecretStore(dirs: Directories) {
+  const values = new Map<string, string>();
+  const backend: SecretBackend = {
+    kind: "keychain",
+    async get(account) { return values.get(account); },
+    async set(account, value) { values.set(account, value); },
+    async delete(account) { values.delete(account); },
+  };
+  return new SecretStore(dirs.dataDir, backend);
+}
+
+const tokenPlaceholder = "{{secret:token}}";
+const printToken = { name: "bash", args: { command: `printf '%s' '${tokenPlaceholder}'` } };
+
+test.skipIf(process.platform === "win32")("bash keeps an out-of-band Bot secret out of entries, messages, console output, and events", async () => {
+  const dirs = directories();
+  const secretStore = fakeSecretStore(dirs);
+  const value = "store-only-token-sentinel";
+  const exec = spyOn(NodeExecutionEnv.prototype, "exec");
+  const consoleCalls: unknown[][] = [];
+  const consoleSpies = (["debug", "info", "log", "warn", "error"] as const).map((method) =>
+    spyOn(console, method).mockImplementation((...args) => { consoleCalls.push(args); }));
+  const views: ConversationView[] = [];
+  const db = new Database(":memory:");
+  try {
+    for (const migration of MIGRATIONS) applyMigration(db, migration);
+    const eventLog = new EventLog(db);
+    const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {}, async onAgentToolFrame() { return undefined; } }, { agents: "" });
+    const agents = new AgentsRegistry(db, eventLog, { conformanceDir: "", workersAgentsDir: "" }, supervisor);
+    const threads = new ThreadsService(db, eventLog, agents);
+    const bots = new BotsService(db, eventLog, agents, threads);
+    threads.insertThreadRow("thread", "bot-a", "Shell secret fixture");
+    threads.insertTurnRow({ id: "turn", threadId: "thread", botId: "bot-a", nativeSessionId: "" });
+    let transcript: DurableTranscript | undefined;
+    await secretStore.forBot("bot-a").save("token", "Service token", value);
+    const { entries, results, settlement } = await withTurn(dirs, [printToken], undefined, {
+      secretStore, botId: "bot-a", echoToolResult: true,
+      observe(view) {
+        views.push(view);
+        transcript ??= new DurableTranscript(threads, bots, eventLog, "thread", "bot-a", "turn", view);
+        transcript.update(view);
+      },
+    });
+    expect(settlement.status).toBe("done");
+    expect(results[0]).toMatchObject({ isError: false, text: tokenPlaceholder });
+    expect(exec.mock.calls.some(([command]) => typeof command === "string" && command.includes(value))).toBe(true);
+    expect(exec.mock.calls[0]?.[1]?.spill).toBeUndefined();
+    expect(JSON.stringify(entries)).toContain(JSON.stringify(printToken.args.command));
+    const messages = threads.listMessages("thread");
+    const { events } = eventLog.replay(0, eventLog.oldestCursor());
+    expect(JSON.stringify(messages)).toContain(tokenPlaceholder);
+    expect(JSON.stringify(events)).toContain(tokenPlaceholder);
+    for (const observed of [entries, views, messages, events]) {
+      expect(JSON.stringify(observed).includes(value)).toBe(false);
+    }
+    expect(inspect(consoleCalls, { showHidden: true, depth: null, maxArrayLength: Infinity, maxStringLength: Infinity }).includes(value)).toBe(false);
+  } finally {
+    exec.mockRestore();
+    for (const spy of consoleSpies) spy.mockRestore();
+    db.close();
+    dirs.close();
+  }
+});
+
+test.skipIf(process.platform === "win32")("secrets and bash cannot list, delete, or use another Bot's or the app's secrets", async () => {
+  const dirs = directories();
+  const secretStore = fakeSecretStore(dirs);
+  const botValue = "bot-a-token-sentinel";
+  const appValue = "app-token-sentinel";
+  try {
+    await secretStore.forBot("bot-a").save("token", "Bot token", botValue);
+    await secretStore.forApp().save("token", "App token", appValue);
+    const { entries, results } = await withTurn(dirs, [
+      { name: "secrets", args: { action: "list" } },
+      { name: "secrets", args: { action: "delete", name: "token" } },
+      printToken,
+    ], undefined, { secretStore, botId: "bot-b" });
+    expect(results[0]).toMatchObject({ isError: false, text: "[]" });
+    expect(results[2]).toMatchObject({ isError: true, text: `Missing secret: ${tokenPlaceholder}` });
+    expect(await secretStore.getBotSecretForRuntime("bot-a", "token")).toBe(botValue);
+    expect(await secretStore.getAppSecretForRuntime("token")).toBe(appValue);
+    expect(JSON.stringify(entries).includes(botValue) || JSON.stringify(entries).includes(appValue)).toBe(false);
+  } finally { dirs.close(); }
+});
+
+test("secrets saves, lists metadata, and deletes model-supplied values", async () => {
+  const dirs = directories();
+  const secretStore = fakeSecretStore(dirs);
+  const metadata = { name: "token", description: "Service token" };
+  const value = "model-supplied-token-sentinel";
+  try {
+    const { results } = await withTurn(dirs, [
+      { name: "secrets", args: { action: "save", ...metadata, value } },
+      { name: "secrets", args: { action: "list" } },
+    ], undefined, { secretStore, botId: "bot-a" });
+    expect(results.map(({ isError }) => isError)).toEqual([false, false]);
+    expect(JSON.parse(results[0]!.text)).toEqual(metadata);
+    expect(JSON.parse(results[1]!.text)).toEqual([metadata]);
+    expect(JSON.stringify(results).includes(value)).toBe(false);
+    expect(await secretStore.getBotSecretForRuntime("bot-a", "token")).toBe(value);
+    const { results: afterDelete } = await withTurn(dirs, [
+      { name: "secrets", args: { action: "delete", name: "token" } },
+      { name: "secrets", args: { action: "list" } },
+    ], undefined, { secretStore, botId: "bot-a" });
+    expect(afterDelete.map(({ isError }) => isError)).toEqual([false, false]);
+    expect(JSON.parse(afterDelete[1]!.text)).toEqual([]);
+    expect(await secretStore.getBotSecretForRuntime("bot-a", "token")).toBeUndefined();
+  } finally { dirs.close(); }
+});
+
+test("secrets rejects a malformed save without copying the value into the result or diagnostics", async () => {
+  const dirs = directories();
+  const secretStore = fakeSecretStore(dirs);
+  const value = "malformed-save-token-sentinel";
+  try {
+    const { results } = await withTurn(dirs, [
+      { name: "secrets", args: { action: "save", name: "INVALID NAME", description: "Service token", value } },
+    ], undefined, { secretStore, botId: "bot-a" });
+    const result = results[0]!;
+    expect(result.isError).toBe(true);
+    expect(result.text.includes(value)).toBe(false);
+    expect(JSON.stringify(result.diagnostics).includes(value)).toBe(false);
+    expect(result.diagnostics).toContainEqual({ severity: "error", code: "invalid_arguments", message: "Invalid secrets arguments." });
+    expect(await secretStore.forBot("bot-a").list()).toEqual([]);
+  } finally { dirs.close(); }
+});
+
+test.skipIf(process.platform === "win32")("bash withholds split secret output until the redacted final result", async () => {
+  const dirs = directories();
+  const secretStore = fakeSecretStore(dirs);
+  const value = "split-output-token-sentinel";
+  const streamed: string[] = [];
+  try {
+    await secretStore.forBot("bot-a").save("token", "Service token", value);
+    const { results, entries } = await withTurn(dirs, [{ name: "bash", args: {
+      command: 'printf "prefix:%s" "${TOKEN:0:8}"; sleep 0.2; printf "%s:end" "${TOKEN:8}"; sleep 0.3',
+      env: { TOKEN: tokenPlaceholder },
+    } }], undefined, {
+      secretStore, botId: "bot-a",
+      observe(view) {
+        for (const slot of (view.docs["pi.live"] as LiveState | undefined)?.tools ?? []) {
+          if (slot.status === "running" && slot.output) streamed.push(slot.output);
+        }
+      },
+    });
+    expect(streamed).toEqual([]);
+    expect(results[0]).toMatchObject({ isError: false, text: `prefix:${tokenPlaceholder}:end` });
+    expect(JSON.stringify(entries)).toContain(`"TOKEN":"${tokenPlaceholder}"`);
+    expect(JSON.stringify(entries).includes(value)).toBe(false);
+  } finally { dirs.close(); }
+});
+
+test.skipIf(process.platform === "win32")("bash streams output when no secret is used", async () => {
+  const dirs = directories();
+  const streamed: string[] = [];
+  try {
+    const { results } = await withTurn(dirs, [
+      { name: "bash", args: { command: 'printf "ordinary output"; sleep 0.3' } },
+    ], undefined, {
+      observe(view) {
+        for (const slot of (view.docs["pi.live"] as LiveState | undefined)?.tools ?? []) {
+          if (slot.status === "running" && slot.output) streamed.push(slot.output);
+        }
+      },
+    });
+    expect(streamed).toContain("ordinary output");
+    expect(results[0]).toMatchObject({ isError: false, text: "ordinary output" });
+  } finally { dirs.close(); }
+});
+
+test.skipIf(process.platform === "win32")("bash keeps only a bounded tail and omits spill files when it uses a secret", async () => {
+  const dirs = directories();
+  const secretStore = fakeSecretStore(dirs);
+  const exec = spyOn(NodeExecutionEnv.prototype, "exec");
+  try {
+    await secretStore.forBot("bot-a").save("token", "Service token", "bounded-output-token-sentinel");
+    const { results } = await withTurn(dirs, [{ name: "bash", args: {
+      command: 'printf "%052000d\\n%s" 0 "$TOKEN"',
+      env: { TOKEN: tokenPlaceholder },
+    } }], undefined, { secretStore, botId: "bot-a" });
+    expect(results[0]).toMatchObject({
+      isError: false,
+      content: [{ type: "text", text: tokenPlaceholder }, expect.objectContaining({ type: "text" })],
+      diagnostics: [expect.objectContaining({ code: "truncated" })],
+    });
+    expect(exec.mock.calls[0]?.[1]?.spill).toBeUndefined();
+  } finally { exec.mockRestore(); dirs.close(); }
+});
+
+test.skipIf(process.platform === "win32")("bash redacts secret values that the output sanitizer would reassemble", async () => {
+  const dirs = directories();
+  const secretStore = fakeSecretStore(dirs);
+  const value = "sanitized-output-token-sentinel";
+  try {
+    await secretStore.forBot("bot-a").save("token", "Service token", value);
+    const { entries, results } = await withTurn(dirs, [{ name: "bash", args: {
+      command: 'printf "%s\\\\033[32m%s" "${TOKEN:0:8}" "${TOKEN:8}"',
+      env: { TOKEN: tokenPlaceholder },
+    } }], undefined, { secretStore, botId: "bot-a" });
+    expect(JSON.stringify(entries).includes(value)).toBe(false);
+    expect(results[0]).toMatchObject({ isError: false, text: tokenPlaceholder });
+  } finally { dirs.close(); }
+});
+
+test("bash redacts shell failure messages and diagnostics", async () => {
+  const dirs = directories();
+  const secretStore = fakeSecretStore(dirs);
+  const value = "shell-failure-token-sentinel";
+  const error = new ExecutionError("spawn_error", `Cannot execute ${value}`, new Error(value));
+  error.spillPath = `/tmp/${value}`;
+  const exec = spyOn(NodeExecutionEnv.prototype, "exec").mockResolvedValue(err(error));
+  try {
+    await secretStore.forBot("bot-a").save("token", "Service token", value);
+    const { entries, results } = await withTurn(dirs, [printToken], undefined, { platform: "linux", secretStore, botId: "bot-a" });
+    expect(results[0]).toMatchObject({
+      isError: true,
+      text: expect.stringContaining(`Cannot execute ${tokenPlaceholder}`),
+      diagnostics: expect.arrayContaining([expect.objectContaining({ code: "full_output", message: `Full output: /tmp/${tokenPlaceholder}` })]),
+    });
+    expect(JSON.stringify(entries).includes(value)).toBe(false);
+  } finally { exec.mockRestore(); dirs.close(); }
+});
+
+test.skipIf(process.platform === "win32")("bash starts with PATH and excludes the Service environment marker", async () => {
+  const dirs = directories();
+  const key = "OMARCHY_BASH_ENV_TEST_MARKER";
+  const previous = process.env[key];
+  process.env[key] = "service-only-sentinel";
+  try {
+    const { results } = await withTurn(dirs, [{ name: "bash", args: { command: "env" } }]);
+    expect(results[0]?.isError).toBe(false);
+    expect(/^PATH=.+$/m.test(results[0]?.text ?? "")).toBe(true);
+    expect(results[0]?.text.includes(key)).toBe(false);
+    expect(process.env[key]).toBe("service-only-sentinel");
+  } finally {
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+    dirs.close();
+  }
+});
+
 const processCommand = 'echo "$$" > shell.pid; sleep 60 & echo "$!" > child.pid; wait';
 async function waitFor(assertion: () => void) {
   const deadline = Date.now() + 2500;
@@ -749,7 +1028,7 @@ test("a late Downloads alias to home grants only explicit Settings folders", asy
   } finally { dirs.close(); }
 });
 
-test("credential identity refuses an allowed file via its ancestor alias and hard link", async () => {
+test("credential and fallback secret identities refuse allowed aliases and hard links", async () => {
   const dirs = directories();
   try {
     const protectedFile = path.join(dirs.extra, "credential-target.json");
@@ -758,12 +1037,20 @@ test("credential identity refuses an allowed file via its ancestor alias and har
     symlinkSync(dirs.extra, path.join(dirs.sharedWorkspaceDir, "alias"), "junction");
     const hardLink = path.join(dirs.extra, "credential-alias.json");
     linkSync(protectedFile, hardLink);
-    const { settlement, results } = await withTurn(dirs, [write("alias/credential-target.json"), write(hardLink)]);
+    const fallback = path.join(dirs.dataDir, "secrets", "secret-values.json");
+    mkdirSync(path.dirname(fallback));
+    writeFileSync(fallback, "private fallback values");
+    const fallbackLink = path.join(dirs.extra, "secret-link.json");
+    const fallbackAlias = path.join(dirs.extra, "renamed.json");
+    linkSync(fallback, fallbackLink);
+    renameSync(fallbackLink, fallbackAlias);
+    const { settlement, results } = await withTurn(dirs, [write("alias/credential-target.json"), write(hardLink), write("alias/renamed.json")]);
     expect(settlement.status).toBe("done");
-    expect(results.map(({ isError }) => isError)).toEqual([true, true]);
+    expect(results.map(({ isError }) => isError)).toEqual([true, true, true]);
     for (const result of results) expect(result.text.includes("credential store")).toBe(true);
     expect(readFileSync(protectedFile, "utf8")).toBe("private credentials");
     expect(readFileSync(hardLink, "utf8")).toBe("private credentials");
+    expect(readFileSync(fallbackAlias, "utf8")).toBe("private fallback values");
   } finally { dirs.close(); }
 });
 
