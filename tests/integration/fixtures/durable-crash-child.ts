@@ -14,7 +14,18 @@ process.env.PI_CODING_AGENT_DIR = await mkdtemp(path.join(home, "empty-pi-agent-
 const credentials = await CredentialStore.open(state, new SecretStore(home));
 if (!credentials.getForRuntime("fake")) await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
 const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
-const daemon = await main({ useHostApplicationUnits: false, botScreenAdapter: new FakeBotScreenRuntimeAdapter(), botScreenRuntimeDir: path.join(home, "r") });
+const daemon = await main({
+  useHostApplicationUnits: false,
+  botScreenAdapter: new FakeBotScreenRuntimeAdapter(),
+  botScreenRuntimeDir: path.join(home, "r"),
+  onMailboxDispatchControls({ pauseDispatch, resumeDispatch }) {
+    if (process.env.OMARCHY_TEST_PEER_MAIL_HOLD !== "queued") return;
+    pauseDispatch();
+    process.once("message", (message: unknown) => {
+      if (message === "resume-mailbox-dispatch") resumeDispatch();
+    });
+  },
+});
 if (getSetting(daemon.svc.db, "default_model") === null) setSetting(daemon.svc.db, "default_model", "fake/fake-model");
 console.log(JSON.stringify({ event: "ready", port: daemon.port, pid: process.pid }));
 process.removeAllListeners("SIGTERM");

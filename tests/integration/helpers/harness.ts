@@ -8,6 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
+import type { MailboxDispatchControls } from "../../../apps/daemon/src/bootstrap/main.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
@@ -27,8 +28,26 @@ export interface Harness {
   token: string;
   home: string;
   svc: DaemonServices;
+  mailbox: MailboxDispatchControls;
   stop: () => Promise<void>;
   disconnectForRestart: () => Promise<void>;
+}
+
+export async function waitForMailboxStep<T>(step: Promise<T>, description: string): Promise<T> {
+  const timeoutMs = 2_000;
+  const timeout = Promise.withResolvers<never>();
+  const timer = setTimeout(() => timeout.reject(new Error(`Timed out after ${timeoutMs}ms waiting for ${description}`)), timeoutMs);
+  try {
+    return await Promise.race([step, timeout.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Let the mailbox's scheduled drain submit its writes before entering the runtime writer. */
+export function waitForMailboxWriter(h: Harness): Promise<void> {
+  const barrier = Promise.resolve().then(() => h.svc.turns["runtime"].writeService(() => {}));
+  return waitForMailboxStep(barrier, "the mailbox writer barrier");
 }
 
 export interface HarnessOptions {
@@ -48,6 +67,7 @@ export interface HarnessOptions {
   /** Worker tree override; defaults to the shared fake workers. */
   workersDir?: string;
   onDurableMailReplay?: DurableMailReplayObserver;
+  pauseMailboxDispatchOnStartup?: boolean;
   /** Keep the Shared Workspace outside the protected Service data directory. */
   separateWorkspace?: boolean;
 }
@@ -147,16 +167,23 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
       restoreRuntime = installDurableSuiteProvider(options.onDurableMailReplay);
     }
     const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
+    let mailbox!: MailboxDispatchControls;
+    const onMailboxDispatchControls = (controls: MailboxDispatchControls) => {
+      mailbox = controls;
+      if (options.pauseMailboxDispatchOnStartup) controls.pauseDispatch();
+    };
     const daemon = options.useProductionBotScreen
       ? await main({
           useHostApplicationUnits: options.useHostApplicationUnits === true,
           botScreenRuntimeDir: path.join(home, "r"),
+          onMailboxDispatchControls,
           ...(options.botComputerAssetSupply === undefined ? {} : { botComputerAssetSupply: options.botComputerAssetSupply }),
           ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
         })
       : await main({
           useHostApplicationUnits: options.useHostApplicationUnits === true,
           botScreenRuntimeDir: path.join(home, "r"),
+          onMailboxDispatchControls,
           botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
           botScreenCapacity: options.botScreenCapacity ?? 8,
         });
@@ -167,6 +194,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
       token: "",
       home,
       svc,
+      mailbox,
       stop: async () => {
         try { await stop(); } finally { restoreFixtures(); }
       },

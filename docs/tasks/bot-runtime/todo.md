@@ -809,6 +809,7 @@ Host note: earlier in the task, `bun test apps/daemon` intermittently failed wit
 **Description:** Delete `workers/pi`, `agent-protocol.ts` and its tests, the Pi conformance tests, and the Agent picker, Pending Agents, and Agent conformance UI. Keep Agent identity fields in storage until nothing reads them. Rename "Native Session" to "Bot session" in user-facing text.
 
 - The Service reports Thinking as `supported` because the durable runtime can display Thinking emitted by the model. Managed attachment staging and sending accept text and JSON up to 64 KiB per file and reject images. These policies are independent of the Pi worker's readiness and capability report.
+- Bot mail schedules dispatch after durable enqueue, startup reconciliation, and failed target deletion, independently of Agent readiness. Test fixtures can pause pending dispatches in place and resume them through the same queue. Shutdown prevents an active dispatch from claiming a Turn while it waits for the writer.
 
 **Acceptance criteria:**
 - [ ] No code imports `pi-coding-agent`, `pi-mcp-adapter`, or the agent protocol, and nothing reads `~/.pi`

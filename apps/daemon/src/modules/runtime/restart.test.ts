@@ -14,7 +14,12 @@ const fixture = path.join(root, "tests/integration/fixtures/durable-crash-child.
 
 type Child = ReturnType<typeof Bun.spawn>;
 async function boot(home: string, deadline: number, crashMode = false, extraEnv: Record<string, string> = {}): Promise<{ child: Child; port: number; events: string[]; stderr: () => string }> {
-  const child = Bun.spawn(["bun", fixture], { env: { ...process.env, HOME: home, OMARCHY_BOT_HOME: home, OMARCHY_BOT_STATE: path.join(home, "state"), OMARCHY_BOT_PORT: "0", OMARCHY_BOT_WORKERS_DIR: path.join(root, "tests/integration/fake-workers"), OMARCHY_TEST_SLEEP_AT: String(deadline), OMARCHY_TEST_CRASH_MODE: crashMode ? "1" : "0", ...extraEnv }, stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn(["bun", fixture], {
+    env: { ...process.env, HOME: home, OMARCHY_BOT_HOME: home, OMARCHY_BOT_STATE: path.join(home, "state"), OMARCHY_BOT_PORT: "0", OMARCHY_BOT_WORKERS_DIR: path.join(root, "tests/integration/fake-workers"), OMARCHY_TEST_SLEEP_AT: String(deadline), OMARCHY_TEST_CRASH_MODE: crashMode ? "1" : "0", ...extraEnv },
+    stdout: "pipe",
+    stderr: "pipe",
+    ...(extraEnv.OMARCHY_TEST_PEER_MAIL_HOLD === "queued" ? { ipc() {} } : {}),
+  });
   const events: string[] = [];
   const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
   let ready!: (port: number) => void;
@@ -258,16 +263,13 @@ test.each([
       finally { db.close(); }
     };
     setTargetModel(`fake/${persistedModelId}`);
-    const conformance = path.join(home, "conformance/pi-fake-pi-1.json");
-    const originalConformance = readFileSync(conformance);
-    writeFileSync(conformance, JSON.stringify({ ok: false }));
-    expect(await post("/api/agents/pi/recheck", {})).toMatchObject({ status: "incompatible" });
     const sent = await post<{ turnId: string }>(`/api/bots/${source.id}/messages`, { text: `send-peer-mail:${target.id}` });
     expect(await terminal(home, sent.turnId)).toMatchObject({ status: "completed" });
-    const delivery = query<{ id: string; thread_id: string; state: string }>(home, "SELECT id, thread_id, state FROM bot_mail_deliveries")!;
+    const delivery = query<{ id: string; thread_id: string; state: string; target_turn_id: string | null }>(home, "SELECT id, thread_id, state, target_turn_id FROM bot_mail_deliveries")!;
     expect(delivery.state).toBe("queued");
-    writeFileSync(conformance, originalConformance);
-    expect(await post("/api/agents/pi/recheck", {})).toMatchObject({ status: "ready" });
+    expect(delivery.target_turn_id).toBeNull();
+    expect(first.events).not.toContain("before-peer-mail-input");
+    child.send("resume-mailbox-dispatch");
     await waitFor(() => first.events.includes("before-peer-mail-input") ? true : undefined);
     const user = await post<{ turnId: string }>(`/api/threads/${delivery.thread_id}/messages`, { text: "Hold the target reply.", whenBusy: "followUp" });
     const queued = await waitFor(() => query<{ id: number; target_turn_id: string }>(home, `

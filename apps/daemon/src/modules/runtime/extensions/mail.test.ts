@@ -7,7 +7,7 @@ import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCal
 import { createModels } from "@earendil-works/pi-ai/models";
 import { AssistantEntry, createRegistry, Harness, ToolResultEntry, type ConversationId, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
-import { api, makeBot, messages, sendToBot, sendToThread, startDaemon } from "../../../../../../tests/integration/helpers/harness.ts";
+import { api, makeBot, messages, sendToBot, sendToThread, startDaemon, waitForMailboxWriter } from "../../../../../../tests/integration/helpers/harness.ts";
 import { setSetting } from "../../../persistence/settings.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../computer/fakeBotScreenRuntime.ts";
 import type { RuntimeServices } from "../runtime.ts";
@@ -222,7 +222,7 @@ async function withMailDaemon(
 }
 
 test.each([
-  ["includes the live sender ID and does not redispatch delivered mail after readiness rechecks", false],
+  ["includes the live sender ID and does not redispatch delivered mail after repeated resumes", false],
   ["omits a sender ID deleted before dispatch", "before"],
   ["omits a sender ID deleted inside the claim transaction", "claim"],
 ] as const)("durable peer-mail dispatch %s", async (_name, deleteSender) => {
@@ -248,7 +248,7 @@ test.each([
       const sourceBotId = await makeBot(h, sourceName);
       targetBotId = await makeBot(h, "Release reviewer", targetInstructions);
       h.svc.db.query("UPDATE bots SET model = ? WHERE id = ?").run("fake/reviewer-model", targetBotId);
-      if (deleteSender) h.svc.agents.markOffline("pi", "Keep mail queued until sender deletion");
+      if (deleteSender) h.mailbox.pauseDispatch();
       const sent = await sendToBot(h, sourceBotId, "Send peer mail");
       expect((await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).status).toBe("completed");
       if (deleteSender) {
@@ -260,15 +260,17 @@ test.each([
         } else {
           expect(await api(h, "DELETE", `/api/bots/${sourceBotId}`, {})).toMatchObject({ status: "deleted" });
         }
-        await h.svc.agents.recheck("pi");
+        h.mailbox.resumeDispatch();
       }
       const delivery = await waitForPeerMailDelivery(h);
       const author = deleteSender ? `Message from Bot ${sourceName}` : `Message from Bot ${sourceName} (${sourceBotId})`;
       const content = `${author}: ${mail.text}`;
       expect(h.svc.threads.turnRow(delivery.target_turn_id)?.status).toBe("working");
       if (!deleteSender) {
-        h.svc.agents.markOffline("pi", "Trigger another readiness dispatch for the same mailbox");
-        await Promise.all([h.svc.agents.recheck("pi"), h.svc.agents.recheck("pi")]);
+        h.mailbox.pauseDispatch();
+        h.mailbox.resumeDispatch();
+        h.mailbox.resumeDispatch();
+        await waitForMailboxWriter(h);
       }
       const binding = h.svc.db.query<{ conversation_id: ConversationId }, [string]>(
         "SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?",
@@ -340,7 +342,7 @@ test.each([
     try {
       const source = await makeBot(h, "Sender");
       targetBotId = await makeBot(h, "Recipient", "Original recipient instructions.");
-      h.svc.agents.markOffline("pi", "Hold mail while setting up its Thread");
+      h.mailbox.pauseDispatch();
       const sent = await sendToBot(h, source, "Send mail");
       expect((await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).status).toBe("completed");
       const initial = h.svc.db.query<{ id: string; thread_id: string; state: string }, []>("SELECT id, thread_id, state FROM bot_mail_deliveries").get()!;
@@ -380,7 +382,7 @@ test.each([
         });
         return opened;
       };
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       const user = await competingUser.promise;
       if (!abortMail) {
         const bound = withAbortSignal(AbortSignal.timeout(1_000), BACKGROUND_CONTEXT);
@@ -478,7 +480,7 @@ test("peer mail preserves an active user reply's configuration and refreshes its
   await withMailDaemon(fake.provider, async (h, harness) => {
     const source = await makeBot(h, "Sender");
     targetBotId = await makeBot(h, "Recipient", originalInstructions);
-    h.svc.agents.markOffline("pi", "Hold mail while setting up the existing conversation");
+    h.mailbox.pauseDispatch();
     const sent = await sendToBot(h, source, "Send mail");
     expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
     const delivery = h.svc.db.query<{ thread_id: string; state: string }, []>("SELECT thread_id, state FROM bot_mail_deliveries").get()!;
@@ -520,7 +522,7 @@ test("peer mail preserves an active user reply's configuration and refreshes its
       return opened;
     };
     try {
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       const bound = withAbortSignal(AbortSignal.timeout(5_000), BACKGROUND_CONTEXT);
       await awaitWithContext(configurationAttempted.promise, bound);
       releaseUser.resolve();
@@ -565,7 +567,7 @@ test("peer mail resolves the current Bot's custom model outside the provider cat
     await withMailDaemon(fake.provider, async (h, harness) => {
       const source = await makeBot(h, "Sender");
       targetBotId = await makeBot(h, "Recipient");
-      h.svc.agents.markOffline("pi", "Hold dispatch while seeding the persisted conversation");
+      h.mailbox.pauseDispatch();
       const sent = await sendToBot(h, source, "Send mail");
       expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
       const { thread_id: threadId } = h.svc.db.query<{ thread_id: string }, []>("SELECT thread_id FROM bot_mail_deliveries").get()!;
@@ -575,7 +577,7 @@ test("peer mail resolves the current Bot's custom model outside the provider cat
       const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "fake", modelId: "fake-model" } } }, BACKGROUND_CONTEXT);
       h.svc.db.query("INSERT INTO pi_thread_conversations (thread_id, bot_id, conversation_id, created_at) VALUES (?, ?, ?, ?)")
         .run(threadId, targetBotId, conversation.id, new Date().toISOString());
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       const delivery = await waitForPeerMailDelivery(h);
       expect(await h.svc.turns.waitForTerminal(delivery.target_turn_id, 5_000)).toMatchObject({ status: "completed" });
       expect(await requested.promise).toBe(model.modelId);
@@ -625,7 +627,7 @@ test.each(["final answer", "failed predecessor", "reply past the admission deadl
     try {
       const source = await makeBot(h, "Sender");
       targetBotId = await makeBot(h, "Recipient");
-      h.svc.agents.markOffline("pi", "Hold mail while a user replies in its Thread");
+      h.mailbox.pauseDispatch();
       const sent = await sendToBot(h, source, "Send mail");
       expect((await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).status).toBe("completed");
       const { thread_id: threadId } = h.svc.db.query<{ thread_id: string }, []>("SELECT thread_id FROM bot_mail_deliveries").get()!;
@@ -654,7 +656,7 @@ test.each(["final answer", "failed predecessor", "reply past the admission deadl
         }
         return conversation;
       };
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       await waitingForIdle.promise;
       const { target_turn_id: mailTurnId } = await waitForPeerMailDelivery(h, "dispatching");
       expect(h.svc.db.query("SELECT id FROM pi_submissions WHERE json_extract(record, '$.requestId') = ?").all(mailTurnId)).toEqual([]);
@@ -699,7 +701,7 @@ test("peer mail survives a transient association insert failure after its input 
   await withMailDaemon(fake.provider, async (h) => {
     const source = await makeBot(h, "Sender");
     targetBotId = await makeBot(h, "Recipient");
-    h.svc.agents.markOffline("pi", "Hold mail until the association failure is armed");
+    h.mailbox.pauseDispatch();
     const sent = await sendToBot(h, source, "Send mail");
     expect((await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).status).toBe("completed");
     const { db } = h.svc;
@@ -722,7 +724,7 @@ test("peer mail survives a transient association insert failure after its input 
       },
     });
     try {
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       const delivered = await waitForPeerMailDelivery(h);
       expect(delivered).toMatchObject({ id: initial.id, target_turn_id: failedTurnId, failure_reason: null });
       expect(failedTurnId).toBeDefined();
@@ -787,7 +789,7 @@ test("aborting peer mail while its announcement writer is held creates no pi sub
   await withMailDaemon(fake.provider, async (h, harness) => {
     const source = await makeBot(h, "Sender");
     targetBotId = await makeBot(h, "Recipient");
-    h.svc.agents.markOffline("pi", "Hold dispatch until the writer can be locked");
+    h.mailbox.pauseDispatch();
     const sent = await sendToBot(h, source, "Send mail");
     expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
     const { db, threads } = h.svc;
@@ -804,7 +806,7 @@ test("aborting peer mail while its announcement writer is held creates no pi sub
       }
     };
     try {
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       await writerHeld.promise;
       const claim = db.query<{ target_turn_id: string; state: string }, []>("SELECT target_turn_id, state FROM bot_mail_deliveries").get()!;
       expect(claim.state).toBe("dispatching");
@@ -835,7 +837,7 @@ test("peer mail admission settles on abort while its configuration commit is que
   await withMailDaemon(fake.provider, async (h, harness) => {
     const source = await makeBot(h, "Sender");
     targetBotId = await makeBot(h, "Recipient", "Original recipient instructions.");
-    h.svc.agents.markOffline("pi", "Hold mail while setting up the existing conversation");
+    h.mailbox.pauseDispatch();
     const sent = await sendToBot(h, source, "Send mail");
     expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
     const { db } = h.svc;
@@ -860,7 +862,7 @@ test("peer mail admission settles on abort while its configuration commit is que
       return opened;
     };
     try {
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       const { target_turn_id: turnId } = await waitForPeerMailDelivery(h, "dispatching");
       await awaitWithContext(commitHeld.promise, withAbortSignal(AbortSignal.timeout(5_000), BACKGROUND_CONTEXT));
       const bound = withAbortSignal(AbortSignal.timeout(1_000), BACKGROUND_CONTEXT);
@@ -894,7 +896,7 @@ test.each(["abort", "admission deadline"] as const)("peer mail settles on %s whi
   await withMailDaemon(fake.provider, async (h, harness) => {
     const source = await makeBot(h, "Sender");
     targetBotId = await makeBot(h, "Recipient");
-    h.svc.agents.markOffline("pi", "Hold dispatch until conversation open can be intercepted");
+    h.mailbox.pauseDispatch();
     const sent = await sendToBot(h, source, "Send mail");
     expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
     const { createConversation } = harness;
@@ -911,7 +913,7 @@ test.each(["abort", "admission deadline"] as const)("peer mail settles on %s whi
     };
     try {
       if (interruption === "admission deadline") h.svc.cfg.turnTimeoutMs = 300;
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       await opening.promise;
       const { target_turn_id: turnId, thread_id: threadId } = await waitForPeerMailDelivery(h, "dispatching");
       expect(h.svc.db.query("SELECT type FROM events WHERE aggregate_id = ? AND type = 'turn.created'").get(turnId)).toEqual({ type: "turn.created" });
@@ -951,7 +953,7 @@ test("a user follow-up completes when the mail caller aborts their shared first 
   await withMailDaemon(fake.provider, async (h, harness) => {
     const source = await makeBot(h, "Sender");
     targetBotId = await makeBot(h, "Recipient");
-    h.svc.agents.markOffline("pi", "Hold dispatch until conversation creation can be intercepted");
+    h.mailbox.pauseDispatch();
     const sent = await sendToBot(h, source, "Send mail");
     expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
     const { createConversation } = harness;
@@ -963,7 +965,7 @@ test("a user follow-up completes when the mail caller aborts their shared first 
       return createConversation.apply(harness, args);
     };
     try {
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       await opening.promise;
       const { target_turn_id: mailTurnId, thread_id: threadId } = await waitForPeerMailDelivery(h, "dispatching");
       const indexed = h.svc.db.query("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?");
@@ -1051,7 +1053,7 @@ test("the daemon queues mail and creates a target Thread for the first Turn whil
     try {
       const sourceBotId = await makeBot(h, "Sender");
       targetBotId = await makeBot(h, "Recipient");
-      h.svc.agents.markOffline("pi", "Keep the mail delivery queued during this test");
+      h.mailbox.pauseDispatch();
       const first = await sendToBot(h, sourceBotId, "Send a message to the recipient");
       await firstRequest.promise;
       const followUp = await api<{ turnId: string }>(h, "POST", `/api/threads/${first.threadId}/messages`, { text: "A later request", whenBusy: "followUp" });
@@ -1101,7 +1103,7 @@ test.each([
     try {
       const sourceBotId = await makeBot(h, "Sender");
       targetBotId = await makeBot(h, "Recipient");
-      h.svc.agents.markOffline("pi", "Keep the mail delivery queued during this test");
+      h.mailbox.pauseDispatch();
       const first = await sendToBot(h, sourceBotId, "Finish the first answer");
       await firstRequest.promise;
       const steer = await sendToThread(h, first.threadId, "Send mail on the next response");
@@ -1173,10 +1175,10 @@ test.each([
       }
       const source = await makeBot(h, "Sender");
       targetBotId = await makeBot(h, "Recipient");
-      h.svc.agents.markOffline("pi", "Hold delivery until the sender's reply settles");
+      h.mailbox.pauseDispatch();
       const sent = await sendToBot(h, source, "Send mail");
       expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
-      await h.svc.agents.recheck("pi");
+      h.mailbox.resumeDispatch();
       await mailStarted.promise;
       const { thread_id: threadId, target_turn_id: turnId } = await waitForPeerMailDelivery(h, mixedOwners ? "delivered" : "dispatching");
       let followUp: { turnId: string } | undefined;
@@ -1221,7 +1223,7 @@ test("send_bot_message rejects both calls with the same ID in one assistant resp
     const sender = await makeBot(h, "Sender");
     firstTarget = await makeBot(h, "First recipient");
     secondTarget = await makeBot(h, "Second recipient");
-    h.svc.agents.markOffline("pi", "Keep any unexpected mail deliveries queued during this test");
+    h.mailbox.pauseDispatch();
     const sent = await sendToBot(h, sender, "Send a message to each recipient");
     expect((await h.svc.turns.waitForTerminal(sent.turnId)).status).toBe("completed");
     const binding = h.svc.db.query<{ conversation_id: ConversationId }, [string]>(
@@ -1258,7 +1260,7 @@ test("DurableTranscript settles send_bot_message and computer sharing a call ID 
   await withMailDaemon(fake.provider, async (h, harness) => {
     const sender = await makeBot(h, "Sender");
     targetBotId = await makeBot(h, "Recipient");
-    h.svc.agents.markOffline("pi", "Keep any unexpected mail deliveries queued during this test");
+    h.mailbox.pauseDispatch();
     const sent = await sendToBot(h, sender, "Try both tools");
     expect((await h.svc.turns.waitForTerminal(sent.turnId)).status).toBe("completed");
 
@@ -1311,7 +1313,7 @@ test("send_bot_message distinguishes reused call IDs across tool tasks and dedup
     const sender = await makeBot(h, "Sender");
     firstTarget = await makeBot(h, "First recipient");
     secondTarget = await makeBot(h, "Second recipient");
-    h.svc.agents.markOffline("pi", "Keep the mail deliveries queued during this test");
+    h.mailbox.pauseDispatch();
     const sent = await sendToBot(h, sender, "Send a message to each recipient");
     expect((await h.svc.turns.waitForTerminal(sent.turnId)).status).toBe("completed");
     const deliveries = h.svc.db.query<{ id: string; target_bot_id: string; text: string }, [string]>(`

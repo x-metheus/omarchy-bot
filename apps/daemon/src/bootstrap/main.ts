@@ -36,6 +36,11 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
   renameSync(tmp, statusPath);
 }
 
+export interface MailboxDispatchControls {
+  pauseDispatch(): void;
+  resumeDispatch(): void;
+}
+
 export interface MainOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
   botComputerAssetSupply?: BotComputerAssetSupply;
@@ -44,6 +49,8 @@ export interface MainOptions {
   useHostApplicationUnits?: boolean;
   /** Test-only private runtime root; production uses the configured XDG runtime. */
   botScreenRuntimeDir?: string;
+  /** Give test fixtures dispatch controls before startup reconciliation schedules mail. */
+  onMailboxDispatchControls?: (controls: MailboxDispatchControls) => void;
 }
 
 export async function main(options: MainOptions = {}): Promise<{
@@ -246,7 +253,7 @@ export async function main(options: MainOptions = {}): Promise<{
   const deviceLiveness = setInterval(() => devices.expire(), 5_000);
   deviceLiveness.unref?.();
   const turns = new TurnService(db, events, threads, bots, attachments, cfg, runtime);
-  const mailbox = new MailboxService(db, events, threads, agents, turns, runtime);
+  const mailbox = new MailboxService(db, events, threads, turns, runtime);
   runtime.bindServices({ mailbox, sidecars: devices, plugins });
   const recoveringMail = mailbox.recoverAcceptedMail();
   if (recoveringMail) await recoveringMail;
@@ -260,10 +267,20 @@ export async function main(options: MainOptions = {}): Promise<{
     threads,
     screens,
     cfg.sharedWorkspaceDir,
-    { secrets: runtime.secrets, runtime, terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs, projections },
+    {
+      secrets: runtime.secrets,
+      runtime,
+      terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs,
+      projections,
+      onDeletionFailed: (botId) => mailbox.scheduleQueuedForBot(botId),
+    },
   );
 
   agents.init();
+  options.onMailboxDispatchControls?.({
+    pauseDispatch: mailbox.pauseDispatch.bind(mailbox),
+    resumeDispatch: mailbox.resumeDispatch.bind(mailbox),
+  });
   mailbox.reconcileStartup();
   if (recoveringMail) turns.recoverTurns();
 
@@ -338,7 +355,7 @@ export async function main(options: MainOptions = {}): Promise<{
     clearInterval(statusTimer);
     clearInterval(deviceLiveness);
     devices.close();
-    mailbox.pauseDispatch();
+    mailbox.stopDispatch();
     await turns.shutdown().catch(reportStopFailure("turns"));
     await runtime.close().catch(reportStopFailure("runtime"));
     computer.shutdown();
@@ -358,7 +375,7 @@ export async function main(options: MainOptions = {}): Promise<{
     clearInterval(statusTimer);
     clearInterval(deviceLiveness);
     devices.close();
-    mailbox.pauseDispatch();
+    mailbox.stopDispatch();
     await turns.shutdown({ reason: "daemon restart" });
     await runtime.close();
     computer.shutdown();
