@@ -97,6 +97,7 @@ export async function startConformanceDaemon(): Promise<ConformanceDaemon> {
   process.env.OMARCHY_BOT_HOME = home;
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
+  process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
   delete process.env.OMARCHY_BOT_WORKERS_DIR; // real workers
   // The isolated home has no installed runtime, so the Bot Screen needs the
   // prepared development bundle and fonts (build-sway-runtime.sh, prepare-fonts.sh).

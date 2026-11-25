@@ -130,6 +130,7 @@ test("HTTPS and WSS preserve the paired-device gate", async () => {
   mkdirSync(agentDir, { mode: 0o700 });
   process.env.PI_CODING_AGENT_DIR = agentDir;
   process.env.OMARCHY_BOT_WORKERS_DIR = path.resolve(import.meta.dir, "fake-workers");
+  process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
   // Boot after configuring the isolated environment, matching the harness loading boundary.
   const { main } = await import("../../apps/daemon/src/bootstrap/main.ts");
   const running = await main({ useHostApplicationUnits: false, botScreenRuntimeDir: path.join(root, "r"), botScreenAdapter: new FakeBotScreenRuntimeAdapter() });

@@ -121,6 +121,7 @@ if(args.includes("enable")||args.includes("start")){
   const daemon = `import ${JSON.stringify(path.join(import.meta.dir, "helpers/headless-keychain.ts"))};
 import {main} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/bootstrap/main.ts"))};
 import {FakeBotScreenRuntimeAdapter} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts"))};
+process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
 const daemon=await main({useHostApplicationUnits:false,botScreenAdapter:new FakeBotScreenRuntimeAdapter(),botScreenRuntimeDir:process.env.HOME+"/r"});
 process.removeAllListeners("SIGINT");
 process.once("SIGINT",async()=>{await daemon.stop();process.exit(0)});

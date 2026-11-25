@@ -63,6 +63,26 @@ test("effectiveServers merges native definitions and resolves private credential
   }
 });
 
+test("effectiveServers projects the adapter OAuth marker and reconciliation retains it in the shared file", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-oauth-marker-"));
+  try {
+    const url = "https://work.example/mcp";
+    const config = path.join(root, ".mcp.json");
+    writeFileSync(config, JSON.stringify({ mcpServers: { work: { url, auth: "oauth" } } }));
+    const store = new NativeMcpStore(root, path.join(root, "private"));
+    store.reconcile();
+    expect(store.errors).toEqual([]);
+    const snapshot = store.effectiveServers();
+    expect(snapshot.configurationError).toBeUndefined();
+    expect(snapshot.servers.work).toEqual({ disabled: false, transport: { type: "http", url } });
+    expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.work.auth).toBe("oauth");
+    expect(Bun.TOML.parse(readFileSync(path.join(root, ".codex", "config.toml"), "utf8")))
+      .toMatchObject({ mcp_servers: { work: { url, enabled: true } } });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("effectiveServers retains service OAuth after reconciliation and drops it when the URL changes", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-service-oauth-"));
   try {
@@ -71,10 +91,11 @@ test("effectiveServers retains service OAuth after reconciliation and drops it w
     const authServerMetadataUrl = "https://login.example/.well-known/openid-configuration";
     const config = path.join(root, ".mcp.json");
     const store = new NativeMcpStore(root, path.join(root, "private"));
-    store.putService("work", { url, oauth: { clientId: "work-client", redirectUri, authServerMetadataUrl, scope: "work.read" } },
+    store.putService("work", { url, auth: "oauth", oauth: { clientId: "work-client", redirectUri, authServerMetadataUrl, scope: "work.read" } },
       { accountId: "work-account", serviceId: "work-service" });
     store.reconcile();
     expect(store.errors).toEqual([]);
+    expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.work.auth).toBe("oauth");
     expect(store.effectiveServers().servers.work?.transport).toEqual({
       type: "http", url, oauth: { clientId: "work-client", callbackUrl: redirectUri, callbackPort: 12798, authServerMetadataUrl, scope: "work.read" },
     });
@@ -156,7 +177,11 @@ test("effectiveServers reports invalid OAuth and unsupported credentials per HTT
       invalidRegistration: { oauth: { clientRegistration: sensitiveValue } },
       nullOAuth: { oauth: null },
       bareAuth: { auth: sensitiveValue },
+      bearerAuth: { auth: "bearer" },
+      objectAuth: { auth: { type: "oauth", value: sensitiveValue } },
+      disabledAuth: { auth: false },
       bareBearer: { bearerToken: sensitiveValue },
+      oauthWithBareBearer: { auth: "oauth", bearerToken: sensitiveValue },
     };
     writeFileSync(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: {
       ...Object.fromEntries(Object.entries(invalid).map(([name, definition]) => [name, { url, ...definition }])),
@@ -172,6 +197,10 @@ test("effectiveServers reports invalid OAuth and unsupported credentials per HTT
       expect(server?.transport).toBeUndefined();
     }
     expect(snapshot.servers.valid?.transport).toEqual({ type: "http", url });
+    store.reconcile();
+    expect(store.errors).toContainEqual(expect.stringMatching(/^bearerAuth: .*auth/));
+    expect(store.errors).toContainEqual(expect.stringMatching(/^objectAuth: .*auth/));
+    expect(JSON.stringify(store.errors).includes(sensitiveValue)).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

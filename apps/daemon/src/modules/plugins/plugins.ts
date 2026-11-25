@@ -71,6 +71,7 @@ export class PluginsService {
   #timer: ReturnType<typeof setInterval>;
   #reconcileTimer: ReturnType<typeof setInterval>;
   #ready: Promise<void>;
+  readonly #failedServiceProvisioning = new Set<string>();
   #stopping = false;
   #defaultError: string | undefined;
   readonly mcp: NativeMcpStore;
@@ -419,12 +420,17 @@ export class PluginsService {
         }
         account.nativeManaged = true;
         this.#persist();
-      } catch (error) { account.error = redactToolErrorSummary(error instanceof Error ? error.message : error); this.#persist(); }
+      } catch (error) {
+        account.error = redactToolErrorSummary(error instanceof Error ? error.message : error);
+        this.#persist();
+        this.#failedServiceProvisioning.add(account.id);
+      }
     }
   }
 
-  async prepareServiceCredentials(): Promise<void> {
+  async prepareServiceCredentials(): Promise<{ failed: string[] }> {
     await this.#ready;
+    const failed = new Set(this.#failedServiceProvisioning);
     for (const account of this.#state.accounts) {
       if (!account.grant || account.status !== "connected") continue;
       try {
@@ -434,8 +440,13 @@ export class PluginsService {
             this.mcp.setServiceToken(this.bundles.serviceName(account, service.id), service.mcpUrl, token);
           }
         }
-      } catch (error) { account.error = redactToolErrorSummary(error instanceof Error ? error.message : error); this.#persist(); }
+      } catch (error) {
+        account.error = redactToolErrorSummary(error instanceof Error ? error.message : error);
+        this.#persist();
+        failed.add(account.id);
+      }
     }
+    return { failed: [...failed] };
   }
 
   async authorize(body: AuthorizePluginBody, callbackOrigin = this.serviceOrigin?.()): Promise<{ url?: string }> {

@@ -2,20 +2,10 @@ import { isDeepStrictEqual } from "node:util";
 import type { McpOAuthState } from "@earendil-works/pi-mcp/oauth";
 import type { EffectiveMcpServers } from "../plugins/nativeMcp.ts";
 import { SecretMcpOAuthStateStore } from "./mcpOAuth.ts";
+import { PiMcpAdapterKeyringUnavailableError, PiMcpAdapterTokenEntryError, type PiMcpAdapterTokenReader } from "./mcpOAuthKeyringReader.ts";
 import type { SecretStore } from "./secrets.ts";
 
-/**
- * A reader must resolve service `pi-mcp-adapter.oauth` and account `sha256-<SHA-256 of server name>`,
- * assemble chunks identified by `__piMcpAdapterOAuthChunked`, and return the parsed AuthEntry.
- * Return undefined when no entry exists.
- */
-export interface PiMcpAdapterTokenReader {
-  readonly available: boolean;
-  read(serverName: string): Promise<unknown>;
-}
-
-// The real reader is pending Task 22's keychain backend decision. This reader attempts no keychain access.
-export const pendingPiMcpAdapterTokenReader: PiMcpAdapterTokenReader = { available: false, read: async () => undefined };
+export type { PiMcpAdapterTokenReader } from "./mcpOAuthKeyringReader.ts";
 
 interface ImportInput {
   secrets: SecretStore;
@@ -38,7 +28,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function convertEntry(entry: unknown, serverUrl: string, now: number): McpOAuthState | undefined {
   if (!isRecord(entry) || Object.hasOwn(entry, "__piMcpAdapterOAuthChunked") || !isRecord(entry.tokens)) return;
-  if (entry.serverUrl !== undefined && (typeof entry.serverUrl !== "string" || URL.parse(entry.serverUrl)?.href !== serverUrl)) return;
+  if (typeof entry.serverUrl !== "string" || entry.serverUrl.length === 0) return;
+  try {
+    if (new URL(entry.serverUrl).href !== serverUrl) return;
+  } catch {
+    return;
+  }
 
   const { accessToken, refreshToken, scope, expiresAt, issuer: tokenIssuer } = entry.tokens;
   if (typeof accessToken !== "string" || !accessToken.length) return;
@@ -84,6 +79,7 @@ async function runImport({ secrets, snapshot, reader, check, reportRejected, now
   const report: ImportReport = { imported: [], needsSignIn: [], skipped: [] };
   const { servers, configurationError } = snapshot();
   if (configurationError !== undefined) return { report, canMarkComplete: false };
+  let hasEligibleServer = false;
   let readSucceeded = false;
   let readFailure: { error: unknown } | undefined;
   const failedReads: string[] = [];
@@ -93,6 +89,7 @@ async function runImport({ secrets, snapshot, reader, check, reportRejected, now
       report.skipped.push(name);
       continue;
     }
+    hasEligibleServer = true;
     const serverUrl = new URL(transport.url).href;
     const store = new SecretMcpOAuthStateStore({ secrets, name, server: serverUrl });
     const staged = await store.withRefreshLock(async () => {
@@ -104,6 +101,8 @@ async function runImport({ secrets, snapshot, reader, check, reportRejected, now
         entry = await reader.read(name);
         readSucceeded = true;
       } catch (error) {
+        if (error instanceof PiMcpAdapterKeyringUnavailableError) return error;
+        if (error instanceof PiMcpAdapterTokenEntryError) return "needsSignIn";
         readFailure ??= { error };
         return "readFailed";
       }
@@ -114,6 +113,9 @@ async function runImport({ secrets, snapshot, reader, check, reportRejected, now
       await store.save(state);
       return state;
     });
+    if (staged instanceof PiMcpAdapterKeyringUnavailableError) {
+      return { report, canMarkComplete: false, keyringUnavailable: staged };
+    }
     if (staged === "readFailed") {
       failedReads.push(name);
       report.needsSignIn.push(name);
@@ -146,21 +148,26 @@ async function runImport({ secrets, snapshot, reader, check, reportRejected, now
     report[connected ? "imported" : "needsSignIn"].push(name);
   }
   await Promise.all(failedReads.map((name) => check(name)));
-  const canMarkComplete = !readFailure && !Object.values(servers).some((server) => "configurationError" in server);
+  // Leave the marker unset so a server added after an empty import can still be imported.
+  const canMarkComplete = hasEligibleServer && !readFailure && !Object.values(servers).some((server) => "configurationError" in server);
   return { report, canMarkComplete, allReadsFailed: readSucceeded ? undefined : readFailure };
 }
 
 export async function importMcpOAuthTokens(input: ImportInput): Promise<ImportReport> {
-  if (input.reader.available === false) throw new Error("The MCP OAuth adapter token reader is unavailable.");
-  return (await runImport(input)).report;
+  const { report, keyringUnavailable } = await runImport(input);
+  if (keyringUnavailable) throw keyringUnavailable;
+  return report;
 }
 
-export async function importMcpOAuthTokensOnce({ marker, ...input }: ImportInput & {
+export async function importMcpOAuthTokensOnce({ marker, preparePlugins, createReader, ...input }: Omit<ImportInput, "reader"> & {
   marker: { get(): string | undefined; set(value: string): void };
+  preparePlugins(): Promise<boolean>;
+  createReader(): PiMcpAdapterTokenReader;
 }): Promise<"unavailable" | "already-imported" | ImportReport> {
-  if (input.reader.available === false) return "unavailable";
   if (marker.get() !== undefined) return "already-imported";
-  const { report, allReadsFailed, canMarkComplete } = await runImport(input);
+  if (!(await preparePlugins())) return "unavailable";
+  const { report, keyringUnavailable, allReadsFailed, canMarkComplete } = await runImport({ ...input, reader: createReader() });
+  if (keyringUnavailable) return "unavailable";
   if (allReadsFailed) throw allReadsFailed.error;
   if (canMarkComplete) marker.set("1");
   return report;

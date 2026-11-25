@@ -125,6 +125,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   process.env.HOME = profile;
   process.env.OMARCHY_BOT_HOME = data;
   process.env.OMARCHY_BOT_PORT = "0";
+  process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
   process.env.OMARCHY_BOT_WORKERS_DIR = options.workersDir ?? path.resolve(import.meta.dir, "../fake-workers");
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
     options.botDeletionTerminalTimeoutMs ?? 30_000,

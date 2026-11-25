@@ -390,15 +390,17 @@ await server.connect(new StdioServerTransport());
   }
 });
 
-test("markNeedsAuth preserves an existing connected MCP server", async () => {
+test("markNeedsAuth preserves a connected MCP server and does not persist disabled or missing servers", async () => {
   const token = "fixture-connected-token";
   const fixture = await startOAuthMcpServer({ fixedAuthorization: `Bearer ${token}` });
+  const persisted: (readonly string[])[] = [];
   const mcp = createMcpExtension({
     servers: () => ({ revision: "fixture", secrets: [], servers: {
       remote: { disabled: false, transport: { type: "http", url: fixture.url } },
       off: { disabled: true, transport: { type: "http", url: fixture.url } },
     } }),
     authProvider: () => ({ token: async () => token }),
+    onRejectedChange: (names: readonly string[]) => persisted.push(names),
   });
   try {
     const connected = await mcp.check("remote");
@@ -407,10 +409,169 @@ test("markNeedsAuth preserves an existing connected MCP server", async () => {
     expect(mcp.markNeedsAuth("off")).toMatchObject({ status: "disabled", toolCount: 0 });
     expect(mcp.markNeedsAuth("missing")).toBeUndefined();
     expect(mcp.status()).toMatchObject([connected, { name: "off", status: "disabled" }]);
+    expect(persisted).toEqual([]);
   } finally {
     await mcp.close();
     await fixture.close();
   }
+});
+
+test("MCP status uses seeded rejected names before discovery and clears them when tool discovery succeeds", async () => {
+  const token = "fixture-discovery-token";
+  const fixture = await startOAuthMcpServer({ fixedAuthorization: `Bearer ${token}`, toolName: "read" });
+  const persisted: (readonly string[])[] = [];
+  const mcp = createMcpExtension({
+    servers: () => ({ revision: "fixture", secrets: [], servers: {
+      remote: { disabled: false, transport: { type: "http", url: fixture.url } },
+      off: { disabled: true, transport: { type: "http", url: fixture.url } },
+    } }),
+    authProvider: () => ({ token: async () => token }),
+    initialRejectedServers: new Set(["remote", "off", "removed"]),
+    onRejectedChange: (names: readonly string[]) => persisted.push(names),
+  });
+  try {
+    expect(mcp.status()).toMatchObject([{ name: "remote", status: "needs-auth" }, { name: "off", status: "disabled" }]);
+    expect(persisted).toEqual([["remote"]]);
+    expect((await executeMcp(mcp, { action: "search", service: "remote" })).isError).toBe(false);
+    expect(mcp.status()).toMatchObject([{ name: "remote", status: "connected", toolCount: 1 }, { name: "off", status: "disabled" }]);
+    expect(persisted).toEqual([["remote"], []]);
+  } finally {
+    await mcp.close();
+    await fixture.close();
+  }
+});
+
+test("MCP status survives a rejected-server persistence error during pruning", () => {
+  const attempted: (readonly string[])[] = [];
+  const mcp = createMcpExtension({
+    servers: () => ({ revision: "fixture", secrets: [], servers: {
+      remote: { disabled: false, transport: { type: "sse" } },
+      off: { disabled: true, transport: { type: "sse" } },
+    } }),
+    initialRejectedServers: new Set(["remote", "off", "removed"]),
+    onRejectedChange(names) {
+      attempted.push(names);
+      throw new Error("settings write failed");
+    },
+  });
+
+  expect(mcp.status()).toMatchObject([
+    { name: "remote", status: "needs-auth", toolCount: 0 },
+    { name: "off", status: "disabled", toolCount: 0 },
+  ]);
+  expect(attempted).toEqual([["remote"]]);
+});
+
+async function startDiscoveryFixture() {
+  const fixture = new McpServer({ name: "fixture", version: "1" });
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    enableJsonResponse: true,
+    sessionIdGenerator: () => crypto.randomUUID(),
+  });
+  fixture.registerTool("read", {}, () => ({ content: [{ type: "text", text: "read" }] }));
+  await fixture.connect(transport);
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => transport.handleRequest(request) });
+  return { url: server.url.href, async close() { await server.stop(true); await fixture.close(); } };
+}
+
+test("MCP discovery returns tools and keeps its connection when clearing rejected-server persistence throws", async () => {
+  const fixture = await startDiscoveryFixture();
+  const attempted: (readonly string[])[] = [];
+  const mcp = createMcpExtension({
+    servers: () => ({ revision: "fixture", secrets: [], servers: {
+      remote: { disabled: false, transport: { type: "http", url: fixture.url } },
+    } }),
+    initialRejectedServers: new Set(["remote"]),
+    onRejectedChange(names) {
+      attempted.push(names);
+      throw new Error("settings write failed");
+    },
+  });
+  try {
+    const search = await executeMcp(mcp, { action: "search", service: "remote" });
+    expect(search.isError).toBe(false);
+    const output = search.output?.[0];
+    expect(JSON.parse(output?.type === "text" ? output.text : "null")).toEqual({
+      services: [{ service: "remote", tools: [{ name: "read" }] }],
+    });
+    expect(mcp.status()).toMatchObject([{ name: "remote", status: "connected", toolCount: 1 }]);
+    expect(attempted).toEqual([[]]);
+  } finally {
+    await mcp.close();
+    await fixture.close();
+  }
+});
+
+test("markNeedsAuth returns needs-auth when rejected-server persistence throws", () => {
+  const attempted: (readonly string[])[] = [];
+  const mcp = createMcpExtension({
+    servers: () => ({ revision: "fixture", secrets: [], servers: {
+      remote: { disabled: false, transport: { type: "sse" } },
+    } }),
+    onRejectedChange(names) {
+      attempted.push(names);
+      throw new Error("settings write failed");
+    },
+  });
+
+  const marked = mcp.markNeedsAuth("remote");
+  expect(marked).toMatchObject({ name: "remote", status: "needs-auth", toolCount: 0 });
+  expect(mcp.status()[0]).toEqual(marked);
+  expect(attempted).toEqual([["remote"]]);
+});
+
+test("MCP keeps only the newest 64 rejected servers and never restores the oldest on clear", async () => {
+  const fixture = await startDiscoveryFixture();
+  const names = Array.from({ length: 65 }, (_, index) => `remote-${index}`);
+  const newest = names[64]!;
+  const servers = Object.fromEntries(names.map((name) => [name, {
+    disabled: false, transport: { type: "http" as const, url: fixture.url },
+  }]));
+  let revision = "initial";
+  let persisted: readonly string[] = [];
+  const mcp = createMcpExtension({
+    servers: () => ({ revision, secrets: [], servers }),
+    onRejectedChange: (rejected) => { persisted = rejected; },
+  });
+  const rejectedNames = () => mcp.status().filter(({ status }) => status === "needs-auth").map(({ name }) => name);
+  try {
+    for (const name of names) mcp.markNeedsAuth(name);
+    // A revision change drops transient failures so status reflects the retained names.
+    revision = "current";
+    expect(rejectedNames()).toEqual(names.slice(1));
+    expect(persisted).toEqual(names.slice(1));
+
+    expect(await mcp.check(newest)).toMatchObject({ status: "connected", toolCount: 1 });
+    expect(rejectedNames()).toEqual(names.slice(1, -1));
+    expect(persisted).toEqual(names.slice(1, -1));
+  } finally {
+    await mcp.close();
+    await fixture.close();
+  }
+});
+
+test("MCP retains a re-rejected server and evicts the second-oldest at the 64-server cap", () => {
+  const names = Array.from({ length: 65 }, (_, index) => `remote-${index}`);
+  const oldest = names[0]!;
+  const newest = names[64]!;
+  const servers = Object.fromEntries(names.map((name) => [name, {
+    disabled: false, transport: { type: "sse" as const },
+  }]));
+  let revision = "initial";
+  let persisted: readonly string[] = [];
+  const mcp = createMcpExtension({
+    servers: () => ({ revision, secrets: [], servers }),
+    onRejectedChange: (rejected) => { persisted = rejected; },
+  });
+  for (const name of names.slice(0, 64)) mcp.markNeedsAuth(name);
+  mcp.markNeedsAuth(oldest);
+  mcp.markNeedsAuth(newest);
+
+  // A revision change drops transient failures so status reflects the retained names.
+  revision = "current";
+  const rejectedNames = mcp.status().filter(({ status }) => status === "needs-auth").map(({ name }) => name);
+  expect(rejectedNames).toEqual([oldest, ...names.slice(2)]);
+  expect(persisted).toEqual([...names.slice(2, -1), oldest, newest]);
 });
 
 test("markNeedsAuth leaves retirement queued behind an active MCP call after a URL change", async () => {
@@ -895,6 +1056,43 @@ test.each(["request timeout", "invocation deadline"] as const)("a timed-out HTTP
   }
 });
 
+test.each([
+  ["startup provisioning", false],
+  ["credential refresh", true],
+] as const)("PluginsService.prepareServiceCredentials reports failed %s", async (_phase, nativeManaged) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-preparation-failure-"));
+  const privateDir = path.join(root, "private");
+  const publisher = "https://publisher.invalid";
+  const tokenEndpoint = `${publisher}/api/plugins/oauth/token`;
+  const accountId = "fixture";
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+    if (String(input) !== tokenEndpoint) throw new Error("Unexpected request during credential preparation.");
+    return Response.json({ error: "Fixture publisher rejected the refresh." }, { status: 401 });
+  }, { preconnect: fetch.preconnect }));
+  let plugins: PluginsService | undefined;
+  try {
+    await mkdir(privateDir);
+    await writeFile(path.join(privateDir, "configuration.json"), JSON.stringify({ version: 1, revision: 0, cloudUrl: publisher, mcp: [], skills: [], accounts: [{
+      id: accountId, providerId: "github", label: "Fixture", identity: "github:fixture", status: "connected", enabledServices: ["github"], nativeManaged,
+      grant: { generation: "fixture", accessToken: crypto.randomUUID(), refreshToken: crypto.randomUUID(), expiresAt: Date.now() - 10_000, scopes: [], cloudUrl: publisher },
+    }] }));
+    plugins = new PluginsService(privateDir, root, async () => ({ skills: [] }));
+
+    expect(await plugins.prepareServiceCredentials()).toEqual({ failed: [accountId] });
+    expectSafeEqual(fetchMock.mock.calls.map(([input]) => String(input)), [tokenEndpoint]);
+    const lease = await plugins.acquire();
+    try {
+      expect(lease.snapshot.diagnostics).toContainEqual(expect.stringContaining("Needs attention: Fixture publisher rejected the refresh."));
+    } finally { lease.release(); }
+  } finally {
+    try { await plugins?.shutdown(); }
+    finally {
+      fetchMock.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("MCP shutdown drains publisher credential preparation after a call is aborted", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-close-preparation-"));
   const privateDir = path.join(root, "private");
@@ -914,7 +1112,7 @@ test("MCP shutdown drains publisher credential preparation after a call is abort
   }, { preconnect: fetch.preconnect }));
   let plugins: PluginsService | undefined;
   let mcp: ReturnType<typeof createMcpExtension> | undefined;
-  const preparations: Promise<void>[] = [];
+  const preparations: Promise<unknown>[] = [];
   try {
     await mkdir(privateDir);
     await writeFile(path.join(privateDir, "configuration.json"), JSON.stringify({ version: 1, revision: 0, cloudUrl: publisher, mcp: [], skills: [], accounts: [{
