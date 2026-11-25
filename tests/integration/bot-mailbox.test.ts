@@ -7,6 +7,7 @@ import {
   durableSuiteToolResultEntries,
   durableSuiteToolResults,
 } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
+import { setSetting } from "../../apps/daemon/src/persistence/settings.ts";
 import type { BotDto, BotViewDto, MessageDto, ThreadDto } from "../../packages/protocol/src/index.ts";
 import {
   api,
@@ -15,6 +16,7 @@ import {
   makeBot,
   messages,
   sendToBot,
+  sendToThread,
   startDaemon,
   waitThreadIdle,
   type Harness,
@@ -1057,6 +1059,55 @@ describe("durable Bot mailbox", () => {
         ),
       ).toHaveLength(1);
     }
+  });
+
+  if (durable) test("dispatches queued peer mail durably after a worker Turn and reuses the conversation for a user Turn", async () => {
+    h = await startDaemon();
+    const sourceBotId = await makeBot(h, "Queued mail source");
+    const targetBotId = await makeBot(h, "Queued mail target");
+    const body = "mailbox-ordered-output";
+    writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "mailbox-input"), "Target workspace fixture");
+
+    // Hold dispatch while the source enqueues mail, then let the worker run a user Turn on the target.
+    const agents = h.svc.agents;
+    const isReady = agents.isReady.bind(agents);
+    const readiness = spyOn(agents, "isReady").mockImplementation((id) => id !== "pi" && isReady(id));
+    let deliveryId: string;
+    try {
+      const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:${body}`);
+      deliveryId = await durableAcknowledgement(h, source.threadId);
+    } finally {
+      readiness.mockRestore();
+    }
+    expect(deliveryRow(h, deliveryId).state).toBe("queued");
+    const [thread] = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
+    if (!thread) throw new Error("Expected a target mailbox Thread");
+    const threadId = thread.id;
+
+    setSetting(h.svc.db, "runtime", "worker");
+    const worker = await sendToThread(h, threadId, "say:Worker Turn complete.");
+    expect((await h.svc.turns.waitForTerminal(worker.turnId)).status).toBe("completed");
+    expect(h.svc.threads.getNativeSession(threadId)).toMatch(/^fake:\/\/s\d+$/);
+    expectNoDurableDispatch(h, threadId, worker.turnId);
+    expect(deliveryRow(h, deliveryId).state).toBe("queued");
+
+    setSetting(h.svc.db, "runtime", "durable");
+    agents.markOffline("pi", "trigger the queued delivery on readiness");
+    await agents.recheck("pi");
+
+    const delivery = await waitForDeliveryState(h, deliveryId, "delivered");
+    if (!delivery.target_turn_id) throw new Error("Expected a target Turn for the delivery");
+    expect((await h.svc.turns.waitForTerminal(delivery.target_turn_id)).status).toBe("completed");
+    expect((await durableSuiteEntries(h.svc.db, threadId)).filter(({ kind }) => kind === "write")).toMatchObject([
+      { data: { deliveryId, text: body } },
+    ]);
+    expect((await messages(h, threadId)).at(-1)).toMatchObject({ kind: "response", text: "Peer mail handled." });
+
+    const conversations = targetConversations(h, threadId);
+    expect(conversations).toHaveLength(1);
+    const followUp = await sendToThread(h, threadId, "say:Continue after peer mail.");
+    expect((await h.svc.turns.waitForTerminal(followUp.turnId)).status).toBe("completed");
+    expect(targetConversations(h, threadId)).toEqual(conversations);
   });
 
   test("dispatches queued mail after source deletion without inventing a live source ID", async () => {

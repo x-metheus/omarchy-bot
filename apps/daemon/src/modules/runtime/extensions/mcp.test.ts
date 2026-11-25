@@ -390,6 +390,54 @@ await server.connect(new StdioServerTransport());
   }
 });
 
+test("MCP queues retirement behind an active call when check follows a URL change", async () => {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const events: string[] = [];
+  const fixture = new McpServer({ name: "fixture", version: "1" });
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    enableJsonResponse: true,
+    sessionIdGenerator: () => crypto.randomUUID(),
+    onsessionclosed() { events.push("session closed"); },
+  });
+  fixture.registerTool("wait", {}, async () => {
+    started.resolve();
+    await release.promise;
+    events.push("tool finished");
+    return { content: [{ type: "text", text: "finished" }] };
+  });
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    if (new URL(request.url).pathname === "/old") return transport.handleRequest(request);
+    return new Response(null, { status: 404 });
+  } });
+  let url = new URL("/old", server.url).href;
+  const mcp = createMcpExtension({ servers: () => ({ revision: url, secrets: [], servers: {
+    remote: { disabled: false, transport: { type: "http", url } },
+  } }) });
+  try {
+    await fixture.connect(transport);
+    const call = executeMcp(mcp, { action: "call", service: "remote", tool: "wait" });
+    await started.promise;
+    url = new URL("/replacement", server.url).href;
+    expect(mcp.status()[0]).toMatchObject({ status: "not-connected", configurationRevision: url });
+    const check = mcp.check("remote");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(events).toEqual([]);
+
+    release.resolve();
+    expect(await call).toEqual({ isError: false, output: [{ type: "text", text: "finished" }] });
+    expect(await check).toMatchObject({ status: "failed", configurationRevision: url });
+    expect(events).toEqual(["tool finished", "session closed"]);
+  } finally {
+    release.resolve();
+    try { await mcp.close(); }
+    finally {
+      await server.stop(true);
+      await fixture.close();
+    }
+  }
+});
+
 test("MCP check reports stdio status without spawning or replacing the process", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-check-"));
   const launches = path.join(root, "launches");
@@ -952,9 +1000,11 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("MCP keeps another service callable after a shared server is deleted", async () => {
+test("the MCP panel reports a shared deletion conflict while the durable runtime keeps another service callable", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-shared-deletion-"));
   const shared = path.join(root, ".mcp.json");
+  const pi = path.join(root, ".pi", "mcp.json");
+  const secret = "fixture-conflict-key";
   let mcp: ReturnType<typeof createMcpExtension> | undefined;
   try {
     const script = await writeStdioFixture(root, `
@@ -962,16 +1012,29 @@ server.registerTool("run", {}, () => ({ content: [{ type: "text", text: "finishe
 await server.connect(new StdioServerTransport());
 `);
     const definition = { command: process.execPath, args: [script] };
+    await mkdir(path.dirname(pi));
     await writeFile(shared, JSON.stringify({ mcpServers: { local: definition, other: definition } }));
+    await writeFile(pi, JSON.stringify({ mcpServers: { local: definition } }));
     const store = new NativeMcpStore(root, path.join(root, "private"));
+    expect(store.list().find(({ name }) => name === "local")?.status).not.toBe("conflict");
     expect(store.effectiveServers().servers.local).toBeDefined();
 
     await writeFile(shared, JSON.stringify({ mcpServers: { other: definition } }));
+    await writeFile(pi, JSON.stringify({ mcpServers: { local: { ...definition, env: { API_KEY: secret } } } }));
     const effective = store.effectiveServers();
+    expect(store.list().find(({ name }) => name === "local")).toMatchObject({
+      status: "conflict", error: expect.stringMatching(/deletion conflicts/i),
+    });
     expect(effective.configurationError).toBeUndefined();
     expect(effective.servers.local).toBeUndefined();
 
     mcp = createMcpExtension({ servers: () => store.effectiveServers() });
+    for (const action of ["search", "describe", "call"]) {
+      const missing = await executeMcp(mcp, { action, service: "local", tool: "run" });
+      expect(missing.isError).toBe(true);
+      expect(missing.output).toEqual([{ type: "text", text: expect.stringMatching(/unknown MCP service/i) }]);
+      expect(JSON.stringify(missing)).not.toContain(secret);
+    }
     const result = await executeMcp(mcp, { action: "call", service: "other", tool: "run" });
     expect(result.isError).toBe(false);
     expect(result.output).toEqual([{ type: "text", text: "finished" }]);

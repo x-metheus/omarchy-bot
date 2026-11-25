@@ -300,11 +300,14 @@ describe("Service supervision without a user manager", () => {
     await scriptedScreen();
     seedHostSession();
     const before = hostSession();
+    const callerAgentDir = scratchRoot("environment-caller-pi");
+    process.env.PI_CODING_AGENT_DIR = callerAgentDir;
     harness = await startDaemon(undefined, {
       useProductionBotScreen: true,
       botComputerAssetSupply: createFixtureFontSupply(scratchRoot("environment-fonts")),
       useHostApplicationUnits: false,
     });
+    expect(process.env.PI_CODING_AGENT_DIR).toBe(path.join(harness.home, ".pi", "agent"));
     const botId = await makeBot(harness, "Explicit environment");
     const surface = await owner(harness, botId);
     await waitScreenReady(harness, surface);
@@ -331,6 +334,7 @@ describe("Service supervision without a user manager", () => {
     await harness.stop();
     harness = undefined;
     expect(hostSession()).toEqual(before);
+    expect(process.env.PI_CODING_AGENT_DIR).toBe(callerAgentDir);
   }, 60_000);
 });
 

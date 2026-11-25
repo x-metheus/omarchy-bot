@@ -37,12 +37,24 @@ test("CredentialStore promotes provider keys and resolves them after removing th
   expect(existsSync(fallbackSecretValuesPath(dir))).toBeFalse();
   expect(await secrets.status()).toEqual({ backend: "keychain" });
   expect(values.size).toBe(providers.length);
+  const metadata = await secrets.forApp().list();
+  expect(metadata).toHaveLength(providers.length);
   const projection = JSON.stringify(promoted.list());
-  for (const { id, apiKey } of providers) {
+  for (const { id, apiKey, ...fields } of providers) {
+    const name = `provider-${createHash("sha256").update(id).digest("hex").slice(0, 48)}`;
+    const entry = metadata.find((secret) => secret.name === name);
+    if (!entry) throw new Error(`Missing provider secret for ${id}`);
+    expect(JSON.parse(entry.description)).toEqual({ id, ...fields });
+    expect(await secrets.getAppSecretForRuntime(name) === apiKey).toBeTrue();
     expect(promoted.getForRuntime(id)?.apiKey === apiKey).toBeTrue();
     expect([...values.values()].includes(apiKey)).toBeTrue();
     expect(projection.includes(apiKey)).toBeFalse();
   }
+  expect(promoted.getAllForRuntime()).toEqual(providers);
+  expect(promoted.list()).toEqual(store.list());
+  await promoted.remove(providers[0].id);
+  const reopened = await CredentialStore.open(dir, new SecretStore(dir, { backend, probe: async () => ({ available: true }) }));
+  expect(reopened.getAllForRuntime()).toEqual([providers[1]]);
 }));
 
 test("provider listings hide model metadata containing the Exa app secret", () => withCredentialDirectory(async (dir) => {

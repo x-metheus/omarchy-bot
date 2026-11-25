@@ -324,13 +324,15 @@ test("effectiveServers omits a server deleted from the shared file", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-deletion-"));
   const privateDir = path.join(root, "private");
   const shared = path.join(root, ".mcp.json");
+  const codex = path.join(root, ".codex", "config.toml");
   try {
     const store = new NativeMcpStore(root, privateDir);
-    writeFileSync(shared, JSON.stringify({ mcpServers: { removed: { command: "fixture" } } }));
+    store.save(null, { name: "removed", enabled: true, transport: { type: "stdio", command: "fixture" } });
     expect(store.effectiveServers().servers.removed).toBeDefined();
+    expect(Bun.TOML.parse(readFileSync(codex, "utf8"))).toMatchObject({ mcp_servers: { removed: { command: "fixture" } } });
 
     writeFileSync(shared, '{ "mcpServers": {} }\n');
-    const files = [shared, nativeMcpConfigFile(privateDir)];
+    const files = [shared, codex, nativeMcpConfigFile(privateDir)];
     const before = files.map((file) => readFileSync(file, "utf8"));
     const effective = store.effectiveServers();
     expect(files.map((file) => readFileSync(file, "utf8"))).toEqual(before);
