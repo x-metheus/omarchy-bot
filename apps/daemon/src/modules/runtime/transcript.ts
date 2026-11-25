@@ -26,12 +26,12 @@ export class DurableTranscript {
     this.update({ ...view, entries: view.entries.filter(CompactionEntry.is), docs: {} });
   }
 
-  async reconcileCompactions(view: ConversationView, conversation: Conversation): Promise<void> {
+  async reconcileCompactions(view: ConversationView, conversation: Conversation, writeService: (write: () => void) => void | Promise<void> = (write) => write()): Promise<void> {
     const lastNotice = Math.max(0, ...this.noticedCompactions);
     let cursor: Cursor | undefined;
     do {
       const page = await conversation.entries({ order: "ascending", ...(lastNotice ? { minEntryId: lastNotice as EntryId } : {}) }, 100, cursor, BACKGROUND_CONTEXT);
-      this.update({ ...view, entries: page.items.filter(CompactionEntry.is), docs: {} });
+      await writeService(() => this.update({ ...view, entries: page.items.filter(CompactionEntry.is), docs: {} }));
       cursor = page.next;
     } while (cursor);
   }

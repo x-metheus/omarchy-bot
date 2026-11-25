@@ -330,26 +330,16 @@ export class TurnService {
       return sent;
     }
     if (durable) {
-      this.#durableTurns.add(turnId);
-      let admitted!: () => void;
-      let rejectAdmission!: (error: unknown) => void;
-      const admission = new Promise<void>((resolve, reject) => { admitted = resolve; rejectAdmission = reject; });
-      void admission.catch(() => {});
-      const runtime = this.runtime;
-      const start = runtime && (async () => {
+      const admission = this.#startDurableTurn(turnId, result.threadId, (runtime, admitted, working) => {
         resolveWorkCwd(this.threads.getThread(result.threadId)!.cwd);
-        await runtime.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, userMessageSeq: userMsgDto.seq, instructions: bot.instructions, workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, ...(durableFollowUp ? { whenBusy: "followUp" as const, admitted } : {}), working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
-      })();
-      if (!start) { this.#durableTurns.delete(turnId); this.#setTurnStatus(turnId, "failed", "Durable runtime unavailable", true); rejectAdmission(new Error("Durable runtime unavailable")); }
-      else {
-        const tracked = start.then(() => this.#setTurnStatus(turnId, "completed", undefined, true), (err: unknown) => {
-          rejectAdmission(err);
-          const aborted = err instanceof DurableRunAborted;
-          const abortReason = aborted ? this.#durableAbortReasons.get(turnId) ?? "aborted" : undefined;
-          this.#finishInterruptedDurableTurn(turnId, result.threadId, aborted ? "cancelled" : "failed", abortReason ?? errorMessage(err));
-        }).finally(() => { this.#durableTurns.delete(turnId); this.#durableAbortReasons.delete(turnId); this.#durableStarts.delete(turnId); });
-        this.#durableStarts.set(turnId, tracked);
-      }
+        return runtime.startTurn({
+          db: this.db, threads: this.threads, bots: this.bots, events: this.events,
+          threadId: result.threadId, botId, turnId, text, userMessageSeq: userMsgDto.seq, instructions: bot.instructions,
+          workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, admitted, working,
+          ...(opts.deviceId === undefined ? {} : { deviceId: opts.deviceId }),
+          ...(durableFollowUp ? { whenBusy: "followUp" } : {}),
+        });
+      });
       if (durableFollowUp) {
         try { await admission; } catch (error) { throw new HttpError(409, `follow-up unavailable: ${errorMessage(error)}`); }
       }
@@ -370,19 +360,81 @@ export class TurnService {
     return sent;
   }
 
-  /**
-   * Start a daemon-authored peer-mail Turn that was already persisted by the
-   * mailbox claim transaction. It always opens a fresh Native Session and
-   * resolves only when the worker accepts message.send, not when the Turn ends.
-   */
+  #startDurableTurn(
+    turnId: string,
+    threadId: string,
+    start: (runtime: BotRuntime, admitted: () => void, working: () => void) => Promise<void>,
+    acceptanceFailureReason?: string,
+  ): Promise<void> {
+    this.#durableTurns.add(turnId);
+    const admission = Promise.withResolvers<void>();
+    void admission.promise.catch(() => {});
+    let accepted = false;
+    const runtime = this.runtime;
+    const tracked = (async () => {
+      try {
+        if (!runtime) throw new Error("Durable runtime unavailable");
+        await start(runtime, () => {
+          accepted = true;
+          admission.resolve();
+        }, () => this.#setTurnStatus(turnId, "working", undefined, true));
+        await runtime.writeService(() => this.#setTurnStatus(turnId, "completed", undefined, true));
+      } catch (error) {
+        admission.reject(error);
+        const settle = () => {
+          if (!accepted && acceptanceFailureReason !== undefined) {
+            console.error(`peer-mail Turn ${turnId} failed before durable acceptance`, error);
+            this.#finishInterruptedDurableTurn(turnId, threadId, "failed", acceptanceFailureReason);
+          } else {
+            const aborted = error instanceof DurableRunAborted;
+            const reason = aborted ? this.#durableAbortReasons.get(turnId) ?? "aborted" : errorMessage(error);
+            this.#finishInterruptedDurableTurn(turnId, threadId, aborted ? "cancelled" : "failed", reason);
+          }
+        };
+        if (runtime) await runtime.writeService(settle);
+        else settle();
+      }
+    })().finally(() => {
+      this.#durableTurns.delete(turnId);
+      this.#durableAbortReasons.delete(turnId);
+      this.#durableStarts.delete(turnId);
+    });
+    this.#durableStarts.set(turnId, tracked);
+    return admission.promise;
+  }
+
+  /** Start a mailbox-owned Turn and resolve once its reply has been admitted. */
   async startPeerMailTurn(input: {
     turnId: string;
     threadId: string;
     botId: string;
     agentId: AgentId;
-    envelope: string;
+    sourceName: string;
+    sourceBotId?: string;
+    text: string;
+    deliveryId: string;
+    durable: boolean;
     acceptanceFailureReason: string;
+    markDelivered(): void;
   }): Promise<void> {
+    const { turnId, threadId, botId } = input;
+    const author = `Message from Bot ${input.sourceName}${input.sourceBotId === undefined ? "" : ` (${input.sourceBotId})`}`;
+    if (input.durable) {
+      return this.#startDurableTurn(turnId, threadId, (runtime, admitted, working) => runtime.startPeerMailTurn({
+        db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId, botId, turnId,
+        peerMail: { author, text: input.text, deliveryId: input.deliveryId },
+        workspaceDir: this.cfg.sharedWorkspaceDir, working, admitted,
+        admissionTimeoutMs: this.cfg.turnTimeoutMs, markDelivered: input.markDelivered,
+        announce: () => {
+          if (this.#stopping) throw new HttpError(503, "Daemon is stopping; new work cannot start");
+          this.events.append("turn", turnId, "turn.created", { turnId, threadId, botId });
+          this.#recordDurableActivity(botId, threadId, turnId);
+          const privateDir = ensurePrivateFolder(botId, this.cfg.sharedWorkspaceDir);
+          resolveWorkCwd(this.threads.getThread(threadId)!.cwd);
+          return privateDir;
+        },
+      }), input.acceptanceFailureReason);
+    }
     if (this.#stopping) throw new HttpError(503, "Daemon is stopping; new work cannot start");
     this.events.append("turn", input.turnId, "turn.created", {
       turnId: input.turnId,
@@ -397,7 +449,7 @@ export class TurnService {
         input.threadId,
         input.botId,
         input.agentId,
-        input.envelope,
+        `${author}:\n\n${input.text}`,
         [],
         {
           freshSession: true,
@@ -744,7 +796,7 @@ export class TurnService {
     if (!this.agents.capabilityInventory(agentId)?.botMail) throw new Error(`Bot mail is not supported by ${agentId}`);
     const message = params as { targetBotId: string; text: string };
     return mailbox.enqueue(
-      { botId: active.botId, turnId: active.turnId, workerSessionId: active.workerSessionId, toolCallId: context.toolCallId },
+      { botId: active.botId, turnId: active.turnId, toolCallId: context.toolCallId },
       message.targetBotId,
       message.text,
     );
