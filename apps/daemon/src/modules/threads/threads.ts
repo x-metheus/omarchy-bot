@@ -217,17 +217,6 @@ export class ThreadsService {
     return all.filter((thread) => thread.title.toLowerCase().includes(needle));
   }
 
-  hasRetainedThinkingForBot(botId: string): boolean {
-    const row = this.db.query(`
-      SELECT 1
-      FROM messages
-      JOIN threads ON threads.id = messages.thread_id
-      WHERE threads.bot_id = ? AND messages.kind = 'thinking'
-      LIMIT 1
-    `).get(botId);
-    return row !== null && row !== undefined;
-  }
-
   /**
    * Rename only through an Agent operation declared by the adapter inventory.
    * The local title changes after the native operation succeeds, never before.

@@ -32,7 +32,7 @@ function transcriptStore(db: Database) {
   const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {} }, { agents: "" });
   const agents = new AgentsRegistry(db, events, { conformanceDir: "", workersAgentsDir: "" }, supervisor);
   const threads = new ThreadsService(db, events, agents);
-  const bots = new BotsService(db, events, agents, threads);
+  const bots = new BotsService(db, events, threads);
   threads.insertThreadRow(threadId, botId, "Transcript");
   threads.insertTurnRow({ id: turnId, threadId, botId, nativeSessionId: "" });
   return { threads, bots, events };

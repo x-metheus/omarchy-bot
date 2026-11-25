@@ -90,27 +90,28 @@ describe("agent capability inventory", () => {
     const pngBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]);
     const imageUpload = await stage(h, botId, new Blob([pngBytes]), "pixel.png", draftToken);
     expect(textUpload.status).toBe(201);
-    expect(imageUpload.status).toBe(201);
+    expect(imageUpload).toEqual({
+      status: 400,
+      body: { error: "Unsupported attachment media type image/png (pixel.png)" },
+    });
 
-    writeFileSync(
-      path.join(h.home, "conformance", "pi-fake-pi-1.json"),
-      JSON.stringify({ ok: true, image: "provider-unsupported" }),
+    // Simulate an image already staged before the durable attachment policy took effect.
+    const legacyUpload = await stage(h, botId, new Blob(["placeholder"]), "pixel.png", draftToken);
+    expect(legacyUpload.status).toBe(201);
+    const legacyImage = legacyUpload.body as AttachmentDto;
+    writeFileSync(path.join(h.svc.cfg.attachmentsDir, "staged", legacyImage.id), pngBytes);
+    h.svc.db.query("UPDATE attachments SET media_type = ?, size = ?, source_sha256 = ? WHERE id = ?").run(
+      "image/png", pngBytes.length, Bun.CryptoHasher.hash("sha256", pngBytes, "hex"), legacyImage.id,
     );
-    await h.svc.agents.recheck("pi");
-
-    const reprobe = await worker.request({ type: "probe" }, 30_000) as {
-      capabilities: AgentCapabilityInventory;
-    };
-    expect(reprobe.capabilities.attachments).toEqual({ text: true, image: false });
 
     const rejected = await apiStatus(h, "POST", `/api/bots/${botId}/messages`, {
       text: "attachment-echo",
-      attachmentIds: [(textUpload.body as AttachmentDto).id, (imageUpload.body as AttachmentDto).id],
+      attachmentIds: [(textUpload.body as AttachmentDto).id, legacyImage.id],
       attachmentDraftToken: draftToken,
     });
     expect(rejected).toEqual({
       status: 400,
-      body: { error: "pi cannot consume attachment media type image/png (pixel.png)" },
+      body: { error: "Unsupported attachment media type image/png (pixel.png)" },
     });
     expect(
       (
@@ -121,16 +122,23 @@ describe("agent capability inventory", () => {
     ).toBe(200);
     expect(
       (
-        await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${(imageUpload.body as AttachmentDto).id}`, {
+        await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${legacyImage.id}`, {
           headers: { "x-attachment-draft-token": draftToken },
         })
       ).status,
     ).toBe(200);
 
+    setProbeControl(h, { image: "provider-unsupported" });
+    await h.svc.agents.recheck("pi");
+    const reprobe = await worker.request({ type: "probe" }, 30_000) as {
+      capabilities: AgentCapabilityInventory;
+    };
+    expect(reprobe.capabilities.attachments).toEqual({ text: true, image: false });
+
     const rejectedStage = await stage(h, botId, new Blob([pngBytes]), "second.png", draftToken);
     expect(rejectedStage).toEqual({
       status: 400,
-      body: { error: "pi cannot consume attachment media type image/png (second.png)" },
+      body: { error: "Unsupported attachment media type image/png (second.png)" },
     });
 
     const sent = await api<{ threadId: string }>(h, "POST", `/api/bots/${botId}/messages`, {
@@ -148,7 +156,7 @@ describe("agent capability inventory", () => {
     ).toBe(404);
     expect(
       (
-        await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${(imageUpload.body as AttachmentDto).id}`, {
+        await authedFetch(h, `${h.baseUrl}/api/attachments/staged/${legacyImage.id}`, {
           headers: { "x-attachment-draft-token": draftToken },
         })
       ).status,

@@ -582,7 +582,7 @@ test.skipIf(process.platform === "win32")("bash keeps an out-of-band Bot secret 
     const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {} }, { agents: "" });
     const agents = new AgentsRegistry(db, eventLog, { conformanceDir: "", workersAgentsDir: "" }, supervisor);
     const threads = new ThreadsService(db, eventLog, agents);
-    const bots = new BotsService(db, eventLog, agents, threads);
+    const bots = new BotsService(db, eventLog, threads);
     threads.insertThreadRow("thread", "bot-a", "Shell secret fixture");
     threads.insertTurnRow({ id: "turn", threadId: "thread", botId: "bot-a", nativeSessionId: "" });
     let transcript: DurableTranscript | undefined;

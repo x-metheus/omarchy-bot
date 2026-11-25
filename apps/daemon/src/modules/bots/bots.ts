@@ -11,10 +11,8 @@ import {
   type BotViewDto,
   type BotUpdatedEventPayload,
   type PatchBotBodyDto,
-  type ThinkingAvailabilityDto,
 } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
-import type { AgentsRegistry } from "../agents/registry.ts";
 import type { ThreadsService } from "../threads/threads.ts";
 
 // Internal placeholder for bots.agent_id until Task 20 removes Agent identity.
@@ -55,7 +53,6 @@ export class BotsService {
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
-    private readonly agents: AgentsRegistry,
     private readonly threads: ThreadsService,
   ) {}
 
@@ -123,14 +120,6 @@ export class BotsService {
     return views;
   }
 
-  #thinkingAvailability(r: BotRow): ThinkingAvailabilityDto {
-    if (this.agents.capabilityInventory(r.agent_id as AgentId)?.thinking.supported === true) {
-      return "supported";
-    }
-
-    return this.threads.hasRetainedThinkingForBot(r.id) ? "history" : "unavailable";
-  }
-
   #toView(r: BotRow): BotViewDto {
     const st = this.#stateRow(r.id);
     const status: BotViewDto["status"] =
@@ -138,7 +127,8 @@ export class BotsService {
     return {
       ...this.#toDto(r),
       status,
-      thinkingAvailability: this.#thinkingAvailability(r),
+      // The durable runtime projects thinking when a model emits it.
+      thinkingAvailability: "supported",
       unreadCount: st?.unread_count ?? 0,
       ...(st?.unread_thread_id !== undefined && st.unread_thread_id !== null ? { unreadThreadId: st.unread_thread_id } : {}),
       ...(st?.preview_text !== undefined && st.preview_text !== null ? { previewText: st.preview_text } : {}),

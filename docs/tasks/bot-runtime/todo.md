@@ -808,6 +808,8 @@ Host note: earlier in the task, `bun test apps/daemon` intermittently failed wit
 
 **Description:** Delete `workers/pi`, `agent-protocol.ts` and its tests, the Pi conformance tests, and the Agent picker, Pending Agents, and Agent conformance UI. Keep Agent identity fields in storage until nothing reads them. Rename "Native Session" to "Bot session" in user-facing text.
 
+- The Service reports Thinking as `supported` because the durable runtime can display Thinking emitted by the model. Managed attachment staging and sending accept text and JSON up to 64 KiB per file and reject images. These policies are independent of the Pi worker's readiness and capability report.
+
 **Acceptance criteria:**
 - [ ] No code imports `pi-coding-agent`, `pi-mcp-adapter`, or the agent protocol, and nothing reads `~/.pi`
 - [ ] The Services panel stops writing the worker's copies in the workspace. The copies the old Bot wrote there (`<workspace>/.pi/`, `.codex/`, and `.claude/`) are deleted; `~/.pi` is never changed. The user approved this on 2026-11-25.

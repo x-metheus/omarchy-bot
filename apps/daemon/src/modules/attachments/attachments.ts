@@ -2,12 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
-import type { AgentCapabilityInventory, WorkerUserMessage } from "@omarchy-bot/agent-contract";
+import type { WorkerUserMessage } from "@omarchy-bot/agent-contract";
 import type { AttachmentDto } from "@omarchy-bot/protocol";
-import { confinedPath, type AgentId } from "@omarchy-bot/domain";
+import { confinedPath } from "@omarchy-bot/domain";
 import { HttpError } from "../bots/bots.ts";
 
 export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_BYTES = 64 * 1024;
 const STAGED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 interface AttachmentRow {
@@ -29,10 +30,6 @@ export interface ManagedAttachmentFile {
   path: string;
   mediaType: string;
   size: number;
-}
-
-export interface AgentCapabilitySource {
-  capabilityInventory(agentId: AgentId): AgentCapabilityInventory | undefined;
 }
 
 function hasPrefix(bytes: Uint8Array, prefix: readonly number[]): boolean {
@@ -80,30 +77,19 @@ export function sniffAttachmentMediaType(bytes: Uint8Array): string | undefined 
   return "text/plain";
 }
 
-function assertAgentSupportsAttachment(
-  agentId: AgentId,
-  capabilities: AgentCapabilityInventory | undefined,
-  attachment: Pick<AttachmentRow, "media_type" | "name" | "size">,
-): void {
-  if (capabilities === undefined) {
-    throw new HttpError(400, `${agentId} has not reported attachment capabilities (${attachment.name})`);
+export function isTextAttachmentMediaType(mediaType: string): boolean {
+  return mediaType.startsWith("text/") || mediaType === "application/json";
+}
+
+function assertSupportedAttachment(attachment: Pick<AttachmentRow, "media_type" | "name" | "size">): void {
+  if (!isTextAttachmentMediaType(attachment.media_type)) {
+    throw new HttpError(400, `Unsupported attachment media type ${attachment.media_type} (${attachment.name})`);
   }
 
-  const modality = attachment.media_type.startsWith("image/")
-    ? "image"
-    : attachment.media_type.startsWith("text/") || attachment.media_type === "application/json"
-      ? "text"
-      : undefined;
-  if (modality === undefined || !capabilities.attachments[modality]) {
-    throw new HttpError(400, `${agentId} cannot consume attachment media type ${attachment.media_type} (${attachment.name})`);
-  }
-
-  const maxTextBytes = capabilities.attachments.maxTextBytes;
-  if (modality === "text" && maxTextBytes !== undefined && attachment.size > maxTextBytes) {
-    const limit = maxTextBytes % 1024 === 0 ? `${maxTextBytes / 1024} KB` : `${maxTextBytes} bytes`;
+  if (attachment.size > MAX_TEXT_ATTACHMENT_BYTES) {
     throw new HttpError(
       400,
-      `${agentId} cannot consume attachment media type ${attachment.media_type} larger than ${limit} (${attachment.name})`,
+      `Attachment media type ${attachment.media_type} exceeds the ${MAX_TEXT_ATTACHMENT_BYTES / 1024} KB limit (${attachment.name})`,
     );
   }
 }
@@ -116,7 +102,6 @@ export class AttachmentsService {
   constructor(
     private readonly db: Database,
     private readonly attachmentsDir: string,
-    private readonly agents: AgentCapabilitySource,
   ) {
     this.#stagedDir = path.join(attachmentsDir, "staged");
     this.#managedDir = path.join(attachmentsDir, "managed");
@@ -125,18 +110,16 @@ export class AttachmentsService {
   }
 
   async stage(botId: string, draftToken: string, file: File): Promise<AttachmentDto> {
-    const bot = this.db.query("SELECT id, agent_id FROM bots WHERE id = ?").get(botId) as {
-      id: string;
-      agent_id: AgentId;
-    } | null;
-    if (!bot) throw new HttpError(404, `unknown bot ${botId}`);
+    if (!this.db.query("SELECT 1 FROM bots WHERE id = ?").get(botId)) {
+      throw new HttpError(404, `unknown bot ${botId}`);
+    }
     if (file.size > MAX_ATTACHMENT_BYTES) throw new HttpError(400, "attachments must be 32 MB or smaller");
 
     const bytes = new Uint8Array(await file.arrayBuffer());
     const mediaType = sniffAttachmentMediaType(bytes);
     if (mediaType === undefined) throw new HttpError(400, "unsupported or invalid file content");
     const name = file.name.trim() || "attachment";
-    assertAgentSupportsAttachment(bot.agent_id, this.agents.capabilityInventory(bot.agent_id), {
+    assertSupportedAttachment({
       media_type: mediaType,
       name,
       size: bytes.byteLength,
@@ -203,11 +186,9 @@ export class AttachmentsService {
       throw new HttpError(400, "attachmentIds must not contain duplicates");
     }
 
-    const bot = this.db.query("SELECT agent_id FROM bots WHERE id = ?").get(input.botId) as {
-      agent_id: AgentId;
-    } | null;
-    if (!bot) throw new HttpError(404, `unknown bot ${input.botId}`);
-    const capabilities = this.agents.capabilityInventory(bot.agent_id);
+    if (!this.db.query("SELECT 1 FROM bots WHERE id = ?").get(input.botId)) {
+      throw new HttpError(404, `unknown bot ${input.botId}`);
+    }
 
     const rows = input.attachmentIds.map((id) => {
       const row = this.#row(id);
@@ -220,7 +201,7 @@ export class AttachmentsService {
       ) {
         throw new HttpError(400, `attachment ${id} is not staged for this draft`);
       }
-      assertAgentSupportsAttachment(bot.agent_id, capabilities, row);
+      assertSupportedAttachment(row);
       return row;
     });
 

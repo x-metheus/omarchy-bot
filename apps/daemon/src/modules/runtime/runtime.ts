@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { AgentBotMessageToolOutput, AgentCommand, NativeMcpControlResult, NativeMcpStatus, WorkerUserMessage } from "@omarchy-bot/agent-contract";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
+import { isTextAttachmentMediaType } from "../attachments/attachments.ts";
 import type { EventLog } from "../events/eventLog.ts";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import type { ComputerBroker } from "../computer/broker.ts";
@@ -164,7 +165,7 @@ async function contentWithManagedAttachments(text: string, attachments: NonNulla
   const blocks: TextContent[] = [{ type: "text", text }];
   for (const { id, name, mediaType, path } of attachments) {
     // Compaction currently serializes model content as text, including image data.
-    if (!mediaType.startsWith("text/") && mediaType !== "application/json") continue;
+    if (!isTextAttachmentMediaType(mediaType)) continue;
     let content: string;
     try {
       content = await Bun.file(path).text();

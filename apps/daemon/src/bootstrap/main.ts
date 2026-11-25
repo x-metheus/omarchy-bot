@@ -223,8 +223,8 @@ export async function main(options: MainOptions = {}): Promise<{
 
   const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
   const threads: ThreadsService = new ThreadsService(db, events, agents);
-  const bots = new BotsService(db, events, agents, threads);
-  const attachments = new AttachmentsService(db, cfg.attachmentsDir, agents);
+  const bots = new BotsService(db, events, threads);
+  const attachments = new AttachmentsService(db, cfg.attachmentsDir);
   attachments.gcStaged();
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {

@@ -122,19 +122,12 @@ describe("integration: ordered Thinking blocks", () => {
     });
   });
 
-  test("reports a model surface without Thinking and does not invent Thinking records", async () => {
-    writeFileSync(
-      path.join(h.home, "conformance", "pi-fake-pi-1.json"),
-      JSON.stringify({
-        ok: true,
-        image: "verified",
-        fakeCapabilities: { thinking: { supported: false, streaming: false } },
-      }),
-    );
-    await h.svc.agents.recheck("pi");
-    const botId = await makeBot(h, "No Thinking Bot");
+  test("keeps Thinking available while Pi is offline and projects only emitted records", async () => {
+    h.svc.agents.markOffline("pi", "worker unavailable in test");
+    expect(h.svc.agents.isReady("pi")).toBeFalse();
+    const botId = await makeBot(h, "Thinking Settings Bot");
     expect(await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).toMatchObject({
-      thinkingAvailability: "unavailable",
+      thinkingAvailability: "supported",
     });
 
     const sent = await sendToBot(h, botId, "say: visible response only");
@@ -142,13 +135,14 @@ describe("integration: ordered Thinking blocks", () => {
     expect((await messages(h, sent.threadId)).some((message) => message.kind === "thinking")).toBeFalse();
   });
 
-  test("retains historical Thinking after current capability loss", async () => {
+  test("keeps Thinking available and retains history after Pi reports no Thinking support", async () => {
     const botId = await makeBot(h, "Historical Thinking Bot");
     const sent = await sendToBot(h, botId, "thinking-order");
     await waitThreadIdle(h, sent.threadId);
     const retainedIds = (await messages(h, sent.threadId))
       .filter((message) => message.kind === "thinking")
       .map((message) => message.thinking!.blockId);
+    expect(retainedIds).toHaveLength(2);
 
     writeFileSync(
       path.join(h.home, "conformance", "pi-fake-pi-1.json"),
@@ -158,10 +152,11 @@ describe("integration: ordered Thinking blocks", () => {
         fakeCapabilities: { thinking: { supported: false, streaming: false } },
       }),
     );
-    await h.svc.agents.recheck("pi");
+    const pi = await h.svc.agents.recheck("pi");
+    expect(pi.capabilities?.thinking.supported).toBeFalse();
 
     expect(await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).toMatchObject({
-      thinkingAvailability: "history",
+      thinkingAvailability: "supported",
     });
     expect((await messages(h, sent.threadId))
       .filter((message) => message.kind === "thinking")
