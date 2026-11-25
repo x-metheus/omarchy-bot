@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Harness, createRegistry, type Conversation, type ConversationId } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentSystemPrompt, type TextContent, type TranscriptContext, type UserMessage } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AGENT_BROWSER_TOOL, AGENT_COMPUTER_TOOL, AGENT_LOCAL_TOOL } from "@omarchy-bot/agent-contract";
@@ -333,6 +333,50 @@ test("a durable Turn completes with a migrated provider after the legacy file is
     expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeFalse();
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
+
+test("durable user input retains managed text and JSON attachments across restart", () => {
+  const inputs: UserMessage["content"][][] = [];
+  const capture = ({ messages }: TranscriptContext) => {
+    inputs.push(messages.filter((message) => message.role === "user").map((message) => message.content));
+    return fauxAssistantMessage("ok");
+  };
+  return withFakeRuntimeProvider([capture, capture], {}, async () => {
+    const first = await startDaemon();
+    let daemon = first;
+    const stateDir = first.svc.cfg.stateDir;
+    try {
+      await first.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
+      setSetting(first.svc.db, "default_model", "fake/fake-model");
+      setSetting(first.svc.db, "runtime", "durable");
+      const botId = await makeBot(first, "Attachments across restart");
+      const draftToken = crypto.randomUUID();
+      const text = await first.svc.attachments.stage(botId, draftToken, new File(["line one\nline two | end"], "notes.txt"));
+      const json = await first.svc.attachments.stage(botId, draftToken, new File(['{"value":1}'], "data.json"));
+      const sent = await first.svc.turns.send(botId, null, "Review the files", [text.id, json.id], draftToken);
+      await waitThreadIdle(first, sent.threadId);
+      expect(first.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+      await first.stop();
+
+      daemon = await startDaemon(first.home, { stateDir });
+      const followUp = await sendToThread(daemon, sent.threadId, "Recall the files");
+      await waitThreadIdle(daemon, sent.threadId);
+      expect(daemon.svc.threads.turnRow(followUp.turnId)?.status).toBe("completed");
+      const attachmentInput: TextContent[] = [
+        { type: "text", text: "Review the files" },
+        { type: "text", text: `${text.id}|notes.txt|text/plain|line one\nline two | end` },
+        { type: "text", text: `${json.id}|data.json|application/json|{"value":1}` },
+      ];
+      expect(inputs).toEqual([
+        [attachmentInput],
+        [attachmentInput, "Recall the files"],
+      ]);
+    } finally {
+      await daemon.stop();
+      rmSync(first.home, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+});
 
 test("a durable Turn times out a hung provider while a completed Turn stays completed", () => {
   const started = Promise.withResolvers<void>();

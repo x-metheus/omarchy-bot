@@ -25,8 +25,9 @@ const orderedIntro = [
   "```ts", 'const order = ["response", "thinking", "tool", "response"];', "```", "", "Long-form context ".repeat(24).trim(),
 ].join("\n");
 
-function userTexts(context: TranscriptContext): string[] {
-  return context.messages.flatMap((message) => message.role === "user" ? [typeof message.content === "string" ? message.content : message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")] : []);
+function latestUserText(context: TranscriptContext): string {
+  const content = context.messages.findLast((message) => message.role === "user")?.content;
+  return typeof content === "string" ? content : content?.find((part) => part.type === "text")?.text ?? "";
 }
 
 export const durableSuiteToolCalls = {
@@ -40,7 +41,7 @@ export const durableSuiteToolCalls = {
 };
 
 function orderedTranscriptFixture(context: TranscriptContext) {
-  const text = userTexts(context).at(-1) ?? "";
+  const text = latestUserText(context);
   const lastUser = context.messages.findLastIndex((message) => message.role === "user");
   const priorAssistant = context.messages.slice(0, lastUser).findLast((message) => message.role === "assistant");
   const result = context.messages.at(-1);
@@ -83,7 +84,7 @@ function computerFixtureArgs(command: string, value: string) {
 }
 
 function graphicalToolFixture(context: TranscriptContext) {
-  const text = userTexts(context).at(-1) ?? "";
+  const text = latestUserText(context);
   const [toolName, command, ...tail] = text.split(":");
   if ((toolName !== "browser" && toolName !== "computer") || command === undefined || command === "crash-agent") return undefined;
   const lastUser = context.messages.findLastIndex((message) => message.role === "user");
@@ -150,8 +151,15 @@ export function createDurableSuiteFakeProvider() {
   const immediate = fauxProvider({ provider: "fake" });
   const failedSessions = new Set<string>();
   fake.setResponses(Array.from({ length: 1000 }, () => (context: TranscriptContext, options) => {
-    const text = userTexts(context).at(-1) ?? "";
+    const text = latestUserText(context);
     const lastUser = context.messages.findLastIndex((message) => message.role === "user");
+    if (text === "attachment-echo") {
+      const user = context.messages[lastUser];
+      const attachments = user?.role === "user" && Array.isArray(user.content)
+        ? user.content.slice(1).flatMap((part) => part.type === "text" ? [part.text] : [])
+        : [];
+      return fauxAssistantMessage(attachments.length ? attachments.join("\n") : []);
+    }
     const priorAssistant = context.messages.slice(0, lastUser).findLast((message) => message.role === "assistant");
     const boundary = priorAssistant?.role === "assistant" ? priorAssistant.content.find((part) => part.type === "toolCall" && part.name === "steer_boundary") : undefined;
     if (boundary?.type === "toolCall" && boundary.id === "steer-boundary") return fauxAssistantMessage(`steered: ${text}`);
@@ -216,7 +224,7 @@ export function createDurableSuiteFakeProvider() {
   // Mail validation includes an oversized argument, so its fixtures stream without pacing.
   const mailbox = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }] });
   mailbox.setResponses(Array.from({ length: 1000 }, () => async (context: TranscriptContext, options) => {
-    const text = userTexts(context).at(-1) ?? "";
+    const text = latestUserText(context);
     const mail = /^send_bot_message:([^:]*):([\s\S]*)$/.exec(text);
     if (mail) {
       const latest = context.messages.at(-1);
@@ -255,7 +263,7 @@ export function createDurableSuiteFakeProvider() {
   }));
   const base = fake.provider;
   const streamSimple: typeof base.streamSimple = (model, context, options) => {
-    const text = userTexts(context).at(-1) ?? "";
+    const text = latestUserText(context);
     const latest = context.messages.at(-1);
     const failingBash = durableSuiteToolCalls.failingBash;
     const interruptedBash = text === "tool-fail"

@@ -60,8 +60,9 @@ export async function exerciseService(base: string, state: string, realBrowser =
       const thread = await (await request(`/api/threads/${turn.threadId}`)).json() as { activeTurn?: unknown };
       return thread.activeTurn === undefined ? true : undefined;
     }, directive, 600_000);
-    const messages = await (await request(`/api/threads/${turn.threadId}/messages`)).json() as Array<{ text?: string; toolCall?: { id: string; status: string; errorSummary?: string } }>;
-    const call = messages.find(message => message.toolCall?.id === `computer-${turn.turnId}`)?.toolCall;
+    const messages = await (await request(`/api/threads/${turn.threadId}/messages`)).json() as Array<{ text?: string; toolCall?: { id: string; name: string; status: string; errorSummary?: string } }>;
+    const call = messages.find(message => message.toolCall?.id === `computer-${turn.turnId}`)?.toolCall
+      ?? messages.find(message => message.toolCall?.name === "computer")?.toolCall;
     assert.equal(call?.status, "completed", `computer:${directive}: ${JSON.stringify(call)}`);
     return messages.slice(messages.findIndex(message => message.toolCall?.id === call!.id) + 1)
       .map(message => message.text ?? "").join("\n");

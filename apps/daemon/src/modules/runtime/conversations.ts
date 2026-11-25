@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@earendil-works/chord/context";
 import type { AgentChange, Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
+import { deleteConversation } from "./conversationDeletion.ts";
 
 const pending = new WeakMap<Harness, Map<string, Promise<Conversation>>>();
 
@@ -36,23 +37,31 @@ export async function openThreadConversation(
     }
     const agent = options?.initialSettings?.();
     const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, ...(agent ? { agent } : {}) }, runtimeContext);
+    // A Thread conversation can have committed entries only once its mapping exists
+    // in the same database. Commit the mapping before seeding or returning the handle.
+    try {
+      const writeService = options?.writeService ?? ((write) => write());
+      await writeService(() => {
+        try {
+          db.transaction(() => {
+            db.query("INSERT INTO pi_thread_conversations (thread_id, bot_id, conversation_id, created_at) VALUES (?, ?, ?, ?)")
+              .run(threadId, botId, conversation.id, new Date().toISOString());
+          }).immediate();
+        } catch (error) {
+          // The insert has rolled back. Delete the empty conversation in the same writer queue.
+          deleteConversation(db, conversation.id);
+          throw error;
+        }
+      });
+    } catch {
+      throw new Error("Unable to index durable conversation");
+    }
     if (options?.seed) {
       try {
         await options.seed(conversation, runtimeContext);
       } catch {
         console.warn(`Unable to seed first durable conversation for thread ${threadId}`);
       }
-    }
-    // pi-durable 1.5.2 has no conversation deletion API. An insert failure can
-    // orphan this conversation; Task 19 must sweep conversations without an index row.
-    try {
-      const writeService = options?.writeService ?? ((write) => write());
-      await writeService(() => {
-        db.query("INSERT INTO pi_thread_conversations (thread_id, bot_id, conversation_id, created_at) VALUES (?, ?, ?, ?)")
-          .run(threadId, botId, conversation.id, new Date().toISOString());
-      });
-    } catch {
-      throw new Error("Unable to index durable conversation");
     }
     return conversation;
   })();

@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { AgentBotMessageToolOutput, AgentCommand, NativeMcpControlResult, NativeMcpStatus } from "@omarchy-bot/agent-contract";
+import type { AgentBotMessageToolOutput, AgentCommand, NativeMcpControlResult, NativeMcpStatus, WorkerUserMessage } from "@omarchy-bot/agent-contract";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
@@ -14,8 +14,9 @@ import { seedFirstTurnConversation, transcriptBeforeTurn } from "./sessionMigrat
 import { DurableTranscript } from "./transcript.ts";
 import { resolveActiveTurnIdentity } from "./active-turn.ts";
 import { resolveModelForBot } from "./models.ts";
+import type { TextContent } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { awaitWithContext, BACKGROUND_CONTEXT, withCancel, type Context } from "@earendil-works/chord/context";
+import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal, withCancel, type Context } from "@earendil-works/chord/context";
 import { CredentialStore } from "./credentials.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { createRuntimeModels } from "./models.ts";
@@ -72,8 +73,7 @@ interface DurableTurnStart {
   working(): void;
 }
 
-type UserTurnStart = DurableTurnStart & {
-  text: string;
+type UserTurnStart = DurableTurnStart & WorkerUserMessage & {
   /** Sequence of the persisted user message. Omitting it disables transcript fallback seeding. */
   userMessageSeq?: number;
   instructions: string;
@@ -145,6 +145,7 @@ export interface BotRuntime {
   recoverPeerMailAcceptance(input: { db: Database; turnId: string; threadId: string; botId: string; markDelivered(): void }): Promise<boolean>;
   /** Run synchronous Service SQL in the same writer queue as pi storage. */
   writeService: ServiceWrite;
+  quiesceConversation(conversationId: number, timeoutMs: number): Promise<void>;
   recoverTurns(input: { db: Database; threads: ThreadsService; bots: BotsService; events: EventLog; registered(turnId: string): void; settled(turnId: string, outcome: { status: "completed" | "cancelled" } | { status: "failed"; reason: string }): void }): { registered: Promise<void>; settled: Promise<void> };
   activeTurn(threadId: string): Promise<string | undefined>;
   steer(turnId: string, text: string, requestId: string): Promise<void>;
@@ -161,6 +162,22 @@ export interface BotRuntime {
 
 function failureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function contentWithManagedAttachments(text: string, attachments: NonNullable<WorkerUserMessage["attachments"]>): Promise<string | TextContent[]> {
+  const blocks: TextContent[] = [{ type: "text", text }];
+  for (const { id, name, mediaType, path } of attachments) {
+    // Compaction currently serializes model content as text, including image data.
+    if (!mediaType.startsWith("text/") && mediaType !== "application/json") continue;
+    let content: string;
+    try {
+      content = await Bun.file(path).text();
+    } catch {
+      throw new Error(`Unable to read managed attachment ${id}`);
+    }
+    blocks.push({ type: "text", text: `${id}|${name}|${mediaType}|${content}` });
+  }
+  return blocks.length > 1 ? blocks : text;
 }
 
 function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | undefined): boolean {
@@ -788,11 +805,12 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
               console.error(`peer-mail Turn ${input.turnId} was admitted but Service bookkeeping failed`, reason);
             });
           } else {
+            const content = input.attachments?.length ? await contentWithManagedAttachments(input.text, input.attachments) : input.text;
             try {
-              submission = await conversation.submit({ type: "input", content: input.text, requestId: input.turnId, ...(whenBusy ? { whenBusy, whenIdle: "reject" as const } : {}) }, context);
+              submission = await conversation.submit({ type: "input", content, requestId: input.turnId, ...(whenBusy ? { whenBusy, whenIdle: "reject" as const } : {}) }, context);
             } catch (error) {
               if (!(whenBusy && error instanceof ConversationIdle)) throw error;
-              submission = await conversation.submit({ type: "input", content: input.text, requestId: input.turnId }, context);
+              submission = await conversation.submit({ type: "input", content, requestId: input.turnId }, context);
             }
             await writeService(() => associateSubmission(input.db, input.turnId, submission.id, "input"));
             register(submission);
@@ -843,6 +861,12 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       startTurn,
       startPeerMailTurn: startTurn,
       writeService,
+      async quiesceConversation(conversationId, timeoutMs) {
+        const stopping = withAbortSignal(AbortSignal.timeout(timeoutMs), context);
+        const conversation = await harness.conversation(conversationId as ConversationId, stopping);
+        // Background compaction can still write after every Service Turn has settled.
+        await conversation?.abort(stopping, { background: true });
+      },
       async recoverPeerMailAcceptance(input) {
         try {
           const indexed = input.db.query<{ conversation_id: ConversationId }, [string, string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?").get(input.threadId, input.botId);

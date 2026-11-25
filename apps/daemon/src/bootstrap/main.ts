@@ -325,7 +325,7 @@ export async function main(options: MainOptions = {}): Promise<{
     threads,
     screens,
     cfg.sharedWorkspaceDir,
-    { secrets: runtime.secrets, terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs, projections },
+    { secrets: runtime.secrets, runtime, terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs, projections },
   );
 
   agents.init();

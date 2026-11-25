@@ -60,7 +60,7 @@ test("thread conversations are reused after reopening the harness and are isolat
   }
 });
 
-test("a new thread conversation seeds once before the index row becomes visible", () => withConversationIndex(async (db, harness) => {
+test("a new thread conversation seeds once with the index row in place", () => withConversationIndex(async (db, harness) => {
   const indexed = db.query("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = 'thread' AND bot_id = 'bot'");
   const rowsDuringSeed: unknown[] = [];
   const seed = mock(async (conversation: Conversation) => {
@@ -74,7 +74,7 @@ test("a new thread conversation seeds once before the index row becomes visible"
     openThreadConversation(db, harness, "thread", "bot", BACKGROUND_CONTEXT, { seed }),
   ]);
   expect(seed).toHaveBeenCalledTimes(1);
-  expect(rowsDuringSeed).toEqual([null]);
+  expect(rowsDuringSeed).toEqual([{ conversation_id: first.id }]);
   expect(indexed.get()).toEqual({ conversation_id: first.id });
   expect(concurrent.id).toBe(first.id);
   expect((await first.context(BACKGROUND_CONTEXT)).entries.map(({ kind }) => kind)).toEqual(["test.seed"]);
