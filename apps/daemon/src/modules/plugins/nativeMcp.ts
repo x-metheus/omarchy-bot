@@ -464,6 +464,10 @@ export class NativeMcpStore {
     };
     const shared = readDocument(this.#shared);
     const privateContents = read(this.#file, "native-mcp.json");
+    // Hash the legacy Pi file for revision agreement with the panel and worker. Definitions come from the shared file.
+    const piFile = path.resolve(this.#pi);
+    const pi = readRuntimeConfig(piFile, this.workspace);
+    snapshot.set(piFile, "error" in pi ? null : pi.contents);
     let metadata = emptyNativeMcpMetadata();
     if (privateContents === undefined) {
       this.#metadata = metadata;

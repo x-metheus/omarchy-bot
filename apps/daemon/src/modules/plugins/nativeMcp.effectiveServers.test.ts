@@ -55,14 +55,40 @@ test("effectiveServers reads shared definitions and resolves private credentials
   }
 });
 
+test("effectiveServers revision accepts durable connection status with an empty Pi config", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-status-"));
+  const workspace = path.join(root, "workspace");
+  const privateDir = path.join(root, "private");
+  try {
+    mkdirSync(path.join(workspace, ".pi"), { recursive: true });
+    mkdirSync(privateDir);
+    writeFileSync(path.join(workspace, ".mcp.json"), JSON.stringify({ mcpServers: {
+      remote: { url: "https://remote.example/mcp" },
+    } }));
+    writeFileSync(path.join(workspace, ".pi", "mcp.json"), "{}");
+    writeFileSync(nativeMcpConfigFile(privateDir), JSON.stringify({ version: 1, entries: {} }));
+    const store = new NativeMcpStore(workspace, privateDir);
+    store.reconcile();
+    expect(store.errors).toEqual([]);
+
+    const { revision } = store.effectiveServers();
+    store.updateStatus([{ name: "remote", configurationRevision: revision, status: "connected", toolCount: 2, disabled: false }]);
+    expect(store.list()).toEqual([expect.objectContaining({
+      name: "remote", status: "connected", toolCount: 2, pendingReload: false,
+    })]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("effectiveServers ignores workspace Pi and Codex definitions", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-shared-only-"));
   try {
-    const store = new NativeMcpStore(root, path.join(root, "private"));
+    const privateDir = path.join(root, "private");
+    const store = new NativeMcpStore(root, privateDir);
     writeFileSync(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: {
       local: { command: "fixture", args: ["shared"] },
     } }));
-    const initialRevision = store.effectiveServers().revision;
     mkdirSync(path.join(root, ".pi"), { recursive: true });
     mkdirSync(path.join(root, ".codex"));
     writeFileSync(path.join(root, ".pi", "mcp.json"), JSON.stringify({ mcpServers: {
@@ -75,7 +101,7 @@ test("effectiveServers ignores workspace Pi and Codex definitions", () => {
     expect(servers.piOnly).toBeUndefined();
     expect(servers.codexOnly).toBeUndefined();
     expect(servers.local).toEqual({ disabled: false, transport: { type: "stdio", command: "fixture", args: ["shared"] } });
-    expect(revision).toBe(initialRevision);
+    expect(revision).toBe(nativeMcpRevision(root, nativeMcpConfigFile(privateDir)));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
