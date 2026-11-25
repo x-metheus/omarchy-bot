@@ -50,7 +50,7 @@ The plugin package only installs the Service. Enable runs the shared installer f
 
 The repository root manifest points Omarchy's plugin manager at `packages/omarchy-plugin`, and Omarchy Shell loads its `Service.qml`.
 
-- **Bun resolution:** PATH, then mise, then a checksum-verified official Bun 1.4.2 download under `OMARCHY_BOT_HOME`.
+- **Bun resolution:** PATH, then mise, then a checksum-verified official Bun 1.4.5 download under `OMARCHY_BOT_HOME`.
 - **Release artifacts:** `omarchy-bot-runtime-<sha>-x86_64.tar.zst` and `omarchy-bot-browser-<version>-x86_64.tar.zst`, each with its SHA-256 sidecar, published under `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<sha>/`. The runtime archive carries no browser; the browser pack is separate.
 - **Runtime location:** `~/.local/share/omarchy-bot/runtime/current/`, or `$OMARCHY_BOT_HOME/runtime/current/` when overridden. Extraction is atomic and keeps the checkout clean and fast-forwardable.
 - **Browser pack location:** `~/.local/share/omarchy-bot/runtime/browser/`, or `$OMARCHY_BOT_HOME/runtime/browser/`, beside `current/` so replacing the runtime on `update` keeps the installed pack. `OMARCHY_BOT_BROWSER_PACK_DIR` overrides it.

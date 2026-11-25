@@ -1,6 +1,6 @@
 # Spec: Bot runtime on pi-durable
 
-Status: approved 2026-11-10, amended 2026-11-24 (see [Changes](#changes))
+Status: approved 2026-11-10, amended 2026-11-24 and 2026-11-25 (see [Changes](#changes))
 
 Decision record: [ADR 0016](../adr/0016-build-bots-on-pi-durable.md)
 Replaces: the earlier draft written for `pi-agent-core` 0.84.4. Its Web and Workspaces rules are copied into this spec, so this spec stands alone.
@@ -41,16 +41,16 @@ This spec covers the runtime: running Turns, storage, tools, models, and file ac
 - No Bot Turn imports `pi-coding-agent` or `pi-agent-core`, and none reads `~/.pi`.
 - Existing Threads continue after upgrade, with their history and each Bot's model.
 - A Service killed mid-reply resumes or clearly fails that reply on next start, and no Turn is lost silently.
-- No secret value is kept in a plain file that a Bot's shell can read where an OS keychain is available, or is sent to a model by the app.
+- No secret value is kept in a plain file where an OS keychain is available, or is sent to a model by the app. The keychain does not stop a Bot's own shell; see the limits under [Secrets](#secrets).
 - Every [prototype](#prototype) check and every [test](#testing-strategy) passes.
 
 ## Tech stack
 
-- Bun 1.4+, TypeScript, ES modules, Bun workspaces (unchanged).
+- Bun, pinned exactly to 1.4.5 in the repository, CI, and packaging; TypeScript, ES modules, and Bun workspaces. The secret store uses Bun's built-in `Bun.secrets`, which Bun marks experimental, so moving Bun is a deliberate upgrade that reruns the secret-store tests.
 - `@earendil-works/pi-ai`, `@earendil-works/pi-durable`, and `@earendil-works/pi-mcp`, each pinned to one exact version: the latest release when the prototype starts and when implementation starts. On 2026-11-12 that is 1.5.2 for all three, and `pi-durable` 1.5.2 itself pins `pi-ai` 1.5.2 exactly. The three move together, because they are released together. `pi-durable` is marked experimental, so it is never on a range, and moving to a newer release is a deliberate upgrade that reruns the prototype checks.
 - `@earendil-works/chord`, which pi-durable takes on every entry point but does not re-export, is pinned to the same version and imported only by the runtime module.
 - `web_fetch` uses `@mozilla/readability`, `linkedom`, and `turndown`, each pinned exactly and imported only by the web extension.
-- pi-durable SQLite storage through `node:sqlite`. Bun 1.4.4 runs it end to end (prototype check 1), so Bun 1.4.4 is the minimum.
+- pi-durable SQLite storage through `node:sqlite`. Bun 1.4.4 runs it end to end (prototype check 1), so no release older than 1.4.4 works.
 - Removed: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-agent-core`, `pi-mcp-adapter`, and loading of the user's global Pi packages.
 
 ## Design
@@ -204,7 +204,7 @@ Path checks resolve symbolic links and `..` before comparing.
 
 Bots can keep sensitive data privately, such as passwords, tokens, and account numbers. The app keeps its own secrets, provider keys and MCP sign-ins, in the same store.
 
-- **Store:** the OS keychain: Secret Service on Linux, Keychain on macOS, and Credential Manager on Windows. Where no keychain is available, such as a server without Secret Service, the Service falls back to a file in its data directory readable only by your user, and Settings warns that a Bot's shell could read it. Keychain access uses one small library or the platform's command-line tool; which one is an ask-first dependency decision.
+- **Store:** the OS keychain: Secret Service on Linux, Keychain on macOS, and Credential Manager on Windows. Where no keychain is available, such as a server without Secret Service, the Service falls back to a file in its data directory readable only by your user, and Settings warns that a Bot's shell could read it. Keychain access uses Bun's built-in `Bun.secrets`, so the store adds no dependency. On start, the Service checks the keychain with a short write, read-back, and delete under a time limit, so a locked keyring cannot hang it. Once a data directory's secrets have moved to the keychain, a marker records it. After that, a keychain outage is reported as an error, and the Service never quietly writes a plaintext file again.
 - **Scopes:** app secrets are never available to Bots. Each Bot's secrets are private to that Bot: other Bots cannot list or use them.
 - **The `secrets` tool:** save a value under a name with a short description, list names and descriptions, and delete. It never returns a value.
 - **Use by name:** a Bot writes `{{secret:name}}` in a `bash` command or its environment, a `web_fetch` URL or header, or an `mcp` call's arguments. The app fills in the value when the tool runs. Before a result is stored or sent to the model, every exact occurrence of a value used in that call is replaced with its `{{secret:name}}`.
@@ -212,7 +212,7 @@ Bots can keep sensitive data privately, such as passwords, tokens, and account n
 - **Typing a secret into a Thread** sends it to the model like any message. Settings lists each Bot's secrets by name and lets you add, replace, and remove them without the model seeing the value.
 - **Bot Deletion** removes that Bot's secrets, and the confirmation says so.
 - **Moving existing keys:** on first start, keys in the earlier 0600 credential file move into the keychain, and the file is removed.
-- **Limits, stated honestly:** replacing values catches exact copies, not changed ones, such as a value a script re-encodes. A Bot that runs a command using a secret can still send it somewhere through that command. This keeps secrets out of the model's sight; it does not stop a Bot told to misuse one.
+- **Limits, stated honestly:** replacing values catches exact copies, not changed ones, such as a value a script re-encodes. A Bot that runs a command using a secret can still send it somewhere through that command. This keeps secrets out of the model's sight; it does not stop a Bot told to misuse one. The keychain is not a sandbox either. A Bot's shell runs as you and can ask the keychain for a value directly, for example with `secret-tool`. The keychain keeps secrets out of files, backups, and the model's view; only an OS sandbox around the shell, which is later work, would stop a Bot that tries.
 
 ### Prompt and Skills
 
@@ -229,7 +229,7 @@ Bots can keep sensitive data privately, such as passwords, tokens, and account n
   - an `McpOAuthStateStore` backed by the app secret store, holding client registration, tokens, and pending sign-in state
   - a loopback callback listener on `127.0.0.1` for the browser redirect
   - a sign-in action in the Services panel that opens the authorization URL on the user's device
-- **Token import:** `pi-mcp-adapter` keeps OAuth tokens in the system keyring (Secret Service on Linux). On first start, the Service reads them once, read-only, and converts the fields, including expiry from seconds to milliseconds. A token that cannot be converted or no longer works is dropped, and that service shows as needing sign-in again. Signing in again is acceptable.
+- **Token import:** `pi-mcp-adapter` keeps OAuth tokens in the system keyring (Secret Service on Linux). On first start, the Service reads them once, read-only, through `Bun.secrets`, and converts the fields, including expiry from seconds to milliseconds. A token that cannot be converted or no longer works is dropped, and that service shows as needing sign-in again. Signing in again is acceptable.
 - **Panel:** the Services panel's status and control behavior is unchanged.
 - **Not in v1:** sampling, elicitation, and MCP app UI panels.
 
@@ -428,6 +428,9 @@ The prototype is in `prototypes/bot-runtime/` on branch `proto/bot-runtime`, wit
   - plugins manage accounts and Skills, and every MCP call goes through `mcp`; catalog Skills install into the workspace Skills folder
   - the web tools are built by the app with three pinned libraries, and the Web and Workspaces rules are copied in from the earlier draft
   - a clean shutdown keeps a reply that is waiting for approval, and the approval wait runs inside its tool task (Task 9)
+- **2026-11-25:**
+  - the keychain is reached through Bun's built-in `Bun.secrets` (no new dependency), with a start-up check and a marker so a keychain outage fails closed, and Bun is pinned exactly to 1.4.5
+  - the secret limits say plainly that the keychain does not stop a Bot's own shell
 
 ## Open questions
 
