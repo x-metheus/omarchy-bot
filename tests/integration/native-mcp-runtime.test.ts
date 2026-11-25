@@ -184,7 +184,8 @@ try {
       env: { ...process.env, HOME: home, OMARCHY_BOT_HOME: home,
         XDG_CONFIG_HOME: path.join(home, ".config"), XDG_DATA_HOME: path.join(home, ".local/share"),
         PI_CODING_AGENT_DIR: path.join(home, ".pi/agent"),
-        PI_MCP_ADAPTER_TEST_AUTH_STORE: path.join(home, "oauth.json") },
+        // The adapter treats any other value as "use the OS keyring"; tests must never reach the real one.
+        PI_MCP_ADAPTER_TEST_AUTH_STORE: "memory" },
     });
     const [stdout, stderr, code] = await Promise.all([
       new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
