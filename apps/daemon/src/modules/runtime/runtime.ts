@@ -10,7 +10,6 @@ import type { SidecarBroker } from "../devices/sidecarBroker.ts";
 import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
 import type { PlatformPaths } from "../workspace/paths.ts";
 import { openThreadConversation } from "./conversations.ts";
-import { seedFirstTurnConversation, transcriptBeforeTurn } from "./sessionMigration.ts";
 import { DurableTranscript } from "./transcript.ts";
 import { resolveActiveTurnIdentity } from "./active-turn.ts";
 import { resolveModelForBot } from "./models.ts";
@@ -74,8 +73,6 @@ interface DurableTurnStart {
 
 type UserTurnStart = DurableTurnStart & {
   text: string;
-  /** Sequence of the persisted user message. Omitting it disables transcript fallback seeding. */
-  userMessageSeq?: number;
   instructions: string;
   privateDir: string;
   deviceId?: string;
@@ -507,14 +504,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           const conversation = await awaitWithContext(
             openThreadConversation(input.db, harness, input.threadId, input.botId, context, {
               writeService,
-              async seed(conversation, seedContext) {
-                const userMessageSeq = "userMessageSeq" in input ? input.userMessageSeq : undefined;
-                await seedFirstTurnConversation(conversation, seedContext, {
-                  threadId: input.threadId,
-                  legacySessionPath: input.threads.getNativeSession(input.threadId),
-                  transcript: () => transcriptBeforeTurn(() => input.threads.listMessages(input.threadId), userMessageSeq),
-                });
-              },
               ...(peerMail ? {
                 initialSettings() {
                   configuredOnCreate = true;

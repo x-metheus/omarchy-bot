@@ -14,7 +14,6 @@ export async function openThreadConversation(
   options?: {
     writeService?: (write: () => void) => void | Promise<void>;
     initialSettings?: () => AgentChange;
-    seed?: (conversation: Conversation, context: Context) => Promise<void>;
   },
 ): Promise<Conversation> {
   let inFlight = pending.get(harness);
@@ -36,13 +35,6 @@ export async function openThreadConversation(
     }
     const agent = options?.initialSettings?.();
     const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, ...(agent ? { agent } : {}) }, runtimeContext);
-    if (options?.seed) {
-      try {
-        await options.seed(conversation, runtimeContext);
-      } catch {
-        console.warn(`Unable to seed first durable conversation for thread ${threadId}`);
-      }
-    }
     // pi-durable 1.5.2 has no conversation deletion API. An insert failure can
     // orphan this conversation; Task 19 must sweep conversations without an index row.
     try {
