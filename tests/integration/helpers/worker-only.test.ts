@@ -24,6 +24,9 @@ workerOnly("worker session ids")("marker fixture", () => { throw new Error("work
     const retiredKey = ["OMARCHY_TEST", "DURABLE"].join("_");
     for (const value of [undefined, "1", "0"]) {
       const env = { ...process.env };
+      // Under an AI agent host (CLAUDECODE), Bun prints only failures, which hides the skipped test and its reason.
+      delete env.CLAUDECODE;
+      delete env.AI_AGENT;
       if (value === undefined) delete env[retiredKey];
       else env[retiredKey] = value;
       const result = Bun.spawnSync([process.execPath, "test", file], { cwd: dir, env, stdout: "pipe", stderr: "pipe" });
