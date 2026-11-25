@@ -4,8 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, defineTool, Harness } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { DeleteBotResultDto } from "@omarchy-bot/protocol";
 import { api, makeBot, sendToBot, startDaemon } from "../../../../../tests/integration/helpers/harness.ts";
@@ -142,6 +143,129 @@ test("permanent Bot deletion removes durable messages and attachment contents wh
     }
   });
 });
+
+test("permanent Bot deletion removes every conversation and rolls back a failure in the second", () => {
+  const taskDocument = defineDoc<{ written: boolean }>({
+    kind: "test.deletion-task",
+    scope: "task",
+    version: 1,
+    initial: () => ({ written: false }),
+    checkpointWhen: () => false,
+  });
+  const tool = defineTool({
+    name: "write_task_document",
+    description: "Persist a document owned by this task",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    async execute(_args, api, context) {
+      await api.commit(async (tx) => { (await tx.doc(taskDocument, api.taskId)).written = true; }, context);
+      return { output: [] };
+    },
+  });
+  const toolCall = () => fauxAssistantMessage([fauxToolCall(tool.name, {})], { stopReason: "toolUse" });
+  const reply = { segments: [{ type: "text" as const, text: "ok" }] };
+  return withFakeRuntimeProvider([toolCall, reply, toolCall, reply, toolCall, reply, toolCall, reply], {}, async () => {
+    const open = Harness.open;
+    Harness.open = (storage, options, context) => {
+      if (!("install" in options.registry) || typeof options.registry.install !== "function") throw new Error("Expected a mutable registry");
+      options.registry.install({ name: "test-conversation-deletion", tools: [tool] });
+      return open.call(Harness, storage, options, context);
+    };
+    try {
+      const h = await startDaemon(undefined, { seedDurableProvider: false });
+      const { cfg, credentials, db, turns } = h.svc;
+      try {
+        await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
+        setSetting(db, "default_model", "fake/fake-model");
+
+        async function send(botId: string, text: string): Promise<number> {
+          const { threadId, turnId } = await sendToBot(h, botId, text);
+          expect(await turns.waitForTerminal(turnId)).toMatchObject({ status: "completed" });
+          const binding = db.query<{ conversation_id: number }, [string, string]>(
+            "SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?",
+          ).get(threadId, botId);
+          if (!binding) throw new Error(`Missing conversation for Thread ${threadId}`);
+          const taskDocuments = db.query(`
+            SELECT document.id FROM pi_documents AS document
+            JOIN pi_tasks AS task ON document.scope_kind = 'task' AND document.owner_id = task.id
+            WHERE task.conversation_id = ? AND json_extract(document.record, '$.kind') = ?
+          `).all(binding.conversation_id, taskDocument.definition.kind);
+          expect(taskDocuments).toHaveLength(1);
+          return binding.conversation_id;
+        }
+
+        const tableKeys = piTables(db).map((table) => ({
+          table,
+          // Capture row IDs before deletion so orphaned revisions and record ID claims remain countable.
+          keys: () => db.query<{ row_id: number }, []>(`SELECT rowid AS row_id FROM "${table.replaceAll('"', '""')}"`)
+            .all().map(({ row_id }) => row_id),
+        }));
+        const sibling = await makeBot(h, "Keep this Bot");
+        await send(sibling, "Keep this conversation");
+        const siblingRows = piRows(db);
+        const bot = await makeBot(h, "Delete this Bot");
+        const conversationRows = [];
+        for (const text of ["First conversation", "Second conversation", "Third conversation"]) {
+          const previous = tableKeys.map(({ keys }) => new Set(keys()));
+          const conversationId = await send(bot, text);
+          const rows = tableKeys.map(({ table, keys }, index) => ({
+            table,
+            rowIds: new Set(keys().filter((id) => !previous[index]!.has(id))),
+          }));
+          for (const { table, rowIds } of rows) {
+            const count = expect(rowIds.size, `${table} for conversation ${conversationId}`);
+            if (table === "pi_durable_metadata" || table === "pi_durable_schema") count.toBe(0);
+            else count.toBeGreaterThan(0);
+          }
+          conversationRows.push({ conversationId, rows });
+        }
+        const conversationIds = new Set(conversationRows.map(({ conversationId }) => conversationId));
+        expect(conversationIds.size).toBe(3);
+        const idsForTrigger = [...conversationIds].join(",");
+        const before = piRows(db);
+
+        // Fail at the second conversation regardless of iteration order. At this point the
+        // first conversation is gone and the second conversation's documents are gone.
+        db.exec(`CREATE TEMP TRIGGER fail_second_conversation BEFORE DELETE ON pi_submissions
+          WHEN OLD.conversation_id IN (${idsForTrigger})
+            AND (SELECT COUNT(*) FROM pi_conversations WHERE id IN (${idsForTrigger})) = 2
+          BEGIN
+            SELECT CASE WHEN EXISTS (
+              SELECT 1 FROM pi_documents
+              WHERE (scope_kind = 'conversation' AND owner_id = OLD.conversation_id)
+                OR (scope_kind = 'task' AND owner_id IN (SELECT id FROM pi_tasks WHERE conversation_id = OLD.conversation_id))
+            ) THEN RAISE(FAIL, 'second conversation documents still present')
+            ELSE RAISE(FAIL, 'second conversation storage failure') END;
+          END`);
+        expect(await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${bot}`, {})).toMatchObject({
+          status: "failed", botId: bot, failures: [{ stage: "database", message: "second conversation storage failure" }],
+        });
+        expect(piRows(db)).toEqual(before);
+        db.exec("DROP TRIGGER fail_second_conversation");
+
+        expect(await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${bot}`, {})).toMatchObject({
+          status: "deleted", botId: bot, removed: { threads: 3, turns: 3 }, failures: [],
+        });
+        const remaining = tableKeys.map(({ keys }) => keys());
+        for (const { conversationId, rows } of conversationRows) {
+          for (const [index, { table, rowIds }] of rows.entries()) {
+            expect(remaining[index]!.filter((id) => rowIds.has(id)).length, `${table} for conversation ${conversationId}`).toBe(0);
+          }
+        }
+        const after = piRows(db);
+        expect(after.filter(({ table }) => table !== "pi_durable_metadata"))
+          .toEqual(siblingRows.filter(({ table }) => table !== "pi_durable_metadata"));
+        expect(after.find(({ table }) => table === "pi_durable_metadata"))
+          .toEqual(before.find(({ table }) => table === "pi_durable_metadata"));
+      } finally {
+        await h.stop();
+        rmSync(h.home, { recursive: true, force: true });
+        rmSync(cfg.stateDir, { recursive: true, force: true });
+      }
+    } finally {
+      Harness.open = open;
+    }
+  });
+}, 30_000);
 
 test("a failed first-Turn conversation mapping leaves no durable data and the Bot can still be deleted", () => {
   const reply = { segments: [{ type: "text" as const, text: "ok" }] };
