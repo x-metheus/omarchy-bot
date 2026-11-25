@@ -118,13 +118,14 @@ async function startServices({ intercomMcpUrl }: { intercomMcpUrl?: string } = {
   async function state(): Promise<PluginStateDto> {
     const result = await api<PluginStateDto>(h, "GET", "/api/plugins");
     const workspace = path.join(home, ".omarchy-bot", "workspace");
-    const shared = await Promise.all([".mcp.json", ".pi/mcp.json", ".codex/config.toml"].map(async (file) => {
-      try { return await readFile(path.join(workspace, file), "utf8"); }
-      catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return ""; throw error; }
-    }));
+    for (const retired of [".pi", ".codex"]) await expect(lstat(path.join(workspace, retired))).rejects.toMatchObject({ code: "ENOENT" });
+    const shared = await readFile(path.join(workspace, ".mcp.json"), "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
     for (const token of tokens.keys()) {
       expect(JSON.stringify(result)).not.toContain(token);
-      for (const configuration of shared) expect(configuration).not.toContain(token);
+      expect(shared).not.toContain(token);
     }
     return result;
   }

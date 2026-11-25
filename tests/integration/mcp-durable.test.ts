@@ -102,7 +102,7 @@ await server.connect(new StdioServerTransport());
       expect(state.mcp).toEqual([
         expect.objectContaining({ name: "disabled", enabled: false, status: "disabled", toolCount: 0, pendingReload: false }),
         expect.objectContaining({ name: "local", enabled: true, status: "connected", toolCount: 1, pendingReload: false,
-          source: ".mcp.json, .codex/config.toml", transport: { type: "stdio", command: process.execPath, args: [script], envKeys: ["SERVICE_TOKEN"] } }),
+          source: ".mcp.json", transport: { type: "stdio", command: process.execPath, args: [script], envKeys: ["SERVICE_TOKEN"] } }),
       ]);
       expect(JSON.stringify(state)).not.toContain(token);
 

@@ -1000,7 +1000,7 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("the MCP panel reports a shared deletion conflict while the durable runtime keeps another service callable", async () => {
+test("a retired Pi edit cannot restore a deleted shared MCP or block another service", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-shared-deletion-"));
   const shared = path.join(root, ".mcp.json");
   const pi = path.join(root, ".pi", "mcp.json");
@@ -1020,11 +1020,12 @@ await server.connect(new StdioServerTransport());
     expect(store.effectiveServers().servers.local).toBeDefined();
 
     await writeFile(shared, JSON.stringify({ mcpServers: { other: definition } }));
-    await writeFile(pi, JSON.stringify({ mcpServers: { local: { ...definition, env: { API_KEY: secret } } } }));
+    const retired = JSON.stringify({ mcpServers: { local: { ...definition, env: { API_KEY: secret } } } });
+    await writeFile(pi, retired);
     const effective = store.effectiveServers();
-    expect(store.list().find(({ name }) => name === "local")).toMatchObject({
-      status: "conflict", error: expect.stringMatching(/deletion conflicts/i),
-    });
+    expect(store.list().map(({ name }) => name)).toEqual(["other"]);
+    expect(store.errors).toEqual([]);
+    expect(await readFile(pi, "utf8")).toBe(retired);
     expect(effective.configurationError).toBeUndefined();
     expect(effective.servers.local).toBeUndefined();
 

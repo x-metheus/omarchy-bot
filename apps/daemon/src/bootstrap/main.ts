@@ -21,7 +21,7 @@ import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { PluginsService } from "../modules/plugins/plugins.ts";
-import { Supervisor } from "../supervision/supervisor.ts";
+import { preparePiAgentDirectory, Supervisor } from "../supervision/supervisor.ts";
 import { SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import { PairingService } from "../modules/pairing/pairing.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
@@ -60,6 +60,9 @@ export async function main(options: MainOptions = {}): Promise<{
   svc: DaemonServices;
 }> {
   const cfg = loadConfig();
+  // The remaining worker probes and inventory requests use Service-owned Pi state.
+  const piAgentDir = path.resolve(cfg.dataDir, "pi-agent");
+  preparePiAgentDirectory(piAgentDir);
   if (options.botScreenCapacity !== undefined) cfg.botScreenCapacity = options.botScreenCapacity;
   if (options.botScreenRuntimeDir !== undefined) cfg.botScreenRuntimeDir = options.botScreenRuntimeDir;
   const db = openDb(cfg);
@@ -86,9 +89,7 @@ export async function main(options: MainOptions = {}): Promise<{
         agents.markOffline(agentId, err.message);
       },
     },
-    {
-      agents: agentsDir,
-    },
+    { agents: agentsDir, piAgentDir },
   );
   const browserSelectionNotice = ignoredBrowserSelectionNotice(process.env);
   if (browserSelectionNotice !== undefined) console.warn(browserSelectionNotice);

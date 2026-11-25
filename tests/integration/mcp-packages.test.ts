@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { PluginsService } from "../../apps/daemon/src/modules/plugins/plugins.ts";
@@ -203,8 +203,7 @@ await server.connect(new StdioServerTransport());
     const replaced = await service.saveMcp(scoped.id, { name: "credential-scope", package: { name: otherPackage } });
     expect(replaced.transport).toMatchObject({ envKeys: [] });
     await service.saveMcp(scoped.id, { name: "credential-scope", package: { name: otherPackage, env: { MANAGED_TOKEN: token } } });
-    await mkdir(path.join(workspace, ".pi"), { recursive: true });
-    await writeFile(path.join(workspace, ".pi/settings.json"), JSON.stringify({ packages: [path.resolve(daemon, "../../workers/pi/node_modules/pi-mcp-adapter")] }));
+    for (const retired of [".pi", ".codex"]) await expect(lstat(path.join(workspace, retired))).rejects.toMatchObject({ code: "ENOENT" });
     await worker.start();
     const connected: NativeMcpControlResult = await worker.request({ type: "mcp.control", cwd: workspace, action: "connect", server: "credential-scope" }, 30_000);
     expect(connected.servers.find((entry) => entry.name === "credential-scope")).toMatchObject({ status: "connected", toolCount: 1 });

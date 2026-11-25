@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { NativeSkills } from "../../apps/daemon/src/modules/plugins/nativeSkills.ts";
@@ -184,7 +184,7 @@ test("imported Skills preserve companion edits and external sources across updat
   const nativeDirectory = path.join(workspace, ".agents", "skills", installed.name);
   expect(await realpath(path.join(nativeDirectory, "SKILL.md"))).toBe(await realpath(installedPath));
   expect(await readFile(path.join(nativeDirectory, "scripts", "review.py"), "utf8")).toBe(originalScript);
-  await expect(lstat(path.join(workspace, ".claude", "skills"))).rejects.toMatchObject({ code: "ENOENT" });
+  for (const retired of [".pi", ".codex", ".claude"]) await expect(lstat(path.join(workspace, retired))).rejects.toMatchObject({ code: "ENOENT" });
   const skillRoute = `/api/plugins/skills/${encodeURIComponent(installed.id)}`;
   const command = `/skill:${installed.name}`;
   expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).filter((entry) => entry.command === command)).toHaveLength(1);
@@ -230,16 +230,17 @@ test("imported Skills preserve companion edits and external sources across updat
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.some((skill) => skill.id === installed.id)).toBe(false);
   expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).some((entry) => entry.command === command)).toBe(false);
   await expect(lstat(nativeDirectory)).rejects.toMatchObject({ code: "ENOENT" });
-  await expect(lstat(path.join(workspace, ".claude", "skills"))).rejects.toMatchObject({ code: "ENOENT" });
+  for (const retired of [".pi", ".codex", ".claude"]) await expect(lstat(path.join(workspace, retired))).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readFile(path.join(source, "SKILL.md"), "utf8")).toBe(document);
   expect(await readFile(path.join(source, "scripts", "review.py"), "utf8")).toBe(upstreamScript);
 }, 20_000);
 
-test("MCP credentials stay private while native edits preserve client settings and conflicts require source resolution", async () => {
+test("Services saves preserve shared MCP settings and leave retired configs untouched", async () => {
   let h = await startPlugins();
   const workspace = path.join(h.home, ".omarchy-bot", "workspace");
   const sharedPath = path.join(workspace, ".mcp.json");
   const piPath = path.join(workspace, ".pi", "mcp.json");
+  const settingsPath = path.join(workspace, ".pi", "settings.json");
   const codexPath = path.join(workspace, ".codex", "config.toml");
   const envSecret = "integration-env-secret-never-project-9c6a";
   const headerSecret = "integration-header-secret-never-project-2a8f";
@@ -252,99 +253,92 @@ test("MCP credentials stay private while native edits preserve client settings a
     transport: { type: "http", url: "https://mcp.invalid/original", headers: { Authorization: headerSecret } },
   });
   const createdState = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  for (const secret of [envSecret, headerSecret]) {
-    expect(JSON.stringify([stdio, http, createdState])).not.toContain(secret);
-    for (const file of [sharedPath, codexPath]) expect(await readFile(file, "utf8")).not.toContain(secret);
-  }
+  for (const file of [piPath, settingsPath, codexPath]) await expect(lstat(file)).rejects.toMatchObject({ code: "ENOENT" });
+  expect((await lstat(sharedPath)).mode & 0o777).toBe(0o600);
+  const privatePath = path.join(h.svc.cfg.dataDir, "plugins", "native-mcp.json");
+  expect((await lstat(privatePath)).mode & 0o777).toBe(0o600);
   const shared = JSON.parse(await readFile(sharedPath, "utf8"));
+  expect(shared.mcpServers[stdio.name]).toEqual({ command: process.execPath, args: ["--version"], env: { DOCS_TOKEN: "${DOCS_TOKEN}" }, disabled: true });
+  expect(shared.mcpServers[http.name]).toEqual({ url: "https://mcp.invalid/original", headers: { Authorization: expect.stringMatching(/^\$\{OMARCHY_BOT_MCP_[A-F0-9]{24}\}$/) }, disabled: true });
+  const metadata = JSON.parse(await readFile(privatePath, "utf8"));
+  expect(Object.values(metadata.secrets)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ server: stdio.name, field: "DOCS_TOKEN", value: envSecret }),
+    expect.objectContaining({ server: http.name, field: "Authorization", value: headerSecret }),
+  ]));
+  for (const secret of [envSecret, headerSecret]) expect(JSON.stringify([stdio, http, createdState, shared])).not.toContain(secret);
+
   await mkdir(path.dirname(piPath), { recursive: true });
-  await writeFile(piPath, JSON.stringify({ mcpServers: { [http.name]: { ...shared.mcpServers[http.name], timeout: 43123 } } }));
-  const unrelatedCodex = 'model = "native-user-model"\n[projects."/tmp/example-project"]\ntrust_level = "untrusted"\n';
-  await writeFile(codexPath, `${unrelatedCodex}\n${await readFile(codexPath, "utf8")}`);
-  await api<PluginStateDto>(h, "GET", "/api/plugins");
+  await mkdir(path.dirname(codexPath), { recursive: true });
+  const retiredFiles = [
+    [piPath, JSON.stringify({ mcpServers: { [http.name]: { url: "https://mcp.invalid/pi-edit", timeout: 43123 } } })],
+    [settingsPath, '{ "packages": [], "theme": "native-user-theme" }\n'],
+    [codexPath, `model = "native-user-model"\n[mcp_servers.${JSON.stringify(http.name)}]\nurl = "https://mcp.invalid/codex-edit"\n`],
+  ] as const;
+  for (const [file, text] of retiredFiles) await writeFile(file, text, { mode: 0o640 });
+  const assertRetiredFilesUnchanged = async () => {
+    for (const [file, text] of retiredFiles) {
+      expect(await readFile(file, "utf8")).toBe(text);
+      expect((await lstat(file)).mode & 0o777).toBe(0o640);
+    }
+  };
 
-  const piEdit = JSON.parse(await readFile(piPath, "utf8"));
-  piEdit.mcpServers[http.name].url = "https://mcp.invalid/pi-edit";
-  await writeFile(piPath, JSON.stringify(piEdit));
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.find((entry) => entry.id === http.id)?.transport).toMatchObject({ url: "https://mcp.invalid/pi-edit" });
-  expect(Bun.TOML.parse(await readFile(codexPath, "utf8"))).toMatchObject({
-    model: "native-user-model", projects: { "/tmp/example-project": { trust_level: "untrusted" } },
-    mcp_servers: { [http.name]: { url: "https://mcp.invalid/pi-edit" } },
+  shared.unrelated = { keep: "native-user-setting" };
+  shared.mcpServers[http.name].timeout = 43123;
+  await writeFile(sharedPath, JSON.stringify(shared));
+  await chmod(sharedPath, 0o640);
+  const editedName = "renamed-http-docs";
+  const editedUrl = "https://mcp.invalid/shared-edit";
+  const editedState = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect(editedState.mcp.find((entry) => entry.id === http.id)).toMatchObject({ source: ".mcp.json", transport: { url: "https://mcp.invalid/original" } });
+  const edited = await api<McpConnectionDto>(h, "PUT", `/api/plugins/mcp/${encodeURIComponent(http.id)}`, {
+    name: editedName, enabled: true, transport: { type: "http", url: editedUrl },
   });
+  expect(edited).toMatchObject({ id: http.id, name: editedName, enabled: true, source: ".mcp.json", transport: { url: editedUrl, headerKeys: [] } });
+  expect((await apiStatus(h, "PATCH", `/api/plugins/mcp/${encodeURIComponent(http.id)}`, { enabled: false })).status).toBe(204);
+  const expectedShared = { unrelated: shared.unrelated, mcpServers: {
+    [stdio.name]: shared.mcpServers[stdio.name], [editedName]: { timeout: 43123, url: editedUrl, disabled: true },
+  } };
+  const sharedBytes = await readFile(sharedPath, "utf8");
+  const privateBytes = await readFile(privatePath, "utf8");
+  expect(JSON.parse(sharedBytes)).toEqual(expectedShared);
+  expect((await lstat(sharedPath)).mode & 0o777).toBe(0o640);
+  await assertRetiredFilesUnchanged();
 
-  await writeFile(codexPath, (await readFile(codexPath, "utf8")).replace("https://mcp.invalid/pi-edit", "https://mcp.invalid/codex-edit"));
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.find((entry) => entry.id === http.id)?.transport).toMatchObject({ url: "https://mcp.invalid/codex-edit" });
-  expect(JSON.parse(await readFile(piPath, "utf8")).mcpServers[http.name]).toMatchObject({ url: "https://mcp.invalid/codex-edit", timeout: 43123 });
-  expect(JSON.parse(await readFile(sharedPath, "utf8")).mcpServers[http.name].url).toBe("https://mcp.invalid/codex-edit");
-
-  const conflictingPi = JSON.parse(await readFile(piPath, "utf8"));
-  conflictingPi.mcpServers[http.name].url = "https://mcp.invalid/pi-conflict";
-  const piConflictText = JSON.stringify(conflictingPi);
-  const codexConflictText = (await readFile(codexPath, "utf8")).replace("https://mcp.invalid/codex-edit", "https://mcp.invalid/codex-conflict");
-  const sharedBeforeConflict = await readFile(sharedPath, "utf8");
-  await writeFile(piPath, piConflictText);
-  await writeFile(codexPath, codexConflictText);
-  const conflicted = (await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.find((entry) => entry.id === http.id);
-  expect(conflicted?.status).toBe("conflict");
-  expect(conflicted?.error).toEqual(expect.any(String));
-  expect(await readFile(piPath, "utf8")).toBe(piConflictText);
-  expect(await readFile(codexPath, "utf8")).toBe(codexConflictText);
-  expect(await readFile(sharedPath, "utf8")).toBe(sharedBeforeConflict);
   await h.stop();
   h = harness = await startDaemon(h.home);
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.find((entry) => entry.id === http.id)?.status).toBe("conflict");
-  expect(await readFile(piPath, "utf8")).toBe(piConflictText);
-  expect(await readFile(codexPath, "utf8")).toBe(codexConflictText);
+  const afterRestart = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect(afterRestart.mcp.find((entry) => entry.id === http.id)).toMatchObject({ name: editedName, status: "disabled", transport: { url: editedUrl, headerKeys: [] } });
+  expect(await readFile(sharedPath, "utf8")).toBe(sharedBytes);
+  expect(await readFile(privatePath, "utf8")).toBe(privateBytes);
+  expect((await lstat(sharedPath)).mode & 0o777).toBe(0o640);
+  expect((await lstat(privatePath)).mode & 0o777).toBe(0o600);
+  await assertRetiredFilesUnchanged();
+  for (const secret of [envSecret, headerSecret]) expect(JSON.stringify([afterRestart, sharedBytes])).not.toContain(secret);
 
-  // The user selects Pi's endpoint by making both native sources agree.
-  await writeFile(codexPath, codexConflictText.replace("https://mcp.invalid/codex-conflict", "https://mcp.invalid/pi-conflict"));
-  const resolved = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  expect(resolved.mcp.find((entry) => entry.id === http.id)).toMatchObject({ status: "disabled", transport: { url: "https://mcp.invalid/pi-conflict" } });
-  expect(JSON.parse(await readFile(sharedPath, "utf8")).mcpServers[http.name].url).toBe("https://mcp.invalid/pi-conflict");
-  expect(JSON.parse(await readFile(piPath, "utf8")).mcpServers[http.name].timeout).toBe(43123);
-  expect(Bun.TOML.parse(await readFile(codexPath, "utf8"))).toMatchObject({
-    model: "native-user-model", projects: { "/tmp/example-project": { trust_level: "untrusted" } },
-  });
-  for (const secret of [envSecret, headerSecret]) {
-    expect(JSON.stringify(resolved)).not.toContain(secret);
-    for (const file of [sharedPath, piPath, codexPath]) expect(await readFile(file, "utf8")).not.toContain(secret);
-  }
-
-  // Delete the Pi/Claude definition and its overlay; Codex must not resurrect it.
-  const withoutHttp = JSON.parse(await readFile(sharedPath, "utf8"));
-  delete withoutHttp.mcpServers[http.name];
-  await writeFile(sharedPath, JSON.stringify(withoutHttp));
-  const withoutPiHttp = JSON.parse(await readFile(piPath, "utf8"));
-  delete withoutPiHttp.mcpServers[http.name];
-  await writeFile(piPath, JSON.stringify(withoutPiHttp));
+  await writeFile(sharedPath, JSON.stringify({ ...expectedShared, mcpServers: { [stdio.name]: shared.mcpServers[stdio.name] } }));
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.some((entry) => entry.id === http.id)).toBe(false);
   expect((await apiStatus(h, "DELETE", `/api/plugins/mcp/${encodeURIComponent(stdio.id)}`)).status).toBe(204);
   await h.stop();
   h = harness = await startDaemon(h.home);
-  const afterRestart = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  expect(afterRestart.mcp.some((entry) => entry.id === http.id || entry.id === stdio.id)).toBe(false);
-  for (const name of [http.name, stdio.name]) {
-    expect(JSON.parse(await readFile(sharedPath, "utf8")).mcpServers[name]).toBeUndefined();
-    expect(JSON.parse(await readFile(piPath, "utf8")).mcpServers[name]).toBeUndefined();
-    expect(Bun.TOML.parse(await readFile(codexPath, "utf8"))).not.toMatchObject({ mcp_servers: { [name]: expect.anything() } });
-  }
-  expect(Bun.TOML.parse(await readFile(codexPath, "utf8"))).toMatchObject({
-    model: "native-user-model", projects: { "/tmp/example-project": { trust_level: "untrusted" } },
-  });
+  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp).toEqual([]);
+  expect(JSON.parse(await readFile(sharedPath, "utf8"))).toEqual({ unrelated: expectedShared.unrelated, mcpServers: {} });
+  await assertRetiredFilesUnchanged();
 }, 20_000);
 
-test("native endpoint overrides do not inherit credentials from the replaced endpoint", async () => {
+test("editing a shared MCP endpoint does not carry its credentials to the new endpoint", async () => {
   const h = await startPlugins();
   const workspace = path.join(h.home, ".omarchy-bot", "workspace");
   const shared = path.join(workspace, ".mcp.json");
-  const overlay = path.join(workspace, ".pi", "mcp.json");
   await writeFile(shared, JSON.stringify({ mcpServers: { protected: { url: "https://original.invalid/mcp", headers: { Authorization: "Bearer ${SERVICE_TOKEN}" } } } }));
-  await api<PluginStateDto>(h, "GET", "/api/plugins");
-  await writeFile(overlay, JSON.stringify({ mcpServers: { protected: { url: "https://replacement.invalid/mcp" } } }));
   const state = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  expect(state.mcp.find((entry) => entry.name === "protected")?.transport).toEqual({ type: "http", url: "https://replacement.invalid/mcp", headerKeys: [] });
+  const original = state.mcp.find((entry) => entry.name === "protected")!;
+  expect(original.transport).toEqual({ type: "http", url: "https://original.invalid/mcp", headerKeys: ["Authorization"] });
+  const edited = await api<McpConnectionDto>(h, "PUT", `/api/plugins/mcp/${encodeURIComponent(original.id)}`, {
+    name: original.name, enabled: true, transport: { type: "http", url: "https://replacement.invalid/mcp" },
+  });
+  expect(edited.transport).toEqual({ type: "http", url: "https://replacement.invalid/mcp", headerKeys: [] });
   expect(await readFile(shared, "utf8")).not.toContain("SERVICE_TOKEN");
-  expect(await readFile(path.join(workspace, ".codex", "config.toml"), "utf8")).not.toContain("SERVICE_TOKEN");
+  await expect(lstat(path.join(workspace, ".codex"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test("malformed and secret-bearing native entries remain untouched with safe visible diagnostics", async () => {
@@ -363,19 +357,23 @@ test("malformed and secret-bearing native entries remain untouched with safe vis
   expect(JSON.stringify(state)).not.toContain("NATIVE_URL_PRIVATE_SENTINEL");
 });
 
-test("deleting a Pi-originated MCP removes its generated representations across restart", async () => {
+test("a Pi-only MCP definition is never copied or discovered across a restart", async () => {
   let h = await startPlugins();
   const workspace = path.join(h.home, ".omarchy-bot", "workspace");
   const overlay = path.join(workspace, ".pi", "mcp.json");
-  await writeFile(overlay, JSON.stringify({ mcpServers: { "pi-origin": { command: process.execPath, args: ["--version"] } } }));
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.some((entry) => entry.name === "pi-origin")).toBe(true);
-  await writeFile(overlay, JSON.stringify({ mcpServers: {} }));
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.some((entry) => entry.name === "pi-origin")).toBe(false);
-  await h.stop();
-  h = harness = await startDaemon(h.home);
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.some((entry) => entry.name === "pi-origin")).toBe(false);
-  expect(await readFile(path.join(workspace, ".mcp.json"), "utf8")).not.toContain("pi-origin");
-  expect(await readFile(path.join(workspace, ".codex", "config.toml"), "utf8")).not.toContain("pi-origin");
+  const contents = JSON.stringify({ mcpServers: { "pi-origin": { command: process.execPath, args: ["--version"] } } });
+  await mkdir(path.dirname(overlay), { recursive: true });
+  await writeFile(overlay, contents);
+  for (let boot = 0; boot < 2; boot++) {
+    expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp).toEqual([]);
+    await expect(lstat(path.join(workspace, ".mcp.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(path.join(workspace, ".codex"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(overlay, "utf8")).toBe(contents);
+    if (boot === 0) {
+      await h.stop();
+      h = harness = await startDaemon(h.home);
+    }
+  }
 });
 
 test("ordinary Creator Python cache files do not masquerade as local source modifications", async () => {
