@@ -118,7 +118,8 @@ if(args.includes("enable")||args.includes("start")){
   env.OMARCHY_BOT_PORT = String(reservation.port);
   reservation.stop(true);
   // The existing scripted worker and fake Screen adapter run real Turns without a model or graphical session.
-  const daemon = `import {main} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/bootstrap/main.ts"))};
+  const daemon = `import ${JSON.stringify(path.join(import.meta.dir, "helpers/headless-keychain.ts"))};
+import {main} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/bootstrap/main.ts"))};
 import {FakeBotScreenRuntimeAdapter} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts"))};
 process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
 const daemon=await main({useHostApplicationUnits:false,botScreenAdapter:new FakeBotScreenRuntimeAdapter(),botScreenRuntimeDir:process.env.HOME+"/r"});

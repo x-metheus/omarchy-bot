@@ -26,7 +26,7 @@ export function readSettingsAllowedFolders(db: Database | undefined): readonly s
   const folders = new Set<string>();
   if (Array.isArray(extra)) {
     for (const folder of extra) {
-      if (typeof folder === "string" && !folder.includes("\0") && path.isAbsolute(folder)) {
+      if (typeof folder === "string" && isAllowedFolderPath(folder)) {
         folders.add(path.resolve(folder));
       }
     }
@@ -34,10 +34,25 @@ export function readSettingsAllowedFolders(db: Database | undefined): readonly s
   return [...folders];
 }
 
+export function isAllowedFolderPath(folder: string): boolean {
+  return path.isAbsolute(folder) && !folder.includes("\0");
+}
+
+function normalizeAllowedFolder(folder: string): string {
+  if (!isAllowedFolderPath(folder)) throw new Error(`Allowed folder must be an absolute path: ${folder}`);
+  return path.resolve(folder);
+}
+
 /** Add one absolute folder to the Settings list; invalid stored entries are dropped. */
 export function addSettingsAllowedFolder(db: Database, folder: string): void {
-  if (!path.isAbsolute(folder) || folder.includes("\0")) throw new Error(`Allowed folder must be an absolute path: ${folder}`);
+  const normalized = normalizeAllowedFolder(folder);
   const folders = new Set(readSettingsAllowedFolders(db));
-  folders.add(path.resolve(folder));
+  folders.add(normalized);
   setSetting(db, ALLOWED_FOLDERS_SETTING, JSON.stringify([...folders]));
+}
+
+export function removeSettingsAllowedFolder(db: Database, folder: string): void {
+  const normalized = normalizeAllowedFolder(folder);
+  const folders = new Set(readSettingsAllowedFolders(db));
+  if (folders.delete(normalized)) setSetting(db, ALLOWED_FOLDERS_SETTING, JSON.stringify([...folders]));
 }

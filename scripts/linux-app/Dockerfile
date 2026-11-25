@@ -5,8 +5,8 @@ RUN rm /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libdbus-1-dev libx11-dev webkit2gtk-driver xvfb dbus-x11 gnome-keyring libsecret-tools libfuse2 patchelf squashfs-tools xauth unzip zstd python3-gi gir1.2-webkit2-4.1 \
     && rm -rf /var/lib/apt/lists/*
-RUN curl --fail --location --proto '=https' -o /tmp/bun.zip https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip \
-    && echo 'bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c  /tmp/bun.zip' | sha256sum -c - \
+RUN curl --fail --location --proto '=https' -o /tmp/bun.zip https://github.com/oven-sh/bun/releases/download/bun-v1.4.5/bun-linux-x64.zip \
+    && echo '94559b3b528995a49452f9f2404cec74f2efd7d06e0a000a8cd214b02c3666eb  /tmp/bun.zip' | sha256sum -c - \
     && unzip /tmp/bun.zip -d /tmp \
     && mv /tmp/bun-linux-x64/bun /usr/local/bin/bun \
     && rm -rf /tmp/bun.zip /tmp/bun-linux-x64

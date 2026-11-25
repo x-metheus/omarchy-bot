@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import {
   LOCAL_RESULT_TEXT_MAX,
   DeviceLocalResultFrame,
@@ -145,13 +146,16 @@ export class SidecarBroker {
 
   /**
    * Run one `local` job on This Device (or an explicitly named online device).
-   * The job lives as long as `signal`; there is no job timeout of its own.
+   * A caller-owned deadline uses asynchronous workspace I/O and checks elapsed time at dispatch
+   * and write boundaries. Once a workspace rename is submitted, it determines the outcome.
    */
   async execute(
     params: LocalJob,
     context: { botId: string; turnId: string; deviceId?: string },
     signal: AbortSignal,
+    deadline?: { checkCancellation(): void; onRenameSubmitted?(): void },
   ): Promise<{ deviceId: string; hostname: string; text: string; exitCode?: number }> {
+    const checkCancellation = deadline?.checkCancellation ?? (() => signal.throwIfAborted());
     const device = this.#resolve(params.target, context.deviceId);
     const capability = ACTION_CAPABILITY[params.action];
     if (!device.capabilities.includes(capability)) {
@@ -160,10 +164,15 @@ export class SidecarBroker {
     if (params.action === "search" && (params.query === "/" || params.path === "/")) {
       throw new Error("Local Sidecar search cannot scan /");
     }
-    signal.throwIfAborted();
+    checkCancellation();
 
-    const contents = this.#transferContents(params);
-    signal.throwIfAborted();
+    let contents = params.contents;
+    if (params.action === "transfer" && params.direction === "from-workspace") {
+      const source = confinedPath(params.path ?? "", this.sharedWorkspaceDir);
+      contents = deadline ? await readFile(source, { encoding: "utf8", signal }) : readFileSync(source, "utf8");
+      checkCancellation();
+      if (this.#devices.get(device.id) !== device) throw new Error("Local Sidecar session changed before dispatch");
+    }
 
     const jobId = randomUUID();
     const frame: DeviceLocalJobFrame = {
@@ -191,6 +200,7 @@ export class SidecarBroker {
       throw new Error("Local Sidecar job rejected before dispatch: frame does not match the canonical local-job schema");
     }
 
+    checkCancellation();
     const port = device.port;
     const { promise, resolve, reject } = Promise.withResolvers<{ text: string; exitCode?: number }>();
     const onAbort = (): void => {
@@ -222,9 +232,42 @@ export class SidecarBroker {
       signal.throwIfAborted();
     }
     if (params.action === "transfer" && params.direction === "to-workspace") {
+      checkCancellation();
       const destination = confinedPath(params.destination ?? "", this.sharedWorkspaceDir);
-      mkdirSync(dirname(destination), { recursive: true });
-      writeFileSync(destination, result.text);
+      if (deadline) {
+        if (destination === resolvePath(this.sharedWorkspaceDir)) {
+          throw new Error("Local Sidecar transfer destination cannot be the Shared Workspace root");
+        }
+        const existing = await lstat(destination).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+        if (existing?.isSymbolicLink()) {
+          throw new Error("Local Sidecar transfer destination cannot be a symbolic link");
+        }
+        const directory = dirname(destination);
+        await mkdir(directory, { recursive: true });
+        checkCancellation();
+        const temporary = join(directory, `.local-transfer-${randomUUID()}.tmp`);
+        const file = await open(temporary, "wx", 0o600);
+        try {
+          try {
+            await writeFile(file, result.text, { signal });
+            if (existing) await file.chmod(existing.mode & 0o7777);
+          } finally {
+            await file.close();
+          }
+          checkCancellation();
+          const replacement = rename(temporary, destination);
+          deadline.onRenameSubmitted?.();
+          await replacement;
+        } catch (error) {
+          await rm(temporary, { force: true }).catch(() => {});
+          throw error;
+        }
+      } else {
+        mkdirSync(dirname(destination), { recursive: true });
+        writeFileSync(destination, result.text);
+      }
     }
     return {
       deviceId: device.id,
@@ -281,12 +324,6 @@ export class SidecarBroker {
     const device = this.#devices.get(thisDeviceId);
     if (device === undefined) throw new Error("This Device is offline or unknown");
     return device;
-  }
-
-  #transferContents(params: LocalJob): string | undefined {
-    if (params.action !== "transfer" || params.direction !== "from-workspace") return params.contents;
-    const source = confinedPath(params.path ?? "", this.sharedWorkspaceDir);
-    return readFileSync(source, "utf8");
   }
 
   #failDeviceJobs(deviceId: string, error: string): void {

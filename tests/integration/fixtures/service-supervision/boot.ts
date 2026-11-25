@@ -3,6 +3,7 @@
  * PATH from process start (`Bun.which` reads PATH once per process). Used only
  * by the supervision acceptance suite; never talks to the host's systemd.
  */
+import "../../helpers/headless-keychain.ts";
 import path from "node:path";
 import { main } from "../../../../apps/daemon/src/bootstrap/main.ts";
 import { createFixtureFontSupply } from "../../helpers/fontFixture.ts";

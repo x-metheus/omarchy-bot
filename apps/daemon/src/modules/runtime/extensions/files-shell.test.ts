@@ -558,7 +558,7 @@ function fakeSecretStore(dirs: Directories) {
     async set(account, value) { values.set(account, value); },
     async delete(account) { values.delete(account); },
   };
-  return new SecretStore(dirs.dataDir, backend);
+  return new SecretStore(dirs.dataDir, { backend, probe: async () => ({ available: true }) });
 }
 
 const tokenPlaceholder = "{{secret:token}}";
@@ -658,6 +658,27 @@ test("secrets saves, lists metadata, and deletes model-supplied values", async (
     expect(afterDelete.map(({ isError }) => isError)).toEqual([false, false]);
     expect(JSON.parse(afterDelete[1]!.text)).toEqual([]);
     expect(await secretStore.getBotSecretForRuntime("bot-a", "token")).toBeUndefined();
+  } finally { dirs.close(); }
+});
+
+test.each(["file", "keychain"])("secrets reports the first %s-backed save without returning the value", async (backend) => {
+  const dirs = directories();
+  const secretStore = backend === "file" ? new SecretStore(dirs.dataDir) : fakeSecretStore(dirs);
+  const metadata = { name: "token", description: "Service token" };
+  const value = "file-save-token-sentinel";
+  try {
+    const { results } = await withTurn(dirs, [
+      { name: "secrets", args: { action: "save", ...metadata, value } },
+    ], undefined, { secretStore, botId: "bot-a" });
+    const result = results[0]!;
+    expect(result.isError).toBe(false);
+    const expectedLines = [JSON.stringify(metadata)];
+    if (backend === "file") {
+      expectedLines.push("Warning — No OS keychain is available. This secret is stored in a private plaintext file readable by your user, including commands run by a Bot.");
+    }
+    expect(result.text.includes(value)).toBeFalse();
+    expect(result.text.split("\n")).toEqual(expectedLines);
+    expect(await secretStore.getBotSecretForRuntime("bot-a", "token") === value).toBeTrue();
   } finally { dirs.close(); }
 });
 

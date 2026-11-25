@@ -38,7 +38,7 @@ async function setup(
   const fixture = await startOAuthMcpServer(options);
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "mcp-oauth-sign-in-"));
   const backend = new MemoryKeychain();
-  const secrets = new SecretStore(dataDir, backend);
+  const secrets = new SecretStore(dataDir, { backend, probe: async () => ({ available: true }) });
   const outcomes: Outcome[] = [];
   const completed = Promise.withResolvers<Outcome>();
   const manager = new McpOAuthManager({ secrets, ...managerOptions, async onComplete(outcome) {

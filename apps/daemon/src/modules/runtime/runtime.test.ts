@@ -5,14 +5,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Harness, createRegistry, type ConversationId } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { AGENT_LOCAL_TOOL } from "@omarchy-bot/agent-contract";
 import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
 import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore, MODEL_CREDENTIALS_FILENAME } from "./credentials.ts";
-import { SecretStore } from "./secrets.ts";
+import { fallbackSecretValuesPath, SecretStore } from "./secrets.ts";
 import { createRuntimeModels } from "./models.ts";
 import { importMcpOAuthTokens } from "./mcpOAuthImport.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
@@ -414,8 +416,44 @@ test("secret storage status requires authentication and reports the active backe
   const h = await startDaemon();
   try {
     expect((await fetch(`${h.baseUrl}/api/secrets/status`)).status).toBe(401);
-    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({ status: 200, body: { backend: "file" } });
+    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({
+      status: 200, body: { backend: "file", reason: "No OS keychain is available." },
+    });
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+});
+
+test("secret storage status reports Bun keychain use and fail-closed restart", async () => {
+  const values = new Map<string, string>();
+  const get = spyOn(Bun.secrets, "get").mockImplementation(async ({ name }) => values.get(name) ?? null);
+  const set = spyOn(Bun.secrets, "set").mockImplementation(async ({ name, value }) => { values.set(name, value); });
+  const remove = spyOn(Bun.secrets, "delete").mockImplementation(async ({ name }) => values.delete(name));
+  const value = "keychain-runtime-sentinel";
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  let restarted: typeof h;
+  try {
+    h = await startDaemon(undefined, { seedDurableProvider: false });
+    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({ status: 200, body: { backend: "keychain" } });
+    await h.svc.credentials.add({ id: "keychain-provider", name: "Test provider", protocol: "built-in", apiKey: value });
+    expect([...values.values()].includes(value)).toBeTrue();
+    expect(existsSync(fallbackSecretValuesPath(h.svc.cfg.dataDir))).toBeFalse();
+    await h.stop();
+    get.mockImplementation(async () => { throw new Error(value, { cause: value }); });
+
+    restarted = await startDaemon(h.home, { seedDurableProvider: false });
+    expect(await apiStatus(restarted, "GET", "/api/secrets/status")).toEqual({
+      status: 200, body: { backend: "unavailable", reason: "The OS keychain is unavailable." },
+    });
+    expect(restarted.svc.credentials.getForRuntime("keychain-provider")).toBeUndefined();
+    expect(existsSync(fallbackSecretValuesPath(restarted.svc.cfg.dataDir))).toBeFalse();
+  } finally {
+    get.mockRestore(); set.mockRestore(); remove.mockRestore();
+    for (const daemon of [restarted, h]) {
+      if (!daemon) continue;
+      await daemon.stop();
+      rmSync(daemon.home, { recursive: true, force: true });
+      rmSync(daemon.svc.cfg.stateDir, { recursive: true, force: true });
+    }
+  }
 });
 
 test("configured conversation uses the Service limit for unset and null Bots and the Bot override otherwise", () => withFakeRuntimeProvider(Array.from({ length: 3 }, () => ({ segments: [{ type: "text" as const, text: "ok" }] })), {}, async () => {
@@ -450,7 +488,7 @@ test("configured conversation uses the Service limit for unset and null Bots and
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
 
-test("the model request contains only the app prompt and Shared Workspace Skills", () => {
+test("the model request contains the app prompt, Shared Workspace Skills, and Local Sidecar and Bot mail guidance", () => {
   const prompts: string[] = [];
   return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "bot-prompt-home-"));
@@ -515,7 +553,21 @@ test("the model request contains only the app prompt and Shared Workspace Skills
         allowedFolders,
         skills: [{ name: "Workspace Skill", description: "Workspace skill description sentinel", path: ".agents/skills/workspace/SKILL.md" }],
       });
-      expect(prompt).toBe(`<instructions>\n${appPrompt}\n</instructions>`);
+      expect(prompt).toBe([
+        "<local>",
+        AGENT_LOCAL_TOOL.systemPrompt.summary,
+        "local requires an online Local Sidecar. this-device selects the Sidecar on the device that sent the Turn's user message.",
+        ...AGENT_LOCAL_TOOL.systemPrompt.guidelines.slice(1),
+        "</local>",
+        "",
+        "<send_bot_message>",
+        "Send durable asynchronous text mail to another Omarchy Bot.",
+        "Use send_bot_message only when handing work or information to a distinct Bot ID.",
+        "After a successful queued acknowledgement, conclude your response; the target Bot's later output is not returned to this Turn.",
+        "</send_bot_message>",
+        "",
+        `<instructions>\n${appPrompt}\n</instructions>`,
+      ].join("\n"));
     } finally {
       await h?.stop();
       if (previousPiConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -523,6 +575,90 @@ test("the model request contains only the app prompt and Shared Workspace Skills
       rmSync(home, { recursive: true, force: true });
     }
   });
+});
+
+test("a catalog Skill installed with manage_plugins appears in the next durable Turn's model system prompt", async () => {
+  const name = "catalog-release-review";
+  const description = "Review release evidence from the catalog fixture";
+  const source = "catalog-skill.invalid";
+  const id = `${source}/${name}`;
+  const publisher = "https://plugin-catalog.invalid";
+  const relativePath = `.agents/skills/${name}/SKILL.md`;
+  const document = `---\nname: ${name}\ndescription: ${description}\n---\nVerify the release evidence.\n`;
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  const detailUrl = `${publisher}/api/plugins/catalog/detail/normalised?${new URLSearchParams({ id })}`;
+  const indexUrl = `https://${source}/.well-known/agent-skills/index.json`;
+  const documentUrl = `https://${source}/.well-known/agent-skills/${name}/SKILL.md`;
+  globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.origin !== publisher && url.hostname !== source) return originalFetch(input, init);
+    requests.push(url.href);
+    if (url.href === detailUrl) return Response.json({ id, source, slug: name, content: document });
+    if (url.href === indexUrl) return Response.json({ skills: [{ name, files: ["SKILL.md"] }] });
+    if (url.href === documentUrl) return new Response(document);
+    if (url.href === `${publisher}/api/plugins/providers`) return Response.json([]);
+    return new Response("Unexpected catalog fixture request", { status: 404 });
+  }, { preconnect: originalFetch.preconnect });
+
+  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }] });
+  const prompts: string[] = [];
+  let installResult: unknown;
+  fake.setResponses([
+    ({ messages }) => {
+      prompts.push(getCurrentSystemPrompt(messages));
+      return fauxAssistantMessage(fauxToolCall("manage_plugins", { action: "install_skill", id }, { id: "catalog-install" }), { stopReason: "toolUse" });
+    },
+    ({ messages }) => {
+      prompts.push(getCurrentSystemPrompt(messages));
+      installResult = messages.at(-1);
+      return fauxAssistantMessage("The Skill is installed.");
+    },
+    ({ messages }) => {
+      prompts.push(getCurrentSystemPrompt(messages));
+      return fauxAssistantMessage("The catalog Skill is available.");
+    },
+  ]);
+  const originalOpen = Harness.open;
+  const open = spyOn(Harness, "open").mockImplementation((storage, options, context) => originalOpen.call(Harness, storage, {
+    ...options,
+    models: () => {
+      const models = typeof options.models === "function" ? options.models() : options.models;
+      if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
+      models.setProvider(fake.provider);
+      return models;
+    },
+  }, context));
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  try {
+    h = await startDaemon();
+    h.svc.plugins.configure(publisher);
+    const botId = await makeBot(h, "Catalog Skill Bot");
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const first = await sendToBot(h, botId, "Install the catalog Skill.");
+    await waitThreadIdle(h, first.threadId);
+    expect(installResult).toMatchObject({ role: "toolResult", toolName: "manage_plugins", isError: false });
+    expect(requests.filter((url) => url !== `${publisher}/api/plugins/providers`)).toEqual([detailUrl, indexUrl, documentUrl]);
+    expect(readFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, relativePath), "utf8")).toBe(document);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).not.toContain(name);
+
+    const next = await sendToThread(h, first.threadId, "Which Skills are available?");
+    expect(next.turnId).not.toBe(first.turnId);
+    await waitThreadIdle(h, next.threadId);
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain(`${name}: ${description} (${relativePath})`);
+    const turn = h.svc.db.query<{ status: string }, [string]>("SELECT status FROM turns WHERE id = ?");
+    expect(turn.get(first.turnId)?.status).toBe("completed");
+    expect(turn.get(next.turnId)?.status).toBe("completed");
+  } finally {
+    open.mockRestore();
+    globalThis.fetch = originalFetch;
+    await h?.stop();
+    if (h) rmSync(h.home, { recursive: true, force: true });
+  }
 });
 
 for (const mode of ["worker", "durable"] as const) {
@@ -671,9 +807,15 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
   }));
   const ids: ConversationId[] = [];
   const ctx = BACKGROUND_CONTEXT;
+  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const callerAgentDir = path.join(root, "caller-pi-agent");
+  const callerKey = "test-recovery-caller-pi-key";
   let runtime: BotRuntime | undefined;
   let restoreOpen: (() => void) | undefined;
   try {
+    mkdirSync(callerAgentDir, { mode: 0o700 });
+    writeFileSync(path.join(callerAgentDir, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: callerKey } }), { mode: 0o600 });
+    process.env.PI_CODING_AGENT_DIR = callerAgentDir;
     const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
     const initial = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, ctx);
     try {
@@ -734,7 +876,13 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
       return harness;
     };
     restoreOpen = () => { Harness.open = originalOpen; };
+    const agentDir = path.join(root, "empty-pi-agent");
+    mkdirSync(agentDir, { mode: 0o700 });
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     runtime = await openBotRuntime(paths, db);
+    const runtimeProviders = runtime.credentials.getAllForRuntime();
+    expect(runtimeProviders.some(({ apiKey }) => apiKey === callerKey)).toBeFalse();
+    expect(runtimeProviders.map(({ id }) => id)).toEqual(["fake"]);
     expect(resumed).toBe(0);
     const callbackError = new Error("callback failure");
     const registered: string[] = [];
@@ -772,6 +920,8 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
     }
     expect(resumed).toBe(1);
   } finally {
+    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
     restoreOpen?.();
     await runtime?.close();
     db.close();

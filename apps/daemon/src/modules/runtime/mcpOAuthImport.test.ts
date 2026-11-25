@@ -46,7 +46,7 @@ async function withSecrets(run: (secrets: SecretStore, backend: FakeSecretBacken
   const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-oauth-import-"));
   const backend = new FakeSecretBackend();
   try {
-    await run(new SecretStore(dir, backend), backend, dir);
+    await run(new SecretStore(dir, { backend, probe: async () => ({ available: true }) }), backend, dir);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -568,7 +568,10 @@ function setupOAuthMcp(fixture: Awaited<ReturnType<typeof startOAuthMcpServer>>,
 }
 
 async function issueAdapterEntry(url: string, dir: string) {
-  const sourceSecrets = new SecretStore(path.join(dir, "adapter-fixture"), new FakeSecretBackend());
+  const sourceSecrets = new SecretStore(path.join(dir, "adapter-fixture"), {
+    backend: new FakeSecretBackend(),
+    probe: async () => ({ available: true }),
+  });
   const manager = new McpOAuthManager({ secrets: sourceSecrets });
   try {
     const start = await manager.start({ name, serverUrl: url, authorizationId: "fixture-seed" });

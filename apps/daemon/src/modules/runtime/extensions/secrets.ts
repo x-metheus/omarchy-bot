@@ -11,6 +11,8 @@ function textResult(text: string, isError = false) {
   return { isError, output: [{ type: "text" as const, text }] };
 }
 
+const fileStorageWarning = "Warning — No OS keychain is available. This secret is stored in a private plaintext file readable by your user, including commands run by a Bot.";
+
 const secretsTool = {
   name: "secrets",
   description: "Manage this Bot's secrets. Save takes a name, short description, and value. List returns names and descriptions. Delete takes a name. A value supplied to save is part of the conversation history. Use saved secrets in bash as {{secret:name}}.",
@@ -49,10 +51,12 @@ export function createSecretsExtension(access: BotSecretAccess) {
         const scope = access.store.forBot(botId);
         try {
           switch (action) {
-            case "save":
+            case "save": {
               if (!name || description === undefined || !value) return textResult("Saving a secret requires a name, description, and value.", true);
               await scope.save(name, description, value);
-              return textResult(JSON.stringify({ name, description }));
+              const metadata = JSON.stringify({ name, description });
+              return textResult(access.store.kind === "file" ? `${metadata}\n${fileStorageWarning}` : metadata);
+            }
             case "list":
               return textResult(JSON.stringify(await scope.list()));
             case "delete":
