@@ -16,10 +16,9 @@ import { ThreadsService } from "../threads/threads.ts";
 import type { DeleteBotResultDto, DeviceServerFrame, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
 import { installDurableSuiteProvider, withFakeRuntimeProvider } from "./harness-test-support.ts";
-import { CredentialStore, MODEL_CREDENTIALS_FILENAME } from "./credentials.ts";
+import { CredentialStore } from "./credentials.ts";
 import { fallbackSecretValuesPath, SecretStore } from "./secrets.ts";
 import { createRuntimeModels } from "./models.ts";
-import { importMcpOAuthTokens } from "./mcpOAuthImport.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { openBotRuntime, type BotRuntime } from "./runtime.ts";
 import { openThreadConversation } from "./conversations.ts";
@@ -37,7 +36,6 @@ test("runtime creates durable tables and can close and reopen", async () => {
       const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
       try {
         expect(runtime.mcpStatus()).toEqual([]);
-        expect(runtime.mcpMarkNeedsAuth("missing")).toBeUndefined();
         const db = new Database(dbPath, { readonly: true });
         try {
           const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'pi_*'").all();
@@ -98,72 +96,6 @@ await server.connect(new StdioServerTransport());
   } finally {
     await runtime.close();
     rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("a plain 403 during OAuth import leaves the MCP service needing sign-in", async () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-rejected-import-"));
-  const stateDir = path.join(directory, "state");
-  const sharedWorkspaceDir = path.join(directory, "workspace");
-  const accessToken = "rejected-fixture-token";
-  const observedAuthorization: (string | null)[] = [];
-  const fixture = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
-    observedAuthorization.push(request.headers.get("authorization"));
-    return new Response(null, { status: 403 });
-  } });
-  let runtime: BotRuntime | undefined;
-  try {
-    mkdirSync(stateDir);
-    mkdirSync(sharedWorkspaceDir);
-    const store = new NativeMcpStore(sharedWorkspaceDir, path.join(directory, "private"));
-    const snapshot = () => store.effectiveServers();
-    const { name } = store.save(null, { name: "remote", enabled: true, transport: { type: "http", url: fixture.url.href } });
-    const config = path.join(sharedWorkspaceDir, ".mcp.json");
-    writeFileSync(config, JSON.stringify({ mcpServers: { [name]: { url: fixture.url.href, auth: "oauth" } } }));
-    store.reconcile();
-    const persisted: (readonly string[])[] = [];
-    const botRuntime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
-      homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
-      mcp: { servers: snapshot },
-      mcpOAuth: { onRejectedChange: (names: readonly string[]) => persisted.push(names) },
-    });
-    runtime = botRuntime;
-    const report = await importMcpOAuthTokens({
-      secrets: botRuntime.secrets,
-      snapshot,
-      reader: { read: async () => ({ serverUrl: fixture.url.href, tokens: { accessToken } }) },
-      async check(server) {
-        const result = await botRuntime.mcpControl({ action: "connect", server });
-        expect(result).toMatchObject({ servers: [{ name, status: "failed" }], result: { error: "connect_failed" } });
-        return result.servers.some((entry) => entry.name === server && entry.status === "connected");
-      },
-      reportRejected: (server) => botRuntime.mcpMarkNeedsAuth(server),
-    });
-    expect(report).toEqual({ imported: [], needsSignIn: [name], skipped: [] });
-    const statuses = botRuntime.mcpStatus();
-    expect(statuses).toMatchObject([{ name, status: "needs-auth", toolCount: 0 }]);
-    store.updateStatus(statuses);
-    expect(store.list()).toMatchObject([{ name, status: "needs-auth", toolCount: 0 }]);
-    expect(Bun.deepEquals(observedAuthorization, [`Bearer ${accessToken}`])).toBe(true);
-    expect(persisted).toEqual([[name]]);
-
-    const revision = statuses[0]?.configurationRevision;
-    writeFileSync(config, JSON.stringify({ mcpServers: {
-      [name]: { url: fixture.url.href, auth: "oauth" }, local: { command: "fixture", disabled: true },
-    } }));
-    store.reconcile();
-    const reconciled = botRuntime.mcpStatus();
-    expect(snapshot().revision).not.toBe(revision);
-    expect(reconciled).toContainEqual(expect.objectContaining({ name, configurationRevision: snapshot().revision, status: "needs-auth" }));
-    store.updateStatus(reconciled);
-    expect(store.list().find((entry) => entry.name === name)?.status).toBe("needs-auth");
-    expect(persisted).toEqual([[name]]);
-  } finally {
-    try { await runtime?.close(); }
-    finally {
-      await fixture.stop(true);
-      rmSync(directory, { recursive: true, force: true });
-    }
   }
 });
 
@@ -285,7 +217,7 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
   const stateDir = path.join(directory, "state");
   const dbPath = path.join(directory, "service.sqlite");
   mkdirSync(stateDir);
-  writeFileSync(path.join(stateDir, "model-credentials.json"), "");
+  writeFileSync(path.join(stateDir, "secret-index.json"), '{"apiKey":"test-key"', { mode: 0o600 });
   const warning = spyOn(console, "warn").mockImplementation(() => {});
   const originalOpen = Harness.open;
   const open = spyOn(Harness, "open").mockImplementation((storage, options, context) => {
@@ -300,9 +232,9 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
     return originalOpen.call(Harness, storage, options, context);
   });
   try {
-    const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
+    const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: stateDir, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
     try {
-      expect(existsSync(path.join(stateDir, MODEL_CREDENTIALS_FILENAME))).toBeTrue();
+      expect(runtime.credentials.list()).toEqual([]);
       const db = new Database(dbPath, { readonly: true });
       try {
         const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'pi_*'").all();
@@ -317,20 +249,18 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
 });
 
 
-test("a durable Turn completes with a migrated provider after the legacy file is removed", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "migrated reply" }] }], {}, async () => {
-  const h = await startDaemon(undefined, { legacyModelCredentials: [
-    { id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "legacy-fake-key", models: [{ id: "fake-model" }] },
-  ] });
+test("a durable Turn completes with a stored provider", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "provider reply" }] }], {}, async () => {
+  const h = await startDaemon();
   try {
-    expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeFalse();
-    expect((await createRuntimeModels(h.svc.credentials).getAuth("fake"))?.auth.apiKey).toBe("legacy-fake-key");
+    const apiKey = "test-fake-provider-key";
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey, models: [{ id: "fake-model" }] });
+    expect((await createRuntimeModels(h.svc.credentials).getAuth("fake"))?.auth.apiKey).toBe(apiKey);
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
-    const botId = await makeBot(h, "Migrated provider");
-    const sent = await sendToBot(h, botId, "Use the migrated provider");
+    const botId = await makeBot(h, "Stored provider");
+    const sent = await sendToBot(h, botId, "Use the stored provider");
     await waitThreadIdle(h, sent.threadId);
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
-    expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeFalse();
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
 
@@ -869,36 +799,6 @@ test.each(["new", "recovered"])("a throwing durable tool finalizer fails a %s Tu
   }),
 );
 
-test("runtime imports a healthy legacy provider when another record fails and retains the file", async () => {
-  const healthyKey = "test-healthy-key-sentinel";
-  const invalidKey = "test-invalid-key-sentinel";
-  const warning = spyOn(console, "warn").mockImplementation(() => {});
-  const log = spyOn(console, "log").mockImplementation(() => {});
-  const error = spyOn(console, "error").mockImplementation(() => {});
-  try {
-    const h = await startDaemon(undefined, { legacyModelCredentials: [
-      { id: invalidKey, name: "Invalid", protocol: "built-in", apiKey: invalidKey },
-      { id: "healthy", name: "Healthy", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: healthyKey, models: [{ id: "model" }] },
-    ] });
-    try {
-      const models = createRuntimeModels(h.svc.credentials);
-      expect(models.getModel("healthy", "model")?.id).toBe("model");
-      expect((await models.getAuth("healthy"))?.auth.apiKey).toBe(healthyKey);
-      expect(h.svc.credentials.getForRuntime(invalidKey)).toBeUndefined();
-      expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeTrue();
-      expect(warning).toHaveBeenCalledWith("Unable to migrate some model credentials; keeping the legacy file for retry");
-      const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events;
-      const recorded = JSON.stringify([warning.mock.calls, log.mock.calls, error.mock.calls, events]);
-      expect(recorded).not.toContain(healthyKey);
-      expect(recorded).not.toContain(invalidKey);
-    } finally {
-      await h.stop();
-      rmSync(h.home, { recursive: true, force: true });
-      rmSync(h.svc.cfg.stateDir, { recursive: true, force: true });
-    }
-  } finally { warning.mockRestore(); log.mockRestore(); error.mockRestore(); }
-});
-
 test("secret storage status requires authentication and reports the active backend", async () => {
   const h = await startDaemon();
   try {
@@ -1392,9 +1292,6 @@ test.each(["none", "registration", "settlement"] as const)("recovery maps both w
       return harness;
     };
     restoreOpen = () => { Harness.open = originalOpen; };
-    const agentDir = path.join(root, "empty-pi-agent");
-    mkdirSync(agentDir, { mode: 0o700 });
-    process.env.PI_CODING_AGENT_DIR = agentDir;
     runtime = await openBotRuntime(paths, db);
     const runtimeProviders = runtime.credentials.getAllForRuntime();
     expect(runtimeProviders.some(({ apiKey }) => apiKey === callerKey)).toBeFalse();

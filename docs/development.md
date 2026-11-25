@@ -48,7 +48,7 @@ Keep workflow adaptations here or in the applicable agent instructions. Keep the
 
 ## Stack and verification
 
-- Runtime and package manager: Bun 1.4+, TypeScript, ES modules, Bun workspaces.
+- Runtime and package manager: Bun, pinned exactly to 1.4.5 (`engines` in [package.json](../package.json), CI, and packaging), TypeScript, ES modules, Bun workspaces. The secret store uses Bun's experimental `Bun.secrets`, so a Bun upgrade is deliberate and reruns the secret-store tests.
 - Web UI: React 19, Vite 7, Astryx 0.5.2; preserve the local Astryx rules.
 - Native application and sidecar work includes Rust and Tauri; browser checks alone do not verify a packaged WebView.
 

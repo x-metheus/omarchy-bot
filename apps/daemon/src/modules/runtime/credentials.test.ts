@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CredentialStore, MODEL_CREDENTIALS_FILENAME, type StoredProvider } from "./credentials.ts";
+import { CredentialStore, type StoredModel, type StoredProvider } from "./credentials.ts";
 import { EXA_SEARCH_KEY_DESCRIPTION, EXA_SEARCH_KEY_SECRET } from "./extensions/web.ts";
 import { fallbackSecretValuesPath, SecretStore, type SecretBackend } from "./secrets.ts";
 
@@ -12,44 +12,18 @@ const providers = [
   { id: "anthropic", name: "Anthropic", protocol: "built-in", apiKey: "another-secret" },
 ] satisfies [StoredProvider, StoredProvider];
 
-async function withCredentialDirectory(run: (dir: string, file: string) => Promise<void>): Promise<void> {
+async function withCredentialDirectory(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "credentials-"));
   try {
-    await run(dir, path.join(dir, MODEL_CREDENTIALS_FILENAME));
+    await run(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("migrates two legacy providers into app secrets once and reloads them without the file", () => withCredentialDirectory(async (dir, file) => {
-  writeFileSync(file, JSON.stringify(providers), { mode: 0o600 });
-  const secrets = new SecretStore(dir);
-  const store = await CredentialStore.open(dir, secrets);
-  expect(existsSync(file)).toBeFalse();
-  const metadata = await secrets.forApp().list();
-  expect(metadata).toHaveLength(2);
-  for (const provider of providers) {
-    const { apiKey, ...record } = provider;
-    const entry = metadata.find(({ description }) => JSON.parse(description).id === record.id)!;
-    const digest = createHash("sha256").update(record.id).digest("hex");
-    expect(entry.name).toBe(`provider-${digest.slice(0, 48)}`);
-    expect(JSON.parse(entry.description)).toEqual(record);
-    expect(await secrets.getAppSecretForRuntime(entry.name)).toBe(apiKey);
-    expect(store.getForRuntime(record.id)).toEqual(provider);
-    expect(JSON.stringify(store.list())).not.toContain(apiKey);
-  }
-  const reopened = await CredentialStore.open(dir, new SecretStore(dir));
-  expect(reopened.getAllForRuntime()).toEqual(providers);
-  expect(reopened.list()).toEqual(store.list());
-  expect(existsSync(file)).toBeFalse();
-  await reopened.remove(providers[0].id);
-  expect((await CredentialStore.open(dir, secrets)).getAllForRuntime()).toEqual([providers[1]]);
-}));
-
-test("CredentialStore promotes imported provider keys and resolves them after removing the fallback", () => withCredentialDirectory(async (dir, legacyFile) => {
-  writeFileSync(legacyFile, JSON.stringify(providers), { mode: 0o600 });
-  await CredentialStore.open(dir, new SecretStore(dir));
-  expect(existsSync(legacyFile)).toBeFalse();
+test("CredentialStore promotes provider keys and resolves them after removing the fallback", () => withCredentialDirectory(async (dir) => {
+  const store = await CredentialStore.open(dir, new SecretStore(dir));
+  for (const provider of providers) await store.add(provider);
   expect(existsSync(fallbackSecretValuesPath(dir))).toBeTrue();
   const values = new Map<string, string>();
   const backend: SecretBackend = {
@@ -63,12 +37,24 @@ test("CredentialStore promotes imported provider keys and resolves them after re
   expect(existsSync(fallbackSecretValuesPath(dir))).toBeFalse();
   expect(await secrets.status()).toEqual({ backend: "keychain" });
   expect(values.size).toBe(providers.length);
+  const metadata = await secrets.forApp().list();
+  expect(metadata).toHaveLength(providers.length);
   const projection = JSON.stringify(promoted.list());
-  for (const { id, apiKey } of providers) {
+  for (const { id, apiKey, ...fields } of providers) {
+    const name = `provider-${createHash("sha256").update(id).digest("hex").slice(0, 48)}`;
+    const entry = metadata.find((secret) => secret.name === name);
+    if (!entry) throw new Error(`Missing provider secret for ${id}`);
+    expect(JSON.parse(entry.description)).toEqual({ id, ...fields });
+    expect(await secrets.getAppSecretForRuntime(name) === apiKey).toBeTrue();
     expect(promoted.getForRuntime(id)?.apiKey === apiKey).toBeTrue();
     expect([...values.values()].includes(apiKey)).toBeTrue();
     expect(projection.includes(apiKey)).toBeFalse();
   }
+  expect(promoted.getAllForRuntime()).toEqual(providers);
+  expect(promoted.list()).toEqual(store.list());
+  await promoted.remove(providers[0].id);
+  const reopened = await CredentialStore.open(dir, new SecretStore(dir, { backend, probe: async () => ({ available: true }) }));
+  expect(reopened.getAllForRuntime()).toEqual([providers[1]]);
 }));
 
 test("provider listings hide model metadata containing the Exa app secret", () => withCredentialDirectory(async (dir) => {
@@ -137,17 +123,21 @@ test("doubly encoded Exa keys and over-depth escapes are rejected before saving 
   expect(store.list()).toEqual([{ ...normal, hasKey: true }]);
 }));
 
-test("list hides legacy metadata containing doubly encoded Exa keys", () => withCredentialDirectory(async (dir, file) => {
+test("list hides stored metadata containing doubly encoded Exa keys", () => withCredentialDirectory(async (dir) => {
   const secrets = new SecretStore(dir);
   await secrets.forApp().save(EXA_SEARCH_KEY_SECRET, EXA_SEARCH_KEY_DESCRIPTION, "exa+legacy-key \t");
   const rawKey = (await secrets.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET))!;
   const key = rawKey.trim();
   const encodedKey = encodeURIComponent(encodeURIComponent(key));
   const { apiKey, ...normal } = providers[0];
-  writeFileSync(file, JSON.stringify([
+  // Simulate persisted metadata that add() now rejects before the listing can project it.
+  for (const { apiKey: value, ...record } of [
     { ...normal, apiKey, models: [{ id: "safe" }, { id: `model-${encodedKey}` }, { id: "model-%25252541" }] },
     { ...normal, id: "legacy-url", apiKey: "legacy-api-key", baseUrl: `https://example.test?token=${encodedKey}` },
-  ]), { mode: 0o600 });
+  ]) {
+    const digest = createHash("sha256").update(record.id).digest("hex");
+    await secrets.forApp().save(`provider-${digest.slice(0, 48)}`, JSON.stringify(record), value);
+  }
   const store = await CredentialStore.open(dir, secrets, { sensitiveValues: [rawKey, key] });
   expect(store.list()).toEqual([{ ...normal, hasKey: true, models: [{ id: "safe" }] }]);
 }));
@@ -168,31 +158,6 @@ test("provider redaction checks decoded forms of configured keys and bounds sele
   expect(store.redactKeys("missing/model-%252541")).toBe("missing/model-%252541");
   const overlappingKey = new CredentialStore(secrets, { sensitiveValues: ["25"] });
   expect(overlappingKey.redactKeys("missing/model-%25252541")).toBe("[redacted]");
-}));
-
-test("keeps the legacy file until every provider verifies and retries without duplicate secrets", () => withCredentialDirectory(async (dir, file) => {
-  const legacy = JSON.stringify(providers);
-  writeFileSync(file, legacy, { mode: 0o600 });
-  const values = new Map<string, string>();
-  let verify = false;
-  const backend: SecretBackend = {
-    kind: "keychain",
-    async get(account) {
-      const value = values.get(account);
-      return verify || value !== providers[1].apiKey ? value : undefined;
-    },
-    async set(account, value) { values.set(account, value); },
-    async delete(account) { values.delete(account); },
-  };
-  const secrets = new SecretStore(dir, { backend, probe: async () => ({ available: true }) });
-  const partiallyMigrated = await CredentialStore.open(dir, secrets);
-  expect(partiallyMigrated.getAllForRuntime()).toEqual([providers[0]]);
-  expect(readFileSync(file, "utf8")).toBe(legacy);
-  verify = true;
-  const reopened = await CredentialStore.open(dir, secrets);
-  expect(reopened.getAllForRuntime()).toEqual(providers);
-  expect(await secrets.forApp().list()).toHaveLength(2);
-  expect(existsSync(file)).toBeFalse();
 }));
 
 test("a failed provider removal keeps the ID listed for retry and hides the key from runtime", () => withCredentialDirectory(async (dir) => {
@@ -274,23 +239,25 @@ test("an index write failure after provider key deletion keeps the cached key ou
   expect(await secrets.forApp().list()).toEqual([]);
 }));
 
-test("malformed credentials and invalid inputs fail without disclosing keys", () => withCredentialDirectory(async (dir, file) => {
-  const secrets = new SecretStore(dir);
-  const store = await CredentialStore.open(dir, secrets);
-  writeFileSync(file, '{"apiKey":"secret-example"');
-  await expect(CredentialStore.open(dir, secrets)).rejects.toThrow(/^Unable to read model credential store$/);
+test("invalid provider inputs fail without disclosing keys", () => withCredentialDirectory(async (dir) => {
+  const store = await CredentialStore.open(dir, new SecretStore(dir));
   await expect(store.add({ id: "bad/id", name: "x", protocol: "built-in", apiKey: "secret-example" })).rejects.toThrow("Invalid model provider");
 }));
 
-test("whole-store projection drops unrecognized catalog data and copies inputs", () => withCredentialDirectory(async (dir, file) => {
-  const keys = ["secret-example", "other-secret", "builtin-secret"];
-  writeFileSync(file, JSON.stringify([
-    { id: "one", name: "One", protocol: "built-in", apiKey: keys[0], models: [{ id: "first", input: ["text", "image"], extra: keys[1], cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, secret: keys[2] } }] },
-    { id: "two", name: "Two", protocol: "built-in", apiKey: keys[1], models: [{ id: "second", input: { secret: keys[0] }, contextWindow: { secret: keys[2] }, cost: { input: keys[0] } }] },
-    { id: "three", name: "Three", protocol: "built-in", apiKey: keys[2], models: [{ id: keys[0] }, { id: keys[1] }, { id: "safe", name: keys[1] }, { id: "safe-id", name: "Safe" }] },
-  ]));
+test("whole-store projection drops unrecognized catalog data and copies inputs", () => withCredentialDirectory(async (dir) => {
+  const keys = ["secret-example", "other-secret", "builtin-secret"] as const;
   const secrets = new SecretStore(dir);
   const store = await CredentialStore.open(dir, secrets);
+  const firstModel = {
+    id: "first",
+    input: ["text", "image"] satisfies StoredModel["input"],
+    extra: keys[1],
+    cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, secret: keys[2] },
+  };
+  const malformedModel = { id: "second", input: { secret: keys[0] }, contextWindow: { secret: keys[2] }, cost: { input: keys[0] } };
+  await store.add({ id: "one", name: "One", protocol: "built-in", apiKey: keys[0], models: [firstModel] });
+  await store.add({ id: "two", name: "Two", protocol: "built-in", apiKey: keys[1], models: [malformedModel as unknown as StoredModel] });
+  await store.add({ id: "three", name: "Three", protocol: "built-in", apiKey: keys[2], models: [{ id: keys[0] }, { id: keys[1] }, { id: "safe", name: keys[1] }, { id: "safe-id", name: "Safe" }] });
   const projection = store.list();
   const metadata = await secrets.forApp().list();
   for (const key of keys) {

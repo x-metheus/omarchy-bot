@@ -15,7 +15,6 @@ export async function openThreadConversation(
   options?: {
     writeService?: (write: () => void) => void | Promise<void>;
     initialSettings?: () => AgentChange;
-    seed?: (conversation: Conversation, context: Context) => Promise<void>;
   },
 ): Promise<Conversation> {
   let inFlight = pending.get(harness);
@@ -37,8 +36,7 @@ export async function openThreadConversation(
     }
     const agent = options?.initialSettings?.();
     const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, ...(agent ? { agent } : {}) }, runtimeContext);
-    // A Thread conversation can have committed entries only once its mapping exists
-    // in the same database. Commit the mapping before seeding or returning the handle.
+    // Commit the mapping before exposing a handle that can commit Thread entries.
     try {
       const writeService = options?.writeService ?? ((write) => write());
       await writeService(() => {
@@ -55,13 +53,6 @@ export async function openThreadConversation(
       });
     } catch {
       throw new Error("Unable to index durable conversation");
-    }
-    if (options?.seed) {
-      try {
-        await options.seed(conversation, runtimeContext);
-      } catch {
-        console.warn(`Unable to seed first durable conversation for thread ${threadId}`);
-      }
     }
     return conversation;
   })();

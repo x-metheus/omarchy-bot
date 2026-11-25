@@ -70,22 +70,20 @@ test("conversation deletion rejects unknown tables and rolls back failed writes"
   expect(piRows(db)).toEqual(before);
 }));
 
-test("a failed mapping insert prevents the first seed from persisting message and attachment content", () => withFreshHarness(async (db, harness) => {
+test("a failed mapping insert prevents the first write from persisting message and attachment content", () => withFreshHarness(async (db, harness) => {
   db.exec(`CREATE TABLE pi_thread_conversations (thread_id TEXT, bot_id TEXT, conversation_id INTEGER, created_at TEXT);
     CREATE TRIGGER reject_conversation BEFORE INSERT ON pi_thread_conversations
       BEGIN SELECT RAISE(FAIL, 'private mapping error'); END;`);
   const before = piRows(db).filter(({ table }) => table !== "pi_durable_metadata");
   const message = crypto.randomUUID();
   const attachment = crypto.randomUUID();
-  const open = openThreadConversation(db, harness, "thread", "bot", BACKGROUND_CONTEXT, {
-    async seed(conversation, context) {
-      await conversation.commit(async (tx) => {
-        await tx.appendEntry(conversation.id, { kind: "test.seed", data: { message, attachment } });
-      }, context);
-    },
+  const firstWrite = openThreadConversation(db, harness, "thread", "bot", BACKGROUND_CONTEXT).then(async (conversation) => {
+    await conversation.commit(async (tx) => {
+      await tx.appendEntry(conversation.id, { kind: "test.message", data: { message, attachment } });
+    }, BACKGROUND_CONTEXT);
   });
 
-  await expect(open).rejects.toThrow("Unable to index durable conversation");
+  await expect(firstWrite).rejects.toThrow("Unable to index durable conversation");
   const after = piRows(db);
   expect(JSON.stringify(after)).not.toContain(message);
   expect(JSON.stringify(after)).not.toContain(attachment);

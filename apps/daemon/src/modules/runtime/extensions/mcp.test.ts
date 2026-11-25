@@ -390,203 +390,15 @@ await server.connect(new StdioServerTransport());
   }
 });
 
-test("markNeedsAuth preserves a connected MCP server and does not persist disabled or missing servers", async () => {
-  const token = "fixture-connected-token";
-  const fixture = await startOAuthMcpServer({ fixedAuthorization: `Bearer ${token}` });
-  const persisted: (readonly string[])[] = [];
-  const mcp = createMcpExtension({
-    servers: () => ({ revision: "fixture", secrets: [], servers: {
-      remote: { disabled: false, transport: { type: "http", url: fixture.url } },
-      off: { disabled: true, transport: { type: "http", url: fixture.url } },
-    } }),
-    authProvider: () => ({ token: async () => token }),
-    onRejectedChange: (names: readonly string[]) => persisted.push(names),
-  });
-  try {
-    const connected = await mcp.check("remote");
-    expect(connected).toMatchObject({ status: "connected", toolCount: 1 });
-    expect(mcp.markNeedsAuth("remote")).toEqual(connected);
-    expect(mcp.markNeedsAuth("off")).toMatchObject({ status: "disabled", toolCount: 0 });
-    expect(mcp.markNeedsAuth("missing")).toBeUndefined();
-    expect(mcp.status()).toMatchObject([connected, { name: "off", status: "disabled" }]);
-    expect(persisted).toEqual([]);
-  } finally {
-    await mcp.close();
-    await fixture.close();
-  }
-});
-
-test("MCP status uses seeded rejected names before discovery and clears them when tool discovery succeeds", async () => {
-  const token = "fixture-discovery-token";
-  const fixture = await startOAuthMcpServer({ fixedAuthorization: `Bearer ${token}`, toolName: "read" });
-  const persisted: (readonly string[])[] = [];
-  const mcp = createMcpExtension({
-    servers: () => ({ revision: "fixture", secrets: [], servers: {
-      remote: { disabled: false, transport: { type: "http", url: fixture.url } },
-      off: { disabled: true, transport: { type: "http", url: fixture.url } },
-    } }),
-    authProvider: () => ({ token: async () => token }),
-    initialRejectedServers: new Set(["remote", "off", "removed"]),
-    onRejectedChange: (names: readonly string[]) => persisted.push(names),
-  });
-  try {
-    expect(mcp.status()).toMatchObject([{ name: "remote", status: "needs-auth" }, { name: "off", status: "disabled" }]);
-    expect(persisted).toEqual([["remote"]]);
-    expect((await executeMcp(mcp, { action: "search", service: "remote" })).isError).toBe(false);
-    expect(mcp.status()).toMatchObject([{ name: "remote", status: "connected", toolCount: 1 }, { name: "off", status: "disabled" }]);
-    expect(persisted).toEqual([["remote"], []]);
-  } finally {
-    await mcp.close();
-    await fixture.close();
-  }
-});
-
-test("MCP status survives a rejected-server persistence error during pruning", () => {
-  const attempted: (readonly string[])[] = [];
-  const mcp = createMcpExtension({
-    servers: () => ({ revision: "fixture", secrets: [], servers: {
-      remote: { disabled: false, transport: { type: "sse" } },
-      off: { disabled: true, transport: { type: "sse" } },
-    } }),
-    initialRejectedServers: new Set(["remote", "off", "removed"]),
-    onRejectedChange(names) {
-      attempted.push(names);
-      throw new Error("settings write failed");
-    },
-  });
-
-  expect(mcp.status()).toMatchObject([
-    { name: "remote", status: "needs-auth", toolCount: 0 },
-    { name: "off", status: "disabled", toolCount: 0 },
-  ]);
-  expect(attempted).toEqual([["remote"]]);
-});
-
-async function startDiscoveryFixture() {
-  const fixture = new McpServer({ name: "fixture", version: "1" });
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    enableJsonResponse: true,
-    sessionIdGenerator: () => crypto.randomUUID(),
-  });
-  fixture.registerTool("read", {}, () => ({ content: [{ type: "text", text: "read" }] }));
-  await fixture.connect(transport);
-  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => transport.handleRequest(request) });
-  return { url: server.url.href, async close() { await server.stop(true); await fixture.close(); } };
-}
-
-test("MCP discovery returns tools and keeps its connection when clearing rejected-server persistence throws", async () => {
-  const fixture = await startDiscoveryFixture();
-  const attempted: (readonly string[])[] = [];
-  const mcp = createMcpExtension({
-    servers: () => ({ revision: "fixture", secrets: [], servers: {
-      remote: { disabled: false, transport: { type: "http", url: fixture.url } },
-    } }),
-    initialRejectedServers: new Set(["remote"]),
-    onRejectedChange(names) {
-      attempted.push(names);
-      throw new Error("settings write failed");
-    },
-  });
-  try {
-    const search = await executeMcp(mcp, { action: "search", service: "remote" });
-    expect(search.isError).toBe(false);
-    const output = search.output?.[0];
-    expect(JSON.parse(output?.type === "text" ? output.text : "null")).toEqual({
-      services: [{ service: "remote", tools: [{ name: "read" }] }],
-    });
-    expect(mcp.status()).toMatchObject([{ name: "remote", status: "connected", toolCount: 1 }]);
-    expect(attempted).toEqual([[]]);
-  } finally {
-    await mcp.close();
-    await fixture.close();
-  }
-});
-
-test("markNeedsAuth returns needs-auth when rejected-server persistence throws", () => {
-  const attempted: (readonly string[])[] = [];
-  const mcp = createMcpExtension({
-    servers: () => ({ revision: "fixture", secrets: [], servers: {
-      remote: { disabled: false, transport: { type: "sse" } },
-    } }),
-    onRejectedChange(names) {
-      attempted.push(names);
-      throw new Error("settings write failed");
-    },
-  });
-
-  const marked = mcp.markNeedsAuth("remote");
-  expect(marked).toMatchObject({ name: "remote", status: "needs-auth", toolCount: 0 });
-  expect(mcp.status()[0]).toEqual(marked);
-  expect(attempted).toEqual([["remote"]]);
-});
-
-test("MCP keeps only the newest 64 rejected servers and never restores the oldest on clear", async () => {
-  const fixture = await startDiscoveryFixture();
-  const names = Array.from({ length: 65 }, (_, index) => `remote-${index}`);
-  const newest = names[64]!;
-  const servers = Object.fromEntries(names.map((name) => [name, {
-    disabled: false, transport: { type: "http" as const, url: fixture.url },
-  }]));
-  let revision = "initial";
-  let persisted: readonly string[] = [];
-  const mcp = createMcpExtension({
-    servers: () => ({ revision, secrets: [], servers }),
-    onRejectedChange: (rejected) => { persisted = rejected; },
-  });
-  const rejectedNames = () => mcp.status().filter(({ status }) => status === "needs-auth").map(({ name }) => name);
-  try {
-    for (const name of names) mcp.markNeedsAuth(name);
-    // A revision change drops transient failures so status reflects the retained names.
-    revision = "current";
-    expect(rejectedNames()).toEqual(names.slice(1));
-    expect(persisted).toEqual(names.slice(1));
-
-    expect(await mcp.check(newest)).toMatchObject({ status: "connected", toolCount: 1 });
-    expect(rejectedNames()).toEqual(names.slice(1, -1));
-    expect(persisted).toEqual(names.slice(1, -1));
-  } finally {
-    await mcp.close();
-    await fixture.close();
-  }
-});
-
-test("MCP retains a re-rejected server and evicts the second-oldest at the 64-server cap", () => {
-  const names = Array.from({ length: 65 }, (_, index) => `remote-${index}`);
-  const oldest = names[0]!;
-  const newest = names[64]!;
-  const servers = Object.fromEntries(names.map((name) => [name, {
-    disabled: false, transport: { type: "sse" as const },
-  }]));
-  let revision = "initial";
-  let persisted: readonly string[] = [];
-  const mcp = createMcpExtension({
-    servers: () => ({ revision, secrets: [], servers }),
-    onRejectedChange: (rejected) => { persisted = rejected; },
-  });
-  for (const name of names.slice(0, 64)) mcp.markNeedsAuth(name);
-  mcp.markNeedsAuth(oldest);
-  mcp.markNeedsAuth(newest);
-
-  // A revision change drops transient failures so status reflects the retained names.
-  revision = "current";
-  const rejectedNames = mcp.status().filter(({ status }) => status === "needs-auth").map(({ name }) => name);
-  expect(rejectedNames).toEqual([oldest, ...names.slice(2)]);
-  expect(persisted).toEqual([...names.slice(2, -1), oldest, newest]);
-});
-
-test("markNeedsAuth leaves retirement queued behind an active MCP call after a URL change", async () => {
+test("MCP queues retirement behind an active call when check follows a URL change", async () => {
   const started = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  const retired = Promise.withResolvers<void>();
   const events: string[] = [];
   const fixture = new McpServer({ name: "fixture", version: "1" });
   const transport = new WebStandardStreamableHTTPServerTransport({
     enableJsonResponse: true,
     sessionIdGenerator: () => crypto.randomUUID(),
-    onsessionclosed() {
-      events.push("session closed");
-      retired.resolve();
-    },
+    onsessionclosed() { events.push("session closed"); },
   });
   fixture.registerTool("wait", {}, async () => {
     started.resolve();
@@ -594,7 +406,10 @@ test("markNeedsAuth leaves retirement queued behind an active MCP call after a U
     events.push("tool finished");
     return { content: [{ type: "text", text: "finished" }] };
   });
-  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => transport.handleRequest(request) });
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    if (new URL(request.url).pathname === "/old") return transport.handleRequest(request);
+    return new Response(null, { status: 404 });
+  } });
   let url = new URL("/old", server.url).href;
   const mcp = createMcpExtension({ servers: () => ({ revision: url, secrets: [], servers: {
     remote: { disabled: false, transport: { type: "http", url } },
@@ -604,17 +419,15 @@ test("markNeedsAuth leaves retirement queued behind an active MCP call after a U
     const call = executeMcp(mcp, { action: "call", service: "remote", tool: "wait" });
     await started.promise;
     url = new URL("/replacement", server.url).href;
-    const [retiring] = mcp.status();
-    expect(retiring).toMatchObject({ status: "not-connected", configurationRevision: url });
-    const marked = mcp.markNeedsAuth("remote");
+    expect(mcp.status()[0]).toMatchObject({ status: "not-connected", configurationRevision: url });
+    const check = mcp.check("remote");
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(events).toEqual([]);
 
     release.resolve();
     expect(await call).toEqual({ isError: false, output: [{ type: "text", text: "finished" }] });
-    await retired.promise;
+    expect(await check).toMatchObject({ status: "failed", configurationRevision: url });
     expect(events).toEqual(["tool finished", "session closed"]);
-    expect(marked).toEqual(retiring);
-    expect(mcp.status()[0]).toEqual(retiring);
   } finally {
     release.resolve();
     try { await mcp.close(); }
@@ -1187,8 +1000,8 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("MCP reports a shared deletion conflict while another service remains callable", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-deletion-conflict-"));
+test("the MCP panel reports a shared deletion conflict while the durable runtime keeps another service callable", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-shared-deletion-"));
   const shared = path.join(root, ".mcp.json");
   const pi = path.join(root, ".pi", "mcp.json");
   const secret = "fixture-conflict-key";
@@ -1204,6 +1017,7 @@ await server.connect(new StdioServerTransport());
     await writeFile(pi, JSON.stringify({ mcpServers: { local: definition } }));
     const store = new NativeMcpStore(root, path.join(root, "private"));
     expect(store.list().find(({ name }) => name === "local")?.status).not.toBe("conflict");
+    expect(store.effectiveServers().servers.local).toBeDefined();
 
     await writeFile(shared, JSON.stringify({ mcpServers: { other: definition } }));
     await writeFile(pi, JSON.stringify({ mcpServers: { local: { ...definition, env: { API_KEY: secret } } } }));
@@ -1212,15 +1026,14 @@ await server.connect(new StdioServerTransport());
       status: "conflict", error: expect.stringMatching(/deletion conflicts/i),
     });
     expect(effective.configurationError).toBeUndefined();
-    expect(effective.servers.local).toEqual({ configurationError: expect.stringMatching(/deletion conflicts/i) });
-    expect(JSON.stringify(effective.servers.local).includes(secret)).toBe(false);
+    expect(effective.servers.local).toBeUndefined();
 
     mcp = createMcpExtension({ servers: () => store.effectiveServers() });
     for (const action of ["search", "describe", "call"]) {
-      const result = await executeMcp(mcp, { action, service: "local", tool: "run" });
-      expect(result.isError).toBe(true);
-      expect(result.output).toEqual([{ type: "text", text: expect.stringMatching(/deletion conflicts/i) }]);
-      expect(JSON.stringify(result).includes(secret)).toBe(false);
+      const missing = await executeMcp(mcp, { action, service: "local", tool: "run" });
+      expect(missing.isError).toBe(true);
+      expect(missing.output).toEqual([{ type: "text", text: expect.stringMatching(/unknown MCP service/i) }]);
+      expect(JSON.stringify(missing)).not.toContain(secret);
     }
     const result = await executeMcp(mcp, { action: "call", service: "other", tool: "run" });
     expect(result.isError).toBe(false);

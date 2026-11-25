@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -1061,14 +1061,14 @@ describe("durable Bot mailbox", () => {
     }
   });
 
-  if (durable) test("queued peer mail migrates a worker Turn's native session once and completes its durable reply", async () => {
+  if (durable) test("dispatches queued peer mail durably after a worker Turn and reuses the conversation for a user Turn", async () => {
     h = await startDaemon();
-    const sourceBotId = await makeBot(h, "Migration source");
-    const targetBotId = await makeBot(h, "Migration target");
+    const sourceBotId = await makeBot(h, "Queued mail source");
+    const targetBotId = await makeBot(h, "Queued mail target");
     const body = "mailbox-ordered-output";
     writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "mailbox-input"), "Target workspace fixture");
 
-    // Hold dispatch during enqueue without changing the target Agent's worker capabilities.
+    // Hold dispatch while the source enqueues mail, then let the worker run a user Turn on the target.
     const agents = h.svc.agents;
     const isReady = agents.isReady.bind(agents);
     const readiness = spyOn(agents, "isReady").mockImplementation((id) => id !== "pi" && isReady(id));
@@ -1081,32 +1081,25 @@ describe("durable Bot mailbox", () => {
     }
     expect(deliveryRow(h, deliveryId).state).toBe("queued");
     const [thread] = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
-    expect(thread?.id).toBeDefined();
-    const threadId = thread!.id;
+    if (!thread) throw new Error("Expected a target mailbox Thread");
+    const threadId = thread.id;
 
     setSetting(h.svc.db, "runtime", "worker");
-    const worker = await sendToThread(h, threadId, "say:I see the pixel.");
+    const worker = await sendToThread(h, threadId, "say:Worker Turn complete.");
     expect((await h.svc.turns.waitForTerminal(worker.turnId)).status).toBe("completed");
     expect(h.svc.threads.getNativeSession(threadId)).toMatch(/^fake:\/\/s\d+$/);
     expectNoDurableDispatch(h, threadId, worker.turnId);
     expect(deliveryRow(h, deliveryId).state).toBe("queued");
 
-    // The fake worker returns an opaque session ID. Supply the on-disk Pi session it represents.
-    const sessionPath = path.join(h.home, "legacy-session.jsonl");
-    copyFileSync(path.join(import.meta.dir, "fixtures/sessions/legacy-session-no-compaction.jsonl"), sessionPath);
-    h.svc.threads.setNativeSession(threadId, sessionPath);
     setSetting(h.svc.db, "runtime", "durable");
     agents.markOffline("pi", "trigger the queued delivery on readiness");
     await agents.recheck("pi");
 
     const delivery = await waitForDeliveryState(h, deliveryId, "delivered");
-    expect(delivery.target_turn_id).not.toBeNull();
-    expect((await h.svc.turns.waitForTerminal(delivery.target_turn_id!)).status).toBe("completed");
-    const entries = await durableSuiteEntries(h.svc.db, threadId);
-    expect(entries.filter(({ kind }) => kind === "legacy.message" || kind === "write")).toMatchObject([
-      { kind: "legacy.message", model: [{ role: "user", content: [{ type: "text", text: "Here is a blank pixel." }, { type: "image" }] }] },
-      { kind: "legacy.message", model: [{ role: "assistant", content: [{ type: "text", text: "I see the pixel." }] }] },
-      { kind: "write", data: { deliveryId, text: body } },
+    if (!delivery.target_turn_id) throw new Error("Expected a target Turn for the delivery");
+    expect((await h.svc.turns.waitForTerminal(delivery.target_turn_id)).status).toBe("completed");
+    expect((await durableSuiteEntries(h.svc.db, threadId)).filter(({ kind }) => kind === "write")).toMatchObject([
+      { data: { deliveryId, text: body } },
     ]);
     expect((await messages(h, threadId)).at(-1)).toMatchObject({ kind: "response", text: "Peer mail handled." });
 
@@ -1115,8 +1108,6 @@ describe("durable Bot mailbox", () => {
     const followUp = await sendToThread(h, threadId, "say:Continue after peer mail.");
     expect((await h.svc.turns.waitForTerminal(followUp.turnId)).status).toBe("completed");
     expect(targetConversations(h, threadId)).toEqual(conversations);
-    expect((await durableSuiteEntries(h.svc.db, threadId)).filter(({ kind }) => kind.startsWith("legacy.")))
-      .toEqual(entries.filter(({ kind }) => kind.startsWith("legacy.")));
   });
 
   test("dispatches queued mail after source deletion without inventing a live source ID", async () => {

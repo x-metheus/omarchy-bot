@@ -40,6 +40,41 @@ test("provider protocols, catalog metadata, defaults, and live model selection",
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("an Anthropic extra model and a pinned catalog model resolve on the native route", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "models-anthropic-"));
+  try {
+    using db = new Database(":memory:");
+    db.exec("CREATE TABLE bots (id TEXT PRIMARY KEY, model TEXT); CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    const pinned = "claude-sonnet-4-6";
+    db.run("INSERT INTO bots VALUES ('default', NULL), ('pinned', ?)", [`anthropic/${pinned}`]);
+    const extra = { id: "custom-claude-model", name: "Custom Claude Model" };
+    const store = await CredentialStore.open(dir, new SecretStore(dir));
+    await store.add({ id: "anthropic", name: "Anthropic", protocol: "built-in", apiKey: "fixture-key", models: [extra] });
+    setSetting(db, DEFAULT_MODEL_SETTING, `anthropic/${extra.id}`);
+
+    const route = { provider: "anthropic", api: "anthropic-messages", baseUrl: "https://api.anthropic.com" };
+    expect(resolveModelForBot(db, store, "default")).toMatchObject({ ...extra, ...route });
+    expect(resolveModelForBot(db, store, "pinned")).toMatchObject({ id: pinned, ...route });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an Anthropic provider-level proxy routes a built-in model to its configured endpoint", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "models-anthropic-proxy-"));
+  try {
+    using db = new Database(":memory:");
+    db.exec("CREATE TABLE bots (id TEXT PRIMARY KEY, model TEXT); CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO bots VALUES ('bot', NULL)");
+    const defaultModel = "claude-sonnet-4-6";
+    const baseUrl = "https://gateway.example.test/anthropic";
+    const store = await CredentialStore.open(dir, new SecretStore(dir));
+    await store.add({ id: "anthropic", name: "Anthropic Gateway", protocol: "anthropic-messages", baseUrl, apiKey: "fixture-key", models: [{ id: "proxy-model" }] });
+    setSetting(db, DEFAULT_MODEL_SETTING, `anthropic/${defaultModel}`);
+
+    expect(resolveModelForBot(db, store, "bot")).toMatchObject({
+      id: defaultModel, provider: "anthropic", api: "anthropic-messages", baseUrl,
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("fake provider streams ordered thinking and response and scripted failure", async () => {
   const fake = createFakeProvider([{ segments: [{ type: "thinking", text: "consider" }, { type: "text", text: "answer" }] }, { segments: [], failure: "scripted failure" }], { tokensPerSecond: 10000 });
   const models = createModels();

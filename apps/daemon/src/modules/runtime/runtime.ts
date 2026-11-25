@@ -10,7 +10,6 @@ import type { SidecarBroker } from "../devices/sidecarBroker.ts";
 import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
 import type { PlatformPaths } from "../workspace/paths.ts";
 import { openThreadConversation } from "./conversations.ts";
-import { seedFirstTurnConversation, transcriptBeforeTurn } from "./sessionMigration.ts";
 import { DurableTranscript } from "./transcript.ts";
 import { resolveActiveTurnIdentity } from "./active-turn.ts";
 import { resolveModelForBot } from "./models.ts";
@@ -33,7 +32,6 @@ import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
 import { createWebExtension, EXA_SEARCH_KEY_SECRET, readWebExemptRanges } from "./extensions/web.ts";
-import { importPiProviders } from "./providerImport.ts";
 import { BunSecretsBackend, probeBunSecrets } from "./bunSecrets.ts";
 import { SecretStore } from "./secrets.ts";
 import { McpOAuthManager, type McpOAuthManagerDeps } from "./mcpOAuth.ts";
@@ -74,8 +72,6 @@ interface DurableTurnStart {
 }
 
 type UserTurnStart = DurableTurnStart & WorkerUserMessage & {
-  /** Sequence of the persisted user message. Omitting it disables transcript fallback seeding. */
-  userMessageSeq?: number;
   instructions: string;
   privateDir: string;
   deviceId?: string;
@@ -151,7 +147,6 @@ export interface BotRuntime {
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
   mcpStatus(): NativeMcpStatus[];
-  mcpMarkNeedsAuth(name: string): NativeMcpStatus | undefined;
   mcpControl(input: McpControlInput): Promise<NativeMcpControlResult>;
   close(): Promise<void>;
   /** Requests to use files outside the allowed folders; absent without Service storage and events. */
@@ -189,7 +184,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   events?: Pick<EventLog, "append">;
   turnTimeoutMs?: number;
   mcp?: Pick<McpExtensionDeps, "servers" | "prepareServers" | "fillSecrets" | "authProvider">;
-  mcpOAuth?: Pick<McpExtensionDeps, "initialRejectedServers" | "onRejectedChange"> & {
+  mcpOAuth?: {
     onAuthorization?: (outcome: McpAuthorizationOutcome) => void;
   };
   computer?: Pick<ComputerBroker, "agentToolAct" | "agentBrowserAct">;
@@ -201,7 +196,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   } : undefined);
   const redactFailure = (reason: string, botId: string) => secretStore.redactKnown(reason, botId).catch(() => "[redacted]");
   const mcpOptions = options.mcp;
-  const { onAuthorization, ...rejectedOptions } = options.mcpOAuth ?? {};
+  const onAuthorization = options.mcpOAuth?.onAuthorization;
   const manager = mcpOptions ? new McpOAuthManager({
     secrets: secretStore,
     settings({ name, serverUrl }) {
@@ -236,7 +231,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   }) : undefined;
   const mcp = mcpOptions && manager ? createMcpExtension({
     ...mcpOptions,
-    ...rejectedOptions,
     authProvider: (name, url) => manager.authProvider(name, url),
   }) : undefined;
   let reportedCredentialsFailure = false;
@@ -251,10 +245,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     reportCredentialsFailure();
     return new CredentialStore(secretStore, credentialOptions);
   });
-  if (db && !reportedCredentialsFailure) {
-    try { await importPiProviders({ db, credentials, homeDir: paths.homeDir }); }
-    catch { console.warn("Unable to import Pi model providers; continuing startup"); }
-  }
   const sqlite = await openNodeSqliteDatabase(paths.dbPath);
   // A Bun SQLite busy wait would block the JS thread holding the durable connection's lock.
   let writer = Promise.resolve();
@@ -726,14 +716,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           const conversation = await awaitWithContext(
             openThreadConversation(input.db, harness, input.threadId, input.botId, context, {
               writeService,
-              async seed(conversation, seedContext) {
-                const userMessageSeq = "userMessageSeq" in input ? input.userMessageSeq : undefined;
-                await seedFirstTurnConversation(conversation, seedContext, {
-                  threadId: input.threadId,
-                  legacySessionPath: input.threads.getNativeSession(input.threadId),
-                  transcript: () => transcriptBeforeTurn(() => input.threads.listMessages(input.threadId), userMessageSeq),
-                });
-              },
               ...(peerMail ? {
                 initialSettings() {
                   configuredOnCreate = true;
@@ -1054,9 +1036,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       abortTurn,
       mcpStatus() {
         return mcp?.status() ?? [];
-      },
-      mcpMarkNeedsAuth(name) {
-        return mcp?.markNeedsAuth(name);
       },
       async mcpControl({ action, server, redirectUrl, authorizationId, expiresAt }) {
         const status = () => mcp?.status() ?? [];

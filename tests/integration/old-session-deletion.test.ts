@@ -7,7 +7,7 @@ import { setSetting } from "../../apps/daemon/src/persistence/settings.ts";
 import { DeleteBotResultDto } from "../../packages/protocol/src/index.ts";
 import { apiStatus, makeBot, messages, sendToThread, startDaemon, type Harness } from "./helpers/harness.ts";
 
-const fixture = join(import.meta.dir, "fixtures/sessions/legacy-session.jsonl");
+const fixture = join(import.meta.dir, "fixtures/old-session-file.jsonl");
 const oldTime = new Date("2026-01-01T00:00:00.000Z");
 
 async function withDaemon(check: (h: Harness, botId: string) => Promise<void>) {

@@ -42,9 +42,9 @@ async function providerRequest<T>(h: Harness, method: string, path: string, stat
   return parsed;
 }
 
-function withDaemon(run: (h: Harness, client: ApiClient) => Promise<void>, options?: Parameters<typeof startDaemon>[1]) {
+function withDaemon(run: (h: Harness, client: ApiClient) => Promise<void>) {
   return async () => {
-    const h = await startDaemon(undefined, options);
+    const h = await startDaemon();
     try {
       // The durable suite harness seeds a "fake" provider; these tests assert the provider store's exact contents.
       if (process.env.OMARCHY_TEST_DURABLE === "1" && h.svc.credentials.has("fake")) await h.svc.credentials.remove("fake");
@@ -160,9 +160,10 @@ test("OAuth-only built-ins are rejected and omitted from the API-key catalog but
   expect((await client.createProvider({ ...custom, name: "OpenAI Codex" })).id).toBe(`${id}-2`);
 }));
 
-test("an existing OAuth-only built-in has no models in the API-key projection", withDaemon(async (_h, client) => {
+test("an existing OAuth-only built-in has no models in the API-key projection", withDaemon(async (h, client) => {
+  await h.svc.credentials.add({ id: "openai-codex", name: "OpenAI Codex", protocol: "built-in", apiKey: fixtureKey, models: [{ id: "extra-model" }] });
   expect(await client.providers()).toContainEqual({ id: "openai-codex", name: "OpenAI Codex", protocol: "built-in", hasKey: true, models: [] });
-}, { legacyModelCredentials: [{ id: "openai-codex", name: "OpenAI Codex", protocol: "built-in", apiKey: fixtureKey, models: [{ id: "extra-model" }] }] }));
+}));
 
 test("built-in catalog projection omits model metadata containing a stored key", withDaemon(async (h) => {
   const key = "gpt-4o-mini";
@@ -250,12 +251,13 @@ test("provider listing hides legacy metadata containing an encoded stored key", 
 }));
 
 test("provider listing omits a legacy base URL containing userinfo", withDaemon(async (h) => {
+  await h.svc.credentials.add({ id: "Legacy.Provider", name: "Legacy", protocol: "openai-compatible", baseUrl: credentialUrl, apiKey: fixtureKey });
   const providers = await providerRequest<ProviderDto[]>(h, "GET", providersPath, 200);
   expect(providers).toContainEqual({ id: "Legacy.Provider", name: "Legacy", protocol: "openai-compatible", hasKey: true, models: [] });
   const removed = await authedFetch(h, `${h.baseUrl}${providersPath}/${encodeURIComponent("Legacy.Provider")}`, { method: "DELETE" });
   expect(removed.status).toBe(204);
   expect(await removed.text()).toBe("");
-}, { legacyModelCredentials: [{ id: "Legacy.Provider", name: "Legacy", protocol: "openai-compatible", baseUrl: credentialUrl, apiKey: fixtureKey }] }));
+}));
 
 for (const [body, providerId, modelId, reply] of [
   [custom, "example-gateway", "example-model", "Custom provider completed this Turn."],
