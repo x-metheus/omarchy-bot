@@ -63,6 +63,120 @@ test("effectiveServers merges native definitions and resolves private credential
   }
 });
 
+test("effectiveServers retains service OAuth after reconciliation and drops it when the URL changes", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-service-oauth-"));
+  try {
+    const url = "https://work.example/mcp";
+    const redirectUri = "http://localhost:12798/callback";
+    const authServerMetadataUrl = "https://login.example/.well-known/openid-configuration";
+    const config = path.join(root, ".mcp.json");
+    const store = new NativeMcpStore(root, path.join(root, "private"));
+    store.putService("work", { url, oauth: { clientId: "work-client", redirectUri, authServerMetadataUrl, scope: "work.read" } },
+      { accountId: "work-account", serviceId: "work-service" });
+    store.reconcile();
+    expect(store.errors).toEqual([]);
+    expect(store.effectiveServers().servers.work?.transport).toEqual({
+      type: "http", url, oauth: { clientId: "work-client", callbackUrl: redirectUri, callbackPort: 12798, authServerMetadataUrl, scope: "work.read" },
+    });
+
+    const moved = "https://new.work.example/mcp";
+    mkdirSync(path.join(root, ".pi"), { recursive: true });
+    writeFileSync(path.join(root, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { work: { url: moved } } }));
+    store.reconcile();
+    expect(store.errors).toEqual([]);
+    expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.work).toEqual({ url: moved, disabled: false });
+    expect(store.effectiveServers().servers.work?.transport).toEqual({ type: "http", url: moved });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("effectiveServers projects only recognized OAuth fields and redacts the client secret", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-oauth-"));
+  try {
+    const url = "https://work.example/mcp";
+    const clientSecret = crypto.randomUUID();
+    const oauth = { clientId: "work-client", clientSecret, callbackUrl: "http://127.0.0.1/finish", callbackPort: 12219,
+      authServerMetadataUrl: "https://login.example/metadata", scope: "work.read work.write", clientName: "Work Client", clientRegistration: "dcr" };
+    const redirectDefaultPort = "http://localhost:80/callback";
+    const redirectWithoutPort = "http://localhost/callback";
+    writeFileSync(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: {
+      handEdited: { url, oauth: { ...oauth, redirectUri: "http://localhost:1111/callback", unknownField: "discard" } },
+      defaultPort: { url, oauth: { redirectUri: redirectDefaultPort } },
+      ephemeralPort: { url, oauth: { redirectUri: redirectWithoutPort } },
+      oauthFalse: { url, oauth: false },
+    } }));
+    const store = new NativeMcpStore(root, path.join(root, "private"));
+    store.reconcile();
+    expect(store.errors).toEqual([]);
+    const { servers, secrets } = store.effectiveServers();
+    expect(Bun.deepEquals(servers.handEdited?.transport, { type: "http", url, oauth })).toBe(true);
+    expect(Bun.deepEquals(secrets, [clientSecret])).toBe(true);
+    expect(servers.defaultPort?.transport).toEqual({ type: "http", url, oauth: { callbackUrl: redirectDefaultPort, callbackPort: 80 } });
+    expect(servers.ephemeralPort?.transport).toEqual({ type: "http", url, oauth: { callbackUrl: redirectWithoutPort } });
+    expect(servers.oauthFalse?.transport).toEqual({ type: "http", url });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("effectiveServers gives daemon callback settings precedence over the adapter redirect URI", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-oauth-callback-"));
+  try {
+    const url = "https://work.example/mcp";
+    const redirectUri = "http://localhost:1111/callback";
+    writeFileSync(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: {
+      port: { url, oauth: { redirectUri, callbackPort: 2222 } },
+      defaultPort: { url, oauth: { redirectUri, callbackPort: 80 } },
+      callback: { url, oauth: { redirectUri, callbackUrl: "http://localhost:3333/x" } },
+      callbackWithoutPort: { url, oauth: { redirectUri, callbackUrl: "http://localhost/x" } },
+    } }));
+    const { servers } = new NativeMcpStore(root, path.join(root, "private")).effectiveServers();
+    expect(servers.port?.transport).toEqual({ type: "http", url, oauth: { callbackUrl: "http://localhost:2222/callback", callbackPort: 2222 } });
+    expect(servers.defaultPort?.transport).toEqual({ type: "http", url, oauth: { callbackUrl: "http://localhost:80/callback", callbackPort: 80 } });
+    expect(servers.callback?.transport).toEqual({ type: "http", url, oauth: { callbackUrl: "http://localhost:3333/x" } });
+    expect(servers.callbackWithoutPort?.transport).toEqual({ type: "http", url, oauth: { callbackUrl: "http://localhost/x" } });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("effectiveServers reports invalid OAuth and unsupported credentials per HTTP connection", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-invalid-oauth-"));
+  try {
+    const url = "https://work.example/mcp";
+    const sensitiveValue = crypto.randomUUID();
+    const invalid = {
+      badClientId: { oauth: { clientId: [sensitiveValue] } },
+      emptyClientName: { oauth: { clientName: " " } },
+      nonLoopback: { oauth: { redirectUri: `http://${sensitiveValue}.example/callback` } },
+      httpsRedirect: { oauth: { callbackUrl: `https://localhost/${sensitiveValue}` } },
+      badMetadata: { oauth: { authServerMetadataUrl: `/metadata/${sensitiveValue}` } },
+      invalidPort: { oauth: { callbackPort: 65_536 } },
+      invalidRegistration: { oauth: { clientRegistration: sensitiveValue } },
+      nullOAuth: { oauth: null },
+      bareAuth: { auth: sensitiveValue },
+      bareBearer: { bearerToken: sensitiveValue },
+    };
+    writeFileSync(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: {
+      ...Object.fromEntries(Object.entries(invalid).map(([name, definition]) => [name, { url, ...definition }])),
+      valid: { url },
+    } }));
+    const store = new NativeMcpStore(root, path.join(root, "private"));
+    const snapshot = store.effectiveServers();
+    expect(JSON.stringify(snapshot).includes(sensitiveValue)).toBe(false);
+    expect(snapshot.configurationError).toBeUndefined();
+    for (const name of Object.keys(invalid)) {
+      const server = snapshot.servers[name];
+      expect(server && "configurationError" in server && typeof server.configurationError === "string").toBe(true);
+      expect(server?.transport).toBeUndefined();
+    }
+    expect(snapshot.servers.valid?.transport).toEqual({ type: "http", url });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test.each(["replaced", "deleted"] as const)("a later save cannot restore a service token after private metadata is %s", (change) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-token-"));
   const privateDir = path.join(root, "private");

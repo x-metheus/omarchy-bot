@@ -9,16 +9,18 @@ import type { NativeMcpStatus } from "@omarchy-bot/agent-contract";
 import { emptyNativeMcpMetadata, type NativeMcpMetadata, nativeMcpConfigFile, nativeMcpEndpoint, nativeMcpSecretKey, nativeMcpSecretPlaceholder, parseNativeMcpMetadata, resolveNativeMcpCredentials } from "@omarchy-bot/agent-contract/native-mcp-config";
 import { nativeMcpRevision } from "@omarchy-bot/agent-contract/native-mcp-revision";
 import { HttpError } from "../bots/bots.ts";
+import { projectNativeMcpOAuth, type NativeMcpOAuthSettings } from "./nativeMcpOAuth.ts";
 
 type Definition = Record<string, unknown>;
 type Document = { file: string; text: string; values: Record<string, Definition>; root: Record<string, unknown>; toml: boolean };
 type Common = { command?: string; args?: string[]; url?: string; env?: Record<string, string>; headers?: Record<string, string>; disabled: boolean };
+type RuntimeConnection = Common & { oauth?: NativeMcpOAuthSettings };
 
 export type EffectiveMcpServer = { configurationError: string; transport?: never; disabled?: never } | {
   disabled: boolean;
   transport:
     | { type: "stdio"; command: string; args: string[]; env?: Record<string, string> }
-    | { type: "http"; url: string; headers?: Record<string, string> }
+    | { type: "http"; url: string; headers?: Record<string, string>; oauth?: NativeMcpOAuthSettings }
     | { type: "sse" | "socket" };
 };
 
@@ -126,7 +128,7 @@ function projectionLimits(definition: Definition | undefined): { unsupported: st
   const unsupported: string[] = [], local: string[] = [];
   for (const key of Object.keys(definition ?? {})) {
     if (localTimingFields.has(key)) local.push(key);
-    else if (!commonFields.has(key)) unsupported.push(key);
+    else if (!commonFields.has(key) && !(key === "oauth" && typeof definition?.url === "string")) unsupported.push(key);
   }
   if (definition?.type === "sse") unsupported.push("type=sse");
   return { unsupported, local };
@@ -468,7 +470,7 @@ export class NativeMcpStore {
       } catch { errors.push("native-mcp.json: invalid JSON or private metadata"); }
     }
     const names = new Set([...Object.keys(shared), ...Object.keys(pi), ...Object.keys(codex)]);
-    const connections: Record<string, Common> = Object.create(null);
+    const connections: Record<string, RuntimeConnection> = Object.create(null);
     const servers: Record<string, EffectiveMcpServer> = Object.create(null);
     for (const name of names) {
       const sourceDefinition = (source: NativeSource) => Object.hasOwn(sources[source], name) ? sources[source][name] : undefined;
@@ -489,14 +491,29 @@ export class NativeMcpStore {
         continue;
       }
       try {
-        const value = common(definition) ?? common(codexDefinition, true);
-        if (value) connections[name] = value;
+        const fromPi = common(definition);
+        const value = fromPi ?? common(codexDefinition, true);
+        if (!value) continue;
+        const selected = fromPi ? definition : codexDefinition;
+        if (value.url !== undefined) {
+          if (selected?.auth !== undefined || selected?.bearerToken !== undefined) {
+            servers[name] = { configurationError: "Unsupported MCP authentication settings. Check the configuration for this connection." };
+            continue;
+          }
+          const oauth = projectNativeMcpOAuth(selected?.oauth);
+          if (oauth === null) {
+            servers[name] = { configurationError: "Invalid MCP OAuth configuration. Check the OAuth settings for this connection." };
+            continue;
+          }
+          connections[name] = { ...value, ...(oauth ? { oauth } : {}) };
+        } else connections[name] = value;
       } catch { /* Invalid definitions do not prevent other servers from loading. */ }
     }
     const secrets = resolveNativeMcpCredentials({ mcpServers: connections }, metadata, { literalSecrets: true });
-    for (const [name, { command, args, env, url, headers, disabled }] of Object.entries(connections)) {
+    for (const [name, { command, args, env, url, headers, disabled, oauth }] of Object.entries(connections)) {
       if (command !== undefined) servers[name] = { transport: { type: "stdio", command, args: args ?? [], ...(env ? { env } : {}) }, disabled };
-      else if (url !== undefined) servers[name] = { transport: { type: "http", url, ...(headers ? { headers } : {}) }, disabled };
+      else if (url !== undefined) servers[name] = { transport: { type: "http", url, ...(headers ? { headers } : {}), ...(oauth ? { oauth } : {}) }, disabled };
+      if (oauth?.clientSecret) secrets.add(oauth.clientSecret);
       for (const [key, value] of Object.entries(env ?? headers ?? {})) {
         if (/secret|token|key|password|credential|auth|cookie/i.test(key)) secrets.add(value);
         if (!headers) continue;
