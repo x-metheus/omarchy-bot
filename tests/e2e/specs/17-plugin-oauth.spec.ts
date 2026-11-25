@@ -88,7 +88,7 @@ test("plugin consent uses the shell and events refresh connected accounts and al
   await page.getByRole("switch", { name: "Use for Google Drive", exact: true }).click();
   await expect.poll(async () => {
     await page.clock.runFor(16);
-    return page.getByText("Saved. File resources are updated immediately; active native sessions may need to reload configuration.", { exact: true }).isVisible();
+    return page.getByText("Saved. File resources update immediately. The next MCP tool call reads the updated configuration.", { exact: true }).isVisible();
   }).toBe(true);
   await expect(page.getByText("Authorization failed. Try Add account or Reconnect again.", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Reconnect", exact: true }).click();

@@ -5,7 +5,6 @@ async function createBot(page: Page, name: string): Promise<string> {
   await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
   await page.getByRole("textbox", { name: "Name" }).fill(name);
   await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Original instructions");
-  await page.getByRole("radio", { name: /^Pi/ }).check();
   await page.getByRole("button", { name: "Create bot" }).click();
   const row = page.getByRole("button", { name, exact: true });
   await expect(row).toBeVisible();
@@ -116,9 +115,6 @@ test.describe("Bot profiles and avatars", () => {
     await openBotSettings(page, "Profile Bot");
 
     const botSettings = page.getByRole("complementary", { name: "Bot settings" });
-    await expect(botSettings.getByText("Backing Agent", { exact: true })).toBeVisible();
-    await expect(botSettings.getByText("Pi", { exact: true })).toBeVisible();
-    await expect(botSettings.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
     await botSettings.getByRole("textbox", { name: "Name" }).fill("Renamed Profile Bot");
     await botSettings.getByRole("textbox", { name: "Job / Instructions" }).fill("Use the latest profile instructions");
     await botSettings.getByRole("button", { name: "Save profile" }).click();

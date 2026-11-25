@@ -25,10 +25,10 @@ export function selectBotDisplayState(
 ): BotDisplayState {
   const { thinkingAvailability } = bot;
   const thinkingDescription = thinkingAvailability === "supported"
-    ? "Show Thinking exposed by this Bot’s Agent in every conversation."
+    ? "Show Thinking from this Bot’s model in every conversation."
     : thinkingAvailability === "history"
-      ? "This Agent no longer provides Thinking. Previously retained Thinking remains available."
-      : "This Bot’s Agent does not provide Thinking and there is no retained Thinking history.";
+      ? "This Bot no longer provides Thinking. Previously retained Thinking remains available."
+      : "This Bot does not provide Thinking and there is no retained Thinking history.";
 
   return {
     showToolCalls: bot.showToolCalls,

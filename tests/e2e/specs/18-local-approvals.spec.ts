@@ -22,7 +22,6 @@ test("Sidecar startup failure shows recovery through the shared UI", async ({ pa
   await expect(page.getByRole("heading", { name: "Add Service" })).toBeVisible();
   await page.route("**/api/pairing/exchange", route => route.fulfill({ status: 201, json: { token: "fixture-token" } }));
   await page.route("**/api/health", route => route.fulfill({ json: { protocol: 1 } }));
-  await page.route("**/api/agents", route => route.fulfill({ json: [] }));
   await page.route("**/api/bots", route => route.fulfill({ json: [] }));
   await page.evaluate(() => {
     const shell = globalThis.__OMARCHY_BOT_MEMORY_SHELL__!;

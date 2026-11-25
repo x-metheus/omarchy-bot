@@ -214,35 +214,6 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
   await page.route(`**/api/bots/${SECONDARY_BOT_ID}/avatar*`, (route) =>
     route.fulfill({ status: 200, contentType: "image/png", body: ONE_PIXEL_PNG }),
   );
-  await page.route("**/api/agents", (route) =>
-    fulfillJson(route, [
-      {
-        id: "pi",
-        displayName: "Pi",
-        version: "fixture",
-        status: "ready",
-        capabilities: {
-          version: 4,
-          steering: true,
-          abort: true,
-          botMail: true,
-          plugins: true,
-          nativeThreadActions: ["resume", "history", "close"],
-          thinking: { supported: true, streaming: true },
-          attachments: { text: true, image: false, maxTextBytes: 64 * 1024 },
-          nativeEventFamilies: [],
-        },
-      },
-      {
-        id: "claude",
-        displayName: "Claude",
-        version: "fixture",
-        status: "offline",
-        reason: "Claude worker is disconnected.",
-        guidance: "Reconnect Claude before sending a message.",
-      },
-    ]),
-  );
   await page.route("**/api/bots*", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname !== "/api/bots" || route.request().method() !== "GET") {
@@ -341,7 +312,6 @@ async function gotoSeededWorkspace(
   expectedResponse = "rollback rehearsal",
 ): Promise<void> {
   const initialResponses = [
-    page.waitForResponse((response) => new URL(response.url()).pathname === "/api/agents"),
     page.waitForResponse((response) => {
       const url = new URL(response.url());
       return url.pathname === "/api/bots" && url.search === "";
@@ -637,7 +607,6 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page, { computerState: "unavailable", messagesGate: messages.promise });
 
     const initialResponses = [
-      page.waitForResponse((response) => new URL(response.url()).pathname === "/api/agents"),
       page.waitForResponse((response) => new URL(response.url()).pathname === "/api/bots"),
       page.waitForResponse((response) => new URL(response.url()).pathname === `/api/bots/${PRIMARY_BOT_ID}/threads`),
     ];
@@ -649,17 +618,6 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
 
     await page.getByRole("button", { name: "Offline Researcher", exact: true }).click();
     await expect(page.getByRole("heading", { level: 1, name: "Offline Researcher" })).toBeVisible();
-    await expect(page.getByText("Claude isn’t ready", { exact: true })).toBeVisible();
-    const conversationWorkspace = page.getByLabel("Conversation workspace");
-    const unavailableNotice = conversationWorkspace.getByTestId("composer-error-card");
-    await expect(unavailableNotice).toContainText("Claude worker is disconnected.");
-    await expect(unavailableNotice).toContainText("Reconnect Claude before sending a message.");
-    await expect(conversationWorkspace.getByRole("alert")).toHaveCount(1);
-    await expect(
-      page
-        .getByRole("textbox", { name: "Message input", exact: true })
-        .or(page.getByRole("combobox", { name: "Message input", exact: true }))
-    ).toHaveAttribute("contenteditable", "false");
 
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const computer = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
@@ -777,7 +735,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(mobileNavigationTrigger).toBeFocused();
   });
 
-  test("shows immutable Agent identity, system-following appearance state, and setup guidance", async ({ page }) => {
+  test("shows system-following appearance state and notification setup guidance", async ({ page }) => {
     await page.setViewportSize(desktopViewport);
     await page.emulateMedia({ colorScheme: "dark" });
     await page.addInitScript(() => localStorage.setItem("settings:v1:appearance", "light"));
@@ -792,13 +750,6 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     });
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
-
-    await page.getByRole("button", { name: "Open settings for Release Partner" }).click();
-    const botSettingsPanel = page.getByRole("complementary", { name: "Bot settings" });
-    await expect(botSettingsPanel.getByText("Backing Agent", { exact: true })).toBeVisible();
-    await expect(botSettingsPanel.getByText("Pi", { exact: true })).toBeVisible();
-    await expect(botSettingsPanel.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
-    await page.keyboard.press("Escape");
 
     await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings" });

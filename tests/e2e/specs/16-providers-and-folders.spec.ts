@@ -168,7 +168,6 @@ test("Bot settings saves a model immediately and can restore the Service default
   await page.goto("/");
   await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
   await page.getByRole("textbox", { name: /^Name\b/ }).fill(botName);
-  await page.getByRole("radio", { name: /^Pi/ }).check();
   const [created] = await Promise.all([
     page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/bots"),
     page.getByRole("button", { name: "Create bot", exact: true }).click(),

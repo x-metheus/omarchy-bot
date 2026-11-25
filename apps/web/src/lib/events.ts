@@ -3,7 +3,6 @@ import { api } from "./api.ts";
 import { clearDraftsByBot } from "./drafts.ts";
 
 export type QueryTag =
-  | "agents"
   | "bots"
   | "threads"
   | "messages"
@@ -190,7 +189,6 @@ export function route(
     case "agent.status":
     case "agent.error":
     case "agent.worker_crash":
-      invalidate("agents");
       invalidate("bots");
       return;
     case "bot.created":

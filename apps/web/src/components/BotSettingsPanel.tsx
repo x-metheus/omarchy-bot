@@ -28,7 +28,6 @@ import { WorkspaceDrawer } from "./WorkspaceDrawer.tsx";
 export interface BotSettingsPanelProps {
   bot: BotViewDto;
   open: boolean;
-  agentDisplayName: string;
   returnFocusRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   onUpdated: (bot: BotDto) => void;
@@ -40,7 +39,6 @@ type ImmediateSetting = BotDisplaySetting | "model";
 /** Right-side Bot Settings panel. Profile identity and Display preferences remain separate. */
 export function BotSettingsPanel({
   bot,
-  agentDisplayName,
   open,
   returnFocusRef,
   onClose,
@@ -333,11 +331,6 @@ export function BotSettingsPanel({
             width="100%"
             data-testid="profile-instructions"
           />
-          <VStack gap={0.5}>
-            <Text type="label-lg">Backing Agent</Text>
-            <Text>{agentDisplayName}</Text>
-            <Text color="secondary">Fixed for this bot.</Text>
-          </VStack>
           <VStack gap={1}>
             <Typeahead
               ref={modelField}
@@ -411,7 +404,7 @@ export function BotSettingsPanel({
             </VStack>
             <Switch
               label="Show tool calls"
-              description="Show Agent tool work in every conversation for this Bot."
+              description="Show this Bot’s tool work in every conversation."
               value={displayState.showToolCalls}
               onChange={(value) => void updateDisplaySetting("showToolCalls", value)}
               isDisabled={settingBusy !== undefined}

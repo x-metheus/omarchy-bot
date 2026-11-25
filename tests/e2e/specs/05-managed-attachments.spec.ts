@@ -5,7 +5,6 @@ async function createBot(page: Page, name: string): Promise<string> {
   await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
   await page.getByRole("textbox", { name: "Name" }).fill(name);
   await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Inspect local attachments");
-  await page.getByRole("radio", { name: /^Pi/ }).check();
   await page.getByRole("button", { name: "Create bot" }).click();
 
   await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
@@ -215,11 +214,16 @@ test.describe("managed attachments", () => {
     const supportedRow = stagedAttachments(page).getByText("notes.txt", { exact: true });
     await expect(supportedRow).toBeVisible();
 
-    await dropFile(page, {
-      name: "pixel.png",
-      mediaType: "application/octet-stream",
-      bytes: [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13],
-    });
+    const [rejectedPng] = await Promise.all([
+      page.waitForResponse((response) =>
+        response.request().method() === "POST" && new URL(response.url()).pathname === "/api/attachments/stage"),
+      dropFile(page, {
+        name: "pixel.png",
+        mediaType: "application/octet-stream",
+        bytes: [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13],
+      }),
+    ]);
+    expect(rejectedPng.status()).toBe(400);
     await expect(page.getByText("This bot can’t use pixel.png. Remove it or choose a supported file.", { exact: true })).toBeVisible();
     await expect(composerInput(page)).toHaveText("attachment-echo");
     await expect(supportedRow).toBeVisible();

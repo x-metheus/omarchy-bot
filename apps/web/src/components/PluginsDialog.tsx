@@ -250,7 +250,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
       await Promise.all([queryClient.invalidateQueries({ queryKey: ["plugins"] }), queryClient.invalidateQueries({ queryKey: ["plugin-commands"] })]);
     },
   });
-  const run = async (action: () => Promise<unknown>, message = "Saved. File resources are updated immediately; active native sessions may need to reload configuration."): Promise<void> => {
+  const run = async (action: () => Promise<unknown>, message = "Saved. File resources update immediately. The next MCP tool call reads the updated configuration."): Promise<void> => {
     setNotice("");
     setAuthorizationNotice("");
     await change.mutateAsync(action);
@@ -282,7 +282,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
   const companionSkills = provider && service ? data.skills.filter((skill) => skill.origin === "service" && skill.serviceId === `${provider.id}/${service.id}`) : [];
 
   return <VStack gap={4} {...stylex.props(styles.root)} data-testid="plugins-section">
-    <Text color="secondary">Plugins are shared across Bots. File resources update immediately; active tools may retain connections until their native session closes, and configuration changes may require a native-session reload.</Text>
+    <Text color="secondary">Plugins are shared across Bots. File resources update immediately. MCP tool calls read the latest configuration, and changed connections retire after queued work.</Text>
     <div {...stylex.props(styles.row)} aria-label="Plugin sections">
       {(["services", "mcp", "skills"] as const).map((id) => <Button key={id} label={id === "mcp" ? "MCP" : id[0]!.toUpperCase() + id.slice(1)} variant={section === id ? "primary" : "secondary"} size="sm" aria-pressed={section === id} onClick={() => setSection(id)} />)}
     </div>
@@ -292,7 +292,15 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
     {data.cloudError ? <Banner status="warning" title="Catalog or publisher unavailable" description={`${data.cloudError} Native connections and local Skills remain available.`} /> : null}
     {confirm ? <VStack gap={2} {...stylex.props(styles.card)}>
       <Heading level={2}>{confirm.kind === "account" ? "Disconnect" : "Remove"} {confirm.name}?</Heading>
-      <Text>{confirm.kind === "account" ? "Remove this account’s native components and private application grant. Native OAuth credentials and provider access are managed by the native client and provider. Other account connections are unaffected." : confirm.kind === "service" ? "Remove only this Service’s installed components for this account, not the account connection or its other Services. Companion Skills still used by other accounts remain. Active tools may retain connections until their native session closes; file resources are removed immediately." : "Remove this shared native resource. Active tools may retain connections until their native session closes; file resources are removed immediately."}</Text>
+      <Text>
+        {confirm.kind === "account"
+          ? "Remove this account’s native components and private application grant. Native OAuth credentials and provider access are managed by the native client and provider. Other account connections are unaffected."
+          : confirm.kind === "service"
+            ? "Remove only this Service’s installed components for this account. Companion Skills still used by other accounts remain. File resources are removed immediately. Removed MCP connections retire after queued work."
+            : confirm.kind === "mcp"
+              ? "Remove this shared MCP connection. It retires after queued work."
+              : "Remove this shared Skill. Its files are removed immediately."}
+      </Text>
       <div {...stylex.props(styles.row)}><Button label="Confirm removal" isDisabled={busy} onClick={() => execute(async () => {
         if (confirm.kind === "mcp") await api.deleteMcp(confirm.id);
         else if (confirm.kind === "skill") await api.removeSkill(confirm.id);
@@ -360,7 +368,7 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
     </VStack> : null}
 
     {section === "mcp" ? <VStack gap={3}>
-      <Heading level={2}>MCP connections</Heading><Text color="secondary">Choose a managed public npm package, a native local command, or a hosted HTTP endpoint. Installing a package does not confirm a server connection. Configuration changes may require the Agent to reload before they take effect.</Text>
+      <Heading level={2}>MCP connections</Heading><Text color="secondary">Choose a managed public npm package, a native local command, or a hosted HTTP endpoint. Use Check to verify a server connection after installing a package.</Text>
       <Text color="secondary">Managed npm packages install privately from the latest release and can be checked for updates here; local modifications are preserved. Only Node-compatible entrypoints are supported, and packages requiring unsupported install-time scripts are rejected. Native commands must be installed and updated outside the app. Hosted servers control their own deployments; a saved URL does not pin a remote version.</Text>
       {editing !== undefined ? <McpEditor key={editing === "new" ? "new" : editing.id} {...(editing === "new" ? {} : { initial: editing })} busy={busy} onCancel={() => setEditing(undefined)} onSave={async (body) => { await run(() => api.saveMcp(editing === "new" ? null : editing.id, body)); setEditing(undefined); }} /> : <Button label="Add MCP" onClick={() => setEditing("new")} isDisabled={busy} />}
       {!data.mcp.length && editing === undefined ? <Text color="secondary">No custom MCP connections. Add a managed npm package, an endpoint, or a locally installed server.</Text> : null}
@@ -375,12 +383,12 @@ function PluginsContent({ open, bots, selectedBotId, onCreateSkill }: {
             ? <Banner status="warning" title="Package modified locally" description={connection.package.error ?? "Local changes are preserved; package updates will not overwrite them."} />
             : connection.package.updateStatus === "failed" || connection.package.error ? <Banner status="warning" title="Package update needs attention" description={connection.package.error ?? "The package update could not be completed. Check again to retry."} /> : null}
           {connection.package.updateStatus === "available" ? <Text color="secondary">A package update is available.</Text> : connection.package.updateStatus === "current" ? <Text color="secondary">Package is current as of the last check.</Text> : null}
-          <Button label="Check update" size="sm" variant="secondary" isDisabled={busy || Boolean(connection.readOnly)} onClick={() => execute(() => api.updateMcp(connection.id), "Package update check completed. See package status; installation does not confirm connectivity, and active native sessions may need to reload configuration.")} />
+          <Button label="Check update" size="sm" variant="secondary" isDisabled={busy || Boolean(connection.readOnly)} onClick={() => execute(() => api.updateMcp(connection.id), "Package update check completed. See package status for details. The next MCP tool call reads the latest configuration.")} />
         </VStack> : null}
         {connection.readOnly ? <Text color="secondary">Read-only native configuration. Edit its source file to change or remove this connection.</Text> : null}
         <Switch label={`Enable ${connection.name}`} value={connection.enabled} isDisabled={busy || Boolean(connection.readOnly)} onChange={(enabled) => execute(() => api.setMcpEnabled(connection.id, enabled))} />
         <Text>{connection.pendingReload ? "Configuration pending reload" : !connection.enabled ? "Disabled" : connection.status === "connected" ? `Connected · ${connection.toolCount} tools discovered` : mcpStatusLabels[connection.status]}</Text>
-        {connection.pendingReload ? <Text color="secondary">Saved configuration has not been loaded by the Agent. Any previous connection status or tools may be out of date.</Text> : null}
+        {connection.pendingReload ? <Text color="secondary">Connection status and tools may be out of date until the runtime loads the saved configuration.</Text> : null}
         {connection.error ? <Banner status="error" title="MCP error" description={connection.error} /> : null}
         {connection.status === "needs-auth" ? <McpAuthorization connectionId={connection.id} busy={busy} execute={execute} /> : null}
         <div {...stylex.props(styles.row)}><Button label="Check" size="sm" variant="secondary" isDisabled={busy} onClick={() => execute(() => api.checkMcp(connection.id), "Connection check completed. See its reported status below.")} /><Button label="Edit" size="sm" variant="secondary" isDisabled={busy || Boolean(connection.readOnly)} onClick={() => setEditing(connection)} /><Button label="Remove" size="sm" variant="ghost" isDisabled={busy || Boolean(connection.readOnly)} onClick={() => setConfirm({ kind: "mcp", id: connection.id, name: connection.name })} /></div>

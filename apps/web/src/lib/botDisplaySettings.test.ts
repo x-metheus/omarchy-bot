@@ -13,7 +13,7 @@ describe("Bot Display Settings presentation state", () => {
     expect(state.thinkingDescription).toContain("does not provide Thinking");
   });
 
-  test("enables Thinking when the current Agent declares support", () => {
+  test("enables Thinking when the Bot reports support", () => {
     const state = selectBotDisplayState({
       showToolCalls: false,
       showThinking: false,
@@ -21,10 +21,10 @@ describe("Bot Display Settings presentation state", () => {
     });
 
     expect(state.thinkingDisabled).toBe(false);
-    expect(state.thinkingDescription).toContain("exposed by this Bot’s Agent");
+    expect(state.thinkingDescription).toContain("from this Bot’s model");
   });
 
-  test("keeps retained Thinking selectable after current capability is lost", () => {
+  test("keeps retained Thinking selectable when the Bot no longer provides it", () => {
     const state = selectBotDisplayState({
       showToolCalls: true,
       showThinking: true,
