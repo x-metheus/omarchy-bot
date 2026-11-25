@@ -343,7 +343,12 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
   - Closed on this branch: the four remaining Thread and lifecycle failures from the Checkpoint B list, and every other switch-on-only failure, are now either fixed on the durable path or marked `workerOnly` with a reason. The decisions, the resulting totals, and the known limits are recorded under “Checkpoint C closure (2026-11-25)” below.
 - [x] A write outside the allowed folders asks, survives a restart, and writes once (Task 9, `restart.test.ts`)
 - [ ] Review with the human before proceeding
-  - Full sweep of all 106 `tests/integration` files on main at `b97ac11` (2026-11-25):
+  - After the Checkpoint C fixes and the removal of every migration, a full sweep of all 104 files ran on main at `e9b0205` (2026-11-25):
+    - Switch on: 829 pass, 10 fail, 58 skip.
+    - Switch off: 862 pass, 10 fail, 24 skip.
+    - The same 10 environmental or older failures appear in both modes, listed below. No test fails only with the switch on.
+    - The skips are the approved `workerOnly` cases, which Task 20 deletes. Each one's reason is listed in the Checkpoint C fixes notes.
+  - Earlier sweep, before the Checkpoint C fixes, all 106 `tests/integration` files on main at `b97ac11` (2026-11-25):
     - Switch on: 813 pass, 39 fail, 47 skip.
     - Switch off: 864 pass, 10 fail, 24 skip.
     - At Checkpoint B (95 files), the same sweep gave 659 pass, 75 fail and 34 skip with the switch on, and 735 pass, 18 fail and 15 skip with it off.

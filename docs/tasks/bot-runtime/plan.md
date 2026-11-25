@@ -85,7 +85,7 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 ### Checkpoint C
 Mailbox, attachments, and every failure caused by tools not yet built in process move here from Checkpoint B, including tool-call projection, native events, capability inventory, the `process-only` fixture, computer and browser tools, and sidecar tools.
 
-- [x] Agent computer, browser, mailbox, and sidecar integration tests pass with the switch on (native-event and `process-only` cases still open; see todo.md)
+- [x] Agent computer, browser, mailbox, and sidecar integration tests pass with the switch on. Across all integration files, no test fails only with the switch on (see todo.md).
 - [x] A write outside the allowed folders asks, survives a restart, and writes once
 - [ ] Review with the human
 
