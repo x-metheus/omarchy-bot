@@ -115,7 +115,6 @@ export interface BotRuntime {
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
   mcpStatus(): NativeMcpStatus[];
-  mcpMarkNeedsAuth(name: string): NativeMcpStatus | undefined;
   mcpControl(input: McpControlInput): Promise<NativeMcpControlResult>;
   close(): Promise<void>;
   /** Requests to use files outside the allowed folders; absent without Service storage and events. */
@@ -136,7 +135,7 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
 export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: {
   events?: Pick<EventLog, "append">;
   mcp?: Pick<McpExtensionDeps, "servers" | "prepareServers" | "fillSecrets" | "authProvider">;
-  mcpOAuth?: Pick<McpExtensionDeps, "initialRejectedServers" | "onRejectedChange"> & {
+  mcpOAuth?: {
     onAuthorization?: (outcome: McpAuthorizationOutcome) => void;
   };
   computer?: Pick<ComputerBroker, "agentToolAct" | "agentBrowserAct">;
@@ -148,7 +147,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   } : undefined);
   const redactFailure = (reason: string, botId: string) => secretStore.redactKnown(reason, botId).catch(() => "[redacted]");
   const mcpOptions = options.mcp;
-  const { onAuthorization, ...rejectedOptions } = options.mcpOAuth ?? {};
+  const onAuthorization = options.mcpOAuth?.onAuthorization;
   const manager = mcpOptions ? new McpOAuthManager({
     secrets: secretStore,
     settings({ name, serverUrl }) {
@@ -183,7 +182,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   }) : undefined;
   const mcp = mcpOptions && manager ? createMcpExtension({
     ...mcpOptions,
-    ...rejectedOptions,
     authProvider: (name, url) => manager.authProvider(name, url),
   }) : undefined;
   let reportedCredentialsFailure = false;
@@ -859,9 +857,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       },
       mcpStatus() {
         return mcp?.status() ?? [];
-      },
-      mcpMarkNeedsAuth(name) {
-        return mcp?.markNeedsAuth(name);
       },
       async mcpControl({ action, server, redirectUrl, authorizationId, expiresAt }) {
         const status = () => mcp?.status() ?? [];

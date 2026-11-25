@@ -1,7 +1,6 @@
-import type { Database } from "bun:sqlite";
 import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
-import { getSetting, setSetting } from "../persistence/settings.ts";
+import { getSetting } from "../persistence/settings.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
 import { ThreadsService } from "../modules/threads/threads.ts";
 import { AgentsRegistry } from "../modules/agents/registry.ts";
@@ -9,8 +8,6 @@ import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { openBotRuntime } from "../modules/runtime/runtime.ts";
-import { importMcpOAuthTokensOnce } from "../modules/runtime/mcpOAuthImport.ts";
-import { createPiMcpAdapterTokenReader } from "../modules/runtime/mcpOAuthKeyringReader.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker, type ComputerSurfaceOwner } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
@@ -39,32 +36,6 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
   const tmp = `${statusPath}.tmp`;
   writeFileSync(tmp, JSON.stringify(data, null, 2));
   renameSync(tmp, statusPath);
-}
-
-export function keyringAccessDisabled(env: Record<string, string | undefined>): boolean {
-  return env.OMARCHY_TEST_DISABLE_KEYRING === "1";
-}
-
-const MCP_OAUTH_REJECTED_SERVERS_SETTING = "mcpOAuthRejectedServers";
-const MAX_MCP_OAUTH_REJECTED_SERVERS = 64;
-
-function readMcpOAuthRejectedServers(db: Database): Set<string> {
-  const setting = getSetting(db, MCP_OAUTH_REJECTED_SERVERS_SETTING);
-  if (setting !== null) {
-    try {
-      const values: unknown = JSON.parse(setting);
-      if (Array.isArray(values)) {
-        const names = new Set(values.filter((value): value is string => typeof value === "string"));
-        return new Set([...names].slice(-MAX_MCP_OAUTH_REJECTED_SERVERS));
-      }
-    } catch { /* Ignore a malformed settings value. */ }
-  }
-  return new Set();
-}
-
-export async function closeRuntimeAfterMcpOAuthImport(importing: Promise<unknown> | undefined, closeRuntime: () => Promise<void>): Promise<void> {
-  await importing;
-  await closeRuntime();
 }
 
 export interface MainOptions {
@@ -255,8 +226,6 @@ export async function main(options: MainOptions = {}): Promise<{
       },
     },
     mcpOAuth: {
-      initialRejectedServers: readMcpOAuthRejectedServers(db),
-      onRejectedChange: (names) => setSetting(db, MCP_OAUTH_REJECTED_SERVERS_SETTING, JSON.stringify(names.slice(-MAX_MCP_OAUTH_REJECTED_SERVERS))),
       onAuthorization: (outcome) => { plugins?.handleNativeAuthorization(outcome); },
     },
     computer,
@@ -286,24 +255,6 @@ export async function main(options: MainOptions = {}): Promise<{
     if (origin.hostname === "[::]") origin.hostname = "[::1]";
     return origin.origin;
   }, (event) => { events.append("plugin", event.accountId ?? event.mcpId ?? event.providerId ?? "plugins", `plugin.authorization_${event.status}`, event); });
-  let mcpOAuthImport: Promise<unknown> | undefined;
-  // Test fixtures set this guard to avoid opening the host keyring during startup.
-  if (!keyringAccessDisabled(process.env) && typeof runtime.mcpControl === "function") {
-    const markerKey = "mcpOAuthAdapterImport";
-    mcpOAuthImport = importMcpOAuthTokensOnce({
-      preparePlugins: async () => (await plugins.prepareServiceCredentials()).failed.length === 0,
-      createReader: () => createPiMcpAdapterTokenReader({ get: (options) => Bun.secrets.get(options) }),
-      secrets: runtime.secrets,
-      snapshot: mcpServers,
-      check: (name) => runtime.mcpControl({ action: "connect", server: name })
-        .then(({ servers }) => servers.some((server) => server.name === name && server.status === "connected")),
-      reportRejected: (name) => runtime.mcpMarkNeedsAuth(name),
-      marker: {
-        get: () => getSetting(db, markerKey) ?? undefined,
-        set: (value) => setSetting(db, markerKey, value),
-      },
-    }).catch(() => undefined);
-  }
   const devices = new SidecarBroker(cfg.sharedWorkspaceDir);
   const pairing = new PairingService(db);
   const pairingHostSecret = pairing.ensureHostSecret(cfg.stateDir);
@@ -404,7 +355,7 @@ export async function main(options: MainOptions = {}): Promise<{
     devices.close();
     mailbox.pauseDispatch();
     await turns.shutdown().catch(reportStopFailure("turns"));
-    await closeRuntimeAfterMcpOAuthImport(mcpOAuthImport, () => runtime.close()).catch(reportStopFailure("runtime"));
+    await runtime.close().catch(reportStopFailure("runtime"));
     computer.shutdown();
     await projections.shutdown().catch(reportStopFailure("projections"));
     await screens.shutdown().catch(reportStopFailure("screens"));
@@ -424,7 +375,7 @@ export async function main(options: MainOptions = {}): Promise<{
     devices.close();
     mailbox.pauseDispatch();
     await turns.shutdown({ reason: "daemon restart" });
-    await closeRuntimeAfterMcpOAuthImport(mcpOAuthImport, () => runtime.close());
+    await runtime.close();
     computer.shutdown();
     await projections.shutdown();
     screens.detach();
