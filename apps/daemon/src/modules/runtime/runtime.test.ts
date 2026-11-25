@@ -256,8 +256,8 @@ test("a durable Turn completes with a stored provider", () => withFakeRuntimePro
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey, models: [{ id: "fake-model" }] });
     expect((await createRuntimeModels(h.svc.credentials).getAuth("fake"))?.auth.apiKey).toBe(apiKey);
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const botId = await makeBot(h, "Stored provider");
+    h.svc.agents.markOffline("pi", "Agent unavailable during durable Turn");
     const sent = await sendToBot(h, botId, "Use the stored provider");
     await waitThreadIdle(h, sent.threadId);
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
@@ -277,7 +277,6 @@ test("durable user input retains managed text and JSON attachments across restar
     try {
       await first.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
       setSetting(first.svc.db, "default_model", "fake/fake-model");
-      setSetting(first.svc.db, "runtime", "durable");
       const botId = await makeBot(first, "Attachments across restart");
       const draftToken = crypto.randomUUID();
       const text = await first.svc.attachments.stage(botId, draftToken, new File(["line one\nline two | end"], "notes.txt"));
@@ -327,7 +326,6 @@ test("a durable Turn times out a hung provider while a completed Turn stays comp
     try {
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
-      setSetting(h.svc.db, "runtime", "durable");
       h.svc.cfg.turnTimeoutMs = 250;
       const completed = await sendToBot(h, await makeBot(h, "Completed durable Turn"), "Finish normally");
       expect(await h.svc.turns.waitForTerminal(completed.turnId, 2_000)).toMatchObject({ status: "completed" });
@@ -348,14 +346,16 @@ test("a durable Turn times out a hung provider while a completed Turn stays comp
   });
 });
 
-async function withDeadlineTestDaemon(run: (h: Awaited<ReturnType<typeof startDaemon>>) => Promise<void>) {
-  const h = await startDaemon(undefined, { separateWorkspace: true });
+async function withFakeProviderDaemon(
+  run: (h: Awaited<ReturnType<typeof startDaemon>>) => Promise<void>,
+  options: Parameters<typeof startDaemon>[1] = {},
+) {
+  const h = await startDaemon(undefined, { separateWorkspace: true, ...options });
   try {
     if (!h.svc.credentials.getForRuntime("fake")) {
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
     }
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     await run(h);
   } finally {
     await h.stop();
@@ -392,7 +392,7 @@ test("a durable approval and a queued follow-up can wait longer than the executi
       },
       { segments: [{ type: "text", text: "Wrote the file" }] },
       { segments: [{ type: "text", text: "Follow-up finished" }] },
-    ], {}, () => withDeadlineTestDaemon(async (h) => {
+    ], {}, () => withFakeProviderDaemon(async (h) => {
       const budget = 1_000;
       h.svc.cfg.turnTimeoutMs = budget;
       const botId = await makeBot(h, "Approval deadline");
@@ -437,7 +437,7 @@ test("a rejected durable deadline abort retries and fails the Turn without anoth
       };
     });
     try {
-      await withDeadlineTestDaemon(async (h) => {
+      await withFakeProviderDaemon(async (h) => {
         h.svc.cfg.turnTimeoutMs = 500;
         const sent = await sendToBot(h, await makeBot(h, "Retry deadline abort"), "Wait until the deadline retries");
         await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "failed", reason: "timed out after 1s" });
@@ -469,7 +469,7 @@ test("a user abort racing a rejected durable deadline abort keeps the user's rea
       conversation.abort = async (...args) => { await rejectFirst(); return abort(...args); };
     });
     try {
-      await withDeadlineTestDaemon(async (h) => {
+      await withFakeProviderDaemon(async (h) => {
         h.svc.cfg.turnTimeoutMs = 500;
         const sent = await sendToBot(h, await makeBot(h, "User abort deadline race"), "Wait until cancelled");
         await started.promise;
@@ -499,7 +499,7 @@ test("a rejected explicit durable abort leaves the deadline armed for a hung pro
       };
     });
     try {
-      await withDeadlineTestDaemon(async (h) => {
+      await withFakeProviderDaemon(async (h) => {
         h.svc.cfg.turnTimeoutMs = 500;
         const sent = await sendToBot(h, await makeBot(h, "Rejected explicit abort"), "Hang after the abort is rejected");
         await started.promise;
@@ -530,7 +530,7 @@ test("a deadline delayed until its durable run settles leaves the successor and 
       conversation.abort = async (...args) => { await hold(); return abort(...args); };
     });
     try {
-      await withDeadlineTestDaemon(async (h) => {
+      await withFakeProviderDaemon(async (h) => {
         h.svc.cfg.turnTimeoutMs = 500;
         const botId = await makeBot(h, "Settled deadline race");
         const first = await sendToBot(h, botId, "First request");
@@ -562,7 +562,7 @@ test("a timed-out durable run withdraws a queued follow-up on the same Thread", 
       return fauxAssistantMessage([], { stopReason: "aborted" });
     },
     { segments: [{ type: "text", text: "Later reply" }] },
-  ], {}, () => withDeadlineTestDaemon(async (h) => {
+  ], {}, () => withFakeProviderDaemon(async (h) => {
     h.svc.cfg.turnTimeoutMs = 500;
     const botId = await makeBot(h, "Timeout with queued input");
     const first = await sendToBot(h, botId, "Hang until timeout");
@@ -607,7 +607,7 @@ test.each(["replies", "times out"] as const)("the next ordinary send %s after a 
     let conversation: Conversation | undefined;
     const restore = interceptDeadlineTestHarness((created) => { conversation = created; });
     try {
-      await withDeadlineTestDaemon(async (h) => {
+      await withFakeProviderDaemon(async (h) => {
         h.svc.cfg.turnTimeoutMs = 500;
         const sent = await sendToBot(h, await makeBot(h, "Timeout with queued steer"), "Hang until timeout");
         await started.promise;
@@ -652,9 +652,9 @@ test.each(["replies", "times out"] as const)("the next ordinary send %s after a 
 });
 
 test("the durable tool-fail fixture faults the run after its bash call starts", async () => {
-  const restore = process.env.OMARCHY_TEST_DURABLE === "1" ? undefined : installDurableSuiteProvider();
+  const restore = installDurableSuiteProvider();
   try {
-    await withDeadlineTestDaemon(async (h) => {
+    await withFakeProviderDaemon(async (h) => {
       const sent = await sendToBot(h, await makeBot(h, "Failed tool round"), "tool-fail");
       await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "failed", reason: "fake failure" });
       const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.filter(({ aggregateId }) => aggregateId === sent.threadId);
@@ -663,37 +663,28 @@ test("the durable tool-fail fixture faults the run after its bash call starts", 
       expect(h.svc.db.query(`SELECT t.id FROM pi_tasks t JOIN pi_thread_conversations c ON c.conversation_id = t.conversation_id
         WHERE c.thread_id = ? AND json_extract(t.record, '$.input.callId') = 'fixture-failing-bash'`).all(sent.threadId)).toHaveLength(1);
     });
-  } finally { restore?.(); }
+  } finally { restore(); }
 });
 
 test("durable native bash uses the Shared Workspace cwd with a Sidecar online and sends no Sidecar jobs", async () => {
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  process.env.OMARCHY_TEST_DURABLE = "1";
-  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  const restore = installDurableSuiteProvider();
   try {
-    h = await startDaemon(undefined, { separateWorkspace: true });
-    const deviceId = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const frames: DeviceServerFrame[] = [];
-    const port = { send: (frame: DeviceServerFrame) => { frames.push(frame); }, close: () => {} };
-    expect(h.svc.devices.register(port, {
-      type: "register", deviceId, hostname: "laptop", os: "linux", shell: "posix-sh", capabilities: ["shell"],
-    }).ok).toBeTrue();
+    await withFakeProviderDaemon(async (h) => {
+      const deviceId = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const frames: DeviceServerFrame[] = [];
+      const port = { send: (frame: DeviceServerFrame) => { frames.push(frame); }, close: () => {} };
+      expect(h.svc.devices.register(port, {
+        type: "register", deviceId, hostname: "laptop", os: "linux", shell: "posix-sh", capabilities: ["shell"],
+      }).ok).toBeTrue();
 
-    const sent = await sendToBot(h, await makeBot(h, "Native cwd Bot"), "native-bash-cwd", deviceId);
-    await waitThreadIdle(h, sent.threadId);
-    const transcript = await messages(h, sent.threadId);
-    expect(transcript.find(({ toolCall }) => toolCall?.name === "bash")?.toolCall?.status).toBe("completed");
-    expect(transcript.find(({ kind }) => kind === "response")?.text?.trim()).toBe(h.svc.cfg.sharedWorkspaceDir);
-    expect(frames).toEqual([]);
-  } finally {
-    try {
-      await h?.stop();
-      if (h) for (const directory of [h.home, `${h.home}-profile`, h.svc.cfg.stateDir]) rmSync(directory, { recursive: true, force: true });
-    } finally {
-      if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-      else process.env.OMARCHY_TEST_DURABLE = previous;
-    }
-  }
+      const sent = await sendToBot(h, await makeBot(h, "Native cwd Bot"), "native-bash-cwd", deviceId);
+      await waitThreadIdle(h, sent.threadId);
+      const transcript = await messages(h, sent.threadId);
+      expect(transcript.find(({ toolCall }) => toolCall?.name === "bash")?.toolCall?.status).toBe("completed");
+      expect(transcript.find(({ kind }) => kind === "response")?.text?.trim()).toBe(h.svc.cfg.sharedWorkspaceDir);
+      expect(frames).toEqual([]);
+    });
+  } finally { restore(); }
 });
 
 test("a durable provider failure redacts app and Bot secrets from the Turn and its status event", () => {
@@ -711,7 +702,6 @@ test("a durable provider failure redacts app and Bot secrets from the Turn and i
       await secrets.forApp().save("token", "MCP token", mcpToken);
       await secrets.forBot(botId).save("token", "Bot token", botToken);
       setSetting(h.svc.db, "default_model", "fake/fake-model");
-      setSetting(h.svc.db, "runtime", "durable");
 
       const sent = await sendToBot(h, botId, "Run with the fake provider");
       const assertRedactedFailure = async (daemon: typeof h, afterCursor: number) => {
@@ -760,7 +750,6 @@ test.each(["new", "recovered"])("a throwing durable tool finalizer fails a %s Tu
       const botId = await makeBot(h, "Failed tool finalizer");
       await new SecretStore(h.svc.cfg.dataDir).forBot(botId).save("finalizer", "Finalizer fixture", secret);
       setSetting(h.svc.db, "default_model", "fake/fake-model");
-      setSetting(h.svc.db, "runtime", "durable");
       const send = () => sendToBot(h, botId, "Finish the durable Turn");
       const recovered = mode === "recovered" ? await send() : undefined;
       if (recovered) {
@@ -850,7 +839,6 @@ test("configured conversation uses the Service limit for unset and null Bots and
     const custom = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Custom limit", agentId: "pi", maxTurns: 3 });
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     async function limit(threadId: string): Promise<number | undefined> {
       const storage = await openNodeSqliteStorage(path.join(h.home, "db.sqlite"), { prefix: "pi_" });
       const harness = await Harness.open(storage, { registry: createRegistry(), models: createModels() }, BACKGROUND_CONTEXT);
@@ -876,25 +864,20 @@ test("configured conversation uses the Service limit for unset and null Bots and
 }));
 
 test("a steer placed at a final Harness boundary resolves its owning Omarchy turn for computer", async () => {
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  process.env.OMARCHY_TEST_DURABLE = "1";
+  const restore = installDurableSuiteProvider();
   const adapter = new FakeBotScreenRuntimeAdapter();
-  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
   try {
-    const daemon = h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const botId = await makeBot(h, "Steered computer Bot");
-    const sent = await sendToBot(h, botId, `say: ${"initial reply ".repeat(3)}`);
-    await until(() => daemon.svc.db.query("SELECT 1 FROM messages WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming'").get(sent.turnId), 3_000, "initial reply did not start streaming");
-    const steered = await sendToThread(h, sent.threadId, "computer:click:first");
-    expect(steered).toMatchObject({ turnId: sent.turnId, action: "steered" });
-    await waitThreadIdle(h, sent.threadId);
-    expect(adapter.inputEvents).toHaveLength(3);
-    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
-  } finally {
-    await h?.stop();
-    if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-    else process.env.OMARCHY_TEST_DURABLE = previous;
-  }
+    await withFakeProviderDaemon(async (h) => {
+      const botId = await makeBot(h, "Steered computer Bot");
+      const sent = await sendToBot(h, botId, `say: ${"initial reply ".repeat(3)}`);
+      await until(() => h.svc.db.query("SELECT 1 FROM messages WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming'").get(sent.turnId), 3_000, "initial reply did not start streaming");
+      const steered = await sendToThread(h, sent.threadId, "computer:click:first");
+      expect(steered).toMatchObject({ turnId: sent.turnId, action: "steered" });
+      await waitThreadIdle(h, sent.threadId);
+      expect(adapter.inputEvents).toHaveLength(3);
+      expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+    }, { botScreenAdapter: adapter });
+  } finally { restore(); }
 });
 
 test("the model request contains the app prompt, Shared Workspace Skills, and Local Sidecar, Bot mail, computer, and browser guidance", () => {
@@ -929,7 +912,6 @@ test("the model request contains the app prompt, Shared Workspace Skills, and Lo
       const { id: botId } = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Prompt Bot", agentId: "pi", instructions: "Keep track of releases." });
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
-      setSetting(h.svc.db, "runtime", "durable");
       const extraFolder = path.join(home, "extra-files");
       setSetting(h.svc.db, ALLOWED_FOLDERS_SETTING, JSON.stringify([extraFolder]));
       const { threadId } = await sendToBot(h, botId, "Check the releases.");
@@ -1049,7 +1031,6 @@ test("a catalog Skill installed with manage_plugins appears in the next durable 
     const botId = await makeBot(h, "Catalog Skill Bot");
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const first = await sendToBot(h, botId, "Install the catalog Skill.");
     await waitThreadIdle(h, first.threadId);
     expect(installResult).toMatchObject({ role: "toolResult", toolName: "manage_plugins", isError: false });
@@ -1077,38 +1058,33 @@ test("a catalog Skill installed with manage_plugins appears in the next durable 
   }
 });
 
-for (const mode of ["worker", "durable"] as const) {
-  test(`${mode} creates the private folder on the first Turn, keeps it on rename, and removes it on deletion`, () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], {}, async () => {
-    const h = await startDaemon();
-    try {
-      setSetting(h.svc.db, "runtime", mode);
-      if (mode === "durable") {
-        await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
-        setSetting(h.svc.db, "default_model", "fake/fake-model");
-      }
-      const botId = await makeBot(h, "Before rename");
-      const siblingId = await makeBot(h, "Sibling");
-      const botsDir = path.join(h.svc.cfg.sharedWorkspaceDir, "bots");
-      const privateDir = path.join(botsDir, botId);
-      const siblingDir = path.join(botsDir, siblingId);
-      expect(existsSync(privateDir)).toBe(false);
-      const sent = await sendToBot(h, botId, "say: hello");
-      await waitThreadIdle(h, sent.threadId);
-      expect(statSync(privateDir).mode & 0o777).toBe(0o700);
-      const note = path.join(privateDir, "note.txt");
-      writeFileSync(note, "Bot note");
-      await api(h, "PATCH", `/api/bots/${botId}`, { name: "After rename" });
-      expect(readFileSync(note, "utf8")).toBe("Bot note");
-      mkdirSync(siblingDir);
-      writeFileSync(path.join(siblingDir, "keep.txt"), "Sibling note");
-      const deleted = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${botId}`, {});
-      expect(deleted.status).toBe("deleted");
-      expect(deleted.removed.privateFolder).toBe(true);
-      expect(existsSync(privateDir)).toBe(false);
-      expect(readFileSync(path.join(siblingDir, "keep.txt"), "utf8")).toBe("Sibling note");
-    } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
-  }));
-}
+test("the first Turn creates the private folder that survives rename and is removed on deletion", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], {}, async () => {
+  const h = await startDaemon();
+  try {
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    const botId = await makeBot(h, "Before rename");
+    const siblingId = await makeBot(h, "Sibling");
+    const botsDir = path.join(h.svc.cfg.sharedWorkspaceDir, "bots");
+    const privateDir = path.join(botsDir, botId);
+    const siblingDir = path.join(botsDir, siblingId);
+    expect(existsSync(privateDir)).toBe(false);
+    const sent = await sendToBot(h, botId, "say: hello");
+    await waitThreadIdle(h, sent.threadId);
+    expect(statSync(privateDir).mode & 0o777).toBe(0o700);
+    const note = path.join(privateDir, "note.txt");
+    writeFileSync(note, "Bot note");
+    await api(h, "PATCH", `/api/bots/${botId}`, { name: "After rename" });
+    expect(readFileSync(note, "utf8")).toBe("Bot note");
+    mkdirSync(siblingDir);
+    writeFileSync(path.join(siblingDir, "keep.txt"), "Sibling note");
+    const deleted = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${botId}`, {});
+    expect(deleted.status).toBe("deleted");
+    expect(deleted.removed.privateFolder).toBe(true);
+    expect(existsSync(privateDir)).toBe(false);
+    expect(readFileSync(path.join(siblingDir, "keep.txt"), "utf8")).toBe("Sibling note");
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
 
 test("deletion refuses to traverse a symlinked bots folder and can retry", async () => {
   const h = await startDaemon();
@@ -1151,7 +1127,6 @@ test("an unreadable SKILL.md is skipped and the durable Turn completes", () => {
       const botId = await makeBot(h, "Skill availability");
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
-      setSetting(h.svc.db, "runtime", "durable");
       const { threadId } = await sendToBot(h, botId, "Check the available Skills.");
       await waitThreadIdle(h, threadId);
       const thread = await api<ThreadDto>(h, "GET", `/api/threads/${threadId}`);
@@ -1163,21 +1138,20 @@ test("an unreadable SKILL.md is skipped and the durable Turn completes", () => {
   });
 });
 
-test("the next Turn sets an existing private folder to mode 0700", async () => {
-  const h = await startDaemon();
-  try {
+test("the next Turn sets an existing private folder to mode 0700", () => withFakeRuntimeProvider(
+  [{ segments: [{ type: "text", text: "ok" }] }], {}, () => withFakeProviderDaemon(async (h) => {
     const botId = await makeBot(h, "Private folder mode");
     const folder = path.join(h.svc.cfg.sharedWorkspaceDir, "bots", botId);
     mkdirSync(folder, { recursive: true });
     chmodSync(folder, 0o755);
     expect(statSync(folder).mode & 0o777).toBe(0o755);
     writeFileSync(path.join(folder, "note.txt"), "Existing note");
-    const { threadId } = await sendToBot(h, botId, "say: check permissions");
-    await waitThreadIdle(h, threadId);
+    const { turnId } = await sendToBot(h, botId, "say: check permissions");
+    expect(await h.svc.turns.waitForTerminal(turnId)).toMatchObject({ status: "completed" });
     expect(statSync(folder).mode & 0o777).toBe(0o700);
     expect(readFileSync(path.join(folder, "note.txt"), "utf8")).toBe("Existing note");
-  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
-});
+  }),
+));
 
 test("deletion refuses a private folder symlink and preserves the sibling Bot's notes", async () => {
   const h = await startDaemon();

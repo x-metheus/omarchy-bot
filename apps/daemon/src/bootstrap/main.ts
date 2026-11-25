@@ -1,6 +1,5 @@
 import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
-import { getSetting } from "../persistence/settings.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
 import { ThreadsService } from "../modules/threads/threads.ts";
 import { AgentsRegistry } from "../modules/agents/registry.ts";
@@ -66,7 +65,6 @@ export async function main(options: MainOptions = {}): Promise<{
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
-  let mailbox!: MailboxService;
   const supervisor: Supervisor = new Supervisor(
     {
       onAgentEvent: (agentId, event) => {
@@ -74,15 +72,12 @@ export async function main(options: MainOptions = {}): Promise<{
           plugins.handleNativeAuthorization(event.payload);
           return;
         }
-        if (!avatars.onAgentEvent(agentId, event)) turns.onAgentEvent(agentId, event);
+        avatars.onAgentEvent(agentId, event);
       },
       onWorkerCrash: (agentId, err) => {
         events.append("agent", agentId, "agent.worker_crash", { agentId, message: err.message });
         agents.markOffline(agentId, err.message);
-        turns.onAgentWorkerCrash(agentId, err);
       },
-      onAgentToolFrame: (agentId, frame) =>
-        turns.onAgentToolFrame(agentId, frame, mailbox, computer),
     },
     {
       agents: agentsDir,
@@ -235,15 +230,10 @@ export async function main(options: MainOptions = {}): Promise<{
   plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
     const worker = await supervisor.agentWorker("pi");
     const resources = await worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
-    if (getSetting(db, "runtime") !== "durable") return resources;
     // Reconciliation can change the configuration revision before Services applies the status.
     plugins.mcp.reconcile();
     return { ...resources, mcp: runtime.mcpStatus() };
-  }, async (input) => {
-    if (getSetting(db, "runtime") === "durable") return runtime.mcpControl(input);
-    const worker = await supervisor.agentWorker("pi");
-    return worker.request({ type: "mcp.control", cwd: cfg.sharedWorkspaceDir, ...input }, 90_000);
-  }, () => {
+  }, (input) => runtime.mcpControl(input), () => {
     const host = cfg.host.includes(":") && !cfg.host.startsWith("[") ? `[${cfg.host}]` : cfg.host;
     const origin = new URL(`${cfg.tlsCert ? "https" : "http"}://${host}:${http.port}`);
     if (origin.hostname === "0.0.0.0") origin.hostname = "127.0.0.1";
@@ -255,8 +245,8 @@ export async function main(options: MainOptions = {}): Promise<{
   const pairingHostSecret = pairing.ensureHostSecret(cfg.stateDir);
   const deviceLiveness = setInterval(() => devices.expire(), 5_000);
   deviceLiveness.unref?.();
-  const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins, devices, runtime);
-  mailbox = new MailboxService(db, events, threads, agents, turns, runtime);
+  const turns = new TurnService(db, events, threads, bots, attachments, cfg, runtime);
+  const mailbox = new MailboxService(db, events, threads, agents, turns, runtime);
   runtime.bindServices({ mailbox, sidecars: devices, plugins });
   const recoveringMail = mailbox.recoverAcceptedMail();
   if (recoveringMail) await recoveringMail;

@@ -7,7 +7,6 @@ import {
   DEFAULT_AVATAR_STYLE_ID,
   type AvatarDto,
   type AvatarRecipeDto,
-  type BotActivityEventPayload,
   type BotDto,
   type BotViewDto,
   type BotUpdatedEventPayload,
@@ -159,15 +158,6 @@ export class BotsService {
     const r = this.#row(id);
     if (!r) throw new HttpError(404, `unknown bot ${id}`);
     return this.#toView(r);
-  }
-
-  recordActivityStatus(botId: string, threadId: string, turnId: string): void {
-    const payload: BotActivityEventPayload = {
-      status: this.getView(botId).status,
-      threadId,
-      turnId,
-    };
-    this.events.append("bot", botId, "bot.activity", payload);
   }
 
   /** Agent reference is fixed: any attempt to change it is a 400. */

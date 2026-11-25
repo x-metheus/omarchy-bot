@@ -98,7 +98,6 @@ test("permanent Bot deletion removes durable messages and attachment contents wh
     try {
       await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
       setSetting(db, "default_model", "fake/fake-model");
-      setSetting(db, "runtime", "durable");
 
       const sibling = await makeBot(h, "Keep this Bot");
       const siblingMessage = crypto.randomUUID();
@@ -152,7 +151,6 @@ test("a failed first-Turn conversation mapping leaves no durable data and the Bo
     try {
       await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
       setSetting(db, "default_model", "fake/fake-model");
-      setSetting(db, "runtime", "durable");
 
       const sibling = await makeBot(h, "Keep this Bot");
       const siblingMessage = crypto.randomUUID();
