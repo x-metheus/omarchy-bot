@@ -377,7 +377,7 @@ Decided: to follow the spec's Hangs rule, the runtime snapshot and the store's d
 **Acceptance criteria:**
 - [x] A secret saved by one Bot is filled in at run time for that Bot, replaced in the result, and cannot be listed or used by another Bot — `bash keeps an out-of-band Bot secret out of entries, messages, console output, and events`; `secrets and bash cannot list, delete, or use another Bot's or the app's secrets`
 - [ ] No secret value appears in `pi_` entries, Service Messages, logs, events, or memory — store values proven by `bash keeps an out-of-band Bot secret out of entries, messages, console output, and events` and `a durable provider failure redacts app and Bot secrets from the Turn and its status event`. Gap: a value the model itself supplies to `secrets` save stays in its assistant tool-call entry, like a secret typed into a Thread; pi-durable's own journal may keep the original provider diagnostic; Bot memory is not implemented yet.
-- [ ] Existing provider keys move into the keychain once, and Turns still complete; without a keychain the fallback file is used and Settings warns — `migrates two legacy providers into app secrets once and reloads them without the file`; `a durable Turn completes with a migrated provider after the legacy file is removed`; `runtime imports a healthy legacy provider when another record fails and retains the file`; `warns about the file backend across Settings sections`. Keychain paths are exercised with the fake backend only; the real OS keychain backend is pending the library/CLI decision.
+- [x] Existing provider keys move into the keychain once, and Turns still complete; without a keychain the fallback file is used and Settings warns — `migrates two legacy providers into app secrets once and reloads them without the file`; `a durable Turn completes with a migrated provider after the legacy file is removed`; `runtime imports a healthy legacy provider when another record fails and retains the file`; `opening with a keychain migrates all indexed fallback values once`; `CredentialStore promotes imported provider keys and resolves them after removing the fallback`; `a promoted directory fails closed after a failed probe or missing keychain API`; `a never-promoted directory uses file storage when the probe is unavailable`; `file storage shows the persistent plaintext warning with the platform limits`. Keychain access uses Bun.secrets (Bun 1.4.5); all keychain paths are proven with fakes, and the manual Linux Secret Service run is still pending for the user.
 - [x] `bash` cannot see the Service's environment variables — `bash starts with PATH and excludes the Service environment marker`
 - [x] Bot Deletion removes the Bot's secrets, and the confirmation says so — `permanent deletion removes only the deleted Bot's private secrets`; `opens the pointer-only Sidebar menu, keeps Bot Settings reachable, cancels unchanged, then deletes and falls back`
 
@@ -390,8 +390,12 @@ Decided: to follow the spec's Hangs rule, the runtime snapshot and the store's d
 - Clean shell environment is an explicit allowlist: `PATH`, `HOME`, `LANG`, `TMPDIR`, `USER`, `SHELL`.
 - Protocol: `removed.secrets` is optional with a default of 0 and `secrets` is a failure stage; `PROTOCOL_VERSION` is not bumped because the web client ships with the daemon. A separately versioned client needs the next bump at cutover.
 - Known limits: shell placeholder substitution is literal, so the Bot's quoting is its responsibility (prefer the environment argument); secret-using calls return bounded output; `secrets` save arguments are model-visible.
+- Keychain (2026-11-25): Bun's built-in `Bun.secrets` (Bun 1.4.5, experimental, no dependency), fixed service `com.omarchy.bot`, store account keys unchanged. The probe bounds get/write/read-back/delete in 5 s plus at most 1 s cleanup; every live keychain operation has a 5 s deadline; Windows writes use `persist: "local"`; macOS and Windows behavior remains unverified.
+- Promotion: a 0600 `secrets/keychain.json` marker is written and its directory synced before any fallback file is unlinked. Promotion refuses to proceed when the fallback holds a value the index cannot account for, retains the source files, and fails closed with a value-free error. After promotion, a keychain outage (including across restarts) reports unavailable and never recreates a plaintext fallback. Provider keys imported by Task 16 promote the same way and still resolve.
+- Settings: persistent plaintext warning for the file backend (POSIX 0700/0600, Windows unverified, Bot shell can read it), an error for unavailable storage, a same-user note for the keychain, and a checking state. A file-backed first save also returns a value-free warning in the tool result; because the durable transcript does not project tool results, Settings is the reliable user-visible surface.
+- Bun is pinned to 1.4.5 in root `engines`, GitHub workflows, image/plugin downloads, and Vercel commands.
 
-**Verification:** default commands; tests with a fake keychain backend, plus one manual run on Linux Secret Service (still manual, pending the backend decision).
+**Verification:** default commands; `bun run typecheck`; `bun run lint:boundaries` (4 pass); `bun test apps/daemon` (295 pass, 1 existing skip); `bun test apps/web/src` (84 pass); the focused secrets/Bun keychain suites (76 pass); the targeted Chromium Settings secret-storage spec (4 pass). Tests use fakes and test daemons load a headless-keychain stub, so no test or child reaches a real keychain. The manual Linux Secret Service run is still pending for the user; macOS and Windows are unverified.
 
 **Dependencies:** Tasks 2 and 8. Tasks 14 and 16 use this store.
 
@@ -453,18 +457,59 @@ Carried from Task 13 (2026-11-25): with the switch on, the Services panel takes 
 **Description:** Add the web extension as the spec describes: `web_fetch` reads a URL as text, extracting with `@mozilla/readability` on `linkedom` and converting with `turndown` (approved 2026-11-24, pinned exactly, imported only by the web extension), and refuses internal addresses unless Settings exempts a range; `web_search` uses Exa's free MCP endpoint through `pi-mcp` by default, with an optional Exa key. Report rate limits as rate limits.
 
 **Acceptance criteria:**
-- [ ] Internal addresses are refused with an error naming the range and the setting
-- [ ] HTTP 429 and the `ai.exa/rateLimited` flag are reported as rate limits, never as empty results
-- [ ] Results are marked as outside content for the memory trust rules
-- [ ] Downloads over 5 MB stop with a clear error; extraction runs in a worker thread with a time limit, and a slow or huge page does not block the Service
+- [x] Internal addresses are refused with an error naming the range and the setting
+  - `web_fetch refuses loopback before connecting and names the range and setting` (asserts the full refusal and zero requests)
+  - `web_fetch accepts 127.0.0.0/8 when Settings exempts it` (updates the setting and fetches successfully on the next call)
+- [x] HTTP 429 and the `ai.exa/rateLimited` flag are reported as rate limits, never as empty results
+  - `web_search reports HTTP 429 as a rate limit` (asserts the rate-limit message and rules out the empty-result message)
+  - `web_search reports HTTP 429 without waiting for a stalled body` (returns a rate limit before the search deadline)
+  - `web_search reports HTTP 429 on SSE resume without retrying` (returns a rate limit after one resume attempt)
+  - `web_search detects the rate-limit flag in an HTTP error body` (bare and `true` flags produce the rate-limit message)
+  - `web_search recognizes a JSON-RPC rate-limit message or error data at HTTP 200` (checks message and data flags)
+  - `web_search detects an HTTP 200 standalone marker in an unsupported content type` (bare and `true` flags produce the rate-limit message)
+  - `web_search detects true and bare flags in HTTP 200 MCP tool error text` (both flags produce the rate-limit message with `isError: true`)
+  - `web_search detects an HTTP 200 MCP result flag in _meta before reporting empty content` (checks a boolean `true` flag)
+  - `web_search detects an HTTP 200 MCP result flag in providerMetadata before reporting empty content` (checks a bare flag)
+  - `web_search detects an HTTP 200 MCP tool error flag in structuredContent` (checks a boolean `true` flag with `isError: true`)
+  - `web_search returns results with a false rate-limit flag in MCP result metadata`
+  - `web_search reports empty content with a null rate-limit flag in MCP result metadata`
+  - `web_search preserves a JSON search result that quotes the rate-limit marker`
+  - `web_search preserves successful results when structuredContent quotes the rate-limit marker`
+- [x] Results are marked as outside content for the memory trust rules
+  - `WEB_TOOL_NAMES lists exactly the registered outside-content tools` (checks both registered names and the classifier)
+  - `web_fetch preserves the full HTML citation and appends a sanitized outside-content notice` (checks the notice and sanitized source)
+  - `web_fetch preserves plain text and Markdown before a notice with the sanitized final URL` (checks both pass-through result types)
+  - `web_search joins Exa results and appends an outside-content notice naming Exa` (checks the notice and Exa source)
+- [x] Downloads over 5 MB stop with a clear error; extraction runs in a worker thread with a time limit, and a slow or huge page does not block the Service
+  - `web_fetch refuses a Content-Length above 5 MB before inspecting the content type` (asserts the 5 MB error from the header)
+  - `web_fetch stops a stream with no Content-Length when it exceeds 5 MB` (asserts the same error from the stream)
+  - `web_fetch returns an error when the extraction worker times out` (asserts the configured timeout error)
+  - `a 10 ms timer fires while web_fetch waits for the extraction worker` (schedules a timer at worker dispatch and checks it fires before the large HTML result returns)
 
 **Verification:** default commands; tests against a local HTTP stub.
 
-**Dependencies:** Task 3
+- `bun test apps/daemon` — 642 passed, 1 skipped, 0 failed across 31 files.
+- `bun run lint:boundaries` — 6 passed, 0 failed.
+- `bun run typecheck` — passed with zero diagnostics after merging `main`.
+- `bun test apps/daemon/src/modules/runtime/extensions/web.test.ts apps/daemon/src/modules/runtime/credentials.test.ts apps/daemon/src/modules/runtime/models.test.ts` — 88 passed, 0 failed across 3 files. The web tests use `Bun.serve` loopback stubs with no live network.
+
+**Dependencies:** Tasks 3 and 22
 
 **Files likely touched:** `apps/daemon/src/modules/runtime/extensions/web.ts`, `apps/daemon/src/modules/runtime/extensions/web.test.ts`, Settings schema
 
 **Estimated scope:** Small
+
+**Decisions:**
+
+- `web_exempt_ranges` is a JSON array of CIDR strings. Exemptions are off by default and read on each fetch. Malformed JSON yields an empty list and invalid entries are ignored. Task 16 owns the Settings UI.
+- The address guard checks IP literals and DNS results on every manual redirect hop, with a maximum of five redirects. Refusals name the canonical range and setting. Each request dials a checked address directly with proxies disabled and the origin's `Host` header and TLS identity preserved, preventing a second DNS lookup between check and connect. The guard is scoped to preventing accidental access to internal addresses.
+- The 5 MB cap applies to both `Content-Length` and streamed bytes. Fetch honors the response charset, extracts `text/html`, passes through `text/plain` and `text/markdown`, and errors on other content types.
+- The extraction worker has a 10-second hard limit by default and is terminated when extraction ends. The worker normalizes HTML without a body and excludes `script`, `style`, `noscript`, `template`, `svg`, `[hidden]`, and `[aria-hidden="true"]` from fallback text.
+- Exa is the sole implementation of the search provider interface. It calls `web_search_exa` through `pi-mcp` with a 20-second timeout and sends the optional key only in the `x-api-key` header, keeping it out of URLs and logs.
+- `web_search` reads the optional `exa-key` app secret through `SecretStore` and trims it before sending the `x-api-key` header. At startup, `CredentialStore` receives the raw and trimmed values to validate provider metadata and redact provider listings and model-selection errors. If the secret changes or the startup read fails, restart the Service so a successful read can refresh those values. Setting the key through the UI or HTTP API is a follow-up outside Task 15.
+- The legacy credential migrator reads an array at the root of `model-credentials.json`. To recover from the object-shaped file written by the Task 15 branch, keep a private backup and use its `providers` array as the contents of `model-credentials.json` so the migrator can import the providers. Re-enter the Exa key as the `exa-key` app secret.
+- HTTP 429 is classified immediately, including on SSE resume, with no retry. The `ai.exa/rateLimited` scanner reads HTTP error bodies (including unsupported HTTP 200 response bodies on the protocol error path), JSON-RPC error messages and data, and protocol metadata (`_meta`, `providerMetadata`, and other extra fields) on any MCP tool result. It scans MCP tool-result error text and `structuredContent` only when `isError === true`. On success, `structuredContent` is treated as result data and content text always bypasses marker scanning. The cycle-safe walk caps depth at 16 and visits at most 1,024 entries. An exact metadata key of `ai.exa/rateLimited` requires boolean `true`. Scanned strings recognize the bare marker or an unquoted `true` value. Empty results and outages have distinct messages. Rate limits and outages suggest the browser tool.
+- `WEB_TOOL_NAMES` and `isExternalContentTool` are exported for the memory trust rules, and both tools append an outside-content notice to successful results. The memory module owns applying the taint.
 
 ---
 

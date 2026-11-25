@@ -2,6 +2,7 @@
  * Bun-side E2E entrypoint. The parent setup provides isolated storage and the
  * fake workers, while this process runs the real daemon main().
  */
+import "../integration/helpers/headless-keychain.ts";
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import { loadConfig } from "../../apps/daemon/src/bootstrap/config.ts";

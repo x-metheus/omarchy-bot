@@ -17,7 +17,7 @@ import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore, MODEL_CREDENTIALS_FILENAME } from "./credentials.ts";
-import { SecretStore } from "./secrets.ts";
+import { fallbackSecretValuesPath, SecretStore } from "./secrets.ts";
 import { createRuntimeModels } from "./models.ts";
 import { importMcpOAuthTokens } from "./mcpOAuthImport.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
@@ -453,8 +453,44 @@ test("secret storage status requires authentication and reports the active backe
   const h = await startDaemon();
   try {
     expect((await fetch(`${h.baseUrl}/api/secrets/status`)).status).toBe(401);
-    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({ status: 200, body: { backend: "file" } });
+    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({
+      status: 200, body: { backend: "file", reason: "No OS keychain is available." },
+    });
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+});
+
+test("secret storage status reports Bun keychain use and fail-closed restart", async () => {
+  const values = new Map<string, string>();
+  const get = spyOn(Bun.secrets, "get").mockImplementation(async ({ name }) => values.get(name) ?? null);
+  const set = spyOn(Bun.secrets, "set").mockImplementation(async ({ name, value }) => { values.set(name, value); });
+  const remove = spyOn(Bun.secrets, "delete").mockImplementation(async ({ name }) => values.delete(name));
+  const value = "keychain-runtime-sentinel";
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  let restarted: typeof h;
+  try {
+    h = await startDaemon(undefined, { seedDurableProvider: false });
+    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({ status: 200, body: { backend: "keychain" } });
+    await h.svc.credentials.add({ id: "keychain-provider", name: "Test provider", protocol: "built-in", apiKey: value });
+    expect([...values.values()].includes(value)).toBeTrue();
+    expect(existsSync(fallbackSecretValuesPath(h.svc.cfg.dataDir))).toBeFalse();
+    await h.stop();
+    get.mockImplementation(async () => { throw new Error(value, { cause: value }); });
+
+    restarted = await startDaemon(h.home, { seedDurableProvider: false });
+    expect(await apiStatus(restarted, "GET", "/api/secrets/status")).toEqual({
+      status: 200, body: { backend: "unavailable", reason: "The OS keychain is unavailable." },
+    });
+    expect(restarted.svc.credentials.getForRuntime("keychain-provider")).toBeUndefined();
+    expect(existsSync(fallbackSecretValuesPath(restarted.svc.cfg.dataDir))).toBeFalse();
+  } finally {
+    get.mockRestore(); set.mockRestore(); remove.mockRestore();
+    for (const daemon of [restarted, h]) {
+      if (!daemon) continue;
+      await daemon.stop();
+      rmSync(daemon.home, { recursive: true, force: true });
+      rmSync(daemon.svc.cfg.stateDir, { recursive: true, force: true });
+    }
+  }
 });
 
 test("configured conversation uses the Service limit for unset and null Bots and the Bot override otherwise", () => withFakeRuntimeProvider(Array.from({ length: 3 }, () => ({ segments: [{ type: "text" as const, text: "ok" }] })), {}, async () => {
@@ -815,7 +851,7 @@ test("deletion refuses a private folder symlink and preserves the sibling Bot's 
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 });
 
-test.each([false, true])("recovery maps both working Bots before waits and new admissions and resumes even if callbacks throw (%s)", async (throwFromCallbacks) => {
+test.each(["none", "registration", "settlement"] as const)("recovery maps both working Bots before waits and new admissions and resumes even if callbacks throw (%s)", async (callbackFailure) => {
   const root = mkdtempSync(path.join(tmpdir(), "bot-runtime-recovery-mapping-"));
   const paths = {
     dbPath: path.join(root, "durable.sqlite"), homeDir: root,
@@ -914,9 +950,15 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
     expect(runtimeProviders.some(({ apiKey }) => apiKey === callerKey)).toBeFalse();
     expect(runtimeProviders.map(({ id }) => id)).toEqual(["fake"]);
     expect(resumed).toBe(0);
-    const callbackError = new Error("callback failure");
+    const settlementSecret = "test-recovery-settlement-secret";
+    const registrationError = new Error(`Registration failed for ${settlementSecret}`);
+    const settlementError = new Error(`Settlement failed for ${settlementSecret}`);
+    if (callbackFailure !== "none") {
+      await runtime.secrets.forBot(rows[0]!.bot).save("settlement", "Settlement fixture", settlementSecret);
+    }
     const registered: string[] = [];
     const settled: string[] = [];
+    let failedReason: string | undefined;
     type Recovery = Parameters<BotRuntime["recoverTurns"]>[0];
     const threads = { listMessages: () => [], finalizeDurableToolCalls() {} } as unknown as Recovery["threads"];
     const bots = { getDto: () => ({ name: "Recovery Bot", maxTurns: null }) } as unknown as Recovery["bots"];
@@ -925,25 +967,46 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
       db, threads, bots, events,
       registered: (id) => {
         registered.push(id);
-        if (throwFromCallbacks) throw callbackError;
+        if (callbackFailure === "registration") throw registrationError;
       },
       settled: (id, outcome) => {
         settled.push(`${id}:${outcome.status}`);
-        if (throwFromCallbacks) throw callbackError;
+        if (outcome.status === "failed") failedReason = outcome.reason;
+        if (callbackFailure === "registration" || (callbackFailure === "settlement" && id === rows[0]!.turn)) {
+          throw settlementError;
+        }
       },
     });
-    if (throwFromCallbacks) {
-      await expect(recovery.settled).rejects.toBe(callbackError);
+    if (callbackFailure === "registration") {
+      const error = await recovery.settled.catch((error: unknown) => error);
+      expect(error instanceof Error).toBeTrue();
+      expect(error).not.toBe(registrationError);
+      expect(error).not.toBe(settlementError);
+      const reason = error instanceof Error ? error.message : "";
+      expect(reason.includes(settlementSecret)).toBeFalse();
+      expect(reason === "Settlement failed for {{secret:settlement}}").toBeTrue();
+      expect(failedReason === "Registration failed for {{secret:settlement}}").toBeTrue();
       expect(waited).toEqual([]);
       expect(settled).toEqual([`${rows[0]!.turn}:failed`]);
     } else {
-      const [first] = rows;
-      const fresh = expect(runtime.startTurn({
-        db, threads, bots, events, botId: first!.bot, threadId: first!.thread, turnId: "fresh-turn", text: "Try a fresh Turn",
-        instructions: "", workspaceDir: paths.sharedWorkspaceDir, privateDir: path.dirname(first!.privateFile), working() {},
-      })).rejects.toBe(freshSubmit);
-      await Promise.all([recovery.settled, fresh]);
-      expect(freshPrivateAccess).toEqual([true, true]);
+      if (callbackFailure === "settlement") {
+        const rejection = recovery.settled.catch((error: unknown) => error);
+        await expect(recovery.registered).resolves.toBeUndefined();
+        const error = await rejection;
+        expect(error instanceof Error).toBeTrue();
+        expect(error).not.toBe(settlementError);
+        const reason = error instanceof Error ? error.message : "";
+        expect(reason.includes(settlementSecret)).toBeFalse();
+        expect(reason === "Settlement failed for {{secret:settlement}}").toBeTrue();
+      } else {
+        const [first] = rows;
+        const fresh = expect(runtime.startTurn({
+          db, threads, bots, events, botId: first!.bot, threadId: first!.thread, turnId: "fresh-turn", text: "Try a fresh Turn",
+          instructions: "", workspaceDir: paths.sharedWorkspaceDir, privateDir: path.dirname(first!.privateFile), working() {},
+        })).rejects.toBe(freshSubmit);
+        await Promise.all([recovery.settled, fresh]);
+        expect(freshPrivateAccess).toEqual([true, true]);
+      }
       expect(registered).toEqual(rows.map(({ turn }) => turn));
       expect(waited.sort((a, b) => a.submission - b.submission)).toEqual(rows.map(({ submission }) => ({ submission, privateAccess: [true, true] })));
       expect(settled.sort()).toEqual(rows.map(({ turn }) => `${turn}:cancelled`));

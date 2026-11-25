@@ -91,9 +91,9 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ### Phase 4: MCP, web, and workspace
 - [x] Task 13: MCP through `pi-mcp`
-- [ ] Task 22: Secret store, secrets tool, and a clean shell environment (merged on the fallback file; `Bun.secrets` keychain backend chosen 2026-11-25, in progress)
+- [x] Task 22: Secret store, secrets tool, and a clean shell environment (`Bun.secrets` keychain; the manual Linux Secret Service run is pending)
 - [ ] Task 14: MCP OAuth sign-in and token import (merged; the `Bun.secrets` keyring reader for the token import is in progress)
-- [ ] Task 15: `web_fetch` and `web_search`
+- [x] Task 15: `web_fetch` and `web_search`
 - [x] Task 16: Provider import, Settings providers screen, and per-Bot model
 - [x] Task 17: Workspace cleanup
 

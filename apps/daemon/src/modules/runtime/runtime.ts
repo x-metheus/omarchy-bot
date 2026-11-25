@@ -31,7 +31,9 @@ import { createPluginsExtension } from "./extensions/plugins.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
+import { createWebExtension, EXA_SEARCH_KEY_SECRET, readWebExemptRanges } from "./extensions/web.ts";
 import { importPiProviders } from "./providerImport.ts";
+import { BunSecretsBackend, probeBunSecrets } from "./bunSecrets.ts";
 import { SecretStore } from "./secrets.ts";
 import { McpOAuthManager, type McpOAuthManagerDeps } from "./mcpOAuth.ts";
 import { AssistantEntry, configure, ConversationIdle, createRegistry, Harness, InboxDoc, LiveDoc, type AgentChange, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type LiveState, type ToolExecutionApi, type SettledSubmissionRecord, type SubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
@@ -137,7 +139,12 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   mcpOAuth?: { onAuthorization?: (outcome: McpAuthorizationOutcome) => void };
   computer?: Pick<ComputerBroker, "agentToolAct" | "agentBrowserAct">;
 } = {}): Promise<BotRuntime> {
-  const secretStore = new SecretStore(paths.dataDir);
+  const secretsApi = typeof Bun === "undefined" ? undefined : Bun.secrets;
+  const secretStore = new SecretStore(paths.dataDir, secretsApi ? {
+    backend: new BunSecretsBackend(secretsApi),
+    probe: () => probeBunSecrets(secretsApi),
+  } : undefined);
+  const redactFailure = (reason: string, botId: string) => secretStore.redactKnown(reason, botId).catch(() => "[redacted]");
   const mcpOptions = options.mcp;
   const manager = mcpOptions ? new McpOAuthManager({
     secrets: secretStore,
@@ -181,9 +188,11 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     reportedCredentialsFailure = true;
     console.warn("Unable to load model credential store; continuing without stored providers");
   };
-  const credentials = await CredentialStore.open(paths.stateDir, secretStore).catch(() => {
+  const exaSearchKey = await secretStore.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET).catch(() => undefined);
+  const credentialOptions = { sensitiveValues: exaSearchKey === undefined ? [] : [exaSearchKey, exaSearchKey.trim()] };
+  const credentials = await CredentialStore.open(paths.stateDir, secretStore, credentialOptions).catch(() => {
     reportCredentialsFailure();
-    return new CredentialStore(secretStore);
+    return new CredentialStore(secretStore, credentialOptions);
   });
   if (db && !reportedCredentialsFailure) {
     try { await importPiProviders({ db, credentials, homeDir: paths.homeDir }); }
@@ -409,6 +418,10 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       }));
       registry.install(createBrowserExtension({ broker: computer, owner }));
     }
+    registry.install(createWebExtension({
+      exemptRanges: () => readWebExemptRanges(db),
+      searchKey: () => secretStore.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET),
+    }));
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         reportCredentialsFailure();
@@ -566,8 +579,9 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
             clearTimeout(admissionTimer);
             delete turn.cancelAdmission;
             register(submission);
-            bookkeeping = recordPeerMailAcceptance(input.db, input.turnId, submission.id, input.markDelivered).catch((error: unknown) => {
-              console.error(`peer-mail Turn ${input.turnId} was admitted but Service bookkeeping failed`, error);
+            bookkeeping = recordPeerMailAcceptance(input.db, input.turnId, submission.id, input.markDelivered).catch(async (error: unknown) => {
+              const reason = await redactFailure(failureMessage(error), input.botId);
+              console.error(`peer-mail Turn ${input.turnId} was admitted but Service bookkeeping failed`, reason);
             });
           } else {
             try {
@@ -612,7 +626,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         let failure = error;
         if (!(error instanceof DurableRunAborted)) {
           const reason = failureMessage(error);
-          const redacted = await secretStore.redactKnown(reason, input.botId);
+          const redacted = await redactFailure(reason, input.botId);
           if (redacted !== reason) failure = new Error(redacted);
         }
         admission.reject(failure);
@@ -629,43 +643,48 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       startPeerMailTurn: startTurn,
       writeService,
       async recoverPeerMailAcceptance(input) {
-        const indexed = input.db.query<{ conversation_id: ConversationId }, [string, string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?").get(input.threadId, input.botId);
-        if (!indexed) return false;
-        const submission = await harness.commit(async (tx) => {
-          const conversationId = indexed.conversation_id;
-          const record = await tx.submissionByRequest(conversationId, input.turnId);
-          if (record?.type !== "input") return;
-          if (record.entry !== undefined) {
-            return (await tx.entry(record.entry))?.kind === "write" ? record : undefined;
-          }
-          if (record.status === "queued") {
-            const inbox = await tx.doc(InboxDoc, conversationId);
-            return inbox.items.find((item) => item.id === record.id)?.entry?.kind === "write" ? record : undefined;
-          }
-          // Withdrawing a queued input removes its inbox item. This request ID belongs to the mailbox's own Turn.
-          if (record.status === "unanswered") return record;
-        }, context);
-        if (!submission) return false;
-        await recordPeerMailAcceptance(input.db, input.turnId, submission.id, input.markDelivered);
-        return true;
+        try {
+          const indexed = input.db.query<{ conversation_id: ConversationId }, [string, string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?").get(input.threadId, input.botId);
+          if (!indexed) return false;
+          const submission = await harness.commit(async (tx) => {
+            const conversationId = indexed.conversation_id;
+            const record = await tx.submissionByRequest(conversationId, input.turnId);
+            if (record?.type !== "input") return;
+            if (record.entry !== undefined) {
+              return (await tx.entry(record.entry))?.kind === "write" ? record : undefined;
+            }
+            if (record.status === "queued") {
+              const inbox = await tx.doc(InboxDoc, conversationId);
+              return inbox.items.find((item) => item.id === record.id)?.entry?.kind === "write" ? record : undefined;
+            }
+            // Withdrawing a queued input removes its inbox item. This request ID belongs to the mailbox's own Turn.
+            if (record.status === "unanswered") return record;
+          }, context);
+          if (!submission) return false;
+          await recordPeerMailAcceptance(input.db, input.turnId, submission.id, input.markDelivered);
+          return true;
+        } catch (error) {
+          throw new Error(await redactFailure(failureMessage(error), input.botId));
+        }
       },
       recoverTurns(input) {
         const jobs: Promise<void>[] = [];
         const rows = input.db.query<{ id: string; thread_id: string; bot_id: string }, []>("SELECT id, thread_id, bot_id FROM turns WHERE status = 'working' ORDER BY started_at, id").all();
         type Outcome = Parameters<typeof input.settled>[1];
-        const settleTurn = (...args: Parameters<typeof input.settled>) => writeService(() => input.settled(...args));
-        const reportFailure = async (row: (typeof rows)[number], reason: string) => {
-          const redacted = await secretStore.redactKnown(reason, row.bot_id);
-          await settleTurn(row.id, { status: "failed", reason: redacted });
-        };
         const settle = async (row: (typeof rows)[number], outcome: Outcome) => {
           try {
             if (!closing) await writeService(() => input.threads.finalizeDurableToolCalls(row.id));
           } catch (error) {
             outcome = { status: "failed", reason: failureMessage(error) };
           }
-          if (outcome.status === "failed") await reportFailure(row, outcome.reason);
-          else await settleTurn(row.id, outcome);
+          if (outcome.status === "failed") {
+            outcome = { status: "failed", reason: await redactFailure(outcome.reason, row.bot_id) };
+          }
+          try {
+            await writeService(() => input.settled(row.id, outcome));
+          } catch (error) {
+            throw new Error(await redactFailure(failureMessage(error), row.bot_id));
+          }
         };
         const registered = (async () => {
           const prepared: {
@@ -757,10 +776,13 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
                   await watch?.stop();
                 }
               };
-              jobs.push(recover().then(
+              const job = recover().then(
                 (outcome) => settle(row, outcome),
                 (error: unknown) => settle(row, { status: "failed", reason: failureMessage(error) }),
-              ).finally(() => { releaseTurn(row.id); }));
+              ).finally(() => { releaseTurn(row.id); });
+              // A job can reject before registration finishes and the drain observes it.
+              void job.catch(() => {});
+              jobs.push(job);
             } catch (error) {
               releaseTurn(row.id);
               await settle(row, { status: "failed", reason: failureMessage(error) });
@@ -768,7 +790,13 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
           }
         })().finally(resumeScheduler);
         recoveryRegistration = registered;
-        const settled = registered.finally(async () => { await Promise.allSettled(jobs); });
+        const settled = registered.finally(async () => {
+          const results = await Promise.allSettled(jobs);
+          const failure = results.find((result) => result.status === "rejected");
+          if (failure) throw failure.reason;
+        });
+        // Recovery runs in the background, and callers can await settlement later.
+        void settled.catch(() => {});
         return { registered, settled };
       },
       async activeTurn(threadId) {

@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.4
+          bun-version: 1.4.5
       - name: Read distribution matrix
         id: matrix
         run: echo "matrix=$(bun -e 'console.log(JSON.stringify({include:await Bun.file("scripts/distro-conformance/matrix.json").json()}))')" >> "$GITHUB_OUTPUT"
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.4
+          bun-version: 1.4.5
       - uses: actions/download-artifact@v4
         with:
           name: distro-runtime

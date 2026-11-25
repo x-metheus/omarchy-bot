@@ -1,3 +1,4 @@
+import "../helpers/headless-keychain.ts";
 import { installDurableCrashProvider } from "../../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 import { CredentialStore } from "../../../apps/daemon/src/modules/runtime/credentials.ts";
 import { SecretStore } from "../../../apps/daemon/src/modules/runtime/secrets.ts";

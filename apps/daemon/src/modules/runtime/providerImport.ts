@@ -150,8 +150,7 @@ export async function importPiProviders({ db, credentials, homeDir, env = proces
     try {
       await credentials.add({ id, name, ...route, apiKey, ...(catalog === undefined ? {} : { models: catalog }) });
     } catch (error) {
-      // CredentialStore rejects a key that also occurs in its serialized metadata or storage name.
-      if (error instanceof Error && error.message === "Secret metadata must not contain the value") continue;
+      if (error instanceof Error && (error.message === "Provider metadata must not contain a key" || error.message === "Secret metadata must not contain the value")) continue;
       throw new Error("Unable to import Pi model providers");
     }
     imported.push(id);

@@ -10,13 +10,13 @@ RUN case "$FAMILY" in \
       alpine) apk add --no-cache bash ca-certificates curl unzip util-linux build-base libx11-dev wayland-dev libxkbcommon-dev pkgconf wayland-protocols libstdc++ ;; \
       *) exit 2 ;; \
     esac
-# Bun 1.4.4 official release digests; Alpine uses the native musl build.
+# Bun 1.4.5 official release digests; Alpine uses the native musl build.
 RUN if [ "$FAMILY" = alpine ]; then \
-      asset=bun-linux-x64-musl; checksum=a5a8ccc5e74dcb883fe974f125a7bdb3b41e5195ed1b870e73f17effd3eb2b2d; \
+      asset=bun-linux-x64-musl; checksum=9b6bdba1fa0914b6adfe48e4438212e2c106d9199b77ba642a9b8a3968a49a59; \
     else \
-      asset=bun-linux-x64; checksum=bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c; \
+      asset=bun-linux-x64; checksum=94559b3b528995a49452f9f2404cec74f2efd7d06e0a000a8cd214b02c3666eb; \
     fi \
-    && curl -fL --retry 3 "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/$asset.zip" -o /tmp/bun.zip \
+    && curl -fL --retry 3 "https://github.com/oven-sh/bun/releases/download/bun-v1.4.5/$asset.zip" -o /tmp/bun.zip \
     && echo "$checksum  /tmp/bun.zip" | sha256sum -c - \
     && unzip -q /tmp/bun.zip -d /opt \
     && ln -s "/opt/$asset/bun" /usr/local/bin/bun \
