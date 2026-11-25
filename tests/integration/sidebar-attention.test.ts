@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { BotActivityEventPayload, BotActivityStatusSchema, type BotDto, type BotViewDto, type ThreadDto } from "../../packages/protocol/src/index.ts";
-import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 describe("Sidebar attention", () => {
   let h: Harness;
@@ -222,12 +222,5 @@ describe("binary Bot Activity", () => {
     expect(withoutAgent.body).toMatchObject({ name: "No Agent ID", agentId: "pi" });
     expect(withLegacyAgent.status).toBe(201);
     expect(withLegacyAgent.body).toMatchObject({ name: "Legacy Agent ID", agentId: "pi" });
-  });
-
-  workerOnly("the durable runtime has no worker to be unready for a send")("rejects sends on a non-ready Agent", async () => {
-    const botId = await makeBot(h, "Readiness Bot");
-    h.svc.agents.markOffline("pi", "credentials expired");
-
-    expect((await apiStatus(h, "POST", `/api/bots/${botId}/messages`, { text: "must not start" })).status).toBe(409);
   });
 });

@@ -284,7 +284,7 @@ export class NativeSkills {
         const backup = path.join(root, `previous-${index}`);
         cpSync(materialized.directory, stage, { recursive: true, dereference: false, errorOnExist: true });
         if (catalog.id === "official:openai:skill-creator") {
-          const dependencies = path.resolve(import.meta.dir, "../../../../../workers/pi/resources/python");
+          const dependencies = path.resolve(import.meta.dir, "../../../resources/python");
           const manifest = z.object({ files: z.record(z.object({ sha256: z.string().regex(/^[0-9a-f]{64}$/) })) }).parse(JSON.parse(readFileSync(path.join(dependencies, "pyyaml-source.json"), "utf8")));
           for (const [relative, file] of Object.entries(manifest.files)) {
             const source = path.resolve(dependencies, relative);

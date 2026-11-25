@@ -59,7 +59,7 @@ test("a linked TAR rejects installation without crashing, leaving files, or pois
 
 test("catalog names resolve to canonical details without accepting another skill or source", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "plugin-identity-regression-"));
-  const service = new PluginsService(root, root, async () => ({ skills: [] }));
+  const service = new PluginsService(root, root, () => ({ skills: [] }));
   const originalFetch = globalThis.fetch;
   const id = "owner/repository/react:components";
   let source = "owner/repository";

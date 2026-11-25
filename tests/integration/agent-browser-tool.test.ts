@@ -3,7 +3,7 @@ import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/compu
 import { BROWSER_PACK_MISSING } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 import type { SurfaceId } from "../../packages/domain/src/index.ts";
 import type { ComputerViewDto } from "../../packages/protocol/src/index.ts";
-import { api, authedFetch, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 import { until } from "./helpers/bot-screen-load-observe.ts";
 
 async function owner(h: Harness, botId: string): Promise<{ botId: string; surfaceId: SurfaceId }> {
@@ -44,33 +44,6 @@ describe("Bot-bound Agent browser tool", () => {
     const transcript = await messages(h, sent.threadId);
     expect(transcript.some((message) => message.kind === "tool" && message.toolCall?.name === "browser")).toBeTrue();
     expect(transcript.some((message) => message.text?.includes(binding.surfaceId))).toBeTrue();
-  });
-
-  workerOnly("forges worker ToolChannel bindings", { timeout: 15_000 })("rejects every stale or mismatched binding before touching either Screen", async () => {
-    const adapter = new FakeBotScreenRuntimeAdapter();
-    h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const botId = await makeBot(h, "Browser binding owner");
-    const binding = await owner(h, botId);
-    const other = await owner(h, await makeBot(h, "Browser binding peer"));
-    const running = h;
-    const turns = await Promise.all([
-      sendToBot(h, botId, `browser:snapshot:mismatch:${other.surfaceId}`),
-      sendToBot(h, botId, "browser:snapshot:stale"),
-      sendToBot(h, botId, "browser:snapshot:wrong-bot"),
-      sendToBot(h, botId, "browser:snapshot:wrong-session"),
-      sendToBot(h, botId, "browser:snapshot:missing-tool-call"),
-    ]);
-    await Promise.all(turns.map((turn) => waitThreadIdle(running, turn.threadId)));
-
-    expect(adapter.browserActions).toEqual([]);
-    expect(h.svc.screens.status(binding)).toEqual({ state: "stopped" });
-    expect(h.svc.screens.status(other)).toEqual({ state: "stopped" });
-    for (const [index, turn] of turns.entries()) {
-      expect(h.svc.threads.turnRow(turn.turnId)).toMatchObject({
-        status: "failed",
-        outcome_reason: index === 4 ? "tool call has not started" : "browser tool context is stale or mismatched",
-      });
-    }
   });
 
   test("an Agent takeover request shows its reason and holds the invocation until I'm done", async () => {

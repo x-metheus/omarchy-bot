@@ -29,7 +29,6 @@ export interface BundleHost {
   ready(): Promise<void>;
   token(providerId: PluginProviderId, grant: BundleGrant): Promise<string>;
   persist(changed?: boolean): void;
-  clearNative(): void;
   removeUnused(directory: string): Promise<void>;
   accountDto(account: BundleAccount): PluginAccountDto;
 }
@@ -89,7 +88,6 @@ export class ServiceBundles {
       }
       this.host.skills.installBundle(installations);
       for (const owner of this.host.accounts().filter((entry) => entry.providerId === account.providerId)) delete owner.bundleErrors[service.id];
-      this.host.clearNative();
       this.host.persist(true);
     } catch (error) {
       const detail = redactToolErrorSummary(error instanceof Error ? error.message : error);
@@ -138,7 +136,6 @@ export class ServiceBundles {
       if (!owners.length) this.host.skills.remove(skill.id, true);
       else if (skill.enabled !== enabled) this.host.skills.enable(skill.id, enabled, true);
     }
-    this.host.clearNative();
   }
 
   async enable(id: string, serviceId: string, on: boolean): Promise<PluginAccountDto> {

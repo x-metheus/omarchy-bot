@@ -3,7 +3,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentCapabilityInventory } from "../../packages/agent-contract/src/index.ts";
 import type { AgentDto, AttachmentDto } from "../../packages/protocol/src/index.ts";
-import { api, authedFetch, apiStatus, makeBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, apiStatus, makeBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 async function stage(
   h: Harness,
@@ -43,16 +43,6 @@ async function piAgent(h: Harness): Promise<AgentDto> {
   const pi = agents.find((agent) => agent.id === "pi");
   if (pi === undefined) throw new Error("missing pi agent");
   return pi;
-}
-
-function diagnosticFamily(payload: unknown): string | undefined {
-  if (payload === null || typeof payload !== "object" || !("family" in payload)) return undefined;
-  return typeof payload.family === "string" ? payload.family : undefined;
-}
-
-function nativeCapability(payload: unknown): string | undefined {
-  if (payload === null || typeof payload !== "object" || !("capability" in payload)) return undefined;
-  return typeof payload.capability === "string" ? payload.capability : undefined;
 }
 
 describe("agent capability inventory", () => {
@@ -191,98 +181,6 @@ describe("agent capability inventory", () => {
     }
   });
 
-  workerOnly("worker agent.event_rejected diagnostics for undeclared native events and unsafe tool detail")("drops undeclared Native capabilities and unsafe Tool Call detail with payload-safe diagnostics", async () => {
-    setProbeControl(h, {
-      fakeCapabilities: {
-        nativeEventFamilies: ["fake.declared"],
-      },
-    });
-    await h.svc.agents.recheck("pi");
-    try {
-      const botId = await makeBot(h, "Event policy Bot");
-      const cursor = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.at(-1)?.cursor ?? 0;
-      const sent = await api<{ threadId: string }>(h, "POST", `/api/bots/${botId}/messages`, {
-        text: "undeclared-events",
-      });
-      await waitThreadIdle(h, sent.threadId);
-
-      const transcript = await api<Array<{ kind: string; text?: string; payload?: unknown }>>(
-        h,
-        "GET",
-        `/api/threads/${sent.threadId}/messages`,
-      );
-      expect(transcript.some((message) => message.kind === "tool")).toBeFalse();
-      expect(transcript.some((message) => message.kind === "event" && message.payload !== undefined)).toBeFalse();
-      expect(transcript.some((message) => message.text === "declared response")).toBeTrue();
-
-      const diagnostics = h.svc.events
-        .replay(cursor, h.svc.events.oldestCursor())
-        .events.filter((event) => event.type === "agent.event_rejected");
-      expect(diagnostics.map((event) => diagnosticFamily(event.payload)).sort()).toEqual(["native", "native", "tool"]);
-      expect(JSON.stringify(diagnostics)).not.toContain("must-not-leak");
-    } finally {
-      setProbeControl(h);
-      await h.svc.agents.recheck("pi");
-    }
-  });
-
-  workerOnly("worker native event channel and agent.native replay redaction")("redacts non-public native payloads from transcript and event replay", async () => {
-    setProbeControl(h);
-    await h.svc.agents.recheck("pi");
-    const botId = await makeBot(h, "Native privacy Bot");
-    const cursor = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.at(-1)?.cursor ?? 0;
-    const sent = await api<{ threadId: string }>(h, "POST", `/api/bots/${botId}/messages`, {
-      text: "undeclared-events",
-    });
-    await waitThreadIdle(h, sent.threadId);
-
-    const transcript = await api<Array<{ kind: string; payload?: unknown }>>(
-      h,
-      "GET",
-      `/api/threads/${sent.threadId}/messages`,
-    );
-    const nativeMessage = transcript.find((message) =>
-      message.kind === "event" &&
-      nativeCapability(message.payload) === "fake.secret-progress"
-    );
-    expect(nativeMessage?.payload).toEqual({
-      capability: "fake.secret-progress",
-      sensitivity: "secret",
-      redacted: true,
-    });
-
-    const nativeEvent = h.svc.events
-      .replay(cursor, h.svc.events.oldestCursor())
-      .events.find((event) => event.type === "agent.native");
-    expect(nativeEvent?.payload).toMatchObject({
-      capability: "fake.secret-progress",
-      sensitivity: "secret",
-      redacted: true,
-    });
-    expect(JSON.stringify(nativeEvent)).not.toContain("must-not-leak");
-    const diagnosticMessage = transcript.find((message) =>
-      message.kind === "event" &&
-      nativeCapability(message.payload) === "fake.diagnostic-progress"
-    );
-    expect(diagnosticMessage?.payload).toEqual({
-      capability: "fake.diagnostic-progress",
-      sensitivity: "diagnostic",
-      redacted: true,
-    });
-    const diagnosticEvent = h.svc.events
-      .replay(cursor, h.svc.events.oldestCursor())
-      .events.find((event) =>
-        event.type === "agent.native" &&
-        nativeCapability(event.payload) === "fake.diagnostic-progress"
-      );
-    expect(diagnosticEvent?.payload).toMatchObject({
-      capability: "fake.diagnostic-progress",
-      sensitivity: "diagnostic",
-      redacted: true,
-    });
-    expect(JSON.stringify(diagnosticEvent)).not.toContain("must-not-leak");
-  });
-
   test("serializes simultaneous timeouts for independent sessions on one Agent", async () => {
     const previousTimeout = h.svc.cfg.turnTimeoutMs;
     setProbeControl(h);
@@ -314,39 +212,6 @@ describe("agent capability inventory", () => {
       expect((await piAgent(h)).status).toBe("ready");
     } finally {
       h.svc.cfg.turnTimeoutMs = previousTimeout;
-    }
-  });
-
-  workerOnly("supervisor quarantine of a timed-out worker session without abort capability")("quarantines an unabortable timed-out worker before releasing its Thread", async () => {
-    const previousTimeout = h.svc.cfg.turnTimeoutMs;
-    setProbeControl(h, { fakeCapabilities: { abort: false } });
-    await h.svc.agents.recheck("pi");
-    h.svc.cfg.turnTimeoutMs = 25;
-    try {
-      const botId = await makeBot(h, "Timeout quarantine Bot");
-      const sent = await api<{ threadId: string }>(h, "POST", `/api/bots/${botId}/messages`, {
-        text: "hang",
-      });
-      await waitThreadIdle(h, sent.threadId, 10_000);
-
-      const thread = await api<{
-        activeTurn?: unknown;
-        latestTurn?: { status: string; reason?: string };
-      }>(h, "GET", `/api/threads/${sent.threadId}`);
-      expect(thread.activeTurn).toBeUndefined();
-      expect(thread.latestTurn?.status).toBe("failed");
-      expect(thread.latestTurn?.reason).toContain("timed out after");
-      const pi = await piAgent(h);
-      expect(pi.status).toBe("offline");
-      expect(pi.capabilities).toBeUndefined();
-      const transcript = await api<Array<{ author: { kind: string }; text?: string }>>(h, "GET", `/api/threads/${sent.threadId}/messages`);
-      expect(transcript.some((message) =>
-        message.author.kind === "system" && message.text?.includes("timed out after") === true
-      )).toBeFalse();
-    } finally {
-      h.svc.cfg.turnTimeoutMs = previousTimeout;
-      setProbeControl(h);
-      await h.svc.agents.recheck("pi");
     }
   });
 });

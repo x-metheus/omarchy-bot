@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 let h: Harness;
 
@@ -48,36 +48,6 @@ async function until(fn: () => Promise<boolean>, timeoutMs = 10_000): Promise<vo
     await Bun.sleep(50);
   }
 }
-
-workerOnly("worker loss reports failed on shutdown; the durable runtime cancels instead", { timeout: 15_000 })("daemon shutdown cancels active Turn timeouts before closing persistence", async () => {
-  const daemon = await startDaemon();
-  try {
-    daemon.svc.cfg.turnTimeoutMs = 100;
-    const botId = await makeBot(daemon, "Shutdown timeout");
-    const sent = await sendToBot(daemon, botId, "hang");
-    await until(async () => {
-      const thread = await api<{ activeTurn?: { status: string } }>(daemon, "GET", `/api/threads/${sent.threadId}`);
-      return thread.activeTurn?.status === "working";
-    });
-    await daemon.svc.turns.shutdown();
-    const rejected = await apiStatus(daemon, "POST", `/api/bots/${botId}/messages`, { text: "late work" });
-    expect(rejected.status).toBe(503);
-    await daemon.stop();
-    // Real worker shutdown races the platform timeout; fake timers cannot drive the child process.
-    await Bun.sleep(5_500);
-    const restarted = await startDaemon(daemon.home);
-    try {
-      const thread = await api<{ latestTurn?: { status: string } }>(restarted, "GET", `/api/threads/${sent.threadId}`);
-      expect(thread.latestTurn?.status).toBe("failed");
-      const agents = await api<{ id: string; status: string }[]>(restarted, "GET", "/api/agents");
-      expect(agents.find((agent) => agent.id === "pi")?.status).toBe("ready");
-    } finally {
-      await restarted.stop();
-    }
-  } finally {
-    await daemon.stop();
-  }
-});
 
 describe("integration: agents API", () => {
   test("lists all nine agents with version/status/reason/guidance fields", async () => {
@@ -213,30 +183,6 @@ describe("integration: chat through a bot", () => {
     expect(responses).toContain("two");
   });
 
-  workerOnly("fake worker fake.progress event and fixed bash summary fields")("Tool Calls, residual Native Events, and Responses remain distinct records", async () => {
-    const botId = await makeBot(h, "Tools");
-    const sent = await sendToBot(h, botId, "tool please");
-    await waitThreadIdle(h, sent.threadId);
-    const msgs = await messages(sent.threadId);
-    const tool = msgs.find((message) => message.kind === "tool");
-    expect(tool?.toolCall).toEqual({
-      id: expect.any(String),
-      name: "bash",
-      status: "completed",
-      target: "echo fake",
-      durationMs: 12,
-    });
-    expect(tool?.payload).toBeUndefined();
-    expect(JSON.stringify(tool)).not.toContain("fake output");
-    expect(msgs.find((message) => message.kind === "event")?.payload).toEqual({
-      capability: "fake.progress",
-      sensitivity: "public",
-      payload: { stage: "tool-running" },
-    });
-    expect(msgs.some((message) => message.author.kind === "bot" && message.kind === "response" && message.text === "tool finished")).toBeTrue();
-    expect(msgs.some((message) => message.author.kind === "user")).toBeTrue();
-  });
-
   test("a failed turn exposes its terminal reason without adding an operational history message", async () => {
     const botId = await makeBot(h, "Fails");
     const sent = await sendToBot(h, botId, "fail");
@@ -262,32 +208,6 @@ describe("integration: chat through a bot", () => {
     // The steered user message is correlated with the active turn.
     const steerMsg = msgs.find((m) => m.author.kind === "user" && m.text === "redirect me");
     expect(steerMsg?.payload?.turnId).toBe(sent.turnId);
-  });
-
-  workerOnly("removes fake-worker steering and abort transcript mechanics")("steering a non-steerable (hanging) turn fails cleanly with a transcript note", async () => {
-    const botId = await makeBot(h, "Hangs");
-    const sent = await sendToBot(h, botId, "hang");
-    await until(async () => (await api<{ activeTurn?: unknown }>(h, "GET", `/api/threads/${sent.threadId}`)).activeTurn !== undefined);
-    const res = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "redirect" });
-    expect(res.status).toBe(409);
-    // Internal cancellation remains available to delete and timeout flows.
-    await h.svc.turns.abortTurn(sent.turnId, "test cleanup");
-    await waitThreadIdle(h, sent.threadId);
-    const msgs = await messages(sent.threadId);
-    expect(msgs.some((m) => m.author.kind === "system" && (m.text ?? "").includes("steer unavailable"))).toBeTrue();
-    expect(msgs.some((m) => m.author.kind === "system" && m.kind === "text" && (m.text ?? "").includes("cancel"))).toBeTrue();
-  });
-
-  workerOnly("fake worker native event in the tool Turn transcript")("tool activity remains, the public abort route is absent, and no approval is pending", async () => {
-    const botId = await makeBot(h, "Tool user");
-    const sent = await sendToBot(h, botId, "tool");
-    await waitThreadIdle(h, sent.threadId);
-    const msgs = await messages(sent.threadId);
-    expect(msgs.some((m) => m.kind === "tool")).toBeTrue();
-    expect(msgs.some((m) => m.kind === "event")).toBeTrue();
-    // Durable file approvals (bot-runtime Task 9) replaced the legacy worker approval routes.
-    expect(await api<unknown[]>(h, "GET", "/api/approvals")).toEqual([]);
-    expect((await apiStatus(h, "POST", `/api/turns/${sent.turnId}/abort`)).status).toBe(404);
   });
 
   test("a completed Turn keeps its Tool Call and Response separate with no pending approvals or public abort", async () => {

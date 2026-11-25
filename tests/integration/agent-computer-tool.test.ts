@@ -6,7 +6,7 @@ import type { MessageDto } from "../../packages/protocol/src/index.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import { BotScreenInputRejectedError } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import { ScreenInputLease } from "../../apps/daemon/src/modules/computer/screenInputLease.ts";
-import { api, authedFetch, makeBot, sendToBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 import { createComputerTool } from "../../workers/pi/src/computer-tool.ts";
 import { until } from "./helpers/bot-screen-load-observe.ts";
 
@@ -651,40 +651,6 @@ describe("Bot-bound Pi computer tool", () => {
     expect(adapter.inputEvents.map((record) => record.surfaceId)).toEqual([surfaceId, surfaceId, surfaceId]);
   });
 
-  // The in-process runtime has no ToolChannel. Task 20 removes this case with the worker.
-  workerOnly("requires a separate worker to exit during native steering")("Agent-worker loss during a held Takeover fails the turn and never reconstructs the waiter", async () => {
-    const adapter = new FakeBotScreenRuntimeAdapter();
-    h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const botId = await makeBot(h, "Restarted Takeover Bot");
-    const surfaceId = await botSurface(h, botId);
-    const owner = { botId, surfaceId };
-    adapter.blockInputs();
-
-    const sent = await sendToBot(h, botId, "computer:click:worker-restart");
-    await adapter.waitForInputAttempts(1);
-    const takeover = computerRequest(h, owner, "POST", "/api/computer/take-control");
-    expect(await Promise.race([
-      takeover.then(() => "takeover-settled" as const),
-      computerRequest(h, owner, "GET", "/api/computer/state").then(() => "state-readable" as const),
-    ])).toBe("state-readable");
-    adapter.releaseInputs();
-    expect((await takeover).body).toMatchObject({ takeover: "active" });
-
-    await expect(
-      h.svc.turns.send(botId, sent.threadId, "crash-agent"),
-    ).rejects.toThrow("steer unavailable");
-    await waitThreadIdle(h, sent.threadId);
-    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("failed");
-    expect(await waitForTakeover(h, owner, "unavailable")).toMatchObject({
-      takeover: "unavailable",
-    });
-    expect(adapter.inputEvents.map((record) => record.surfaceId)).toEqual([surfaceId, surfaceId, surfaceId]);
-    const transcript = await messages(h, sent.threadId);
-    expect(transcript.some((message) =>
-      message.author.kind === "system" && message.text?.includes("worker exited")
-    )).toBeTrue();
-  });
-
   test("daemon restart fails a held Takeover turn instead of pretending to resume it", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
@@ -725,53 +691,6 @@ describe("Bot-bound Pi computer tool", () => {
     expect(await waitForTakeover(h, owner, "unavailable")).toMatchObject({
       takeover: "unavailable",
     });
-  });
-
-  // The in-process runtime has no ToolChannel. Task 20 removes this case with the worker.
-  workerOnly("forges worker ToolChannel bindings", { timeout: 15_000 })("every stale or mismatched binding identity fails without touching either Screen", async () => {
-    const adapter = new FakeBotScreenRuntimeAdapter();
-    h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const firstBot = await makeBot(h, "Context owner Bot");
-    const secondBot = await makeBot(h, "Context other Bot");
-    const secondSurface = await botSurface(h, secondBot);
-    const runningHarness = h;
-
-    const turns = await Promise.all([
-      sendToBot(h, firstBot, `computer:observe:mismatch:${secondSurface}`),
-      sendToBot(h, firstBot, "computer:observe:stale"),
-      sendToBot(h, firstBot, "computer:observe:wrong-bot"),
-      sendToBot(h, firstBot, "computer:observe:wrong-session"),
-      sendToBot(h, firstBot, "computer:observe:missing-tool-call"),
-    ]);
-    await Promise.all(turns.map((turn) => waitThreadIdle(runningHarness, turn.threadId)));
-
-    expect(adapter.actionsStarted).toBe(0);
-    const reasons = [
-      "computer tool context is stale or mismatched",
-      "computer tool context is stale or mismatched",
-      "computer tool context is stale or mismatched",
-      "computer tool context is stale or mismatched",
-      "tool call has not started",
-    ];
-    for (const [index, turn] of turns.entries()) {
-      const row = h.svc.threads.turnRow(turn.turnId);
-      expect(row?.status).toBe("failed");
-      expect(row?.outcome_reason).toBe(reasons[index]);
-    }
-  });
-
-  // The in-process runtime has no ToolChannel. Task 20 removes this case with the worker.
-  workerOnly("requires a separate worker to exit during tool dispatch", { timeout: 15_000 })("Agent worker loss fails its active tool turn instead of reconstructing or rerouting it", async () => {
-    const adapter = new FakeBotScreenRuntimeAdapter();
-    h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const bot = await makeBot(h, "Crashed Agent worker Bot");
-
-    const sent = await sendToBot(h, bot, "computer:crash-agent");
-    await waitThreadIdle(h, sent.threadId);
-
-    expect(adapter.actionsStarted).toBe(0);
-    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("failed");
-    expect(h.svc.threads.turnRow(sent.turnId)?.outcome_reason).toContain("worker exited");
   });
 
   test("assigned worker failure fails honestly and never reroutes", async () => {

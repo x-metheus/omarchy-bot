@@ -128,10 +128,14 @@ test("the Service's Pi probe and Services inventory leave the user's Pi home unt
     const worker = await harness.svc.supervisor.agentWorker("pi");
     const probe: ProbePayload = await worker.request({ type: "probe" }, 30_000);
     expect(probe).toMatchObject({ sdkOk: true, reason: expect.stringContaining("no authenticated model provider") });
+    const workerResources: NativePluginResources = await worker.request({ type: "resources.list", cwd: harness.svc.cfg.sharedWorkspaceDir }, 30_000);
+    expect(workerResources.skills).toContainEqual(expect.objectContaining({ name: "app-pi-skill", path: appSkillFile }));
+    expect(workerResources.skills.some((skill) => skill.name === "user-pi-skill")).toBe(false);
+
     const state = await api<PluginStateDto>(harness, "GET", "/api/plugins");
     expect(state.nativeError).toBeUndefined();
-    expect(state.nativeSkills).toContainEqual(expect.objectContaining({ name: "app-pi-skill", path: appSkillFile, agentId: "pi", readOnly: true }));
-    expect(state.nativeSkills.some((skill) => skill.name === "user-pi-skill")).toBe(false);
+    expect(state.skills).toContainEqual(expect.objectContaining({ name: "skill-creator", origin: "default", enabled: true }));
+    expect(state.nativeSkills).toEqual([]);
     await harness.stop();
     harness = undefined;
 

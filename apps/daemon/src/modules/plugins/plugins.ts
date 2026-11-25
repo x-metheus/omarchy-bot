@@ -64,8 +64,6 @@ export class PluginsService {
   readonly accounts: ProviderAccounts;
   readonly skillInstalls: SkillInstalls;
   readonly publisher: CatalogClient;
-  #nativeCache: { at: number; resources: NativePluginResources; error?: string } | undefined;
-  #nativePending: Promise<NativePluginResources> | undefined;
   #authorizations = new Map<string, { id: string; server: string; expiresAt: number; event: PluginAuthorizationEvent; completion?: Promise<string | undefined> }>();
   readonly bundles: ServiceBundles;
   #timer: ReturnType<typeof setInterval>;
@@ -77,7 +75,7 @@ export class PluginsService {
   readonly mcp: NativeMcpStore;
   readonly packages: McpPackages;
 
-  constructor(private readonly rootDir: string, private readonly cwd: string, private readonly nativeResources: () => Promise<NativePluginResources>,
+  constructor(private readonly rootDir: string, private readonly cwd: string, private readonly nativeResources: () => NativePluginResources,
     private readonly nativeControl?: (input: Pick<Extract<AgentCommand, { type: "mcp.control" }>, "action" | "server" | "redirectUrl" | "authorizationId" | "expiresAt">) => Promise<NativeMcpControlResult>,
     private readonly serviceOrigin?: () => string, private readonly authorizationEvent?: (event: PluginAuthorizationEvent) => void) {
     mkdirSync(rootDir, { recursive: true, mode: 0o700 });
@@ -89,7 +87,6 @@ export class PluginsService {
       stopping: () => this.#stopping,
       detail: (id) => this.detail(id),
       persist: (changed) => this.#persist(changed ?? false),
-      clearNative: () => { this.#nativeCache = undefined; },
       legacyDirectories: () => this.#state.skills.map((skill) => skill.directory),
       accounts: () => this.#state.accounts,
       updateService: (id, serviceId) => this.updateService(id, serviceId),
@@ -97,7 +94,7 @@ export class PluginsService {
     this.publisher = new CatalogClient(() => this.#cloudUrl());
     this.mcp = new NativeMcpStore(cwd, rootDir);
     this.packages = new McpPackages(this.mcp);
-    try { this.skills.provisionDefault(path.resolve(import.meta.dir, "../../../../../workers/pi/resources")); }
+    try { this.skills.provisionDefault(path.resolve(import.meta.dir, "../../../resources")); }
     catch (error) { this.#defaultError = `Default Skill Creator needs attention: ${error instanceof Error ? error.message : String(error)}`; }
     this.#file = path.join(rootDir, "configuration.json");
     if (existsSync(this.#file)) {
@@ -145,7 +142,6 @@ export class PluginsService {
       ready: () => this.#ready,
       token: (providerId, grant) => this.accounts.token(providerId, grant),
       persist: (changed) => this.#persist(changed ?? false),
-      clearNative: () => { this.#nativeCache = undefined; },
       removeUnused: (directory) => this.#removeUnusedSkill(directory),
       accountDto: (account) => this.#accountDto(account as Account),
     });
@@ -190,15 +186,9 @@ export class PluginsService {
     this.#persist(true);
   }
 
-  async #native(): Promise<NativePluginResources> {
-    this.#nativePending ??= this.nativeResources().then((resources) => {
-      this.#nativeCache = { at: Date.now(), resources };
-      return resources;
-    }).catch((error: unknown) => {
-      this.#nativeCache = { at: Date.now(), resources: { skills: [] }, error: redactToolErrorSummary(error instanceof Error ? error.message : error) };
-      return this.#nativeCache.resources;
-    }).finally(() => { this.#nativePending = undefined; });
-    return this.#nativePending;
+  #native(): NativePluginResources & { error?: string } {
+    try { return this.nativeResources(); }
+    catch (error) { return { skills: [], error: redactToolErrorSummary(error instanceof Error ? error.message : error) }; }
   }
 
   #accountDto(account: Account): PluginAccountDto {
@@ -241,11 +231,13 @@ export class PluginsService {
 
   async state(): Promise<PluginStateDto> {
     await this.#ready;
-    const [cloud, native] = await Promise.all([this.publisher.providers(), this.#native()]);
+    const cloud = await this.publisher.providers();
+    // A toggle moves the Skill file. Read both inventories without yielding between them.
+    const native = this.#native();
+    const skills = this.skills.list();
     this.mcp.updateStatus(native.mcp ?? []);
     const mcp = this.packages.list();
-    const skills = this.skills.list();
-    const nativeError = [this.#defaultError, this.#nativeCache?.error, ...this.mcp.errors, ...this.skills.errors, ...this.packages.errors].filter(Boolean).join("\n");
+    const nativeError = [this.#defaultError, native.error, ...this.mcp.errors, ...this.skills.errors, ...this.packages.errors].filter(Boolean).join("\n");
     const workspaceSkills = new Set(skills.map((skill) => skill.path));
     return { revision: this.#state.revision, cloudUrl: this.#cloudUrl(), providers: cloud.providers,
       accounts: this.#state.accounts.map((account) => this.#accountDto(account)), mcp: [...mcp, ...this.#state.mcp.map((connection) => ({ ...this.#mcpDto(connection), enabled: false, readOnly: true }))],
@@ -392,7 +384,7 @@ export class PluginsService {
   }
 
   async commands(): Promise<SkillCommandDto[]> {
-    const native = await this.#native();
+    const native = this.#native();
     const shared = this.skills.list();
     const sharedPaths = new Set(shared.map((skill) => skill.path));
     const candidates = [

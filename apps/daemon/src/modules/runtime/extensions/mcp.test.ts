@@ -531,7 +531,7 @@ test("durable MCP credential preparation rejects a workspace FIFO without blocki
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { PluginsService } from ${JSON.stringify(new URL("../../plugins/plugins.ts", import.meta.url).href)};
 import { createMcpExtension } from ${JSON.stringify(new URL("./mcp.ts", import.meta.url).href)};
-const plugins = new PluginsService(${JSON.stringify(privateDir)}, ${JSON.stringify(workspace)}, async () => ({ skills: [] }));
+const plugins = new PluginsService(${JSON.stringify(privateDir)}, ${JSON.stringify(workspace)}, () => ({ skills: [] }));
 const servers = () => plugins.mcp.effectiveServers();
 const mcp = createMcpExtension({ servers, async prepareServers() {
   await plugins.prepareServiceCredentials();
@@ -889,7 +889,7 @@ test.each([
       id: accountId, providerId: "github", label: "Fixture", identity: "github:fixture", status: "connected", enabledServices: ["github"], nativeManaged,
       grant: { generation: "fixture", accessToken: crypto.randomUUID(), refreshToken: crypto.randomUUID(), expiresAt: Date.now() - 10_000, scopes: [], cloudUrl: publisher },
     }] }));
-    plugins = new PluginsService(privateDir, root, async () => ({ skills: [] }));
+    plugins = new PluginsService(privateDir, root, () => ({ skills: [] }));
 
     expect(await plugins.prepareServiceCredentials()).toEqual({ failed: [accountId] });
     expectSafeEqual(fetchMock.mock.calls.map(([input]) => String(input)), [tokenEndpoint]);
@@ -932,7 +932,7 @@ test("MCP shutdown drains publisher credential preparation after a call is abort
       id: "fixture", providerId: "github", label: "Fixture", identity: "github:fixture", status: "connected", enabledServices: ["github"], nativeManaged: true,
       grant: { generation: "fixture", accessToken: staleToken, refreshToken: "fixture-refresh", expiresAt: Date.now() - 10_000, scopes: [], cloudUrl: publisher },
     }] }));
-    const servicePlugins = plugins = new PluginsService(privateDir, root, async () => ({ skills: [] }));
+    const servicePlugins = plugins = new PluginsService(privateDir, root, () => ({ skills: [] }));
     servicePlugins.mcp.putService(service, { url }, { accountId: "fixture", serviceId: "github" });
     servicePlugins.mcp.setServiceToken(service, url, staleToken);
     const servers = () => servicePlugins.mcp.effectiveServers();

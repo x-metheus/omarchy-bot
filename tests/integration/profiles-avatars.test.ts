@@ -6,7 +6,7 @@ import { AVATAR_RENDERER_ID, AVATAR_STYLE_IDS, AvatarRecipeDto, type BotDto } fr
 import { handleAvatarRequest } from "../../apps/daemon/src/api/avatarRoutes.ts";
 import { HttpError } from "../../apps/daemon/src/modules/bots/bots.ts";
 import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
-import { api, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
+import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 let h: Harness;
 
@@ -90,56 +90,6 @@ describe("bot profile editing", () => {
       expect(first.avatar.recipe.seed).toBe(createHash("sha256").update(`${botId}:1`).digest("hex"));
       expect(second.avatar.recipe.seed).toBe(createHash("sha256").update(`${botId}:2`).digest("hex"));
     }
-  });
-
-  workerOnly("removes the worker session command used to observe supplied instructions", { timeout: 20_000 })("edits name and instructions, keeps Agent immutable, and supplies current instructions to future sessions", async () => {
-    const botId = await makeBot(h, "Before", "old instructions");
-    const first = await sendToBot(h, botId, "say: keep this message");
-    await waitThreadIdle(h, first.threadId);
-
-    const changed = await api<BotDto>(h, "PATCH", `/api/bots/${botId}`, { name: "After", instructions: "current instructions" });
-    expect(changed.name).toBe("After");
-    expect(changed.instructions).toBe("current instructions");
-    expect(changed.agentId).toBe("pi");
-    const immutable = await apiStatus(h, "PATCH", `/api/bots/${botId}`, { agentId: "claude" });
-    expect(immutable.status).toBe(400);
-    expect(
-      immutable.body !== null && typeof immutable.body === "object" && "error" in immutable.body
-        ? immutable.body.error
-        : undefined,
-    ).toContain("agent");
-
-    const originalAgentWorker = h.svc.supervisor.agentWorker.bind(h.svc.supervisor);
-    let turnInstructions: unknown;
-    h.svc.supervisor.agentWorker = async (agentId) => {
-      const liveWorker = await originalAgentWorker(agentId);
-      return new Proxy(liveWorker, {
-        get(target, property) {
-          // `target`, not `receiver`: WorkerClient reads its private `#proc`
-          // field, which throws through a Proxy whose receiver is the proxy.
-          if (property !== "request") return Reflect.get(target, property, target);
-          return async (command: Record<string, unknown>, timeoutMs: number) => {
-            if (command.type === "session.resume" || command.type === "session.open") {
-              const options = command.options;
-              if (options !== null && typeof options === "object" && "instructions" in options) {
-                turnInstructions = options.instructions;
-              }
-            }
-            return target.request(command, timeoutMs);
-          };
-        },
-      });
-    };
-    try {
-      const second = await sendToBot(h, botId, "say: second message");
-      await waitThreadIdle(h, second.threadId);
-      expect(turnInstructions).toBe("current instructions");
-    } finally {
-      h.svc.supervisor.agentWorker = originalAgentWorker;
-    }
-
-    const messages = await api<{ text?: string }[]>(h, "GET", `/api/threads/${first.threadId}/messages`);
-    expect(messages.some((message) => message.text === "keep this message")).toBeTrue();
   });
 });
 

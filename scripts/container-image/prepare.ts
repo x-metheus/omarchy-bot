@@ -12,10 +12,14 @@ if (new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== expected) {
 }
 const runtime = path.join(staging, "runtime");
 extractRuntimeArchive(archive, runtime);
-for (const required of ["scripts/serve.sh", "sway/.omarchy-bot-runtime", "fonts", "workers/pi/src/worker.ts"]) {
+for (const required of ["scripts/serve.sh", "sway/.omarchy-bot-runtime", "fonts", "apps/daemon/src/bootstrap/main.ts"]) {
   if (!existsSync(path.join(runtime, required))) {
     throw new Error(`runtime archive is missing ${required}`);
   }
+}
+const skillCreatorRoots = ["apps/daemon/resources", "workers/pi/resources"];
+if (!skillCreatorRoots.some((root) => existsSync(path.join(runtime, root, "skill-creator/SKILL.md")))) {
+  throw new Error("runtime archive is missing the Skill Creator bundle");
 }
 // Browser pins come from the supplied archive; the builder verifies every copied input.
 const assets = [

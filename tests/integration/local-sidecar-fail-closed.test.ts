@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { DeviceDto, MessageDto } from "../../packages/protocol/src/index.ts";
 import {
@@ -7,32 +5,14 @@ import {
   makeBot,
   messages,
   sendToBot,
-  sendToThread,
   startDaemon,
   waitThreadIdle,
-  workerOnly,
   type Harness,
 } from "./helpers/harness.ts";
 import { LocalSidecarFixture } from "./helpers/localSidecar.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DEVICE_B = "dev_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-interface SessionObservation {
-  type: string;
-  botId?: string;
-  threadId?: string;
-  options?: { cwd?: string; local?: { os: string; shell: string } };
-}
-
-function workerObservations(h: Harness): SessionObservation[] {
-  const log = path.join(h.home, "fake-agent-observations.ndjson");
-  if (!existsSync(log)) return [];
-  return readFileSync(log, "utf8")
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as SessionObservation);
-}
 
 function toolNamed(transcript: MessageDto[], name: string): MessageDto | undefined {
   return transcript.find((message) => message.kind === "tool" && message.toolCall?.name === name);
@@ -169,46 +149,6 @@ describe("fail closed and keep Sidecars distinct", () => {
     const afterReconnect = await messages(h, sent.threadId);
     expect(toolNamed(afterReconnect, "local")?.toolCall?.status).toBe("error");
     expect(afterReconnect.some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "completed")).toBeFalse();
-  });
-
-  workerOnly("fake worker session.open and session.resume options for sender device identity")("session open and resume describe only the sender's online device", async () => {
-    h = await startDaemon();
-    const sidecar = await connect();
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
-    const botId = await makeBot(h, "Device syntax Bot");
-    const first = await sendToBot(h, botId, "hello", DEVICE_A);
-    await waitThreadIdle(h, first.threadId);
-    await sendToThread(h, first.threadId, "hello again", DEVICE_A);
-    await waitThreadIdle(h, first.threadId);
-    await sendToThread(h, first.threadId, "untagged");
-    await waitThreadIdle(h, first.threadId);
-    await sendToThread(h, first.threadId, "unknown", DEVICE_B);
-    await waitThreadIdle(h, first.threadId);
-    await sidecar.close();
-    await waitRoster(h, (devices) => devices.length === 0);
-    await sendToThread(h, first.threadId, "offline", DEVICE_A);
-    await waitThreadIdle(h, first.threadId);
-    const sessions = workerObservations(h).filter((observation) => observation.threadId === first.threadId);
-    expect(sessions.map((session) => session.type)).toEqual(["session.open", "session.resume", "session.resume", "session.resume", "session.resume"]);
-    const identity = { os: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", shell: process.platform === "win32" ? "powershell-5.1" : "posix-sh" };
-    expect(sessions.map((session) => session.options?.local)).toEqual([
-      identity, identity, undefined, undefined, undefined,
-    ]);
-  });
-
-  workerOnly("fake worker session.open log for the Shared Workspace cwd")("native bash with a Sidecar online keeps Shared Workspace cwd and creates no sidecar jobs", async () => {
-    h = await startDaemon();
-    const sidecar = await connect();
-    await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
-    const botId = await makeBot(h, "Native cwd Bot");
-    const native = await sendToBot(h, botId, "tool");
-    await waitThreadIdle(h, native.threadId);
-    expect(sidecar.jobs()).toEqual([]);
-    expect(sidecar.executed).toEqual([]);
-    expect(toolNamed(await messages(h, native.threadId), "bash")?.toolCall?.status).toBe("completed");
-    const opened = workerObservations(h).find((observation) => observation.type === "session.open");
-    expect(opened?.options?.cwd).toBe(h.svc.cfg.sharedWorkspaceDir);
-    expect(h.svc.cfg.sharedWorkspaceDir).toBe(path.join(h.home, ".omarchy-bot", "workspace"));
   });
 
   test("computer screenshot with a Sidecar online still uses Bot Screen and creates no sidecar jobs", async () => {

@@ -7,6 +7,7 @@ import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { openBotRuntime } from "../modules/runtime/runtime.ts";
+import { listWorkspaceSkills } from "../modules/runtime/extensions/skills.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker, type ComputerSurfaceOwner } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
@@ -233,12 +234,13 @@ export async function main(options: MainOptions = {}): Promise<{
   const attachments = new AttachmentsService(db, cfg.attachmentsDir);
   attachments.gcStaged();
   const avatars = new AvatarService(bots, cfg.avatarsDir);
-  plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
-    const worker = await supervisor.agentWorker("pi");
-    const resources = await worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
+  plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, () => {
     // Reconciliation can change the configuration revision before Services applies the status.
     plugins.mcp.reconcile();
-    return { ...resources, mcp: runtime.mcpStatus() };
+    const skills = listWorkspaceSkills(sharedWorkspaceDir).map((skill) => ({
+      ...skill, path: path.resolve(sharedWorkspaceDir, skill.path),
+    }));
+    return { skills, mcp: runtime.mcpStatus() };
   }, (input) => runtime.mcpControl(input), () => {
     const host = cfg.host.includes(":") && !cfg.host.startsWith("[") ? `[${cfg.host}]` : cfg.host;
     const origin = new URL(`${cfg.tlsCert ? "https" : "http"}://${host}:${http.port}`);

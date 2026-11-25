@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { NativeSkills } from "../../apps/daemon/src/modules/plugins/nativeSkills.ts";
@@ -15,10 +15,10 @@ afterEach(async () => {
   globalThis.fetch = originalFetch;
 });
 
-async function startPlugins(): Promise<Harness> {
+async function startPlugins(providers: () => Response | Promise<Response> = () => Response.json([])): Promise<Harness> {
   globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
-    if (url.hostname === "plugin-catalog.invalid") return Response.json([]);
+    if (url.hostname === "plugin-catalog.invalid") return url.pathname === "/api/plugins/providers" ? providers() : Response.json([]);
     return originalFetch(input, init);
   }, { preconnect: originalFetch.preconnect });
   const h = await startDaemon();
@@ -49,6 +49,31 @@ test("workspace Skill edits are discoverable and removal is not resurrected afte
   await h.stop();
   harness = await startDaemon(h.home);
   expect((await api<PluginStateDto>(harness, "GET", "/api/plugins")).skills.some((skill) => skill.name === "release-check")).toBe(false);
+});
+
+test("a six-level workspace Skill appears once in Services and slash commands", async () => {
+  const h = await startPlugins();
+  const root = path.join(h.svc.cfg.sharedWorkspaceDir, ".agents", "skills");
+  const directory = path.join(root, "a", "b", "c", "d", "e", "f");
+  const name = "nested-skill";
+  const description = "Discover a deeply nested workspace Skill";
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
+
+  const deep = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect([...deep.skills, ...deep.nativeSkills].filter((skill) => skill.name === name)).toEqual([
+    expect.objectContaining({ name, description, path: path.join(directory, "SKILL.md"), readOnly: true }),
+  ]);
+  const command: SkillCommandDto = { name, description, command: `/skill:${name}`, source: "native" };
+  expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).filter((skill) => skill.name === name)).toEqual([command]);
+
+  const managedDirectory = path.join(root, name);
+  await rename(directory, managedDirectory);
+  const managed = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect([...managed.skills, ...managed.nativeSkills].filter((skill) => skill.name === name)).toEqual([
+    expect.objectContaining({ name, description, path: path.join(managedDirectory, "SKILL.md"), enabled: true, readOnly: false }),
+  ]);
+  expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).filter((skill) => skill.name === name)).toEqual([command]);
 });
 
 test("NativeSkills ignores legacy Skills roots and leaves their live and dangling aliases in place", async () => {
@@ -397,4 +422,40 @@ test("disabling a skill reads enabled from the request body", async () => {
   if (!skill) throw new Error("toggle-check was not discovered");
   expect((await apiStatus(h, "PATCH", `/api/plugins/skills/${encodeURIComponent(skill.id)}`, { enabled: false })).status).toBe(204);
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.find((entry) => entry.id === skill.id)?.enabled).toBe(false);
+});
+
+test("Services refresh lists a Skill disabled during catalog loading exactly once", async () => {
+  const requested = Promise.withResolvers<void>();
+  const providerResponse = Promise.withResolvers<Response>();
+  const h = await startPlugins(() => {
+    requested.resolve();
+    return providerResponse.promise;
+  });
+  const name = "disable-during-refresh";
+  const source = path.join(h.home, name);
+  await mkdir(source);
+  await writeFile(path.join(source, "SKILL.md"), `---\nname: ${name}\ndescription: Disable while Services refreshes\n---\n`);
+  const installed = await api<InstalledSkillDto>(h, "POST", "/api/plugins/skills", { source });
+  expect(installed).toMatchObject({ name, enabled: true, path: expect.any(String) });
+
+  const refresh = api<PluginStateDto>(h, "GET", "/api/plugins");
+  await requested.promise;
+  let disabled: Awaited<ReturnType<typeof apiStatus>>;
+  try {
+    disabled = await apiStatus(h, "PATCH", `/api/plugins/skills/${encodeURIComponent(installed.id)}`, { enabled: false });
+  } finally {
+    providerResponse.resolve(Response.json([]));
+  }
+  const refreshed = await refresh;
+  expect(disabled.status).toBe(204);
+  const matches = [...refreshed.skills, ...refreshed.nativeSkills].filter((skill) => skill.name === name);
+  expect(matches).toEqual([expect.objectContaining({ id: installed.id, enabled: false, path: expect.stringMatching(/\/disabled-skills\/[^/]+\/SKILL\.md$/) })]);
+
+  const plugins = h.svc.plugins;
+  plugins.enableSkill(installed.id, true);
+  const commandsBeforeDisable = plugins.commands();
+  plugins.enableSkill(installed.id, false);
+  const commandsAfterDisable = plugins.commands();
+  const [, commands] = await Promise.all([commandsBeforeDisable, commandsAfterDisable]);
+  expect(commands.filter((skill) => skill.command === `/skill:${name}`)).toEqual([]);
 });

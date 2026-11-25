@@ -12,7 +12,6 @@ import {
   sendToThread,
   startDaemon,
   waitThreadIdle,
-  workerOnly,
   type Harness,
 } from "./helpers/harness.ts";
 import { createScriptedSwayFixture, type ScriptedSwayFixture } from "./helpers/swayBotScreen.ts";
@@ -658,64 +657,6 @@ describe("Bot Screen lifecycle", () => {
     ]);
     expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
     expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
-  });
-
-  workerOnly("removes worker-native session IDs observed by this test")("two Bots on one Agent keep independent desktops and input", async () => {
-    const adapter = new FakeBotScreenRuntimeAdapter();
-    h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const first = await bot(h, await makeBot(h, "Independent desktop A"));
-    const second = await bot(h, await makeBot(h, "Independent desktop B"));
-    expect(first.agentId).toBe("pi");
-    expect(second.agentId).toBe("pi");
-    expect(first.surfaceId).not.toBe(second.surfaceId);
-    expect(adapter.starts).toHaveLength(0);
-
-    await Promise.all([activateScreen(h, first), activateScreen(h, second)]);
-    expect(adapter.starts.map((start) => start.surfaceId).sort()).toEqual(
-      [first.surfaceId, second.surfaceId].sort(),
-    );
-    expect(adapter.running(first.surfaceId)).toEqual({ generation: 1 });
-    expect(adapter.running(second.surfaceId)).toEqual({ generation: 1 });
-
-    const [firstSource, secondSource] = await Promise.all([
-      h.svc.screens.projectionSource({ botId: first.id, surfaceId: first.surfaceId }),
-      h.svc.screens.projectionSource({ botId: second.id, surfaceId: second.surfaceId }),
-    ]);
-    await firstSource!.setInputAuthority(1);
-    await secondSource!.setInputAuthority(1);
-    await firstSource!.input({
-      surfaceId: firstSource!.surfaceId,
-      runtimeGeneration: firstSource!.runtimeGeneration,
-      geometryGeneration: firstSource!.geometryGeneration,
-      controllerEpoch: 1,
-      sequence: 1,
-      type: "key",
-      keyCode: 30,
-      state: "pressed",
-    });
-    expect(adapter.inputEvents.filter((event) => event.surfaceId === first.surfaceId)).toHaveLength(1);
-    expect(adapter.inputEvents.filter((event) => event.surfaceId === second.surfaceId)).toHaveLength(0);
-    expect(h.svc.screens.status({ botId: second.id, surfaceId: second.surfaceId })).toEqual({ state: "ready" });
-
-    await h.svc.screens.act(
-      { botId: first.id, surfaceId: first.surfaceId },
-      { name: "open_app", args: { app: "fixture-a.desktop" } },
-    );
-    expect(h.svc.screens.status({ botId: first.id, surfaceId: first.surfaceId })).toEqual({ state: "ready" });
-    expect(h.svc.screens.status({ botId: second.id, surfaceId: second.surfaceId })).toEqual({ state: "ready" });
-    expect(adapter.running(second.surfaceId)).toEqual({ generation: 1 });
-
-    const firstTurn = await sendToBot(h, first.id, "computer:observe");
-    const secondTurn = await sendToBot(h, second.id, "computer:observe");
-    await Promise.all([waitThreadIdle(h, firstTurn.threadId), waitThreadIdle(h, secondTurn.threadId)]);
-    const sessions = workerSessions(h);
-    const firstSession = sessions.find((session) => session.botId === first.id && session.threadId === firstTurn.threadId);
-    const secondSession = sessions.find((session) => session.botId === second.id && session.threadId === secondTurn.threadId);
-    expect(firstSession?.nativeSessionId).toBeString();
-    expect(secondSession?.nativeSessionId).toBeString();
-    expect(firstSession?.nativeSessionId).not.toBe(secondSession?.nativeSessionId);
-    expect(adapter.starts.filter((start) => start.surfaceId === first.surfaceId)).toHaveLength(1);
-    expect(adapter.starts.filter((start) => start.surfaceId === second.surfaceId)).toHaveLength(1);
   });
 
   test("a provision failure stays on its Bot, frees capacity, and leaves no admitted runtime", async () => {
@@ -1522,13 +1463,3 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
     }
   }, 15_000);
 });
-
-function workerSessions(h: Harness): Array<{ botId?: string; threadId?: string; nativeSessionId?: string }> {
-  const log = path.join(h.home, "fake-agent-observations.ndjson");
-  if (!existsSync(log)) return [];
-  return readFileSync(log, "utf8")
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as { type?: string; botId?: string; threadId?: string; nativeSessionId?: string })
-    .filter((entry) => entry.type === "session.open");
-}
