@@ -11,24 +11,28 @@ import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThre
 import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
-import { CredentialStore } from "./credentials.ts";
+import { CredentialStore, MODEL_CREDENTIALS_FILENAME } from "./credentials.ts";
+import { SecretStore } from "./secrets.ts";
+import { createRuntimeModels } from "./models.ts";
+import { importMcpOAuthTokens } from "./mcpOAuthImport.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { openBotRuntime, type BotRuntime } from "./runtime.ts";
 import { openThreadConversation } from "./conversations.ts";
 import { ALLOWED_FOLDERS_SETTING } from "../workspace/allowedFolders.ts";
+import { NativeMcpStore } from "../plugins/nativeMcp.ts";
+import { startOAuthMcpServer } from "./testing/oauthMcpServer.ts";
 
 test("runtime creates durable tables and can close and reopen", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-"));
   const dbPath = path.join(directory, "service.sqlite");
   const stateDir = path.join(directory, "state");
-  const store = new CredentialStore(stateDir);
-  store.add({ id: "openai", name: "OpenAI", protocol: "built-in", apiKey: "test-key" });
-  expect(existsSync(path.join(stateDir, "model-credentials.json"))).toBe(true);
-  expect(existsSync(path.join(directory, "model-credentials.json"))).toBe(false);
+  mkdirSync(stateDir);
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
       try {
+        expect(runtime.mcpStatus()).toEqual([]);
+        expect(runtime.mcpMarkNeedsAuth("missing")).toBeUndefined();
         const db = new Database(dbPath, { readonly: true });
         try {
           const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'pi_*'").all();
@@ -56,6 +60,203 @@ test("runtime creates durable tables and can close and reopen", async () => {
   }
 });
 
+test("runtime MCP connect discovers stdio tools in the shared workspace while status does not spawn", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-stdio-"));
+  const stateDir = path.join(directory, "state");
+  const sharedWorkspaceDir = path.join(directory, "workspace");
+  mkdirSync(stateDir);
+  mkdirSync(sharedWorkspaceDir);
+  const script = path.join(directory, "server.ts");
+  const launched = path.join(sharedWorkspaceDir, "fixture-cwd");
+  writeFileSync(script, `
+import { writeFileSync } from "node:fs";
+import { McpServer } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/mcp.js", import.meta.dir))};
+import { StdioServerTransport } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/stdio.js", import.meta.dir))};
+writeFileSync(${JSON.stringify(launched)}, process.cwd());
+const server = new McpServer({ name: "fixture", version: "1" });
+server.registerTool("read_fixture", {}, () => ({ content: [{ type: "text", text: "fixture" }] }));
+await server.connect(new StdioServerTransport());
+`);
+  const runtime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+    homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+    mcp: { servers: () => ({ revision: "fixture", secrets: [], servers: {
+      local: { disabled: false, transport: { type: "stdio", command: process.execPath, args: [script] } },
+    } }) },
+  });
+  try {
+    expect(runtime.mcpStatus()).toMatchObject([{ name: "local", status: "not-connected", toolCount: 0 }]);
+    expect(existsSync(launched)).toBe(false);
+    expect(await runtime.mcpControl({ action: "connect", server: "local" })).toMatchObject({
+      servers: [{ name: "local", status: "connected", toolCount: 1 }], result: {},
+    });
+    expect(readFileSync(launched, "utf8")).toBe(sharedWorkspaceDir);
+  } finally {
+    await runtime.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a plain 403 during OAuth import leaves the MCP service needing sign-in", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-rejected-import-"));
+  const stateDir = path.join(directory, "state");
+  const sharedWorkspaceDir = path.join(directory, "workspace");
+  const accessToken = "rejected-fixture-token";
+  const observedAuthorization: (string | null)[] = [];
+  const fixture = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    observedAuthorization.push(request.headers.get("authorization"));
+    return new Response(null, { status: 403 });
+  } });
+  let runtime: BotRuntime | undefined;
+  try {
+    mkdirSync(stateDir);
+    mkdirSync(sharedWorkspaceDir);
+    const store = new NativeMcpStore(sharedWorkspaceDir, path.join(directory, "private"));
+    const snapshot = () => store.effectiveServers();
+    const { name } = store.save(null, { name: "remote", enabled: true, transport: { type: "http", url: fixture.url.href } });
+    const botRuntime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+      homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+      mcp: { servers: snapshot },
+    });
+    runtime = botRuntime;
+    const report = await importMcpOAuthTokens({
+      secrets: botRuntime.secrets,
+      snapshot,
+      reader: { available: true, read: async () => ({ tokens: { accessToken } }) },
+      async check(server) {
+        const result = await botRuntime.mcpControl({ action: "connect", server });
+        expect(result).toMatchObject({ servers: [{ name, status: "failed" }], result: { error: "connect_failed" } });
+        return result.servers.some((entry) => entry.name === server && entry.status === "connected");
+      },
+      reportRejected: (server) => botRuntime.mcpMarkNeedsAuth(server),
+    });
+    expect(report).toEqual({ imported: [], needsSignIn: [name], skipped: [] });
+    const statuses = botRuntime.mcpStatus();
+    expect(statuses).toMatchObject([{ name, status: "needs-auth", toolCount: 0 }]);
+    store.updateStatus(statuses);
+    expect(store.list()).toMatchObject([{ name, status: "needs-auth", toolCount: 0 }]);
+    expect(Bun.deepEquals(observedAuthorization, [`Bearer ${accessToken}`])).toBe(true);
+  } finally {
+    try { await runtime?.close(); }
+    finally {
+      await fixture.stop(true);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("runtime close drains Services MCP control preparation and refuses later controls", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-preparation-"));
+  const stateDir = path.join(directory, "state");
+  const preparationStarted = Promise.withResolvers<void>();
+  const releasePreparation = Promise.withResolvers<void>();
+  const servers = () => ({ revision: "fixture", secrets: [], servers: {} });
+  let preparations = 0;
+  let runtime: BotRuntime | undefined;
+  try {
+    mkdirSync(stateDir);
+    runtime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+      homeDir: directory, dataDir: directory, sharedWorkspaceDir: directory, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+      mcp: { servers, async prepareServers() {
+        preparations++;
+        preparationStarted.resolve();
+        await releasePreparation.promise;
+        return servers();
+      } },
+    });
+    const control = runtime.mcpControl({ action: "connect", server: "local" });
+    await preparationStarted.promise;
+    let closed = false;
+    const closing = runtime.close().then(() => { closed = true; });
+    const refused = runtime.mcpControl({ action: "auth-start", server: "local", authorizationId: "closing" });
+    const duringClose = await Promise.race([refused, new Promise<string>((resolve) => setImmediate(() => resolve("pending")))]);
+    expect(closed).toBe(false);
+    expect(duringClose).toEqual({ servers: [], result: { error: "authorization_failed" } });
+    releasePreparation.resolve();
+    await Promise.all([closing, control]);
+    expect(await runtime.mcpControl({ action: "connect", server: "local" }))
+      .toEqual({ servers: [], result: { error: "connect_failed" } });
+    expect(preparations).toBe(1);
+  } finally {
+    releasePreparation.resolve();
+    await runtime?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("runtime signs in a pre-registered MCP connection using current settings for its name", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-oauth-"));
+  const stateDir = path.join(directory, "state");
+  const sharedWorkspaceDir = path.join(directory, "workspace");
+  const registeredClient = { clientId: "pre-registered-fixture", redirectUri: "" };
+  const fixture = await startOAuthMcpServer({ preRegisteredClient: registeredClient });
+  let runtime: BotRuntime | undefined;
+  const serve = spyOn(Bun, "serve");
+  try {
+    mkdirSync(stateDir);
+    mkdirSync(sharedWorkspaceDir);
+    const store = new NativeMcpStore(sharedWorkspaceDir, path.join(directory, "private"));
+    const config = path.join(sharedWorkspaceDir, ".mcp.json");
+    const plain = { url: fixture.url };
+    writeFileSync(config, JSON.stringify({ mcpServers: { work: plain, alias: plain } }));
+    const beforeOAuth = store.effectiveServers();
+    const completed = Promise.withResolvers<{ server: string; status: string }>();
+    runtime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+      homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+      mcp: { servers: () => store.effectiveServers(), prepareServers: async () => beforeOAuth },
+      mcpOAuth: { onAuthorization: (outcome) => { if (outcome.server === "work") completed.resolve(outcome); } },
+    });
+
+    const scope = "fixture.work.read";
+    let authorizationUrl: string | undefined;
+    let port: number | undefined;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(null) });
+      try {
+        port = reservation.port!;
+        registeredClient.redirectUri = `http://localhost:${port}/callback`;
+        writeFileSync(config, JSON.stringify({ mcpServers: { alias: plain, work: { ...plain, oauth: {
+          clientId: registeredClient.clientId, redirectUri: registeredClient.redirectUri,
+          authServerMetadataUrl: `${fixture.origin}/oauth-metadata`, scope,
+        } } } }));
+      } finally {
+        await reservation.stop(true);
+      }
+      serve.mockClear();
+      const { result } = await runtime.mcpControl({ action: "auth-start", server: "work", authorizationId: "work-sign-in" });
+      if (typeof result?.authorizationUrl === "string") authorizationUrl = result.authorizationUrl;
+      const portTaken = serve.mock.results.some(({ type, value }) => type === "throw" && (value as NodeJS.ErrnoException).code === "EADDRINUSE");
+      if (!portTaken) break;
+    }
+    if (!authorizationUrl) throw new Error("Expected a browser sign-in for the registered MCP client.");
+    expect(serve.mock.calls.map(([options]) => ({ hostname: options.hostname, port: options.port })))
+      .toEqual([{ hostname: "127.0.0.1", port }]);
+
+    const fetchStatus = (url: string | URL, redirect: RequestRedirect) => fetch(url, { redirect }).then(
+      (response) => response.status,
+      () => { throw new Error("OAuth fixture request failed."); },
+    );
+    const wrongHost = new URL(authorizationUrl);
+    wrongHost.searchParams.set("redirect_uri", `http://127.0.0.1:${port}/callback`);
+    expect(await fetchStatus(wrongHost, "manual")).toBe(400);
+    expect(await fetchStatus(authorizationUrl, "follow")).toBe(200);
+    expect(await completed.promise).toMatchObject({ server: "work", status: "completed" });
+    expect(fixture.authorizationRequests.at(-1)).toEqual({ clientId: registeredClient.clientId, redirectUri: registeredClient.redirectUri, scope });
+    expect(fixture.counts).toMatchObject({ configuredMetadata: 2, register: 0, token: 1 });
+    expect(runtime.mcpStatus()).toContainEqual(expect.objectContaining({ name: "work", status: "connected", toolCount: 1 }));
+
+    const unconfigured = await runtime.mcpControl({ action: "auth-start", server: "alias", authorizationId: "alias-sign-in" });
+    expect(unconfigured.result?.error).toBe("authorization_failed");
+    expect(fixture.counts.register).toBe(1);
+  } finally {
+    serve.mockRestore();
+    try { await runtime?.close(); }
+    finally {
+      await fixture.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test("runtime opens and creates durable tables with corrupt credentials", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-corrupt-"));
   const stateDir = path.join(directory, "state");
@@ -77,6 +278,7 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
   try {
     const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
     try {
+      expect(existsSync(path.join(stateDir, MODEL_CREDENTIALS_FILENAME))).toBeTrue();
       const db = new Database(dbPath, { readonly: true });
       try {
         const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'pi_*'").all();
@@ -91,12 +293,119 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
 });
 
 
+test("a durable Turn completes with a migrated provider after the legacy file is removed", () => withFakeRuntimeProvider([{ segments: [{ type: "text", text: "migrated reply" }] }], {}, async () => {
+  const h = await startDaemon(undefined, { legacyModelCredentials: [
+    { id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "legacy-fake-key", models: [{ id: "fake-model" }] },
+  ] });
+  try {
+    expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeFalse();
+    expect((await createRuntimeModels(h.svc.credentials).getAuth("fake"))?.auth.apiKey).toBe("legacy-fake-key");
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const botId = await makeBot(h, "Migrated provider");
+    const sent = await sendToBot(h, botId, "Use the migrated provider");
+    await waitThreadIdle(h, sent.threadId);
+    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+    expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeFalse();
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+}));
+
+test("a durable provider failure redacts app and Bot secrets from the Turn and its status event", () => {
+  const apiKey = "test-provider-key-sentinel";
+  const mcpToken = "test-mcp-token-sentinel";
+  const botToken = "test-bot-token-sentinel";
+  const failure = `Provider rejected ${apiKey}, ${mcpToken}, and ${botToken}`;
+  return withFakeRuntimeProvider([{ segments: [], failure }], {}, async () => {
+    const h = await startDaemon();
+    try {
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey, models: [{ id: "fake-model" }] });
+      const botId = await makeBot(h, "Failed durable");
+      const secrets = new SecretStore(h.svc.cfg.dataDir);
+      const providerSecret = (await secrets.forApp().list())[0]!.name;
+      await secrets.forApp().save("token", "MCP token", mcpToken);
+      await secrets.forBot(botId).save("token", "Bot token", botToken);
+      setSetting(h.svc.db, "default_model", "fake/fake-model");
+      setSetting(h.svc.db, "runtime", "durable");
+
+      const sent = await sendToBot(h, botId, "Run with the fake provider");
+      const assertRedactedFailure = async (daemon: typeof h, afterCursor: number) => {
+        await waitThreadIdle(daemon, sent.threadId);
+        const turn = daemon.svc.threads.turnRow(sent.turnId);
+        const events = daemon.svc.events.replay(afterCursor, daemon.svc.events.oldestCursor()).events;
+        const failedEvent = events.find((event) => event.type === "turn.status" && event.aggregateId === sent.turnId
+          && (event.payload as { to?: string }).to === "failed");
+        expect(turn?.status).toBe("failed");
+        for (const secret of [apiKey, mcpToken, botToken]) {
+          expect(turn?.outcome_reason?.includes(secret)).toBeFalse();
+          expect(JSON.stringify(events)).not.toContain(secret);
+        }
+        const reason = `Provider rejected {{secret:${providerSecret}}}, {{secret:token}}, and {{secret:token}}`;
+        expect(turn?.outcome_reason).toContain(reason);
+        expect(failedEvent?.payload).toMatchObject({ reason: turn?.outcome_reason });
+        return events.at(-1)!.cursor;
+      };
+      const cursor = await assertRedactedFailure(h, 0);
+      // Simulate stopping after the durable submission failed, before the Service recorded that outcome.
+      h.svc.db.run("UPDATE turns SET status = 'working', finished_at = NULL, outcome_reason = NULL WHERE id = ?", [sent.turnId]);
+      await h.stop();
+      const restarted = await startDaemon(h.home);
+      try { await assertRedactedFailure(restarted, cursor); }
+      finally {
+        await restarted.stop();
+        rmSync(restarted.svc.cfg.stateDir, { recursive: true, force: true });
+      }
+    } finally {
+      await h.stop();
+      rmSync(h.home, { recursive: true, force: true });
+      rmSync(h.svc.cfg.stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("runtime imports a healthy legacy provider when another record fails and retains the file", async () => {
+  const healthyKey = "test-healthy-key-sentinel";
+  const invalidKey = "test-invalid-key-sentinel";
+  const warning = spyOn(console, "warn").mockImplementation(() => {});
+  const log = spyOn(console, "log").mockImplementation(() => {});
+  const error = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const h = await startDaemon(undefined, { legacyModelCredentials: [
+      { id: invalidKey, name: "Invalid", protocol: "built-in", apiKey: invalidKey },
+      { id: "healthy", name: "Healthy", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: healthyKey, models: [{ id: "model" }] },
+    ] });
+    try {
+      const models = createRuntimeModels(h.svc.credentials);
+      expect(models.getModel("healthy", "model")?.id).toBe("model");
+      expect((await models.getAuth("healthy"))?.auth.apiKey).toBe(healthyKey);
+      expect(h.svc.credentials.getForRuntime(invalidKey)).toBeUndefined();
+      expect(existsSync(path.join(h.svc.cfg.stateDir, MODEL_CREDENTIALS_FILENAME))).toBeTrue();
+      expect(warning).toHaveBeenCalledWith("Unable to migrate some model credentials; keeping the legacy file for retry");
+      const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events;
+      const recorded = JSON.stringify([warning.mock.calls, log.mock.calls, error.mock.calls, events]);
+      expect(recorded).not.toContain(healthyKey);
+      expect(recorded).not.toContain(invalidKey);
+    } finally {
+      await h.stop();
+      rmSync(h.home, { recursive: true, force: true });
+      rmSync(h.svc.cfg.stateDir, { recursive: true, force: true });
+    }
+  } finally { warning.mockRestore(); log.mockRestore(); error.mockRestore(); }
+});
+
+test("secret storage status requires authentication and reports the active backend", async () => {
+  const h = await startDaemon();
+  try {
+    expect((await fetch(`${h.baseUrl}/api/secrets/status`)).status).toBe(401);
+    expect(await apiStatus(h, "GET", "/api/secrets/status")).toEqual({ status: 200, body: { backend: "file" } });
+  } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
+});
+
 test("configured conversation uses the Service limit for unset and null Bots and the Bot override otherwise", () => withFakeRuntimeProvider(Array.from({ length: 3 }, () => ({ segments: [{ type: "text" as const, text: "ok" }] })), {}, async () => {
   const h = await startDaemon();
   try {
     const botId = await makeBot(h, "Default limit");
     const custom = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Custom limit", agentId: "pi", maxTurns: 3 });
-    new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     setSetting(h.svc.db, "runtime", "durable");
     async function limit(threadId: string): Promise<number | undefined> {
@@ -153,7 +462,7 @@ test("the model request contains only the app prompt and Shared Workspace Skills
       rmSync(path.join(workspace, ".agents/skills"), { recursive: true, force: true });
       [workspaceSkill, ...legacyWorkspaceSkills].forEach(writeSkill);
       const { id: botId } = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Prompt Bot", agentId: "pi", instructions: "Keep track of releases." });
-      new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
       setSetting(h.svc.db, "runtime", "durable");
       const extraFolder = path.join(home, "extra-files");
@@ -204,7 +513,7 @@ for (const mode of ["worker", "durable"] as const) {
     try {
       setSetting(h.svc.db, "runtime", mode);
       if (mode === "durable") {
-        new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+        await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
         setSetting(h.svc.db, "default_model", "fake/fake-model");
       }
       const botId = await makeBot(h, "Before rename");
@@ -270,7 +579,7 @@ test("an unreadable SKILL.md is skipped and the durable Turn completes", () => {
         if (name === "Unreadable Skill") chmodSync(skillFile, 0o000);
       }
       const botId = await makeBot(h, "Skill availability");
-      new CredentialStore(h.svc.cfg.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
       setSetting(h.svc.db, "runtime", "durable");
       const { threadId } = await sendToBot(h, botId, "Check the available Skills.");
@@ -336,16 +645,23 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
   db.run("CREATE TABLE messages (id TEXT, thread_id TEXT, turn_id TEXT, kind TEXT, author_kind TEXT, payload TEXT)");
   db.run("CREATE TABLE service_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
   db.run("CREATE TABLE bots (id TEXT PRIMARY KEY, model TEXT)");
-  new CredentialStore(paths.stateDir).add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
+  const credentials = await CredentialStore.open(paths.stateDir, new SecretStore(paths.dataDir));
+  await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
   const rows = ["first", "second"].map((name, index) => ({
     thread: `thread-${name}`, bot: `bot-${name}`, turn: `turn-${name}`, submission: index + 1,
     privateFile: path.join(paths.sharedWorkspaceDir, "bots", `bot-${name}`, "notes.txt"),
   }));
   const ids: ConversationId[] = [];
   const ctx = BACKGROUND_CONTEXT;
+  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const callerAgentDir = path.join(root, "caller-pi-agent");
+  const callerKey = "test-recovery-caller-pi-key";
   let runtime: BotRuntime | undefined;
   let restoreOpen: (() => void) | undefined;
   try {
+    mkdirSync(callerAgentDir, { mode: 0o700 });
+    writeFileSync(path.join(callerAgentDir, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: callerKey } }), { mode: 0o600 });
+    process.env.PI_CODING_AGENT_DIR = callerAgentDir;
     const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
     const initial = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, ctx);
     try {
@@ -406,7 +722,13 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
       return harness;
     };
     restoreOpen = () => { Harness.open = originalOpen; };
+    const agentDir = path.join(root, "empty-pi-agent");
+    mkdirSync(agentDir, { mode: 0o700 });
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     runtime = await openBotRuntime(paths, db);
+    const runtimeProviders = runtime.credentials.getAllForRuntime();
+    expect(runtimeProviders.some(({ apiKey }) => apiKey === callerKey)).toBeFalse();
+    expect(runtimeProviders.map(({ id }) => id)).toEqual(["fake"]);
     expect(resumed).toBe(0);
     const callbackError = new Error("callback failure");
     const registered: string[] = [];
@@ -444,6 +766,8 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
     }
     expect(resumed).toBe(1);
   } finally {
+    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
     restoreOpen?.();
     await runtime?.close();
     db.close();

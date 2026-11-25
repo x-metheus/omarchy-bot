@@ -5,7 +5,7 @@
  * processes it owns, and the fixture manager's own log.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { SurfaceId } from "../../packages/domain/src/index.ts";
@@ -64,6 +64,7 @@ const priorEnvironment = {
   XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
   DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
   OMARCHY_BOT_HOST_SESSION_MARKER: process.env.OMARCHY_BOT_HOST_SESSION_MARKER,
+  PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
 };
 
 const roots: string[] = [];
@@ -341,6 +342,10 @@ describe("Service supervision with a user manager present", () => {
     const home = path.join(scratch, "home");
     const state = path.join(scratch, "state");
     const runtimeRoot = path.join(home, "r");
+    const callerAgentDir = path.join(scratch, "caller-pi-agent");
+    mkdirSync(callerAgentDir, { mode: 0o700 });
+    writeFileSync(path.join(callerAgentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "test-managed-caller-pi-key" } }), { mode: 0o600 });
+    process.env.PI_CODING_AGENT_DIR = callerAgentDir;
     managed = await startManagedService({
       home,
       state,
@@ -349,6 +354,7 @@ describe("Service supervision with a user manager present", () => {
       workersDir: path.resolve(import.meta.dir, "fake-workers"),
       runtimeRoot,
     });
+    expect(existsSync(path.join(home, "secret-index.json"))).toBeFalse();
     // The managed Service is a separate process; pair once on its loopback host, then carry the token.
     const token = await pairForToken(managed.baseUrl, state, "service-supervision");
     const request = async <T>(method: string, p: string, body?: unknown): Promise<T> => {

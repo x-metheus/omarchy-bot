@@ -338,7 +338,7 @@ export class TurnService {
       const runtime = this.runtime;
       const start = runtime && (async () => {
         resolveWorkCwd(this.threads.getThread(result.threadId)!.cwd);
-        await runtime.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, instructions: bot.instructions, workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, ...(durableFollowUp ? { whenBusy: "followUp" as const, admitted } : {}), working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
+        await runtime.startTurn({ db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId: result.threadId, botId, turnId, text, userMessageSeq: userMsgDto.seq, instructions: bot.instructions, workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, ...(durableFollowUp ? { whenBusy: "followUp" as const, admitted } : {}), working: () => this.#setTurnStatus(turnId, "working", undefined, true) });
       })();
       if (!start) { this.#durableTurns.delete(turnId); this.#setTurnStatus(turnId, "failed", "Durable runtime unavailable", true); rejectAdmission(new Error("Durable runtime unavailable")); }
       else {

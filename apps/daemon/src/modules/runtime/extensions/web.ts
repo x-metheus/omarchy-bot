@@ -9,6 +9,8 @@ import { getSetting } from "../../../persistence/settings.ts";
 import type { ExtractionRequest, ExtractionResult } from "./web.worker.ts";
 
 export const WEB_EXEMPT_RANGES_SETTING = "web_exempt_ranges";
+export const EXA_SEARCH_KEY_SECRET = "exa-key";
+export const EXA_SEARCH_KEY_DESCRIPTION = "Exa search API key";
 
 const WEB_FETCH_TOOL_NAME = "web_fetch";
 const WEB_SEARCH_TOOL_NAME = "web_search";
@@ -239,7 +241,7 @@ function outsideContentResult(text: string, source: string): ToolExecutionResult
   return textResult(`${text}\n\n${OUTSIDE_CONTENT_NOTICE}\nSource: ${source}`);
 }
 
-type SearchKeyLookup = () => string | undefined;
+type SearchKeyLookup = () => string | undefined | Promise<string | undefined>;
 
 type WebExtensionOptions = {
   exemptRanges?: () => readonly string[];
@@ -434,10 +436,19 @@ function defineWebSearch(options: WebExtensionOptions) {
         return textResult(`Web search result count must be ${resultCountDescription}.`, true);
       }
       const timeout = new AbortController();
-      const signal = context.abortSignal ? AbortSignal.any([context.abortSignal, timeout.signal]) : timeout.signal;
+      const searchContext = withAbortSignal(timeout.signal, context);
+      const signal = searchContext.abortSignal ?? timeout.signal;
       const timer = setTimeout(() => timeout.abort(), timeoutMs);
       try {
-        const key = options.searchKey?.()?.trim();
+        let key: string | undefined;
+        try {
+          const storedKey = await awaitWithContext(Promise.resolve().then(() => options.searchKey?.()), searchContext);
+          key = storedKey?.trim();
+        } catch {
+          signal.throwIfAborted();
+          return textResult("Web search failed because it could not read the Exa search API key. Try the browser tool instead.", true);
+        }
+        signal.throwIfAborted();
         const provider = createExaSearchProvider(endpoint, key, timeoutMs);
         const results = await provider.search(query, numResults, signal);
         signal.throwIfAborted();

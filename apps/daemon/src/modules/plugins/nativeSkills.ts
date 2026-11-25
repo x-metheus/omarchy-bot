@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { ResourceFingerprint } from "./resourceFingerprint.ts";
@@ -19,7 +19,8 @@ const Entry = z.object({
   error: z.string().optional(), availableRevision: z.string().optional(),
 });
 type Entry = z.infer<typeof Entry>;
-const Registry = z.object({ version: z.literal(1), entries: z.array(Entry), defaultsInitialized: z.boolean().default(false), aliases: z.record(z.string()).default({}) });
+// Zod strips the retired aliases map when reading older registries or transactions.
+const Registry = z.object({ version: z.literal(1), entries: z.array(Entry), defaultsInitialized: z.boolean().default(false) });
 type InstallOptions = { origin?: Entry["origin"]; serviceId?: string; enabled?: boolean; installedAt?: string; baselineVerified?: boolean };
 type Installation = { catalog: CatalogSkillDto; materialized: { directory: string; revision: string }; options?: InstallOptions };
 const Transaction = z.object({
@@ -33,6 +34,10 @@ function inside(root: string, target: string): boolean {
   } catch {
     return false;
   }
+}
+
+function legacySkillRoots(workspace: string): string[] {
+  return [".pi", ".claude"].map((client) => path.join(workspace, client, "skills"));
 }
 
 /** Native files are authoritative; this registry retains origin and update baselines only. */
@@ -52,14 +57,14 @@ export class NativeSkills {
     this.#file = path.join(privateDir, "native-skills.json");
     this.#transactionFile = path.join(privateDir, "native-skills-transaction.json");
     mkdirSync(privateDir, { recursive: true, mode: 0o700 });
-    this.#registry = existsSync(this.#file) ? Registry.parse(JSON.parse(readFileSync(this.#file, "utf8"))) : { version: 1, entries: [], defaultsInitialized: false, aliases: {} };
+    this.#registry = existsSync(this.#file) ? Registry.parse(JSON.parse(readFileSync(this.#file, "utf8"))) : { version: 1, entries: [], defaultsInitialized: false };
     try { this.#recover(); }
     catch { this.#recoveryError = `Interrupted Skill update requires attention. Current files and recovery copies were retained; inspect ${this.#transactionFile}.`; }
   }
 
-  #persist(): void {
+  #persist(registry = this.#registry): void {
     const temporary = `${this.#file}.${randomUUID()}.tmp`;
-    writeFileSync(temporary, JSON.stringify(this.#registry, null, 2), { mode: 0o600, flag: "wx" });
+    writeFileSync(temporary, JSON.stringify(registry, null, 2), { mode: 0o600, flag: "wx" });
     renameSync(temporary, this.#file);
   }
 
@@ -101,23 +106,26 @@ export class NativeSkills {
   }
 
   #owned(directory: string): boolean {
-    const roots = [this.root, path.join(this.workspace, ".pi", "skills"), path.join(this.workspace, ".claude", "skills"), this.#disabled];
+    const roots = [this.root, this.#disabled];
     if (!roots.some((root) => inside(root, directory))) return false;
     if (!existsSync(directory)) return true;
     const real = realpathSync(directory);
     return roots.some((root) => inside(path.resolve(root), real));
   }
 
-
   #directories(): string[] {
     const directories: string[] = [];
     const seen = new Set<string>();
+    const legacyRoots = legacySkillRoots(existsSync(this.workspace) ? realpathSync(this.workspace) : path.resolve(this.workspace));
     let visited = 0;
     const scan = (directory: string, depth: number): void => {
       if (!existsSync(directory) || depth > 5 || ++visited > 2000) return;
       let canonical: string;
-      try { canonical = realpathSync(directory); } catch { return; }
-      if (seen.has(canonical)) return;
+      try {
+        canonical = realpathSync(directory);
+        if (depth === 0 && !lstatSync(canonical).isDirectory()) return;
+      } catch { return; }
+      if (seen.has(canonical) || legacyRoots.some((root) => canonical === root || inside(root, canonical))) return;
       seen.add(canonical);
       if (existsSync(path.join(directory, "SKILL.md"))) { directories.push(this.#owned(canonical) ? canonical : directory); return; }
       for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -128,59 +136,61 @@ export class NativeSkills {
         }
       }
     };
-    for (const directory of [path.join(this.workspace, ".pi", "skills"), this.root, path.join(this.workspace, ".claude", "skills"), this.#disabled]) scan(directory, 0);
+    for (const directory of [this.root, this.#disabled]) scan(directory, 0);
     return directories;
   }
 
-  #syncAliases(directories: string[]): boolean {
-    this.errors = this.#recoveryError ? [this.#recoveryError] : [];
-    let changed = false;
-    const wanted = new Map<string, string>();
-    for (const directory of directories) {
-      if (!this.#owned(directory) || inside(this.#disabled, directory)) continue;
-      for (const root of [this.root, path.join(this.workspace, ".claude", "skills")]) {
-        if (inside(root, directory)) continue;
-        const alias = path.join(root, path.basename(directory));
-        if (wanted.has(alias) && wanted.get(alias) !== directory) {
-          this.errors.push(`${alias}: native Skill names conflict across discovery roots; existing resources were retained`);
-        } else wanted.set(alias, directory);
+  #reconcileLegacyDestinations(): Map<Entry, Entry> {
+    const reconciled = new Map<Entry, Entry>();
+    const legacyRoots = legacySkillRoots(this.workspace);
+    const pending = this.#registry.entries.filter((entry) => !entry.enabled && inside(this.#disabled, entry.directory)
+      && legacyRoots.some((root) => inside(root, entry.activeDirectory)));
+    if (!pending.length) return reconciled;
+
+    const occupied = new Set(this.#registry.entries.map((entry) => path.resolve(entry.activeDirectory).toLowerCase()));
+    try {
+      for (const directory of [path.dirname(this.root), this.root]) {
+        const stat = lstatSync(directory, { throwIfNoEntry: false });
+        if (stat && !stat.isDirectory()) throw new Error(`${directory} must be a real directory`);
       }
+      if (existsSync(this.root)) {
+        for (const name of readdirSync(this.root)) occupied.add(path.resolve(this.root, name).toLowerCase());
+      }
+    } catch (error) {
+      this.errors.push(`Cannot reconcile disabled legacy Skills: ${error instanceof Error ? error.message : String(error)}`);
+      return reconciled;
     }
-    for (const [alias, target] of Object.entries(this.#registry.aliases)) {
+
+    for (const entry of pending) {
+      const name = path.basename(path.resolve(entry.activeDirectory));
+      let destination = path.resolve(this.root, name);
       try {
-        if (lstatSync(alias).isSymbolicLink() && path.resolve(path.dirname(alias), readlinkSync(alias)) === target) {
-          if (wanted.get(alias) === target) continue;
-          rmSync(alias);
+        for (let suffix = 2; occupied.has(destination.toLowerCase()) || lstatSync(destination, { throwIfNoEntry: false }); suffix++) {
+          destination = path.resolve(this.root, `${name}-${suffix}`);
         }
       } catch (error) {
-        if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+        this.errors.push(`Cannot reconcile disabled Skill ${entry.id}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
       }
-      delete this.#registry.aliases[alias];
-      changed = true;
+      occupied.add(destination.toLowerCase());
+      const updated = { ...entry, activeDirectory: destination };
+      if (entry.origin === "local") {
+        if (entry.source === entry.activeDirectory) updated.source = destination;
+        if (entry.installUrl === entry.activeDirectory) updated.installUrl = destination;
+      }
+      reconciled.set(entry, updated);
     }
-    for (const [alias, target] of wanted) {
-      try {
-        if (existsSync(alias)) {
-          if (realpathSync(alias) !== target) this.errors.push(`${alias}: an existing native Skill prevents cross-client discovery; it was not overwritten`);
-          continue;
-        }
-        mkdirSync(path.dirname(alias), { recursive: true, mode: 0o700 });
-        const parent = realpathSync(path.dirname(alias));
-        if (!inside(this.workspace, parent)) throw new Error("Native Skill alias parent is outside the shared workspace");
-        symlinkSync(path.relative(path.dirname(alias), target), alias, "dir");
-        this.#registry.aliases[alias] = target;
-        changed = true;
-      } catch (error) { this.errors.push(`${alias}: ${error instanceof Error ? error.message : String(error)}`); }
-    }
-    return changed;
+    return reconciled;
   }
 
   list(): InstalledSkillDto[] {
     const results: InstalledSkillDto[] = [];
     const directories = this.#directories();
-    const byPath = new Map(this.#registry.entries.map((entry) => [entry.directory, entry]));
+    this.errors = this.#recoveryError ? [this.#recoveryError] : [];
+    const reconciled = this.#reconcileLegacyDestinations();
+    let changed = reconciled.size > 0;
+    const byPath = new Map(this.#registry.entries.map((entry) => [entry.directory, reconciled.get(entry) ?? entry]));
     const retained: Entry[] = [];
-    let changed = this.#syncAliases(directories);
     for (const directory of directories) {
       const stored = byPath.get(directory);
       const enabled = !inside(this.#disabled, directory);
@@ -222,7 +232,11 @@ export class NativeSkills {
       }
     }
     if (retained.length !== this.#registry.entries.length) changed = true;
-    if (changed) { this.#registry.entries = retained; this.#persist(); }
+    if (changed) {
+      const registry = { ...this.#registry, entries: retained };
+      this.#persist(registry);
+      this.#registry = registry;
+    }
     return results;
   }
 
@@ -330,7 +344,7 @@ export class NativeSkills {
     if (entry.origin === "service" && !service) throw new HttpError(409, "Manage this Skill through its owning Service");
     if (entry.enabled === enabled) return;
     const target = enabled ? entry.activeDirectory : path.join(this.#disabled, createHash("sha256").update(id).digest("hex"));
-    if (existsSync(target)) throw new HttpError(409, "Another Skill occupies the destination; nothing was overwritten");
+    if (lstatSync(target, { throwIfNoEntry: false })) throw new HttpError(409, "Another Skill occupies the destination; nothing was overwritten");
     mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
     renameSync(entry.directory, target);
     entry.directory = target;

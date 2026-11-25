@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"10000000-0000-4000-8000-000000000003","timestamp":"2026-01-03T00:00:00.000Z","cwd":"/synthetic/broken"}
+{"type":"message","id":"00000001","parentId":null,"timestamp":"2026-01-03T00:00:01.000Z","message":{"role":"user","content":"A truncated synthetic message

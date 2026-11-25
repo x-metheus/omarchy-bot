@@ -1,5 +1,6 @@
 import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
+import { getSetting, setSetting } from "../persistence/settings.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
 import { ThreadsService } from "../modules/threads/threads.ts";
 import { AgentsRegistry } from "../modules/agents/registry.ts";
@@ -7,6 +8,7 @@ import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { openBotRuntime } from "../modules/runtime/runtime.ts";
+import { importMcpOAuthTokensOnce, pendingPiMcpAdapterTokenReader } from "../modules/runtime/mcpOAuthImport.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker, type ComputerSurfaceOwner } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
@@ -19,6 +21,7 @@ import type { BotComputerAssetSupply } from "../modules/computer/botComputerAsse
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
+import { cleanupWorkspace } from "../modules/workspace/cleanup.ts";
 import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { PluginsService } from "../modules/plugins/plugins.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
@@ -58,13 +61,30 @@ export async function main(options: MainOptions = {}): Promise<{
   const db = openDb(cfg);
   recoverOnStartup(db);
   const events = new EventLog(db);
-  const runtime = await openBotRuntime(cfg, db, { events });
+  let plugins!: PluginsService;
+  const mcpServers = () => plugins?.mcp.effectiveServers() ?? { revision: "", servers: {}, secrets: [] };
+  const runtime = await openBotRuntime(cfg, db, {
+    events,
+    mcp: {
+      servers: mcpServers,
+      async prepareServers() {
+        await plugins?.prepareServiceCredentials();
+        return mcpServers();
+      },
+    },
+    mcpOAuth: { onAuthorization: (outcome) => { plugins?.handleNativeAuthorization(outcome); } },
+  });
+  const sharedWorkspaceDir = prepareSharedWorkspace(cfg.sharedWorkspaceDir);
+  try {
+    cleanupWorkspace({ workspaceDir: cfg.sharedWorkspaceDir, dataDir: cfg.dataDir });
+  } catch (error) {
+    console.warn("Workspace cleanup failed. It will retry on the next Service start.", error);
+  }
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
   let mailbox!: MailboxService;
-  let plugins!: PluginsService;
   const supervisor: Supervisor = new Supervisor(
     {
       onAgentEvent: (agentId, event) => {
@@ -92,7 +112,7 @@ export async function main(options: MainOptions = {}): Promise<{
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
     capacity: cfg.botScreenCapacity,
-    applicationCwd: prepareSharedWorkspace(cfg.sharedWorkspaceDir),
+    applicationCwd: sharedWorkspaceDir,
     fontDir: process.env.OMARCHY_BOT_FONT_DIR ?? cfg.botComputerFontSupplyDir,
     browserPackDir: process.env.OMARCHY_BOT_BROWSER_PACK_DIR ?? cfg.botComputerBrowserPackDir,
     ...(options.botComputerAssetSupply === undefined ? {} : { assetSupply: options.botComputerAssetSupply }),
@@ -150,8 +170,13 @@ export async function main(options: MainOptions = {}): Promise<{
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
     const worker = await supervisor.agentWorker("pi");
-    return worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
+    const resources = await worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
+    if (getSetting(db, "runtime") !== "durable") return resources;
+    // Reconciliation can change the configuration revision before Services applies the status.
+    plugins.mcp.reconcile();
+    return { ...resources, mcp: runtime.mcpStatus() };
   }, async (input) => {
+    if (getSetting(db, "runtime") === "durable") return runtime.mcpControl(input);
     const worker = await supervisor.agentWorker("pi");
     return worker.request({ type: "mcp.control", cwd: cfg.sharedWorkspaceDir, ...input }, 90_000);
   }, () => {
@@ -161,6 +186,21 @@ export async function main(options: MainOptions = {}): Promise<{
     if (origin.hostname === "[::]") origin.hostname = "[::1]";
     return origin.origin;
   }, (event) => { events.append("plugin", event.accountId ?? event.mcpId ?? event.providerId ?? "plugins", `plugin.authorization_${event.status}`, event); });
+  if (typeof runtime.mcpControl === "function") {
+    const markerKey = "mcpOAuthAdapterImport";
+    void importMcpOAuthTokensOnce({
+      reader: pendingPiMcpAdapterTokenReader,
+      secrets: runtime.secrets,
+      snapshot: mcpServers,
+      check: (name) => runtime.mcpControl({ action: "connect", server: name })
+        .then(({ servers }) => servers.some((server) => server.name === name && server.status === "connected")),
+      reportRejected: (name) => runtime.mcpMarkNeedsAuth(name),
+      marker: {
+        get: () => getSetting(db, markerKey) ?? undefined,
+        set: (value) => setSetting(db, markerKey, value),
+      },
+    }).catch(() => undefined);
+  }
   const devices = new SidecarBroker(cfg.sharedWorkspaceDir);
   const pairing = new PairingService(db);
   const pairingHostSecret = pairing.ensureHostSecret(cfg.stateDir);
@@ -240,8 +280,7 @@ export async function main(options: MainOptions = {}): Promise<{
     threads,
     screens,
     cfg.sharedWorkspaceDir,
-    cfg.botDeletionTerminalTimeoutMs,
-    projections,
+    { secrets: runtime.secrets, terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs, projections },
   );
   await screens.recover();
 
@@ -255,6 +294,8 @@ export async function main(options: MainOptions = {}): Promise<{
 
   const svc: DaemonServices = {
     ...(runtime.approvals ? { approvals: runtime.approvals } : {}),
+    credentials: runtime.credentials,
+    secretsBackend: runtime.secrets.kind,
     cfg,
     db,
     events,

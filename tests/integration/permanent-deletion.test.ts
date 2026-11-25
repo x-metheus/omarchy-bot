@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { SecretStore } from "../../apps/daemon/src/modules/runtime/secrets.ts";
 import type { AttachmentDto, BotViewDto, DeleteBotResultDto } from "../../packages/protocol/src/index.ts";
 import { api, authedFetch, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
 
@@ -140,6 +141,7 @@ describe("local Bot deletion", () => {
         turns: 0,
         attachments: 0,
         avatar: false,
+        secrets: 0,
         computerArtifacts: 0,
         surface: false,
       },
@@ -181,6 +183,7 @@ describe("local Bot deletion", () => {
         turns: 0,
         attachments: 0,
         avatar: false,
+        secrets: 0,
         computerArtifacts: 0,
         surface: false,
       },
@@ -194,9 +197,12 @@ describe("local Bot deletion", () => {
     expect((await apiStatus(h, "GET", `/api/bots/${botId}`)).status).toBe(404);
   });
 
-  test("removes only Bot-owned database rows and files while preserving the shared Agent and sibling Bot", async () => {
+  test("removes only Bot-owned database rows, files, and secrets while preserving the shared Agent and sibling Bot", async () => {
     const botId = await makeBot(h, "Delete all owned data");
     const siblingId = await makeBot(h, "Shared Agent sibling survives");
+    const secrets = new SecretStore(h.svc.cfg.dataDir);
+    await secrets.forBot(botId).save("token", "Deleted Bot token", "deleted-test-value");
+    await secrets.forBot(siblingId).save("token", "Sibling Bot token", "sibling-test-value");
     const deletedBot = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
     const computerTurn = await sendToBot(h, botId, "computer:screenshot");
     await waitThreadIdle(h, computerTurn.threadId);
@@ -235,11 +241,14 @@ describe("local Bot deletion", () => {
       turns: 2,
       attachments: 2,
       avatar: true,
+      secrets: 1,
       privateFolder: true,
       computerArtifacts: 1,
       surface: true,
     });
     expect(result).not.toHaveProperty("nativeSessionCleanup");
+    expect(await secrets.forBot(botId).list()).toEqual([]);
+    expect(await secrets.getBotSecretForRuntime(siblingId, "token")).toBe("sibling-test-value");
     expect(existsSync(managedPath)).toBeFalse();
     expect(existsSync(stagedPath)).toBeFalse();
     expect(existsSync(avatarPath)).toBeFalse();
@@ -284,12 +293,14 @@ describe("local Bot deletion", () => {
       status: "deleted",
       botId,
       botName: "Delete while Agent unavailable",
+      oldSessionFilesRemoved: 0,
       removed: {
         threads: 1,
         messages: 2,
         turns: 1,
         attachments: 0,
         avatar: false,
+        secrets: 0,
         privateFolder: true,
         computerArtifacts: 0,
         surface: true,

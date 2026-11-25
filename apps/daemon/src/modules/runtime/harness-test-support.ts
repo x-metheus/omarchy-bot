@@ -57,8 +57,7 @@ export function installDurableSuiteProvider(): () => void {
     });
     return conversation;
   }
-  const registry = createRegistry();
-  registry.install({ name: "test-steering", tools: [defineTool({
+  const steering = defineExtension({ name: "test-steering", tools: [defineTool({
     name: "steer_boundary", description: "Test steering boundary", parameters: { type: "object", properties: {}, additionalProperties: false },
     async execute(_args, api, context) {
       if (!steered.delete(api.conversationId)) {
@@ -75,9 +74,11 @@ export function installDurableSuiteProvider(): () => void {
   })] });
   const originalOpen = Harness.open;
   Harness.open = async (storage, options, context) => {
+    const registry = options.registry;
+    if (!("install" in registry) || typeof registry.install !== "function") throw new Error("Expected a mutable registry");
+    registry.install(steering);
     const harness = await originalOpen.call(Harness, storage, {
       ...options,
-      registry,
       models: () => {
         const models = typeof options.models === "function" ? options.models() : options.models;
         if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
@@ -125,7 +126,7 @@ export async function withBlockingRuntimeTool<T>(fn: (tool: { started: Promise<v
   try { return await fn({ started, release, seen: () => seen }); }
   finally { release(); Harness.open = originalOpen; }
 }
-export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: { tokensPerSecond?: number; onMaxTurns?: (maxTurns: number | null | undefined) => void; onSystemPrompt?: (systemPrompt: string) => void }, fn: () => Promise<T>): Promise<T> {
+export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: { providerId?: string; tokensPerSecond?: number; onMaxTurns?: (maxTurns: number | null | undefined) => void; onSystemPrompt?: (systemPrompt: string) => void }, fn: () => Promise<T>): Promise<T> {
   const fake = createFakeProvider(script, options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond });
   const provider: typeof fake.provider = {
     ...fake.provider,
@@ -141,7 +142,13 @@ export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: {
       models: () => {
         const models = typeof harnessOptions.models === "function" ? harnessOptions.models() : harnessOptions.models;
         if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
-        models.setProvider(provider);
+        if (options.providerId === undefined) {
+          models.setProvider(provider);
+        } else {
+          // Preserve catalog and auth from the stored provider, including when it is added after daemon startup.
+          const stored = models.getProvider(options.providerId);
+          if (stored) models.setProvider({ ...stored, streamSimple: provider.streamSimple });
+        }
         return models;
       },
     }, context);

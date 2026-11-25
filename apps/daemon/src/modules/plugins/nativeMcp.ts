@@ -1,18 +1,62 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { parseForESLint, type AST } from "toml-eslint-parser";
 import { z } from "zod";
 import { McpDefinition, type McpConnectionDto } from "@omarchy-bot/protocol";
 import type { NativeMcpStatus } from "@omarchy-bot/agent-contract";
-import { emptyNativeMcpMetadata, type NativeMcpMetadata, nativeMcpConfigFile, nativeMcpEndpoint, nativeMcpSecretKey, nativeMcpSecretPlaceholder, parseNativeMcpMetadata } from "@omarchy-bot/agent-contract/native-mcp-config";
+import { emptyNativeMcpMetadata, type NativeMcpMetadata, nativeMcpConfigFile, nativeMcpEndpoint, nativeMcpSecretKey, nativeMcpSecretPlaceholder, parseNativeMcpMetadata, resolveNativeMcpCredentials } from "@omarchy-bot/agent-contract/native-mcp-config";
 import { nativeMcpRevision } from "@omarchy-bot/agent-contract/native-mcp-revision";
 import { HttpError } from "../bots/bots.ts";
+import { projectNativeMcpOAuth, type NativeMcpOAuthSettings } from "./nativeMcpOAuth.ts";
 
 type Definition = Record<string, unknown>;
 type Document = { file: string; text: string; values: Record<string, Definition>; root: Record<string, unknown>; toml: boolean };
 type Common = { command?: string; args?: string[]; url?: string; env?: Record<string, string>; headers?: Record<string, string>; disabled: boolean };
+type RuntimeConnection = Common & { oauth?: NativeMcpOAuthSettings };
+
+export type EffectiveMcpServer = { configurationError: string; transport?: never; disabled?: never } | {
+  disabled: boolean;
+  transport:
+    | { type: "stdio"; command: string; args: string[]; env?: Record<string, string> }
+    | { type: "http"; url: string; headers?: Record<string, string>; oauth?: NativeMcpOAuthSettings }
+    | { type: "sse" | "socket" };
+};
+
+export type EffectiveMcpServers = { revision: string; servers: Record<string, EffectiveMcpServer>; secrets: string[]; configurationError?: string };
+
+const MAX_RUNTIME_CONFIG_BYTES = 1024 * 1024;
+
+function readRuntimeConfig(file: string, workspace?: string): { contents?: Buffer } | { error: string } {
+  try {
+    const original = lstatSync(file);
+    if (!original.isFile()) return { error: "expected an unlinked regular file" };
+    if (workspace !== undefined) {
+      const relative = path.relative(workspace, realpathSync(file));
+      if (relative.startsWith("..") || path.isAbsolute(relative)) return { error: "configuration file is outside the workspace" };
+    }
+    const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.dev !== original.dev || stat.ino !== original.ino) return { error: "configuration changed during the read" };
+      if (stat.size > MAX_RUNTIME_CONFIG_BYTES) return { error: "configuration file exceeds 1 MiB" };
+      // A file that grows after validation must still have a bounded read.
+      const buffer = Buffer.allocUnsafe(stat.size + 1);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const read = readSync(fd, buffer, offset, buffer.length - offset, null);
+        if (!read) return { contents: buffer.subarray(0, offset) };
+        offset += read;
+      }
+      return { error: "configuration grew during the read" };
+    } finally {
+      closeSync(fd);
+    }
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? {} : { error: "configuration file could not be read" };
+  }
+}
 
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function strings(value: unknown): Record<string, string> {
@@ -50,11 +94,29 @@ function sourceFingerprint(value: Definition | undefined): string | null {
   return value ? createHash("sha256").update(stable(value)).digest("hex") : null;
 }
 
+const nativeSources = ["shared", "pi", "codex"] as const;
+const SOURCE_DELETION_CONFLICT = "Native deletion conflicts with another source edit; resolve the source files before synchronizing";
+type NativeSource = (typeof nativeSources)[number];
+type SourceFingerprints = NativeMcpMetadata["entries"][string]["sources"];
+
+function hasSourceDeletion(previous: SourceFingerprints, sourceExists: (source: NativeSource) => boolean): boolean {
+  return previous !== undefined && nativeSources.some((source) => previous[source] !== null && !sourceExists(source));
+}
+
+function hasConcurrentSourceEdit(previous: SourceFingerprints, fingerprintSource: (source: NativeSource) => string | null): boolean {
+  return previous !== undefined && nativeSources.some((source) => {
+    const current = fingerprintSource(source);
+    return current !== null && current !== previous[source];
+  });
+}
+
+const credentialQueryName = /token|secret|password|api.?key|^(?:sig|signature)$/i;
+
 function safeEndpoint(value: string): string {
   try {
     const url = new URL(value);
     url.username = ""; url.password = "";
-    for (const key of url.searchParams.keys()) if (/token|secret|password|api.?key/i.test(key)) url.searchParams.set(key, "<REDACTED>");
+    for (const key of [...url.searchParams.keys()]) if (credentialQueryName.test(key)) url.searchParams.set(key, "<REDACTED>");
     return url.href;
   } catch { return "<invalid endpoint>"; }
 }
@@ -66,7 +128,7 @@ function projectionLimits(definition: Definition | undefined): { unsupported: st
   const unsupported: string[] = [], local: string[] = [];
   for (const key of Object.keys(definition ?? {})) {
     if (localTimingFields.has(key)) local.push(key);
-    else if (!commonFields.has(key)) unsupported.push(key);
+    else if (!commonFields.has(key) && !(key === "oauth" && typeof definition?.url === "string")) unsupported.push(key);
   }
   if (definition?.type === "sse") unsupported.push("type=sse");
   return { unsupported, local };
@@ -89,7 +151,7 @@ function common(definition: Definition | undefined, codex = false): Common | und
   let endpoint: URL;
   try { endpoint = new URL(definition.url); } catch { throw new Error("Invalid native endpoint URL"); }
   if (!["http:", "https:"].includes(endpoint.protocol)) throw new Error("Native endpoint must use HTTP or HTTPS");
-  if (endpoint.username || endpoint.password || [...endpoint.searchParams.keys()].some((key) => /token|secret|password|api.?key/i.test(key))) throw new Error("Move URL credentials into private environment or header configuration; the source was not propagated");
+  if (endpoint.username || endpoint.password || [...endpoint.searchParams.keys()].some((key) => credentialQueryName.test(key))) throw new Error("Move URL credentials into private environment or header configuration; the source was not propagated");
   const headers = { ...strings(codex ? definition.http_headers : definition.headers) };
   if (codex) {
     for (const [key, value] of Object.entries(strings(definition.env_http_headers))) headers[key] = `\${${value}}`;
@@ -194,7 +256,7 @@ export class NativeMcpStore {
     mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const parent = path.relative(this.workspace, realpathSync(path.dirname(file)));
     if (parent.startsWith("..") || path.isAbsolute(parent)) throw new Error("Native Pi settings are outside the shared workspace");
-    if ((existsSync(file) ? readFileSync(file, "utf8") : "") !== document.text) throw new Error("Native Pi settings changed during provisioning");
+    if (this.#readWorkspaceText(file) !== document.text) throw new Error("Native Pi settings changed during provisioning");
     const temporary = `${file}.${randomUUID()}.tmp`;
     writeFileSync(temporary, `${JSON.stringify({ ...document.root, packages: updated }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     renameSync(temporary, file);
@@ -202,25 +264,39 @@ export class NativeMcpStore {
     this.#persist();
   }
 
+  #readWorkspaceText(file: string): string {
+    const result = readRuntimeConfig(file, this.workspace);
+    if ("error" in result) throw new Error(`${path.relative(this.workspace, file)}: ${result.error}`);
+    return result.contents?.toString("utf8") ?? "";
+  }
+
   #document(file: string): Document {
-    if (existsSync(file)) {
-      const relative = path.relative(this.workspace, realpathSync(file));
-      if (relative.startsWith("..") || path.isAbsolute(relative) || lstatSync(file).isSymbolicLink()) throw new Error(`${file}: external or linked configuration is read-only`);
-    }
-    const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+    return this.#parseDocument(file, this.#readWorkspaceText(file));
+  }
+
+  #configurationRevision(): string {
+    return nativeMcpRevision(this.workspace, this.#file, (file) => {
+      const result = readRuntimeConfig(file, file === path.resolve(this.#file) ? undefined : this.workspace);
+      return "error" in result ? null : result.contents;
+    });
+  }
+
+  #parseDocument(file: string, text: string, label = file, skipInvalidServers = false): Document {
     const toml = file === this.#codex;
     let parsed: unknown;
     try { parsed = text.trim() ? toml ? Bun.TOML.parse(text) : JSON.parse(text) : {}; }
-    catch { throw new Error(`${file}: invalid ${toml ? "TOML" : "JSON"}; repair the original file, which was not overwritten`); }
-    if (!object(parsed)) throw new Error(`${file}: expected a native configuration object`);
-    const values = parsed[toml ? "mcp_servers" : "mcpServers"] ?? {};
-    if (!object(values) || Object.values(values).some((entry) => !object(entry))) throw new Error(`${file}: malformed MCP server map`);
-    return { file, text, root: parsed, values: values as Record<string, Definition>, toml };
+    catch { throw new Error(`${label}: invalid ${toml ? "TOML" : "JSON"}; repair the original file, which was not overwritten`); }
+    if (!object(parsed)) throw new Error(`${label}: expected a native configuration object`);
+    const map = parsed[toml ? "mcp_servers" : "mcpServers"];
+    const values = map === undefined || (!skipInvalidServers && map === null) ? {} : map;
+    if (!object(values) || (!skipInvalidServers && Object.values(values).some((entry) => !object(entry)))) throw new Error(`${label}: malformed MCP server map`);
+    const servers = skipInvalidServers ? Object.fromEntries(Object.entries(values).filter(([, entry]) => object(entry))) : values;
+    return { file, text, root: parsed, values: servers as Record<string, Definition>, toml };
   }
 
   #write(document: Document, updates: Map<string, Definition | undefined>): void {
     if (!updates.size) return;
-    if ((existsSync(document.file) ? readFileSync(document.file, "utf8") : "") !== document.text) throw new HttpError(409, "Native MCP configuration changed during the operation; retry after inspecting it");
+    if (this.#readWorkspaceText(document.file) !== document.text) throw new HttpError(409, "Native MCP configuration changed during the operation; retry after inspecting it");
     const values = { ...document.values };
     for (const [name, value] of updates) { if (value) values[name] = value; else delete values[name]; }
     const text = document.toml ? editToml(document.text, updates) : `${JSON.stringify({ ...document.root, mcpServers: values }, null, 2)}\n`;
@@ -300,9 +376,8 @@ export class NativeMcpStore {
         const local = limits.flatMap((limit) => limit.local);
         if (local.length) this.#limitations.set(name, `Client-specific timing settings are retained only in their native source: ${[...new Set(local)].join(", ")}`);
         const sources = { shared: sourceFingerprint(shared.values[name]), pi: sourceFingerprint(pi.values[name]), codex: sourceFingerprint(codex.values[name]) };
-        const deleted = previous?.sources && (["shared", "pi", "codex"] as const).some((source) => previous.sources![source] !== null && sources[source] === null);
-        const concurrentEdit = previous?.sources && (["shared", "pi", "codex"] as const).some((source) => sources[source] !== null && sources[source] !== previous.sources![source]);
-        if (deleted && concurrentEdit) throw new Error("Native deletion conflicts with another source edit; resolve the source files before synchronizing");
+        const deleted = hasSourceDeletion(previous?.sources, (source) => sources[source] !== null);
+        if (deleted && hasConcurrentSourceEdit(previous?.sources, (source) => sources[source])) throw new Error(SOURCE_DELETION_CONFLICT);
         const piValue = fromPi ? fingerprint(fromPi) : null;
         const codexValue = fromCodex ? fingerprint(fromCodex) : null;
         const piChanged = previous ? previous.pi !== piValue : piValue !== null;
@@ -361,11 +436,117 @@ export class NativeMcpStore {
     }
   }
 
+  /** Credential-bearing connection definitions for the in-process runtime. */
+  effectiveServers(): EffectiveMcpServers {
+    const errors: string[] = [];
+    const snapshot = new Map<string, Buffer | null | undefined>();
+    const read = (file: string, label: string, workspace?: string) => {
+      const result = readRuntimeConfig(file, workspace);
+      const contents = "error" in result ? null : result.contents;
+      snapshot.set(path.resolve(file), contents);
+      if ("error" in result) errors.push(`${label}: ${result.error}`);
+      return contents;
+    };
+    const readDocument = (file: string): Record<string, Definition> => {
+      const label = path.relative(this.workspace, file);
+      const contents = read(file, label, this.workspace);
+      if (contents === undefined || contents === null) return {};
+      try { return this.#parseDocument(file, contents.toString("utf8"), label, true).values; }
+      catch (error) {
+        errors.push((error as Error).message);
+        return {};
+      }
+    };
+    const sources = { shared: readDocument(this.#shared), pi: readDocument(this.#pi), codex: readDocument(this.#codex) };
+    const { shared, pi, codex } = sources;
+    const privateContents = read(this.#file, "native-mcp.json");
+    let metadata = emptyNativeMcpMetadata();
+    if (privateContents === undefined) {
+      this.#metadata = metadata;
+    } else if (privateContents !== null) {
+      try {
+        metadata = parseNativeMcpMetadata(JSON.parse(privateContents.toString("utf8")));
+        this.#metadata = metadata;
+      } catch { errors.push("native-mcp.json: invalid JSON or private metadata"); }
+    }
+    const names = new Set([...Object.keys(shared), ...Object.keys(pi), ...Object.keys(codex)]);
+    const connections: Record<string, RuntimeConnection> = Object.create(null);
+    const servers: Record<string, EffectiveMcpServer> = Object.create(null);
+    for (const name of names) {
+      const sourceDefinition = (source: NativeSource) => Object.hasOwn(sources[source], name) ? sources[source][name] : undefined;
+      const previous = metadata.entries[name]?.sources;
+      if (hasSourceDeletion(previous, (source) => sourceDefinition(source) !== undefined)) {
+        if (hasConcurrentSourceEdit(previous, (source) => sourceFingerprint(sourceDefinition(source)))) {
+          servers[name] = { configurationError: SOURCE_DELETION_CONFLICT };
+        }
+        continue;
+      }
+      const definition = effectiveDefinition(sourceDefinition("shared"), sourceDefinition("pi"));
+      const codexDefinition = sourceDefinition("codex");
+      const source = definition ?? codexDefinition;
+      const unsupported = source?.type === "sse" || source?.httpTransport === "sse" ? "sse"
+        : source?.type === "socket" || typeof source?.socket === "string" ? "socket" : undefined;
+      if (unsupported) {
+        servers[name] = { transport: { type: unsupported }, disabled: definition ? source?.disabled === true : source?.enabled === false };
+        continue;
+      }
+      try {
+        const fromPi = common(definition);
+        const value = fromPi ?? common(codexDefinition, true);
+        if (!value) continue;
+        const selected = fromPi ? definition : codexDefinition;
+        if (value.url !== undefined) {
+          if (selected?.auth !== undefined || selected?.bearerToken !== undefined) {
+            servers[name] = { configurationError: "Unsupported MCP authentication settings. Check the configuration for this connection." };
+            continue;
+          }
+          const oauth = projectNativeMcpOAuth(selected?.oauth);
+          if (oauth === null) {
+            servers[name] = { configurationError: "Invalid MCP OAuth configuration. Check the OAuth settings for this connection." };
+            continue;
+          }
+          connections[name] = { ...value, ...(oauth ? { oauth } : {}) };
+        } else connections[name] = value;
+      } catch { /* Invalid definitions do not prevent other servers from loading. */ }
+    }
+    const secrets = resolveNativeMcpCredentials({ mcpServers: connections }, metadata, { literalSecrets: true });
+    for (const [name, { command, args, env, url, headers, disabled, oauth }] of Object.entries(connections)) {
+      if (command !== undefined) servers[name] = { transport: { type: "stdio", command, args: args ?? [], ...(env ? { env } : {}) }, disabled };
+      else if (url !== undefined) servers[name] = { transport: { type: "http", url, ...(headers ? { headers } : {}), ...(oauth ? { oauth } : {}) }, disabled };
+      if (oauth?.clientSecret) secrets.add(oauth.clientSecret);
+      for (const [key, value] of Object.entries(env ?? headers ?? {})) {
+        if (/secret|token|key|password|credential|auth|cookie/i.test(key)) secrets.add(value);
+        if (!headers) continue;
+        const header = key.toLowerCase();
+        if (header === "authorization") {
+          const token = value.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
+          if (token) secrets.add(token);
+        } else if (header === "cookie") {
+          for (const cookie of value.split(";")) {
+            const separator = cookie.indexOf("=");
+            if (separator === -1) continue;
+            const cookieValue = cookie.slice(separator + 1).trim();
+            if (cookieValue) secrets.add(cookieValue);
+            if (cookieValue.length > 2 && cookieValue.startsWith('"') && cookieValue.endsWith('"')) {
+              secrets.add(cookieValue.slice(1, -1));
+            }
+          }
+        }
+      }
+    }
+    return {
+      revision: nativeMcpRevision(this.workspace, this.#file, (file) => snapshot.get(file)),
+      servers,
+      secrets: [...secrets].filter(Boolean),
+      ...(errors.length ? { configurationError: `MCP configuration could not be loaded. ${errors.join(". ")}` } : {}),
+    };
+  }
+
   list(includeService = false): McpConnectionDto[] {
     this.reconcile();
     let shared: Document, pi: Document, codex: Document;
     try { shared = this.#document(this.#shared); pi = this.#document(this.#pi); codex = this.#document(this.#codex); } catch { return []; }
-    const revision = nativeMcpRevision(this.workspace, this.#file);
+    const revision = this.#configurationRevision();
     return [...new Set([...Object.keys(shared.values), ...Object.keys(pi.values), ...Object.keys(codex.values)])].sort().flatMap((name) => {
       const metadata = this.#metadata.entries[name];
       if (!includeService && metadata?.owner) return [];
@@ -404,7 +585,7 @@ export class NativeMcpStore {
   name(id: string): string { const entry = this.list(true).find((item) => item.id === id); if (!entry) throw new HttpError(404, "Native MCP connection not found"); return entry.name; }
   updateStatus(statuses: NativeMcpStatus[]): void {
     this.reconcile();
-    const revision = nativeMcpRevision(this.workspace, this.#file);
+    const revision = this.#configurationRevision();
     this.#live.clear();
     if (!statuses.length) this.#pending.clear();
     for (const status of statuses) {
@@ -433,7 +614,7 @@ export class NativeMcpStore {
       : { url: body.transport.url, headers: body.transport.headers ?? (previous?.url === body.transport.url ? strings(previous?.headers) : {}), disabled: !body.enabled };
     if (value.url) {
       const url = new URL(value.url);
-      if (url.username || url.password || [...url.searchParams.keys()].some((key) => /token|secret|password|api.?key/i.test(key))) throw new HttpError(400, "Keep MCP credentials out of URLs");
+      if (url.username || url.password || [...url.searchParams.keys()].some((key) => credentialQueryName.test(key))) throw new HttpError(400, "Keep MCP credentials out of URLs");
     }
     const endpoint = nativeMcpEndpoint(value);
     if (previousName && previous && body.transport.type === "stdio" && body.transport.env === undefined && previous.command === value.command) {

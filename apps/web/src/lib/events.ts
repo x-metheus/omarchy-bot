@@ -1,4 +1,4 @@
-import { MessageDto, ToolCallSummaryDto, type EventEnvelope } from "@omarchy-bot/protocol";
+import { ApprovalDto, MessageDto, ToolCallSummaryDto, type EventEnvelope } from "@omarchy-bot/protocol";
 import { api } from "./api.ts";
 import { clearDraftsByBot } from "./drafts.ts";
 
@@ -8,6 +8,7 @@ export type QueryTag =
   | "threads"
   | "messages"
   | "turns"
+  | "approvals"
   | "computer"
   | "plugins"
   | "plugin-commands";
@@ -32,9 +33,14 @@ export interface NotificationContext {
 
 interface NotificationDecision {
   botId: string;
+  approval?: ApprovalDto;
 }
 
 function notificationDecision(envelope: EventEnvelope): NotificationDecision | undefined {
+  if (envelope.type === "approval.requested") {
+    const approval = ApprovalDto.safeParse(envelope.payload);
+    return approval.success ? { botId: approval.data.botId, approval: approval.data } : undefined;
+  }
   if (envelope.type !== "turn.status") return undefined;
   const payload = payloadOf(envelope);
   if (typeof payload.botId !== "string") return undefined;
@@ -77,9 +83,16 @@ export function notifyForAttentionEvent(
     return undefined;
   }
 
-  const name = context.botName?.(decision.botId) ?? "Bot";
+  const name = context.botName?.(decision.botId);
+  const approval = decision.approval;
+  if (approval !== undefined) {
+    return new Notification(`${name ?? "A Bot"} wants to ${approval.tool}`, {
+      body: approval.path,
+      tag: `omarchy-bot:${decision.botId}:approval:${approval.id}`,
+    });
+  }
   return new Notification(
-    `${name} finished working`,
+    `${name ?? "Bot"} finished working`,
     {
       body: "Background work is complete.",
       tag: `omarchy-bot:${decision.botId}:completed`,
@@ -235,6 +248,10 @@ export function route(
     case "agent.native":
       invalidate("messages", threadIdOf(envelope));
       return;
+    case "approval.requested":
+    case "approval.resolved":
+      invalidate("approvals", threadIdOf(envelope));
+      return;
     case "turn.created":
     case "turn.status":
     case "turn.steered":
@@ -291,6 +308,8 @@ export function startEventPump(
       if (stopped) return;
     }
     let notificationsReady = cursor !== undefined;
+    // The server sends hello after replay on every socket, including resumes.
+    let live = false;
     socket = api.connectEvents(
       cursor,
       (envelope) => {
@@ -298,22 +317,26 @@ export function startEventPump(
         const current = handlers;
         if (current === undefined) return;
         route(envelope, current.invalidate, current.applyUpdate);
-        if (notificationsReady && current.getNotificationContext !== undefined) {
+        if (
+          notificationsReady
+          && current.getNotificationContext !== undefined
+          && (envelope.type !== "approval.requested" || live)
+        ) {
           notifyForAttentionEvent(envelope, current.getNotificationContext());
         }
       },
       {
         snapshotRequired: () => {
-          const current = handlers;
           cursor = undefined;
           notificationsReady = false;
-          current?.onSnapshotRequired();
+          handlers?.onSnapshotRequired();
         },
         onOpen: () => {
           retries = 0;
         },
         onCaughtUp: () => {
           notificationsReady = true;
+          live = true;
         },
       },
     );
@@ -321,9 +344,8 @@ export function startEventPump(
       if (stopped) return;
       retries += 1;
       if (retries > 5) {
-        const current = handlers;
         cursor = undefined;
-        current?.onSnapshotRequired();
+        handlers?.onSnapshotRequired();
       }
       reconnectTimer = window.setTimeout(() => void connect(), Math.min(1000 * 2 ** retries, 10_000));
     };
