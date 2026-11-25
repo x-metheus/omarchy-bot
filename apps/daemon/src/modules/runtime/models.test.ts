@@ -8,6 +8,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createFakeProvider } from "../../../../../packages/testkit/src/fake-provider.ts";
 import { setSetting } from "../../persistence/settings.ts";
 import { CredentialStore } from "./credentials.ts";
+import { EXA_SEARCH_KEY_DESCRIPTION, EXA_SEARCH_KEY_SECRET } from "./extensions/web.ts";
 import { SecretStore } from "./secrets.ts";
 import { createRuntimeModels, DEFAULT_MODEL_METADATA, DEFAULT_MODEL_SETTING, resolveModelForBot } from "./models.ts";
 
@@ -104,6 +105,28 @@ test("resolution fails closed and redacts every stored key including causes", as
     await store.add({ id: "my-copy", name: "openai", protocol: "built-in", apiKey: "copy-key" });
     select("my-copy/model"); assertFailure("bot", "my-copy/model");
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("model selection errors redact raw, trimmed, and doubly encoded Exa app secret values", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "models-exa-redaction-"));
+  try {
+    using db = new Database(":memory:");
+    db.exec("CREATE TABLE bots (id TEXT PRIMARY KEY, model TEXT); INSERT INTO bots VALUES ('bot', NULL)");
+    const secrets = new SecretStore(dir);
+    await secrets.forApp().save(EXA_SEARCH_KEY_SECRET, EXA_SEARCH_KEY_DESCRIPTION, "exa+selection-key \t\n");
+    const rawKey = (await secrets.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET))!;
+    const sensitiveValues = [rawKey, rawKey.trim()];
+    const store = new CredentialStore(secrets, { sensitiveValues });
+    for (const key of sensitiveValues) {
+      db.query("UPDATE bots SET model = ? WHERE id = 'bot'").run(`missing/${key}`);
+      expect(() => resolveModelForBot(db, store, "bot"))
+        .toThrow(/^Unable to resolve Bot provider\/model selection: missing\/\[redacted\]$/);
+    }
+    const encodedKey = encodeURIComponent(encodeURIComponent(rawKey.trim()));
+    db.query("UPDATE bots SET model = ? WHERE id = 'bot'").run(`missing/${encodedKey}`);
+    expect(() => resolveModelForBot(db, store, "bot"))
+      .toThrow(/^Unable to resolve Bot provider\/model selection: \[redacted\]$/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("custom endpoints validate URL and avoid metadata from a different native API", async () => {

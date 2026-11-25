@@ -1,6 +1,6 @@
 import type { JSX, RefObject } from "react";
 import { useEffect, useState } from "react";
-import { Bell, Bot, Keyboard, Palette } from "lucide-react";
+import { Bell, Bot, Folder, Keyboard, Palette, Server } from "lucide-react";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -21,6 +21,8 @@ import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 import { api } from "../lib/api.ts";
 import { secretStorageNotice } from "../lib/secretStorageNotice.ts";
 import { getShell } from "../lib/shell.ts";
+import { AllowedFoldersSection } from "./settings/AllowedFoldersSection.tsx";
+import { ProvidersSection } from "./settings/ProvidersSection.tsx";
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -36,12 +38,14 @@ export interface SettingsDialogProps {
   onRequestNotifications: () => void;
 }
 
-type SettingsSectionId = "appearance" | "notifications" | "bots" | "keyboard";
+type SettingsSectionId = "appearance" | "notifications" | "bots" | "providers" | "allowed-folders" | "keyboard";
 
 const SETTINGS_SECTIONS = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "bots", label: "Bots", icon: Bot },
+  { id: "providers", label: "Providers", icon: Server },
+  { id: "allowed-folders", label: "Allowed folders", icon: Folder },
   { id: "keyboard", label: "Keyboard", icon: Keyboard },
 ] as const satisfies ReadonlyArray<{
   id: SettingsSectionId;
@@ -305,6 +309,8 @@ function SettingsContent({
               <Text role="status" color="secondary">{storageNotice.text}</Text>
             )}
             {selected.id === "appearance" ? <AppearanceSection /> : null}
+            {open && selected.id === "providers" ? <ProvidersSection /> : null}
+            {open && selected.id === "allowed-folders" ? <AllowedFoldersSection /> : null}
             {selected.id === "keyboard" ? <KeyboardSection /> : null}
             {selected.id === "notifications" ? (
               <NotificationsSection

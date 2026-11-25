@@ -80,7 +80,7 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 - [x] Task 9: Approval flow on the Service
 - [x] Task 10: Approval UI in the web client
 - [ ] Task 11: Computer and browser tools in process
-- [ ] Task 12: Bot mail, Local Sidecar, and plugin tools in process
+- [x] Task 12: Bot mail, Local Sidecar, and plugin tools in process
 
 ### Checkpoint C
 Mailbox, attachments, and every failure caused by tools not yet built in process move here from Checkpoint B, including tool-call projection, native events, capability inventory, the `process-only` fixture, computer and browser tools, and sidecar tools.
@@ -91,11 +91,11 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ### Phase 4: MCP, web, and workspace
 - [x] Task 13: MCP through `pi-mcp`
-- [ ] Task 22: Secret store, secrets tool, and a clean shell environment (merged on the fallback file; keychain backend pending)
-- [ ] Task 14: MCP OAuth sign-in and token import
-- [ ] Task 15: `web_fetch` and `web_search`
-- [ ] Task 16: Provider import, Settings providers screen, and per-Bot model
-- [ ] Task 17: Workspace cleanup
+- [ ] Task 22: Secret store, secrets tool, and a clean shell environment (merged on the fallback file; `Bun.secrets` keychain backend chosen 2026-11-25, in progress)
+- [ ] Task 14: MCP OAuth sign-in and token import (merged; the `Bun.secrets` keyring reader for the token import is in progress)
+- [x] Task 15: `web_fetch` and `web_search`
+- [x] Task 16: Provider import, Settings providers screen, and per-Bot model
+- [x] Task 17: Workspace cleanup
 
 ### Checkpoint D
 - [ ] Every tool in the spec's tools table works with the switch on

@@ -11,6 +11,8 @@ import type {
 } from "@omarchy-bot/protocol";
 import type {
   AgentDto,
+  AllowedFolderBody,
+  AllowedFoldersDto,
   ApprovalAnswerBodyDto,
   ApprovalDto,
   AttachmentDto,
@@ -18,9 +20,11 @@ import type {
   AvatarRecipeBodyDto,
   BotDto,
   BotViewDto,
+  BuiltinProviderDto,
   ClientToServer,
   ComputerViewDto,
   CreateBotBodyDto,
+  CreateProviderBody,
   DeleteBotResultDto,
   DeviceDto,
   EventEnvelope,
@@ -28,10 +32,12 @@ import type {
   PatchBotBodyDto,
   PatchThreadBodyDto,
   PinBodyDto,
+  ProviderDto,
   SendMessageBodyDto,
   SendResultDto,
   ServerToClient,
   ThreadDto,
+  UpdateProviderBody,
 } from "@omarchy-bot/protocol";
 import {
   ComputerViewDto as ComputerViewSchema,
@@ -167,6 +173,34 @@ export class ApiClient {
 
   secretStorageStatus(): Promise<{ backend: "keychain" | "file" | "unavailable"; reason?: string }> {
     return this.req("/api/secrets/status");
+  }
+
+  // ----- providers -----
+  providers(): Promise<ProviderDto[]> {
+    return this.req("/api/providers");
+  }
+  builtinProviders(): Promise<BuiltinProviderDto[]> {
+    return this.req("/api/providers/builtin");
+  }
+  createProvider(body: CreateProviderBody): Promise<ProviderDto> {
+    return this.req("/api/providers", { method: "POST", body: JSON.stringify(body) });
+  }
+  updateProvider(id: string, body: UpdateProviderBody): Promise<ProviderDto> {
+    return this.req(`/api/providers/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) });
+  }
+  deleteProvider(id: string): Promise<void> {
+    return this.req(`/api/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  // ----- allowed folders -----
+  allowedFolders(): Promise<AllowedFoldersDto> {
+    return this.req("/api/settings/allowed-folders");
+  }
+  addAllowedFolder(folder: string): Promise<AllowedFoldersDto> {
+    return this.req("/api/settings/allowed-folders", { method: "POST", body: JSON.stringify({ folder } satisfies AllowedFolderBody) });
+  }
+  removeAllowedFolder(folder: string): Promise<AllowedFoldersDto> {
+    return this.req("/api/settings/allowed-folders", { method: "DELETE", body: JSON.stringify({ folder } satisfies AllowedFolderBody) });
   }
 
   // ----- agents -----

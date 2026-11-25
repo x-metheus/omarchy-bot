@@ -12,6 +12,7 @@ import { MODEL_CREDENTIALS_FILENAME, type StoredProvider } from "../../../apps/d
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
+import type { DurableMailReplayObserver } from "../../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 
 /** Mark worker-protocol tests for removal with the worker in Task 20. */
 export function workerOnly(reason: string, options?: { timeout?: number }) {
@@ -43,8 +44,13 @@ export interface HarnessOptions {
   waitForAgentReady?: boolean;
   seedDurableProvider?: boolean;
   legacyModelCredentials?: readonly StoredProvider[];
+  dataDir?: string;
+  stateDir?: string;
   /** Worker tree override; defaults to the shared fake workers. */
   workersDir?: string;
+  onDurableMailReplay?: DurableMailReplayObserver;
+  /** Keep the Shared Workspace outside the protected Service data directory. */
+  separateWorkspace?: boolean;
 }
 
 /**
@@ -97,59 +103,85 @@ export function authedFetch(h: Harness, input: string, init: RequestInit = {}): 
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
   const home = existingHome ?? path.join(os.tmpdir(), `omarchy-bot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  const state = path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const data = options.dataDir ?? home;
+  const state = options.stateDir ?? path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const profile = options.separateWorkspace ? `${home}-profile` : home;
+  const agentDir = path.join(profile, ".pi", "agent");
   mkdirSync(home, { recursive: true });
   mkdirSync(state, { recursive: true });
+  process.env.OMARCHY_BOT_STATE = state;
+  mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   if (options.legacyModelCredentials) {
     writeFileSync(path.join(state, MODEL_CREDENTIALS_FILENAME), JSON.stringify(options.legacyModelCredentials), { mode: 0o600 });
   }
   // Fake conformance record so the fake pi worker probes to `ready`.
-  const conf = path.join(home, "conformance");
+  const conf = path.join(data, "conformance");
   mkdirSync(conf, { recursive: true });
   writeFileSync(
     path.join(conf, "pi-fake-pi-1.json"),
     JSON.stringify({ ok: true, image: "verified" }),
   );
 
-  process.env.HOME = home;
-  process.env.OMARCHY_BOT_HOME = home;
-  process.env.OMARCHY_BOT_STATE = state;
+  process.env.HOME = profile;
+  process.env.OMARCHY_BOT_HOME = data;
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_BOT_WORKERS_DIR = options.workersDir ?? path.resolve(import.meta.dir, "../fake-workers");
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
     options.botDeletionTerminalTimeoutMs ?? 30_000,
   );
 
-  // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
-  const durableSuite = process.env.OMARCHY_TEST_DURABLE === "1";
-  const restoreRuntime = durableSuite
-    ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider()
-    : undefined;
-  const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
-  const daemon = options.useProductionBotScreen
-    ? await main({
-        useHostApplicationUnits: options.useHostApplicationUnits === true,
-        botScreenRuntimeDir: path.join(home, "r"),
-        ...(options.botComputerAssetSupply === undefined ? {} : { botComputerAssetSupply: options.botComputerAssetSupply }),
-        ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
-      })
-    : await main({
-        useHostApplicationUnits: options.useHostApplicationUnits === true,
-        botScreenRuntimeDir: path.join(home, "r"),
-        botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
-        botScreenCapacity: options.botScreenCapacity ?? 8,
-      });
-  const { stop, disconnectForRestart, port, svc } = daemon;
-  const base: Harness = {
-    baseUrl: `http://127.0.0.1:${port}`,
-    port,
-    token: "",
-    home,
-    svc,
-    stop: async () => { try { await stop(); } finally { restoreRuntime?.(); } },
-    disconnectForRestart,
+  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  let restoredPiAgentDir = false;
+  const restorePiAgentDir = () => {
+    if (restoredPiAgentDir) return;
+    restoredPiAgentDir = true;
+    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
   };
+
+  let base: Harness | undefined;
+  let restoreRuntime: (() => void) | undefined;
+  const restoreFixtures = () => {
+    restorePiAgentDir();
+    restoreRuntime?.();
+    restoreRuntime = undefined;
+  };
+
   try {
+    // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
+    const durableSuite = process.env.OMARCHY_TEST_DURABLE === "1";
+    restoreRuntime = durableSuite
+      ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider(options.onDurableMailReplay)
+      : undefined;
+    const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
+    const daemon = options.useProductionBotScreen
+      ? await main({
+          useHostApplicationUnits: options.useHostApplicationUnits === true,
+          botScreenRuntimeDir: path.join(home, "r"),
+          ...(options.botComputerAssetSupply === undefined ? {} : { botComputerAssetSupply: options.botComputerAssetSupply }),
+          ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
+        })
+      : await main({
+          useHostApplicationUnits: options.useHostApplicationUnits === true,
+          botScreenRuntimeDir: path.join(home, "r"),
+          botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
+          botScreenCapacity: options.botScreenCapacity ?? 8,
+        });
+    const { stop, disconnectForRestart, port, svc } = daemon;
+    base = {
+      baseUrl: `http://127.0.0.1:${port}`,
+      port,
+      token: "",
+      home,
+      svc,
+      stop: async () => {
+        try { await stop(); } finally { restoreFixtures(); }
+      },
+      disconnectForRestart: async () => {
+        try { await disconnectForRestart(); } finally { restoreFixtures(); }
+      },
+    };
     if (durableSuite) {
       const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
       if (options.seedDurableProvider !== false) {
@@ -172,7 +204,8 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     }
     return base;
   } catch (error) {
-    await base.stop();
+    if (base) await base.stop();
+    else restoreFixtures();
     throw error;
   }
 }

@@ -22,6 +22,14 @@ import { NativeMcpStore } from "./nativeMcp.ts";
 import { McpPackages } from "./mcpPackages.ts";
 
 const DEFAULT_PUBLISHER_ORIGIN = "https://omarchy-bot-site-ymlq.vercel.app";
+const WRONG_MANAGEMENT_TOOL = "Plugin management tool does not belong to this turn";
+
+export const PLUGIN_TOOL_OUTPUT_MAX_BYTES = 2 * 1024 * 1024;
+export const PLUGIN_MANAGEMENT_TOOL = {
+  name: "manage_plugins",
+  description: "Inspect shared Services, native MCP connections and Skills. inspect reads installed inventory; inspect_skill reads catalog source and content. Search and install complete independent Skills from the catalog or explicit sources; update Skills, and enable, disable or remove Skills and custom MCPs without a product approval gate. Authorize, enable, disable, remove or update Services; label or disconnect exact account ids. Updates preserve local modifications. Changes affect subsequent native resource reloads; actual reload and native/provider authorization still apply. authorize_service returns a real URL pending user authorization, never completed consent. Never claim an unprobed MCP is connected. Use the mcp tool to discover and call connected-service tools. Use the default official skill-creator for local authoring.",
+  inputSchema: MANAGE_PLUGINS_SCHEMA,
+} as const;
 
 const Account = z.object({
   id: z.string(), providerId: PluginProviderId, label: z.string(), identity: z.string(), enabledServices: z.array(z.string()),
@@ -58,7 +66,7 @@ export class PluginsService {
   readonly publisher: CatalogClient;
   #nativeCache: { at: number; resources: NativePluginResources; error?: string } | undefined;
   #nativePending: Promise<NativePluginResources> | undefined;
-  #authorizations = new Map<string, { id: string; server: string; expiresAt: number; event: PluginAuthorizationEvent }>();
+  #authorizations = new Map<string, { id: string; server: string; expiresAt: number; event: PluginAuthorizationEvent; completion?: Promise<string | undefined> }>();
   readonly bundles: ServiceBundles;
   #timer: ReturnType<typeof setInterval>;
   #reconcileTimer: ReturnType<typeof setInterval>;
@@ -280,6 +288,10 @@ export class PluginsService {
     if (!this.nativeControl) throw new HttpError(503, "The native Pi MCP runtime is unavailable");
     const server = this.mcp.name(id);
     let pending = this.#authorizations.get(id);
+    if (redirectUrl !== undefined && pending?.completion) {
+      const failure = await pending.completion;
+      return failure ? { error: failure } : { authenticated: true };
+    }
     if (redirectUrl !== undefined && (!pending || pending.expiresAt <= Date.now())) {
       if (pending) this.#finishNative(id, pending.id, "failed", "expired");
       throw new HttpError(400, "Authorization is missing, expired, or already used. Start again from Plugins.");
@@ -294,9 +306,9 @@ export class PluginsService {
     try {
       const response = await this.nativeControl({ action: redirectUrl === undefined ? "auth-start" : "auth-complete", server,
         authorizationId: attempt.id, expiresAt: attempt.expiresAt, ...(redirectUrl === undefined ? {} : { redirectUrl }) });
-      if (this.#authorizations.get(id) !== attempt) return {};
-      this.mcp.updateStatus(response.servers);
       const error = typeof response.result?.error === "string" ? redactToolErrorSummary(response.result.error) : undefined;
+      if (this.#authorizations.get(id) !== attempt) return error ? { error } : {};
+      this.mcp.updateStatus(response.servers);
       if (error) this.#finishNative(id, attempt.id, "failed", error);
       else if (response.result?.authenticated === true) {
         const failure = await this.#completeNative(id, attempt.id);
@@ -317,21 +329,25 @@ export class PluginsService {
     for (const [id, pending] of this.#authorizations) if (pending.server === outcome.server && pending.id === outcome.authorizationId) {
       if (pending.expiresAt <= Date.now()) this.#finishNative(id, pending.id, "failed", "expired");
       else if (outcome.status === "completed") void this.#completeNative(id, pending.id).catch(() => undefined);
-      else this.#finishNative(id, pending.id, "failed", outcome.reason === "expired" ? "expired" : "auth_failed");
+      else this.#finishNative(id, pending.id, "failed", outcome.reason === "expired" || outcome.reason === "connect_failed" ? outcome.reason : "auth_failed");
       break;
     }
   }
 
   async #completeNative(id: string, authorizationId: string): Promise<string | undefined> {
-    let failure: string | undefined;
-    try {
-      const connection = await this.checkMcp(id);
-      if (connection.status !== "connected") failure = "connect_failed";
-    } catch { failure = "connect_failed"; }
     const pending = this.#authorizations.get(id);
-    if (pending && pending.id === authorizationId && pending.expiresAt <= Date.now()) failure = "expired";
-    this.#finishNative(id, authorizationId, failure ? "failed" : "completed", failure);
-    return failure;
+    if (pending?.id !== authorizationId) return;
+    pending.completion ??= (async () => {
+      let failure: string | undefined;
+      try {
+        const connection = await this.checkMcp(id);
+        if (connection.status !== "connected") failure = "connect_failed";
+      } catch { failure = "connect_failed"; }
+      if (pending.expiresAt <= Date.now()) failure = "expired";
+      this.#finishNative(id, authorizationId, failure ? "failed" : "completed", failure);
+      return failure;
+    })().finally(() => { delete pending.completion; });
+    return pending.completion;
   }
 
   #finishNative(id: string, authorizationId: string, status: "completed" | "failed", reason?: string): void {
@@ -339,7 +355,7 @@ export class PluginsService {
     if (!pending || pending.id !== authorizationId) return;
     if (pending.expiresAt <= Date.now()) { status = "failed"; reason = "expired"; }
     this.#authorizations.delete(id);
-    if (reason === "expired") void this.nativeControl?.({ action: "auth-cancel", server: pending.server, authorizationId }).catch(() => undefined);
+    if (status === "failed") void this.nativeControl?.({ action: "auth-cancel", server: pending.server, authorizationId }).catch(() => undefined);
     const account = this.#state.accounts.find(account => account.id === pending.event.accountId);
     if (account) {
       account.status = status === "completed" ? "connected" : "reauthorize";
@@ -458,7 +474,7 @@ export class PluginsService {
 
   async #toolOutput(result: AgentPluginToolOutput): Promise<AgentPluginToolOutput> {
     const encoded = JSON.stringify(result);
-    if (Buffer.byteLength(encoded) > 2 * 1024 * 1024) {
+    if (Buffer.byteLength(encoded) > PLUGIN_TOOL_OUTPUT_MAX_BYTES) {
       const directory = path.join(this.rootDir, "results");
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const file = path.join(directory, `${randomUUID()}.json`);
@@ -471,6 +487,20 @@ export class PluginsService {
       ...(result.structuredContent ? { structuredContent: result.structuredContent } : {}) };
   }
 
+  async callManage(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<AgentPluginToolOutput> {
+    signal.throwIfAborted();
+    if (name !== PLUGIN_MANAGEMENT_TOOL.name) throw new Error(WRONG_MANAGEMENT_TOOL);
+    const input = PluginManageInput.parse(args);
+    const row = toolOperation(input.action);
+    if (!row) throw new HttpError(404, "Unknown plugin operation");
+    const { action, ...fields } = input;
+    const result = await row.handler(this, {
+      ...fields, ...(input.id === undefined ? {} : { accountId: input.id }),
+      tool: true, signal,
+    } as Parameters<typeof row.handler>[1]);
+    return this.#toolOutput({ content: [{ type: "text", text: JSON.stringify(result) }] });
+  }
+
   async acquire(): Promise<PluginLease> {
     if (this.#stopping) throw new Error("Plugin runtime is stopping");
     await this.prepareServiceCredentials();
@@ -479,11 +509,7 @@ export class PluginsService {
       revision: this.#state.revision,
       diagnostics: [...this.mcp.errors, ...this.skills.list().filter((skill) => skill.error).map((skill) => `${skill.name}: ${skill.error}`),
         ...this.#state.accounts.map((account) => `Service account ${account.id}: ${account.label}; ${account.identity}. Native MCP server names are ${account.enabledServices.map((serviceId) => this.bundles.serviceName(account, serviceId)).join(", ") || "none enabled"}.${account.error ? ` Needs attention: ${account.error}` : ""}`)],
-      tools: [{
-        name: "manage_plugins",
-        description: "Inspect shared Services, native MCP connections and Skills. inspect reads installed inventory; inspect_skill reads catalog source and content. Search and install complete independent Skills from the catalog or explicit sources; update Skills, and enable, disable or remove Skills and custom MCPs without a product approval gate. Authorize, enable, disable, remove or update Services; label or disconnect exact account ids. Updates preserve local modifications. Changes affect subsequent native resource reloads; actual reload and native/provider authorization still apply. authorize_service returns a real URL pending user authorization, never completed consent. Never claim an unprobed MCP is connected. Use Pi's native mcp tool for provider business operations, and the default official skill-creator for local authoring.",
-        inputSchema: MANAGE_PLUGINS_SCHEMA,
-      }],
+      tools: [{ ...PLUGIN_MANAGEMENT_TOOL }],
     };
     let released = false;
     return {
@@ -491,16 +517,8 @@ export class PluginsService {
       call: async (name, args, signal) => {
         signal.throwIfAborted();
         if (released) throw new Error("Plugin turn snapshot was released");
-        if (name !== "manage_plugins") throw new Error("Plugin management tool does not belong to this turn");
-        const input = PluginManageInput.parse(args);
-        const row = toolOperation(input.action);
-        if (!row) throw new HttpError(404, "Unknown plugin operation");
-        const { action, ...fields } = input;
-        const result = await row.handler(this, {
-          ...fields, ...(input.id === undefined ? {} : { accountId: input.id }),
-          tool: true, signal,
-        } as Parameters<typeof row.handler>[1]);
-        return this.#toolOutput({ content: [{ type: "text", text: JSON.stringify(result) }] });
+        if (name !== PLUGIN_MANAGEMENT_TOOL.name) throw new Error(WRONG_MANAGEMENT_TOOL);
+        return this.callManage(name, args, signal);
       },
       release: () => { released = true; },
     };

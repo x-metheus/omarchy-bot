@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Harness, createRegistry, type ConversationId } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { AGENT_LOCAL_TOOL } from "@omarchy-bot/agent-contract";
 import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
 import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
@@ -14,10 +16,13 @@ import { withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore, MODEL_CREDENTIALS_FILENAME } from "./credentials.ts";
 import { fallbackSecretValuesPath, SecretStore } from "./secrets.ts";
 import { createRuntimeModels } from "./models.ts";
+import { importMcpOAuthTokens } from "./mcpOAuthImport.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { openBotRuntime, type BotRuntime } from "./runtime.ts";
 import { openThreadConversation } from "./conversations.ts";
 import { ALLOWED_FOLDERS_SETTING } from "../workspace/allowedFolders.ts";
+import { NativeMcpStore } from "../plugins/nativeMcp.ts";
+import { startOAuthMcpServer } from "./testing/oauthMcpServer.ts";
 
 test("runtime creates durable tables and can close and reopen", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-"));
@@ -29,6 +34,7 @@ test("runtime creates durable tables and can close and reopen", async () => {
       const runtime = await openBotRuntime({ dbPath, stateDir, homeDir: directory, dataDir: directory, sharedWorkspaceDir: path.join(directory, "workspace"), downloadsDir: path.join(directory, "Downloads") });
       try {
         expect(runtime.mcpStatus()).toEqual([]);
+        expect(runtime.mcpMarkNeedsAuth("missing")).toBeUndefined();
         const db = new Database(dbPath, { readonly: true });
         try {
           const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'pi_*'").all();
@@ -53,6 +59,203 @@ test("runtime creates durable tables and can close and reopen", async () => {
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("runtime MCP connect discovers stdio tools in the shared workspace while status does not spawn", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-stdio-"));
+  const stateDir = path.join(directory, "state");
+  const sharedWorkspaceDir = path.join(directory, "workspace");
+  mkdirSync(stateDir);
+  mkdirSync(sharedWorkspaceDir);
+  const script = path.join(directory, "server.ts");
+  const launched = path.join(sharedWorkspaceDir, "fixture-cwd");
+  writeFileSync(script, `
+import { writeFileSync } from "node:fs";
+import { McpServer } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/mcp.js", import.meta.dir))};
+import { StdioServerTransport } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/stdio.js", import.meta.dir))};
+writeFileSync(${JSON.stringify(launched)}, process.cwd());
+const server = new McpServer({ name: "fixture", version: "1" });
+server.registerTool("read_fixture", {}, () => ({ content: [{ type: "text", text: "fixture" }] }));
+await server.connect(new StdioServerTransport());
+`);
+  const runtime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+    homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+    mcp: { servers: () => ({ revision: "fixture", secrets: [], servers: {
+      local: { disabled: false, transport: { type: "stdio", command: process.execPath, args: [script] } },
+    } }) },
+  });
+  try {
+    expect(runtime.mcpStatus()).toMatchObject([{ name: "local", status: "not-connected", toolCount: 0 }]);
+    expect(existsSync(launched)).toBe(false);
+    expect(await runtime.mcpControl({ action: "connect", server: "local" })).toMatchObject({
+      servers: [{ name: "local", status: "connected", toolCount: 1 }], result: {},
+    });
+    expect(readFileSync(launched, "utf8")).toBe(sharedWorkspaceDir);
+  } finally {
+    await runtime.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a plain 403 during OAuth import leaves the MCP service needing sign-in", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-rejected-import-"));
+  const stateDir = path.join(directory, "state");
+  const sharedWorkspaceDir = path.join(directory, "workspace");
+  const accessToken = "rejected-fixture-token";
+  const observedAuthorization: (string | null)[] = [];
+  const fixture = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    observedAuthorization.push(request.headers.get("authorization"));
+    return new Response(null, { status: 403 });
+  } });
+  let runtime: BotRuntime | undefined;
+  try {
+    mkdirSync(stateDir);
+    mkdirSync(sharedWorkspaceDir);
+    const store = new NativeMcpStore(sharedWorkspaceDir, path.join(directory, "private"));
+    const snapshot = () => store.effectiveServers();
+    const { name } = store.save(null, { name: "remote", enabled: true, transport: { type: "http", url: fixture.url.href } });
+    const botRuntime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+      homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+      mcp: { servers: snapshot },
+    });
+    runtime = botRuntime;
+    const report = await importMcpOAuthTokens({
+      secrets: botRuntime.secrets,
+      snapshot,
+      reader: { available: true, read: async () => ({ tokens: { accessToken } }) },
+      async check(server) {
+        const result = await botRuntime.mcpControl({ action: "connect", server });
+        expect(result).toMatchObject({ servers: [{ name, status: "failed" }], result: { error: "connect_failed" } });
+        return result.servers.some((entry) => entry.name === server && entry.status === "connected");
+      },
+      reportRejected: (server) => botRuntime.mcpMarkNeedsAuth(server),
+    });
+    expect(report).toEqual({ imported: [], needsSignIn: [name], skipped: [] });
+    const statuses = botRuntime.mcpStatus();
+    expect(statuses).toMatchObject([{ name, status: "needs-auth", toolCount: 0 }]);
+    store.updateStatus(statuses);
+    expect(store.list()).toMatchObject([{ name, status: "needs-auth", toolCount: 0 }]);
+    expect(Bun.deepEquals(observedAuthorization, [`Bearer ${accessToken}`])).toBe(true);
+  } finally {
+    try { await runtime?.close(); }
+    finally {
+      await fixture.stop(true);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("runtime close drains Services MCP control preparation and refuses later controls", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-preparation-"));
+  const stateDir = path.join(directory, "state");
+  const preparationStarted = Promise.withResolvers<void>();
+  const releasePreparation = Promise.withResolvers<void>();
+  const servers = () => ({ revision: "fixture", secrets: [], servers: {} });
+  let preparations = 0;
+  let runtime: BotRuntime | undefined;
+  try {
+    mkdirSync(stateDir);
+    runtime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+      homeDir: directory, dataDir: directory, sharedWorkspaceDir: directory, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+      mcp: { servers, async prepareServers() {
+        preparations++;
+        preparationStarted.resolve();
+        await releasePreparation.promise;
+        return servers();
+      } },
+    });
+    const control = runtime.mcpControl({ action: "connect", server: "local" });
+    await preparationStarted.promise;
+    let closed = false;
+    const closing = runtime.close().then(() => { closed = true; });
+    const refused = runtime.mcpControl({ action: "auth-start", server: "local", authorizationId: "closing" });
+    const duringClose = await Promise.race([refused, new Promise<string>((resolve) => setImmediate(() => resolve("pending")))]);
+    expect(closed).toBe(false);
+    expect(duringClose).toEqual({ servers: [], result: { error: "authorization_failed" } });
+    releasePreparation.resolve();
+    await Promise.all([closing, control]);
+    expect(await runtime.mcpControl({ action: "connect", server: "local" }))
+      .toEqual({ servers: [], result: { error: "connect_failed" } });
+    expect(preparations).toBe(1);
+  } finally {
+    releasePreparation.resolve();
+    await runtime?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("runtime signs in a pre-registered MCP connection using current settings for its name", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bot-runtime-mcp-oauth-"));
+  const stateDir = path.join(directory, "state");
+  const sharedWorkspaceDir = path.join(directory, "workspace");
+  const registeredClient = { clientId: "pre-registered-fixture", redirectUri: "" };
+  const fixture = await startOAuthMcpServer({ preRegisteredClient: registeredClient });
+  let runtime: BotRuntime | undefined;
+  const serve = spyOn(Bun, "serve");
+  try {
+    mkdirSync(stateDir);
+    mkdirSync(sharedWorkspaceDir);
+    const store = new NativeMcpStore(sharedWorkspaceDir, path.join(directory, "private"));
+    const config = path.join(sharedWorkspaceDir, ".mcp.json");
+    const plain = { url: fixture.url };
+    writeFileSync(config, JSON.stringify({ mcpServers: { work: plain, alias: plain } }));
+    const beforeOAuth = store.effectiveServers();
+    const completed = Promise.withResolvers<{ server: string; status: string }>();
+    runtime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
+      homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
+      mcp: { servers: () => store.effectiveServers(), prepareServers: async () => beforeOAuth },
+      mcpOAuth: { onAuthorization: (outcome) => { if (outcome.server === "work") completed.resolve(outcome); } },
+    });
+
+    const scope = "fixture.work.read";
+    let authorizationUrl: string | undefined;
+    let port: number | undefined;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(null) });
+      try {
+        port = reservation.port!;
+        registeredClient.redirectUri = `http://localhost:${port}/callback`;
+        writeFileSync(config, JSON.stringify({ mcpServers: { alias: plain, work: { ...plain, oauth: {
+          clientId: registeredClient.clientId, redirectUri: registeredClient.redirectUri,
+          authServerMetadataUrl: `${fixture.origin}/oauth-metadata`, scope,
+        } } } }));
+      } finally {
+        await reservation.stop(true);
+      }
+      serve.mockClear();
+      const { result } = await runtime.mcpControl({ action: "auth-start", server: "work", authorizationId: "work-sign-in" });
+      if (typeof result?.authorizationUrl === "string") authorizationUrl = result.authorizationUrl;
+      const portTaken = serve.mock.results.some(({ type, value }) => type === "throw" && (value as NodeJS.ErrnoException).code === "EADDRINUSE");
+      if (!portTaken) break;
+    }
+    if (!authorizationUrl) throw new Error("Expected a browser sign-in for the registered MCP client.");
+    expect(serve.mock.calls.map(([options]) => ({ hostname: options.hostname, port: options.port })))
+      .toEqual([{ hostname: "127.0.0.1", port }]);
+
+    const fetchStatus = (url: string | URL, redirect: RequestRedirect) => fetch(url, { redirect }).then(
+      (response) => response.status,
+      () => { throw new Error("OAuth fixture request failed."); },
+    );
+    const wrongHost = new URL(authorizationUrl);
+    wrongHost.searchParams.set("redirect_uri", `http://127.0.0.1:${port}/callback`);
+    expect(await fetchStatus(wrongHost, "manual")).toBe(400);
+    expect(await fetchStatus(authorizationUrl, "follow")).toBe(200);
+    expect(await completed.promise).toMatchObject({ server: "work", status: "completed" });
+    expect(fixture.authorizationRequests.at(-1)).toEqual({ clientId: registeredClient.clientId, redirectUri: registeredClient.redirectUri, scope });
+    expect(fixture.counts).toMatchObject({ configuredMetadata: 2, register: 0, token: 1 });
+    expect(runtime.mcpStatus()).toContainEqual(expect.objectContaining({ name: "work", status: "connected", toolCount: 1 }));
+
+    const unconfigured = await runtime.mcpControl({ action: "auth-start", server: "alias", authorizationId: "alias-sign-in" });
+    expect(unconfigured.result?.error).toBe("authorization_failed");
+    expect(fixture.counts.register).toBe(1);
+  } finally {
+    serve.mockRestore();
+    try { await runtime?.close(); }
+    finally {
+      await fixture.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 
@@ -267,7 +470,7 @@ test("configured conversation uses the Service limit for unset and null Bots and
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
 
-test("the model request contains only the app prompt and Shared Workspace Skills", () => {
+test("the model request contains the app prompt, Shared Workspace Skills, and Local Sidecar and Bot mail guidance", () => {
   const prompts: string[] = [];
   return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "bot-prompt-home-"));
@@ -332,7 +535,21 @@ test("the model request contains only the app prompt and Shared Workspace Skills
         allowedFolders,
         skills: [{ name: "Workspace Skill", description: "Workspace skill description sentinel", path: ".agents/skills/workspace/SKILL.md" }],
       });
-      expect(prompt).toBe(`<instructions>\n${appPrompt}\n</instructions>`);
+      expect(prompt).toBe([
+        "<local>",
+        AGENT_LOCAL_TOOL.systemPrompt.summary,
+        "local requires an online Local Sidecar. this-device selects the Sidecar on the device that sent the Turn's user message.",
+        ...AGENT_LOCAL_TOOL.systemPrompt.guidelines.slice(1),
+        "</local>",
+        "",
+        "<send_bot_message>",
+        "Send durable asynchronous text mail to another Omarchy Bot.",
+        "Use send_bot_message only when handing work or information to a distinct Bot ID.",
+        "After a successful queued acknowledgement, conclude your response; the target Bot's later output is not returned to this Turn.",
+        "</send_bot_message>",
+        "",
+        `<instructions>\n${appPrompt}\n</instructions>`,
+      ].join("\n"));
     } finally {
       await h?.stop();
       if (previousPiConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -340,6 +557,90 @@ test("the model request contains only the app prompt and Shared Workspace Skills
       rmSync(home, { recursive: true, force: true });
     }
   });
+});
+
+test("a catalog Skill installed with manage_plugins appears in the next durable Turn's model system prompt", async () => {
+  const name = "catalog-release-review";
+  const description = "Review release evidence from the catalog fixture";
+  const source = "catalog-skill.invalid";
+  const id = `${source}/${name}`;
+  const publisher = "https://plugin-catalog.invalid";
+  const relativePath = `.agents/skills/${name}/SKILL.md`;
+  const document = `---\nname: ${name}\ndescription: ${description}\n---\nVerify the release evidence.\n`;
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  const detailUrl = `${publisher}/api/plugins/catalog/detail/normalised?${new URLSearchParams({ id })}`;
+  const indexUrl = `https://${source}/.well-known/agent-skills/index.json`;
+  const documentUrl = `https://${source}/.well-known/agent-skills/${name}/SKILL.md`;
+  globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.origin !== publisher && url.hostname !== source) return originalFetch(input, init);
+    requests.push(url.href);
+    if (url.href === detailUrl) return Response.json({ id, source, slug: name, content: document });
+    if (url.href === indexUrl) return Response.json({ skills: [{ name, files: ["SKILL.md"] }] });
+    if (url.href === documentUrl) return new Response(document);
+    if (url.href === `${publisher}/api/plugins/providers`) return Response.json([]);
+    return new Response("Unexpected catalog fixture request", { status: 404 });
+  }, { preconnect: originalFetch.preconnect });
+
+  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }] });
+  const prompts: string[] = [];
+  let installResult: unknown;
+  fake.setResponses([
+    ({ messages }) => {
+      prompts.push(getCurrentSystemPrompt(messages));
+      return fauxAssistantMessage(fauxToolCall("manage_plugins", { action: "install_skill", id }, { id: "catalog-install" }), { stopReason: "toolUse" });
+    },
+    ({ messages }) => {
+      prompts.push(getCurrentSystemPrompt(messages));
+      installResult = messages.at(-1);
+      return fauxAssistantMessage("The Skill is installed.");
+    },
+    ({ messages }) => {
+      prompts.push(getCurrentSystemPrompt(messages));
+      return fauxAssistantMessage("The catalog Skill is available.");
+    },
+  ]);
+  const originalOpen = Harness.open;
+  const open = spyOn(Harness, "open").mockImplementation((storage, options, context) => originalOpen.call(Harness, storage, {
+    ...options,
+    models: () => {
+      const models = typeof options.models === "function" ? options.models() : options.models;
+      if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
+      models.setProvider(fake.provider);
+      return models;
+    },
+  }, context));
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  try {
+    h = await startDaemon();
+    h.svc.plugins.configure(publisher);
+    const botId = await makeBot(h, "Catalog Skill Bot");
+    await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    const first = await sendToBot(h, botId, "Install the catalog Skill.");
+    await waitThreadIdle(h, first.threadId);
+    expect(installResult).toMatchObject({ role: "toolResult", toolName: "manage_plugins", isError: false });
+    expect(requests.filter((url) => url !== `${publisher}/api/plugins/providers`)).toEqual([detailUrl, indexUrl, documentUrl]);
+    expect(readFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, relativePath), "utf8")).toBe(document);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).not.toContain(name);
+
+    const next = await sendToThread(h, first.threadId, "Which Skills are available?");
+    expect(next.turnId).not.toBe(first.turnId);
+    await waitThreadIdle(h, next.threadId);
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain(`${name}: ${description} (${relativePath})`);
+    const turn = h.svc.db.query<{ status: string }, [string]>("SELECT status FROM turns WHERE id = ?");
+    expect(turn.get(first.turnId)?.status).toBe("completed");
+    expect(turn.get(next.turnId)?.status).toBe("completed");
+  } finally {
+    open.mockRestore();
+    globalThis.fetch = originalFetch;
+    await h?.stop();
+    if (h) rmSync(h.home, { recursive: true, force: true });
+  }
 });
 
 for (const mode of ["worker", "durable"] as const) {
@@ -488,9 +789,15 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
   }));
   const ids: ConversationId[] = [];
   const ctx = BACKGROUND_CONTEXT;
+  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const callerAgentDir = path.join(root, "caller-pi-agent");
+  const callerKey = "test-recovery-caller-pi-key";
   let runtime: BotRuntime | undefined;
   let restoreOpen: (() => void) | undefined;
   try {
+    mkdirSync(callerAgentDir, { mode: 0o700 });
+    writeFileSync(path.join(callerAgentDir, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: callerKey } }), { mode: 0o600 });
+    process.env.PI_CODING_AGENT_DIR = callerAgentDir;
     const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
     const initial = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, ctx);
     try {
@@ -551,7 +858,13 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
       return harness;
     };
     restoreOpen = () => { Harness.open = originalOpen; };
+    const agentDir = path.join(root, "empty-pi-agent");
+    mkdirSync(agentDir, { mode: 0o700 });
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     runtime = await openBotRuntime(paths, db);
+    const runtimeProviders = runtime.credentials.getAllForRuntime();
+    expect(runtimeProviders.some(({ apiKey }) => apiKey === callerKey)).toBeFalse();
+    expect(runtimeProviders.map(({ id }) => id)).toEqual(["fake"]);
     expect(resumed).toBe(0);
     const callbackError = new Error("callback failure");
     const registered: string[] = [];
@@ -589,6 +902,8 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
     }
     expect(resumed).toBe(1);
   } finally {
+    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
     restoreOpen?.();
     await runtime?.close();
     db.close();

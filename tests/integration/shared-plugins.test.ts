@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { NativeSkills } from "../../apps/daemon/src/modules/plugins/nativeSkills.ts";
 import type { InstalledSkillDto, McpConnectionDto, PluginStateDto, SkillCommandDto } from "../../packages/protocol/src/plugins.ts";
 import { api, authedFetch, apiStatus, startDaemon, type Harness } from "./helpers/harness.ts";
 
@@ -49,6 +51,104 @@ test("workspace Skill edits are discoverable and removal is not resurrected afte
   expect((await api<PluginStateDto>(harness, "GET", "/api/plugins")).skills.some((skill) => skill.name === "release-check")).toBe(false);
 });
 
+test("NativeSkills ignores legacy Skills roots and leaves their live and dangling aliases in place", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const privateDir = path.join(root, "plugins");
+    for (const [folder, name] of [[".agents", "current-skill"], [".pi", "pi-skill"], [".claude", "claude-skill"]] as const) {
+      const directory = path.join(workspace, folder, "skills", name);
+      await mkdir(directory, { recursive: true });
+      await writeFile(path.join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: Fixture skill\n---\n`);
+    }
+    const nativeRoot = path.join(workspace, ".agents", "skills");
+    const aliases = {
+      [path.join(workspace, ".claude", "skills", "retired-alias")]: path.join(nativeRoot, "retired-alias"),
+      [path.join(nativeRoot, "pi-skill")]: path.join(workspace, ".pi", "skills", "pi-skill"),
+      [path.join(nativeRoot, "claude-category")]: path.join(workspace, ".claude", "skills"),
+      [path.join(nativeRoot, "dangling-skill")]: path.join(workspace, ".pi", "skills", "missing"),
+    };
+    for (const [alias, target] of Object.entries(aliases)) await symlink(path.relative(path.dirname(alias), target), alias, "dir");
+    await mkdir(privateDir);
+    await writeFile(path.join(privateDir, "native-skills.json"), JSON.stringify({ version: 1, entries: [], aliases }));
+
+    const skills = new NativeSkills(workspace, privateDir);
+    expect(skills.list().map((skill) => skill.name)).toEqual(["current-skill"]);
+    for (const [alias, target] of Object.entries(aliases)) expect(await readlink(alias)).toBe(path.relative(path.dirname(alias), target));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.each([".pi", ".claude"])("NativeSkills reconciles disabled %s Skill destinations", async (legacyFolder) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const privateDir = path.join(root, "plugins");
+    const name = "legacy-skill";
+    const nativeRoot = path.join(workspace, ".agents", "skills");
+    await mkdir(workspace);
+    const legacyDirectory = path.join(workspace, legacyFolder, "skills", name);
+    const directory = path.join(privateDir, "disabled-skills", "stored-bundle");
+    await mkdir(directory, { recursive: true });
+    const document = `---\nname: ${name}\ndescription: Disabled legacy Skill\n---\nPrivate bundle\n`;
+    await writeFile(path.join(directory, "SKILL.md"), document);
+    await writeFile(path.join(directory, "notes.txt"), "private companion content\n");
+    const source = legacyFolder === ".pi"
+      ? { origin: "local", sourceType: "local", source: legacyDirectory, installUrl: legacyDirectory }
+      : { origin: "installed", sourceType: "github", source: "example/legacy-skill", installUrl: "https://example.invalid/legacy-skill" };
+    const entry = {
+      ...source, id: "legacy-disabled-id", name, description: "Disabled legacy Skill", revision: "legacy-revision",
+      installedAt: "2026-04-01T00:00:00.000Z", updatedAt: "2026-05-01T00:00:00.000Z",
+      directory, activeDirectory: legacyDirectory, baseline: "legacy-baseline", enabled: false,
+      baselineVerified: true, error: "Previous update failed", availableRevision: "next-revision",
+    };
+    const registryFile = path.join(privateDir, "native-skills.json");
+    await writeFile(registryFile, JSON.stringify({ version: 1, entries: [entry], defaultsInitialized: true, aliases: {} }));
+    const occupied = path.join(nativeRoot, name);
+    const dangling = path.join(nativeRoot, `${name}-2`);
+    const hasCollisions = legacyFolder === ".claude";
+    if (hasCollisions) {
+      await mkdir(occupied, { recursive: true });
+      await writeFile(path.join(occupied, "notes.txt"), "existing native content\n");
+      await symlink(legacyDirectory, dangling, "dir");
+    }
+    const destination = path.join(nativeRoot, hasCollisions ? `${name}-3` : name);
+
+    const skills = new NativeSkills(workspace, privateDir);
+    expect(skills.list()).toEqual([expect.objectContaining({ id: entry.id, enabled: false, error: entry.error, path: path.join(directory, "SKILL.md") })]);
+    expect(await readFile(path.join(directory, "notes.txt"), "utf8")).toBe("private companion content\n");
+    await expect(lstat(destination)).rejects.toMatchObject({ code: "ENOENT" });
+    const expectedEntry = { ...entry, activeDirectory: destination,
+      ...(source.origin === "local" ? { source: destination, installUrl: destination } : {}),
+    };
+    expect(JSON.parse(await readFile(registryFile, "utf8"))).toMatchObject({ entries: [expectedEntry], defaultsInitialized: true });
+
+    if (hasCollisions) {
+      skills.remove(entry.id);
+      expect(skills.list()).toEqual([]);
+      await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(path.join(occupied, "notes.txt"), "utf8")).toBe("existing native content\n");
+      expect(await readlink(dangling)).toBe(legacyDirectory);
+    } else {
+      await mkdir(nativeRoot, { recursive: true });
+      await symlink(legacyDirectory, destination, "dir");
+      expect(() => skills.enable(entry.id, true)).toThrow("Another Skill occupies the destination");
+      expect(await readlink(destination)).toBe(legacyDirectory);
+      expect(await readFile(path.join(directory, "SKILL.md"), "utf8")).toBe(document);
+      await rm(destination);
+
+      skills.enable(entry.id, true);
+      expect(await readFile(path.join(destination, "SKILL.md"), "utf8")).toBe(document);
+      expect(await readFile(path.join(destination, "notes.txt"), "utf8")).toBe("private companion content\n");
+      expect(skills.list()).toEqual([expect.objectContaining({ id: entry.id, enabled: true, error: entry.error, path: path.join(destination, "SKILL.md") })]);
+    }
+    expect(await readFile(registryFile, "utf8")).not.toContain(legacyDirectory);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("native project MCP additions and removals are reflected in the plugin inventory", async () => {
   const h = await startPlugins();
   const workspace = path.join(h.home, ".omarchy-bot", "workspace");
@@ -81,11 +181,10 @@ test("imported Skills preserve companion edits and external sources across updat
   expect(await readFile(installedPath, "utf8")).toBe(document);
   const companion = path.join(path.dirname(installedPath), "scripts", "review.py");
   expect(await readFile(companion, "utf8")).toBe(originalScript);
-  const nativePaths = [".agents", ".claude"].map((client) => path.join(workspace, client, "skills", installed.name));
-  for (const directory of nativePaths) {
-    expect(await realpath(path.join(directory, "SKILL.md"))).toBe(await realpath(installedPath));
-    expect(await readFile(path.join(directory, "scripts", "review.py"), "utf8")).toBe(originalScript);
-  }
+  const nativeDirectory = path.join(workspace, ".agents", "skills", installed.name);
+  expect(await realpath(path.join(nativeDirectory, "SKILL.md"))).toBe(await realpath(installedPath));
+  expect(await readFile(path.join(nativeDirectory, "scripts", "review.py"), "utf8")).toBe(originalScript);
+  await expect(lstat(path.join(workspace, ".claude", "skills"))).rejects.toMatchObject({ code: "ENOENT" });
   const skillRoute = `/api/plugins/skills/${encodeURIComponent(installed.id)}`;
   const command = `/skill:${installed.name}`;
   expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).filter((entry) => entry.command === command)).toHaveLength(1);
@@ -101,11 +200,11 @@ test("imported Skills preserve companion edits and external sources across updat
   const disabled = (await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.find((skill) => skill.id === installed.id);
   expect(disabled?.enabled).toBe(false);
   expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).some((entry) => entry.command === command)).toBe(false);
-  for (const directory of nativePaths) await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(nativeDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readFile(path.join(source, "SKILL.md"), "utf8")).toBe(document);
   expect((await apiStatus(h, "PATCH", skillRoute, { enabled: true })).status).toBe(204);
   await api<PluginStateDto>(h, "GET", "/api/plugins");
-  for (const directory of nativePaths) expect(await readFile(path.join(directory, "scripts", "review.py"), "utf8")).toBe(editedScript);
+  expect(await readFile(path.join(nativeDirectory, "scripts", "review.py"), "utf8")).toBe(editedScript);
   expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).some((entry) => entry.command === command)).toBe(true);
 
   const malformed = "---\nname: [unterminated\n";
@@ -125,12 +224,13 @@ test("imported Skills preserve companion edits and external sources across updat
 
   expect((await apiStatus(h, "DELETE", skillRoute)).status).toBe(204);
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.some((skill) => skill.id === installed.id)).toBe(false);
-  for (const directory of nativePaths) await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(nativeDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   await h.stop();
   h = harness = await startDaemon(h.home);
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.some((skill) => skill.id === installed.id)).toBe(false);
   expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).some((entry) => entry.command === command)).toBe(false);
-  for (const directory of nativePaths) await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(nativeDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(path.join(workspace, ".claude", "skills"))).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readFile(path.join(source, "SKILL.md"), "utf8")).toBe(document);
   expect(await readFile(path.join(source, "scripts", "review.py"), "utf8")).toBe(upstreamScript);
 }, 20_000);

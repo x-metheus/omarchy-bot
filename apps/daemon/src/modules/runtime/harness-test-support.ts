@@ -1,12 +1,43 @@
 // This test helper lives here to satisfy the pi-durable module boundary rule.
 // No production module imports this test-only helper.
-import { Harness, createRegistry, defineExtension, defineTask, defineTool, type Conversation } from "@earendil-works/pi-durable";
+import type { Database } from "bun:sqlite";
+import { Harness, createRegistry, defineExtension, defineTask, defineTool, ToolResultEntry, type Conversation, type ConversationId, type SubmissionDraft, type ToolExecutionApi, type ToolExecutionResult, type Tx } from "@earendil-works/pi-durable";
+import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { createDurableSuiteFakeProvider, createFakeProvider, type FakeReply } from "../../../../../packages/testkit/src/fake-provider.ts";
 
 let durableSuiteHarness: Awaited<ReturnType<typeof Harness.open>> | undefined;
+
+async function durableSuiteConversation(db: Database, threadId: string) {
+  if (!durableSuiteHarness) throw new Error("Durable suite harness is not installed");
+  const binding = db.query<{ conversation_id: ConversationId }, [string]>(
+    "SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?",
+  ).get(threadId);
+  if (!binding) throw new Error("Missing Thread conversation binding");
+  const conversation = await durableSuiteHarness.conversation(binding.conversation_id, BACKGROUND_CONTEXT);
+  if (!conversation) throw new Error("Missing durable conversation");
+  return conversation;
+}
+
+export async function durableSuiteEntries(db: Database, threadId: string) {
+  const conversation = await durableSuiteConversation(db, threadId);
+  const { items } = await conversation.entries({ order: "ascending" }, 100, undefined, BACKGROUND_CONTEXT);
+  return items;
+}
+
+export async function durableSuiteAgent(db: Database, threadId: string) {
+  return (await durableSuiteConversation(db, threadId)).agent(BACKGROUND_CONTEXT);
+}
+
+export async function durableSuiteToolResultEntries(db: Database, threadId: string) {
+  return (await durableSuiteEntries(db, threadId)).filter(ToolResultEntry.is);
+}
+
+export async function durableSuiteToolResults(db: Database, threadId: string) {
+  return (await durableSuiteToolResultEntries(db, threadId)).flatMap((entry) => entry.model ?? []);
+}
 
 export async function abortDurableSuiteGeneration(): Promise<void> {
   if (!durableSuiteHarness) throw new Error("Durable suite harness is not installed");
@@ -22,9 +53,11 @@ export function durableSuiteProviderCallCount(): number {
   return durableSuiteCallCount();
 }
 
-export function installDurableSuiteProvider(): () => void {
+export type DurableMailReplayObserver = (first: ToolExecutionResult, replayed: ToolExecutionResult) => void;
+
+export function installDurableSuiteProvider(onMailReplay?: DurableMailReplayObserver): () => void {
   const fake = createDurableSuiteFakeProvider();
-  durableSuiteCallCount = () => fake.state.callCount;
+  durableSuiteCallCount = fake.getCallCount;
   const waiting = new Map<number, () => void>();
   const steered = new Set<number>();
   const boundaries = new Set<number>();
@@ -77,6 +110,20 @@ export function installDurableSuiteProvider(): () => void {
     const registry = options.registry;
     if (!("install" in registry) || typeof registry.install !== "function") throw new Error("Expected a mutable registry");
     registry.install(steering);
+    if (onMailReplay) {
+      const extension = registry.snapshot().extension("omarchy-mail");
+      const tool = extension?.tools?.find(({ name }) => name === "send_bot_message");
+      if (!extension || !tool) throw new Error("Expected the installed mail extension");
+      registry.install({ ...extension, tools: [{
+        ...tool,
+        async execute(args: Parameters<typeof tool.execute>[0], api: ToolExecutionApi, context: Context) {
+          const first = await tool.execute(args, api, context);
+          // Replay the same task while its active Turn still owns the execution.
+          onMailReplay(first, await tool.execute(args, api, context));
+          return first;
+        },
+      }] });
+    }
     const harness = await originalOpen.call(Harness, storage, {
       ...options,
       models: () => {
@@ -126,7 +173,7 @@ export async function withBlockingRuntimeTool<T>(fn: (tool: { started: Promise<v
   try { return await fn({ started, release, seen: () => seen }); }
   finally { release(); Harness.open = originalOpen; }
 }
-export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: { tokensPerSecond?: number; onMaxTurns?: (maxTurns: number | null | undefined) => void; onSystemPrompt?: (systemPrompt: string) => void }, fn: () => Promise<T>): Promise<T> {
+export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: { providerId?: string; tokensPerSecond?: number; onMaxTurns?: (maxTurns: number | null | undefined) => void; onSystemPrompt?: (systemPrompt: string) => void }, fn: () => Promise<T>): Promise<T> {
   const fake = createFakeProvider(script, options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond });
   const provider: typeof fake.provider = {
     ...fake.provider,
@@ -142,7 +189,13 @@ export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: {
       models: () => {
         const models = typeof harnessOptions.models === "function" ? harnessOptions.models() : harnessOptions.models;
         if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
-        models.setProvider(provider);
+        if (options.providerId === undefined) {
+          models.setProvider(provider);
+        } else {
+          // Preserve catalog and auth from the stored provider, including when it is added after daemon startup.
+          const stored = models.getProvider(options.providerId);
+          if (stored) models.setProvider({ ...stored, streamSimple: provider.streamSimple });
+        }
         return models;
       },
     }, context);
@@ -180,6 +233,24 @@ export async function withFakeRuntimeProvider<T>(script: FakeReply[], options: {
 
 /** Child-process-only fake provider and durable timer used by restart tests. */
 export function installDurableCrashProvider(): () => void {
+  let holdRecoveryWrite: (() => Promise<void>) | undefined;
+  if (process.env.OMARCHY_TEST_RECOVERY_WRITE_COLLISION === "1") {
+    const openSqliteStorage = SqliteStorage.open;
+    SqliteStorage.open = (database, options) => {
+      SqliteStorage.open = openSqliteStorage;
+      const holdWrite = async () => {
+        const locked = Promise.withResolvers<void>();
+        void database.transaction(async () => {
+          locked.resolve();
+          // Give the competing Service write a turn while pi still holds SQLite's write lock.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }).catch(locked.reject);
+        await locked.promise;
+      };
+      holdRecoveryWrite = holdWrite;
+      return openSqliteStorage.call(SqliteStorage, database, options);
+    };
+  }
   const sleepTask = defineTask<{ at: number; text: string }, { phase: "wait" } | { phase: "deliver" }, null>({
     name: "test.sleep", version: 1, initial: () => ({ phase: "wait" }),
     phases: {
@@ -213,10 +284,25 @@ export function installDurableCrashProvider(): () => void {
       async execute() { console.log(JSON.stringify({ event: "hang" })); return await new Promise<never>(() => {}); },
     }),
   ] });
-  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }], tokensPerSecond: 15, tokenSize: { min: 1, max: 1 } });
-  fake.setResponses(Array.from({ length: 100 }, () => ({ messages }) => {
+  const fake = fauxProvider({ provider: "fake", api: "openai-completions", tokensPerSecond: 15, tokenSize: { min: 1, max: 1 } });
+  fake.setResponses(Array.from({ length: 100 }, () => async ({ messages }) => {
     const latest = messages.filter((message) => message.role === "user").at(-1);
     const text = typeof latest?.content === "string" ? latest.content : "";
+    if (text.startsWith("send-peer-mail:")) {
+      if (messages.at(-1)?.role === "toolResult") return fauxAssistantMessage("Mail sent.");
+      return fauxAssistantMessage(fauxToolCall("send_bot_message", { targetBotId: text.slice("send-peer-mail:".length), text: "Check the restart." }, { id: "restart-mail" }), { stopReason: "toolUse" });
+    }
+    if (text === "Hold the target reply.") {
+      if (process.env.OMARCHY_TEST_PEER_MAIL_HOLD === "queued") await new Promise<never>(() => {});
+      if (process.env.OMARCHY_TEST_PEER_MAIL_PREDECESSOR_FAILS === "1") {
+        return fauxAssistantMessage("Predecessor partial.", { stopReason: "error", errorMessage: "The predecessor reply failed." });
+      }
+      return fauxAssistantMessage("User reply recovered.");
+    }
+    if (text === "A competing steer." || text.startsWith("Message from Bot ")) {
+      if (process.env.OMARCHY_TEST_PEER_MAIL_HOLD === "placed") await new Promise<never>(() => {});
+      return fauxAssistantMessage("Peer mail survived restart.");
+    }
     if (text === "hang") return fauxAssistantMessage([fauxToolCall("hang", {}, { id: "hang-call" })], { stopReason: "toolUse" });
     if (text === "approval-write") {
       if (messages.at(-1)?.role === "toolResult") return fauxAssistantMessage("Approval write finished.");
@@ -227,19 +313,70 @@ export function installDurableCrashProvider(): () => void {
     return fauxAssistantMessage("A long reply that keeps streaming across the restart and eventually completes.");
   }));
   const originalOpen = Harness.open;
-  Harness.open = (storage, options, context) => {
+  Harness.open = async (storage, options, context) => {
     const runtimeRegistry: unknown = options.registry;
     if (typeof runtimeRegistry !== "object" || runtimeRegistry === null || !("install" in runtimeRegistry) || typeof runtimeRegistry.install !== "function") throw new Error("Expected a mutable registry");
     runtimeRegistry.install(crashExtension);
-    return originalOpen.call(Harness, storage, {
+    const harness = await originalOpen.call(Harness, storage, {
       ...options,
       models: () => {
         const models = typeof options.models === "function" ? options.models() : options.models;
         if (!("setProvider" in models) || typeof models.setProvider !== "function") throw new Error("Expected mutable models");
-        models.setProvider(fake.provider);
+        const provider = models.getProvider(fake.provider.id);
+        if (!provider) throw new Error("Expected stored fake provider");
+        // Preserve runtime model resolution and replace only network streaming.
+        models.setProvider({ ...provider, streamSimple: fake.provider.streamSimple });
         return models;
       },
     }, context);
+    if (holdRecoveryWrite) {
+      const open = harness.conversation.bind(harness);
+      harness.conversation = async (...args) => {
+        const conversation = await open(...args);
+        if (conversation) {
+          const watch = conversation.watch.bind(conversation);
+          conversation.watch = async (...args) => {
+            const attached = await watch(...args);
+            const hold = holdRecoveryWrite;
+            holdRecoveryWrite = undefined;
+            await hold?.();
+            return attached;
+          };
+        }
+        return conversation;
+      };
+    }
+    const peerMailHold = process.env.OMARCHY_TEST_PEER_MAIL_HOLD;
+    if (peerMailHold) {
+      const competingInput = Promise.withResolvers<void>();
+      const holdPeerMailBookkeeping = (conversation: Conversation) => {
+        conversation.submit = new Proxy(conversation.submit, {
+          async apply(target, thisArg, args: [SubmissionDraft | Tx, unknown]) {
+            const draft = args[0];
+            const input = "type" in draft && draft.type === "input" ? draft : undefined;
+            const peerMail = input?.entry?.kind === "write";
+            if (peerMail && peerMailHold === "queued") {
+              console.log(JSON.stringify({ event: "before-peer-mail-input" }));
+              await competingInput.promise;
+            }
+            const submission: unknown = await Reflect.apply(target, thisArg, args);
+            if (input?.content === "Hold the target reply.") competingInput.resolve();
+            // Hold the Service between the durable commit and its bookkeeping.
+            if (peerMail) await new Promise<never>(() => {});
+            return submission;
+          },
+        });
+        return conversation;
+      };
+      const create = harness.createConversation.bind(harness);
+      harness.createConversation = async (...args) => holdPeerMailBookkeeping(await create(...args));
+      const open = harness.conversation.bind(harness);
+      harness.conversation = async (...args) => {
+        const conversation = await open(...args);
+        return conversation && holdPeerMailBookkeeping(conversation);
+      };
+    }
+    return harness;
   };
   return () => { Harness.open = originalOpen; };
 }

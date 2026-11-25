@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 import {
+  BotUpdatedEventPayload,
   MessageDto,
   ToolCallSummaryDto,
   type ApprovalDto,
@@ -154,6 +155,32 @@ const resolvedApproval: ApprovalDto = {
   status: "allowed_once",
   answeredAt: COMPLETED_AT,
 };
+
+describe("route Bot updates", () => {
+  test.each([
+    ["a model reference", "fake/org/model"],
+    ["null", null],
+    ["an omitted model", undefined],
+  ] as const)("preserves %s in bot.updated and invalidates the Bot cache", (_description, model) => {
+    const harness = createHarness();
+    const payload = {
+      name: "Research Bot",
+      instructions: "",
+      showToolCalls: false,
+      showThinking: false,
+      ...(model === undefined ? {} : { model }),
+    };
+    const envelope: EventEnvelope = {
+      ...threadEvent("bot.updated", payload, { aggregateId: "bot-1" }),
+      aggregateType: "bot",
+    };
+
+    route(envelope, harness.invalidate);
+
+    expect(BotUpdatedEventPayload.parse(envelope.payload)).toEqual(payload);
+    expect(harness.invalidations).toEqual([{ tag: "bots" }]);
+  });
+});
 
 describe("route approval events", () => {
   test("invalidates approvals for the thread in approval.requested", () => {
