@@ -509,7 +509,7 @@ Carried from Task 13 (2026-11-25): with the switch on, the Services panel takes 
 - `bun test apps/daemon/src/modules/workspace/cleanup.test.ts` — 33 passed.
 - `bun test tests/integration/workspace-cleanup.test.ts` — 1 passed.
 - `bun run lint:boundaries` — 4 passed.
-- `bun run typecheck` — one pre-existing failure at `tests/integration/daemon.test.ts:289`, unrelated to Task 17.
+- `bun run typecheck` — one pre-existing failure at `tests/integration/daemon.test.ts:289`, unrelated to Task 17; fixed on main in `5a92a12`, and typecheck passes after the merge.
 
 **Dependencies:** Task 7
 
