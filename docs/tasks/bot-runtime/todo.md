@@ -340,6 +340,21 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
   - Still open from the Checkpoint B list, with no task assigned: across the 12 Thread and lifecycle files, 4 tests fail with the switch on and none with it off (127 pass). The native-event cases are "Tool Calls, residual Native Events, and Responses remain distinct records" and "tool activity remains, the public abort route is absent, and no approval is pending" in `daemon.test.ts`, and "preserves mixed Agent blocks and Steering in exact occurrence order across restart" in `ordered-transcript-qa.test.ts`. They expect the worker's native `fake.progress` event record and tool-summary fields that the durable path does not produce. The `process-only` case is "keeps a completed process-only Turn quiet while Bot Activity remains state-driven" in `ordered-transcript-qa.test.ts`. Task 19 requires these to pass on the runtime, so the review must decide whether the runtime adds an equivalent or the tests change.
 - [x] A write outside the allowed folders asks, survives a restart, and writes once (Task 9, `restart.test.ts`)
 - [ ] Review with the human before proceeding
+  - Full sweep of all 106 `tests/integration` files on main at `b97ac11` (2026-11-25):
+    - Switch on: 813 pass, 39 fail, 47 skip.
+    - Switch off: 864 pass, 10 fail, 24 skip.
+    - At Checkpoint B (95 files), the same sweep gave 659 pass, 75 fail and 34 skip with the switch on, and 735 pass, 18 fail and 15 skip with it off.
+  - The 10 switch-off failures also fail with the switch on, and all are environmental or predate Tasks 9–22:
+    - the TypeScript Sidecar packaging check: a stray ignored `apps/sidecar/node_modules`
+    - three cloud bootstrap cases: the retired `.cursor/install.sh`, exit 127
+    - four Service listener install cases: port and pairing setup
+    - one Bot Screen case: the host Sway refused a scratchpad move
+    - the `workerOnly` helper self-test: it also fails at `82b970c`
+  - The 29 switch-on-only failures fall into four groups:
+    1. Worker-protocol behavior (13). Native events and the tool-summary fields in `daemon.test.ts` and `ordered-transcript-qa.test.ts`, the `process-only` Turn, the native Tool Call summary file, and the agent capability inventory file.
+    2. Local Sidecar tools beyond dispatch (13). Ask then Allow once, sandboxed read and write, search, transfers, the process timeout, and the online-device descriptions.
+    3. The distribution smoke for public Agent Turns (2).
+    4. Managed attachment ownership (1).
 
 ---
 
