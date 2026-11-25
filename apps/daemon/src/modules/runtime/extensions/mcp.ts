@@ -13,6 +13,7 @@ import type { EffectiveMcpServer, EffectiveMcpServers } from "../../plugins/nati
 const DISCOVERY_TIMEOUT_MS = 20_000;
 const CALL_TIMEOUT_MS = 120_000;
 const MAX_RETAINED_OAUTH_TOKENS = 4;
+const MAX_REJECTED_SERVERS = 64;
 const CONFIGURATION_LOAD_ERROR = "MCP configuration could not be loaded. Check the configuration in Services and retry.";
 const SHUTDOWN_ERROR = "The MCP runtime is shutting down. Retry once the Service is running.";
 
@@ -48,6 +49,8 @@ export type McpExtensionDeps = {
   fillSecrets?: (value: string) => string;
   authProvider?: (service: string, url: string) => AuthProvider | undefined;
   callTimeoutMs?: number;
+  initialRejectedServers?: ReadonlySet<string>;
+  onRejectedChange?: (names: readonly string[]) => void;
 };
 
 function credentialRedactor(secrets: string[]): Redact {
@@ -110,14 +113,23 @@ function fillArgumentRecord(fields: Record<string, unknown>, fill: (value: strin
   return Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, fillValue(value)]));
 }
 
-export function createMcpExtension({ servers: loadServers, prepareServers, fillSecrets = (value) => value, authProvider, callTimeoutMs = CALL_TIMEOUT_MS }: McpExtensionDeps) {
+export function createMcpExtension({
+  servers: loadServers, prepareServers, fillSecrets = (value) => value, authProvider, callTimeoutMs = CALL_TIMEOUT_MS,
+  initialRejectedServers, onRejectedChange,
+}: McpExtensionDeps) {
   const connections = new Map<string, Connection>();
   const issuedTokensByName = new Map<string, Set<string>>();
   const failures = new Map<string, DiscoveryFailure>();
+  const rejectedServers = new Set([...(initialRejectedServers ?? [])].slice(-MAX_REJECTED_SERVERS));
   const pendingCloses = new Map<string, Promise<void>>();
   const pendingPreparations = new Set<Promise<EffectiveMcpServers>>();
   const callQueues = new Map<string, Promise<void>>();
   let closing: Promise<void> | undefined;
+
+  function persistRejectedServers() {
+    try { onRejectedChange?.([...rejectedServers]); }
+    catch { /* Runtime status and discovery use the in-memory set even if persistence fails. */ }
+  }
 
   function enqueue<T>(name: string, run: () => Promise<T>): Promise<T> {
     const next = (callQueues.get(name) ?? Promise.resolve()).then(run);
@@ -201,6 +213,9 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
     })();
     const tools = awaitWithContext(discovery, context).then((found) => {
       connection.toolCount = found.length;
+      if (connections.get(name) === connection && !connection.retiring && rejectedServers.delete(name)) {
+        persistRejectedServers();
+      }
       return found;
     }, (error) => {
       if (connections.get(name) === connection && !(error instanceof McpConfigurationError)) {
@@ -234,6 +249,14 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
   function refreshServers(effective: EffectiveMcpServers | undefined) {
     if (!effective) return undefined;
     const servers = new Map(Object.entries(effective.servers));
+    if (!effective.configurationError) {
+      const previousSize = rejectedServers.size;
+      for (const name of rejectedServers) {
+        const server = servers.get(name);
+        if (!server || server.disabled) rejectedServers.delete(name);
+      }
+      if (rejectedServers.size !== previousSize) persistRejectedServers();
+    }
     for (const [name, failure] of failures) {
       if (failure.revision !== effective.revision) failures.delete(name);
     }
@@ -259,6 +282,7 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
     let status: NativeMcpStatus["status"] = "not-connected";
     if (toolCount !== undefined) status = "connected";
     else if ("configurationError" in server) status = "failed";
+    else if (rejectedServers.has(name)) status = "needs-auth";
     else status = failures.get(name)?.status ?? status;
     return { name, configurationRevision, status, toolCount: toolCount ?? 0, disabled };
   }
@@ -466,6 +490,11 @@ export function createMcpExtension({ servers: loadServers, prepareServers, fillS
       if (entry.disabled || effective.configurationError || "configurationError" in server ||
         connection?.retiring || connection?.client.connectionState === "connected") return entry;
       failures.set(name, { revision: effective.revision, status: "needs-auth" });
+      if (!rejectedServers.has(name)) {
+        rejectedServers.add(name);
+        if (rejectedServers.size > MAX_REJECTED_SERVERS) rejectedServers.delete(rejectedServers.values().next().value!);
+        persistRejectedServers();
+      }
       return { ...entry, status: "needs-auth" };
     },
     status(): NativeMcpStatus[] {

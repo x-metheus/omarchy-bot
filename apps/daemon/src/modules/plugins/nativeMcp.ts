@@ -124,11 +124,16 @@ function safeEndpoint(value: string): string {
 const commonFields = new Set(["command", "args", "env", "env_vars", "url", "headers", "http_headers", "env_http_headers", "bearer_token_env_var", "bearerTokenEnv", "disabled", "enabled", "type"]);
 const localTimingFields = new Set(["timeout", "connectionTimeout", "requestTimeout", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec"]);
 
+function hasOAuthMarker(definition: Definition | undefined): boolean {
+  return definition?.auth === "oauth" && typeof definition.url === "string";
+}
+
 function projectionLimits(definition: Definition | undefined): { unsupported: string[]; local: string[] } {
   const unsupported: string[] = [], local: string[] = [];
   for (const key of Object.keys(definition ?? {})) {
     if (localTimingFields.has(key)) local.push(key);
-    else if (!commonFields.has(key) && !(key === "oauth" && typeof definition?.url === "string")) unsupported.push(key);
+    else if (!commonFields.has(key) && !(key === "oauth" && typeof definition?.url === "string") &&
+      !(key === "auth" && hasOAuthMarker(definition))) unsupported.push(key);
   }
   if (definition?.type === "sse") unsupported.push("type=sse");
   return { unsupported, local };
@@ -495,11 +500,12 @@ export class NativeMcpStore {
         const value = fromPi ?? common(codexDefinition, true);
         if (!value) continue;
         const selected = fromPi ? definition : codexDefinition;
+        if ((selected?.auth !== undefined && !hasOAuthMarker(selected)) ||
+          (value.url !== undefined && selected?.bearerToken !== undefined)) {
+          servers[name] = { configurationError: "Unsupported MCP authentication settings. Check the configuration for this connection." };
+          continue;
+        }
         if (value.url !== undefined) {
-          if (selected?.auth !== undefined || selected?.bearerToken !== undefined) {
-            servers[name] = { configurationError: "Unsupported MCP authentication settings. Check the configuration for this connection." };
-            continue;
-          }
           const oauth = projectNativeMcpOAuth(selected?.oauth);
           if (oauth === null) {
             servers[name] = { configurationError: "Invalid MCP OAuth configuration. Check the OAuth settings for this connection." };

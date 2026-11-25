@@ -113,9 +113,14 @@ test("a plain 403 during OAuth import leaves the MCP service needing sign-in", a
     const store = new NativeMcpStore(sharedWorkspaceDir, path.join(directory, "private"));
     const snapshot = () => store.effectiveServers();
     const { name } = store.save(null, { name: "remote", enabled: true, transport: { type: "http", url: fixture.url.href } });
+    const config = path.join(sharedWorkspaceDir, ".mcp.json");
+    writeFileSync(config, JSON.stringify({ mcpServers: { [name]: { url: fixture.url.href, auth: "oauth" } } }));
+    store.reconcile();
+    const persisted: (readonly string[])[] = [];
     const botRuntime = await openBotRuntime({ dbPath: path.join(directory, "service.sqlite"), stateDir,
       homeDir: directory, dataDir: directory, sharedWorkspaceDir, downloadsDir: path.join(directory, "Downloads") }, undefined, {
       mcp: { servers: snapshot },
+      mcpOAuth: { onRejectedChange: (names: readonly string[]) => persisted.push(names) },
     });
     runtime = botRuntime;
     const report = await importMcpOAuthTokens({
@@ -135,6 +140,19 @@ test("a plain 403 during OAuth import leaves the MCP service needing sign-in", a
     store.updateStatus(statuses);
     expect(store.list()).toMatchObject([{ name, status: "needs-auth", toolCount: 0 }]);
     expect(Bun.deepEquals(observedAuthorization, [`Bearer ${accessToken}`])).toBe(true);
+    expect(persisted).toEqual([[name]]);
+
+    const revision = statuses[0]?.configurationRevision;
+    writeFileSync(config, JSON.stringify({ mcpServers: {
+      [name]: { url: fixture.url.href, auth: "oauth" }, local: { command: "fixture", disabled: true },
+    } }));
+    store.reconcile();
+    const reconciled = botRuntime.mcpStatus();
+    expect(snapshot().revision).not.toBe(revision);
+    expect(reconciled).toContainEqual(expect.objectContaining({ name, configurationRevision: snapshot().revision, status: "needs-auth" }));
+    store.updateStatus(reconciled);
+    expect(store.list().find((entry) => entry.name === name)?.status).toBe("needs-auth");
+    expect(persisted).toEqual([[name]]);
   } finally {
     try { await runtime?.close(); }
     finally {

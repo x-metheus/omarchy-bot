@@ -1,3 +1,4 @@
+import type { Database } from "bun:sqlite";
 import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
 import { getSetting, setSetting } from "../persistence/settings.ts";
@@ -43,6 +44,23 @@ export function keyringAccessDisabled(env: Record<string, string | undefined>): 
   return env.OMARCHY_TEST_DISABLE_KEYRING === "1";
 }
 
+const MCP_OAUTH_REJECTED_SERVERS_SETTING = "mcpOAuthRejectedServers";
+const MAX_MCP_OAUTH_REJECTED_SERVERS = 64;
+
+function readMcpOAuthRejectedServers(db: Database): Set<string> {
+  const setting = getSetting(db, MCP_OAUTH_REJECTED_SERVERS_SETTING);
+  if (setting !== null) {
+    try {
+      const values: unknown = JSON.parse(setting);
+      if (Array.isArray(values)) {
+        const names = new Set(values.filter((value): value is string => typeof value === "string"));
+        return new Set([...names].slice(-MAX_MCP_OAUTH_REJECTED_SERVERS));
+      }
+    } catch { /* Ignore a malformed settings value. */ }
+  }
+  return new Set();
+}
+
 export async function closeRuntimeAfterMcpOAuthImport(importing: Promise<unknown> | undefined, closeRuntime: () => Promise<void>): Promise<void> {
   await importing;
   await closeRuntime();
@@ -81,7 +99,11 @@ export async function main(options: MainOptions = {}): Promise<{
         return mcpServers();
       },
     },
-    mcpOAuth: { onAuthorization: (outcome) => { plugins?.handleNativeAuthorization(outcome); } },
+    mcpOAuth: {
+      initialRejectedServers: readMcpOAuthRejectedServers(db),
+      onRejectedChange: (names) => setSetting(db, MCP_OAUTH_REJECTED_SERVERS_SETTING, JSON.stringify(names.slice(-MAX_MCP_OAUTH_REJECTED_SERVERS))),
+      onAuthorization: (outcome) => { plugins?.handleNativeAuthorization(outcome); },
+    },
   });
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;

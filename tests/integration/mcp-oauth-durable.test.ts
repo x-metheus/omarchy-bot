@@ -1,8 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { startOAuthMcpServer } from "../../apps/daemon/src/modules/runtime/testing/oauthMcpServer.ts";
+import { getSetting, setSetting } from "../../apps/daemon/src/persistence/settings.ts";
 import type { EventEnvelope, McpConnectionDto, PluginStateDto } from "../../packages/protocol/src/index.ts";
 import { PLUGIN_PROVIDERS } from "../../packages/protocol/src/pluginProviders.ts";
 import { api, apiStatus, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
@@ -103,8 +104,11 @@ async function expectToolResult(h: Harness) {
   expect(Bun.deepEquals(responseTexts, [toolText])).toBe(true);
 }
 
-test("durable MCP browser sign-in publishes completion and enables tool calls", async () => {
-  await withDurableDaemon(async (h, { id }) => {
+test("durable MCP browser sign-in publishes completion and enables tool calls with the adapter OAuth marker", async () => {
+  await withDurableDaemon(async (h, { id, name }, fixture) => {
+    await writeFile(path.join(h.svc.cfg.sharedWorkspaceDir, ".mcp.json"), JSON.stringify({
+      mcpServers: { [name]: { url: fixture.url, auth: "oauth" } },
+    }));
     expect(await api(h, "POST", `/api/plugins/mcp/${id}/check`, {})).toMatchObject({ status: "needs-auth" });
     expect(await connectionState(h, id)).toMatchObject({ status: "needs-auth" });
     await withAuthorizationEvent(h, id, "completed", async (event) => {
@@ -115,6 +119,34 @@ test("durable MCP browser sign-in publishes completion and enables tool calls", 
     });
     expect(await connectionState(h, id)).toMatchObject({ status: "connected", toolCount: 1 });
     await expectToolResult(h);
+  });
+}, 25_000);
+
+test("durable MCP bootstrap restores rejected imports before discovery and clears the setting after sign-in", async () => {
+  await withDurableDaemon(async (h, { id, name }, fixture) => {
+    const setting = "mcpOAuthRejectedServers";
+    const removed = Array.from({ length: 64 }, (_, index) => `removed-${index}`);
+    setSetting(h.svc.db, setting, JSON.stringify(["oldest", ...removed, name, "disabled", null, name]));
+    const oldest = h.svc.plugins.mcp.save(null, { name: "oldest", enabled: true, transport: { type: "http", url: fixture.url } });
+    h.svc.plugins.mcp.save(null, { name: "disabled", enabled: false, transport: { type: "http", url: fixture.url } });
+    await h.stop();
+
+    const restarted = await startDaemon(h.home);
+    try {
+      expect(await connectionState(restarted, id)).toMatchObject({ status: "needs-auth", toolCount: 0 });
+      expect(await connectionState(restarted, oldest.id)).toMatchObject({ status: "not-connected", toolCount: 0 });
+      expect(fixture.counts.oauthRequests).toBe(0);
+      expect(fixture.counts.unauthorized).toBe(0);
+      expect(getSetting(restarted.svc.db, setting)).toBe(JSON.stringify([name]));
+
+      const redirectUrl = await browserRedirect(await startSignIn(restarted, id));
+      expect(await api<{ authenticated?: boolean }>(restarted, "POST", authorizeRoute(id), { redirectUrl })).toEqual({ authenticated: true });
+      expect(await connectionState(restarted, id)).toMatchObject({ status: "connected", toolCount: 1 });
+      expect(getSetting(restarted.svc.db, setting)).toBe("[]");
+    } finally {
+      await restarted.stop();
+      await rm(restarted.svc.cfg.stateDir, { recursive: true, force: true });
+    }
   });
 }, 25_000);
 

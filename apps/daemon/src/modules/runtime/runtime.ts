@@ -81,10 +81,13 @@ function shouldProjectEntry(entry: EntryRecord, lastEntryBeforeAbort: number | u
 export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, db?: Database, options: {
   events?: Pick<EventLog, "append">;
   mcp?: Pick<McpExtensionDeps, "servers" | "prepareServers" | "fillSecrets" | "authProvider">;
-  mcpOAuth?: { onAuthorization?: (outcome: McpAuthorizationOutcome) => void };
+  mcpOAuth?: Pick<McpExtensionDeps, "initialRejectedServers" | "onRejectedChange"> & {
+    onAuthorization?: (outcome: McpAuthorizationOutcome) => void;
+  };
 } = {}): Promise<BotRuntime> {
   const secretStore = new SecretStore(paths.dataDir);
   const mcpOptions = options.mcp;
+  const { onAuthorization, ...rejectedOptions } = options.mcpOAuth ?? {};
   const manager = mcpOptions ? new McpOAuthManager({
     secrets: secretStore,
     settings({ name, serverUrl }) {
@@ -112,13 +115,14 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         const entry = await mcp?.check(name).catch(() => undefined);
         if (entry?.status !== "connected") outcome = { status: "failed", reason: "connect_failed" };
       }
-      try { await options.mcpOAuth?.onAuthorization?.({ ...outcome, authorizationId, server: name }); }
+      try { await onAuthorization?.({ ...outcome, authorizationId, server: name }); }
       catch { /* Event consumers must not interrupt OAuth completion. */ }
       return outcome;
     },
   }) : undefined;
   const mcp = mcpOptions && manager ? createMcpExtension({
     ...mcpOptions,
+    ...rejectedOptions,
     authProvider: (name, url) => manager.authProvider(name, url),
   }) : undefined;
   let reportedCredentialsFailure = false;
