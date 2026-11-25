@@ -34,13 +34,9 @@ async function withTurn(
   ]);
   const registry = createRegistry();
   const storage = new MemoryStorage();
-  const turnsBySubmission = new Map<number, string>();
   registry.install(createBrowserExtension({
     broker: { agentBrowserAct },
-    owner(_conversationId, submissionId) {
-      const turnId = turnsBySubmission.get(submissionId);
-      return turnId === undefined ? undefined : { ...owner, turnId };
-    },
+    async owner() { return { ...owner, turnId: "turn-1" }; },
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
   }));
   const harness = await Harness.open(storage, { registry, models }, context);
@@ -48,7 +44,6 @@ async function withTurn(
     const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
     await conversation.configure({ model: { provider: "fake", modelId: "fake-model" } }, context);
     const submission = await conversation.submit({ type: "input", content: "Use the browser", requestId: "turn-1" }, context);
-    turnsBySubmission.set(submission.id, "turn-1");
     const waiting = submission.wait(context);
     await options.duringTurn?.(conversation);
     const settlement = await waiting;

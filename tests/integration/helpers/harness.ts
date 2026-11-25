@@ -12,6 +12,7 @@ import { MODEL_CREDENTIALS_FILENAME, type StoredProvider } from "../../../apps/d
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
+import type { DurableMailReplayObserver } from "../../../apps/daemon/src/modules/runtime/harness-test-support.ts";
 
 /** Mark worker-protocol tests for removal with the worker in Task 20. */
 export function workerOnly(reason: string, options?: { timeout?: number }) {
@@ -46,6 +47,9 @@ export interface HarnessOptions {
   stateDir?: string;
   /** Worker tree override; defaults to the shared fake workers. */
   workersDir?: string;
+  onDurableMailReplay?: DurableMailReplayObserver;
+  /** Keep the Shared Workspace outside the protected Service data directory. */
+  separateWorkspace?: boolean;
 }
 
 /**
@@ -100,7 +104,8 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   const home = existingHome ?? path.join(os.tmpdir(), `omarchy-bot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const data = options.dataDir ?? home;
   const state = options.stateDir ?? path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  const agentDir = path.join(home, ".pi", "agent");
+  const profile = options.separateWorkspace ? `${home}-profile` : home;
+  const agentDir = path.join(profile, ".pi", "agent");
   mkdirSync(home, { recursive: true });
   mkdirSync(state, { recursive: true });
   process.env.OMARCHY_BOT_STATE = state;
@@ -116,7 +121,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     JSON.stringify({ ok: true, image: "verified" }),
   );
 
-  process.env.HOME = home;
+  process.env.HOME = profile;
   process.env.OMARCHY_BOT_HOME = data;
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_BOT_WORKERS_DIR = options.workersDir ?? path.resolve(import.meta.dir, "../fake-workers");
@@ -140,7 +145,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
     const durableSuite = process.env.OMARCHY_TEST_DURABLE === "1";
     restoreRuntime = durableSuite
-      ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider()
+      ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider(options.onDurableMailReplay)
       : undefined;
     const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
     const daemon = options.useProductionBotScreen

@@ -1093,7 +1093,7 @@ export function openDb(cfg: Config): Database {
   }
   return db;
 }
-/** Recover interrupted worker turns; durable turns with an association are resumed by BotRuntime. */
+/** Recover interrupted worker turns and preserve durable turns for BotRuntime. */
 export function recoverOnStartup(db: Database): void {
   const now = new Date().toISOString();
   db.query(
@@ -1109,8 +1109,12 @@ export function recoverOnStartup(db: Database): void {
   db.query(`UPDATE turns SET status='failed', finished_at=?, outcome_reason='daemon restart'
     WHERE status NOT IN ('completed','cancelled','failed')
       AND id NOT IN (SELECT turn_id FROM pi_turn_submissions)
-      AND NOT (status = 'working' AND COALESCE((SELECT value FROM service_settings WHERE key = 'runtime'), '') = 'durable'
-        AND EXISTS (SELECT 1 FROM pi_thread_conversations c WHERE c.thread_id = turns.thread_id AND c.bot_id = turns.bot_id))`).run(now);
+      AND NOT (status = 'working'
+        AND EXISTS (SELECT 1 FROM pi_thread_conversations c WHERE c.thread_id = turns.thread_id AND c.bot_id = turns.bot_id)
+        AND (COALESCE((SELECT value FROM service_settings WHERE key = 'runtime'), '') = 'durable'
+          OR (native_session_id = '' AND EXISTS (
+            SELECT 1 FROM bot_mail_deliveries d WHERE d.target_turn_id = turns.id AND d.state IN ('queued', 'dispatching')
+          ))))`).run(now);
   db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE state='cleaning'`)
     .run(JSON.stringify([{ stage: "database", resource: "daemon", message: "daemon restarted during permanent deletion" }]), now);
   db.query(`UPDATE agents SET status='offline', reason='daemon restarted during check', updated_at=? WHERE status='checking'`).run(now);

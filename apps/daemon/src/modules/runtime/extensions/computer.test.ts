@@ -36,14 +36,11 @@ async function withTurn(
   const registry = createRegistry();
   const storage = new MemoryStorage();
   const bindings: { conversationId: number; turnId: string }[] = [];
-  const turnsBySubmission = new Map<number, string>();
   registry.install(createComputerExtension({
     broker: { agentToolAct },
-    owner(conversationId, submissionId) {
-      const turnId = turnsBySubmission.get(submissionId);
-      if (turnId === undefined) return undefined;
-      bindings.push({ conversationId, turnId });
-      return { ...owner, turnId };
+    async owner({ conversationId }) {
+      bindings.push({ conversationId, turnId: "turn-1" });
+      return { ...owner, turnId: "turn-1" };
     },
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
   }));
@@ -52,7 +49,6 @@ async function withTurn(
     const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
     await conversation.configure({ model: { provider: "fake", modelId: "fake-model" } }, context);
     const submission = await conversation.submit({ type: "input", content: "Use the computer", requestId: "turn-1" }, context);
-    turnsBySubmission.set(submission.id, "turn-1");
     const waiting = submission.wait(context);
     await options.duringTurn?.(conversation);
     const settlement = await waiting;

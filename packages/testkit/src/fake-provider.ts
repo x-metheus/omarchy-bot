@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall, type FauxResponseFactory, type TranscriptContext } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 
@@ -111,6 +113,16 @@ export function createDurableSuiteFakeProvider() {
     const boundary = priorAssistant?.role === "assistant" ? priorAssistant.content.find((part) => part.type === "toolCall" && part.name === "steer_boundary") : undefined;
     if (boundary?.type === "toolCall" && boundary.id === "steer-boundary") return fauxAssistantMessage(`steered: ${text}`);
     if (text === "steer-echo") return fauxAssistantMessage([fauxToolCall("steer_boundary", {}, { id: "steer-boundary" })], { stopReason: "toolUse" });
+    const localRun = /^local\.run(?:@(dev_[0-9a-f]{32}|this-device))?:(.*)$/.exec(text);
+    const forgedLocalRun = text.startsWith("local.run.forged:");
+    if (localRun || forgedLocalRun) {
+      const latest = context.messages.at(-1);
+      if (latest?.role === "toolResult" && latest.toolName === "local") return fauxAssistantMessage("Local call finished.");
+      const args = localRun
+        ? { action: "run", command: localRun[2]!, ...(localRun[1] === undefined ? {} : { target: localRun[1] }) }
+        : { action: "run", command: text.slice("local.run.forged:".length), botId: "wrong-bot", turnId: "wrong-turn" };
+      return fauxAssistantMessage(fauxToolCall("local", args, { id: "local-run" }), { stopReason: "toolUse" });
+    }
     if (text.startsWith("mcp-durable: ")) {
       const action = text.slice("mcp-durable: ".length);
       const latest = context.messages.at(-1);
@@ -160,15 +172,57 @@ export function createDurableSuiteFakeProvider() {
     if (text === "hang") return fauxAssistantMessage("hanging…");
     return fauxAssistantMessage(text.startsWith("say:") ? [fauxText(text.slice(4).trim())] : []);
   }));
+  // Mail validation includes an oversized argument, so its fixtures stream without pacing.
+  const mailbox = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }] });
+  mailbox.setResponses(Array.from({ length: 1000 }, () => async (context: TranscriptContext, options) => {
+    const text = userTexts(context).at(-1) ?? "";
+    const mail = /^send_bot_message:([^:]*):([\s\S]*)$/.exec(text);
+    if (mail) {
+      const latest = context.messages.at(-1);
+      if (latest?.role === "toolResult" && latest.toolName === "send_bot_message") {
+        const details = latest.details;
+        const deliveryId = details && typeof details === "object" && "deliveryId" in details ? details.deliveryId : undefined;
+        return fauxAssistantMessage(!latest.isError && typeof deliveryId === "string"
+          ? `Bot message acknowledgements: ${deliveryId} queued.`
+          : []);
+      }
+      const rawBody = mail[2]!;
+      const forged = rawBody.endsWith(":forge-source");
+      const args = {
+        targetBotId: mail[1]!,
+        text: rawBody.replace(/:(?:retry|forge-source)$/, ""),
+        ...(forged ? { botId: mail[1]!, turnId: "forged-turn" } : {}),
+      };
+      return fauxAssistantMessage(fauxToolCall("send_bot_message", args, { id: "mail-send" }), { stopReason: "toolUse" });
+    }
+    const peerMail = /^Message from Bot [^\n]+?: ([\s\S]*)$/.exec(text);
+    if (peerMail?.[1] === "mailbox-ordered-output") {
+      const latest = context.messages.at(-1);
+      if (latest?.role === "toolResult" && latest.toolName === "read") return fauxAssistantMessage("Peer mail handled.");
+      return fauxAssistantMessage([
+        fauxThinking("Review the isolated peer mail."),
+        fauxToolCall("read", { path: "mailbox-input" }, { id: "mail-read" }),
+      ], { stopReason: "toolUse" });
+    }
+    if (peerMail?.[1] === "mailbox-fail-after-acceptance") {
+      const home = process.env.OMARCHY_BOT_HOME;
+      const release = home === undefined ? undefined : path.join(home, "fake-peer-mail-failure.release");
+      while (release !== undefined && !existsSync(release) && !options?.signal?.aborted) await Bun.sleep(10);
+      return fauxAssistantMessage([], { stopReason: "error", errorMessage: "fake peer-mail failure" });
+    }
+    return fauxAssistantMessage([]);
+  }));
   const base = fake.provider;
   const streamSimple: typeof base.streamSimple = (model, context, options) => {
     const reply = graphicalToolFixture(context) ?? orderedTranscriptFixture(context);
     if (reply !== undefined) {
       immediate.appendResponses([reply]);
-      fake.state.callCount++;
       return immediate.provider.streamSimple(model, context, options);
     }
     const text = userTexts(context).at(-1);
+    if (text?.startsWith("send_bot_message:") || text?.startsWith("Message from Bot ")) {
+      return mailbox.provider.streamSimple(model, context, options);
+    }
     const hanging = text === "hang" || text === "thinking-hang";
     const interrupted = hanging || text === "thinking-fail" || text === "thinking-crash" || text === "partial-fail" || text === "partial-crash";
     const inner = base.streamSimple(model, context, options);
@@ -213,5 +267,5 @@ export function createDurableSuiteFakeProvider() {
     })();
     return outer;
   };
-  return { ...fake, provider: { ...base, streamSimple } };
+  return { ...fake, provider: { ...base, streamSimple }, getCallCount: () => fake.state.callCount + immediate.state.callCount + mailbox.state.callCount };
 }

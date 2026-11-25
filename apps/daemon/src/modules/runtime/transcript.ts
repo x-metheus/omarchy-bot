@@ -1,4 +1,5 @@
-import { AssistantEntry, CompactionEntry, ToolResultEntry, type Conversation, type ConversationView, type Cursor, type EntryId, type LiveState, type ToolDiagnostic, type TypedEntry } from "@earendil-works/pi-durable";
+import type { Database } from "bun:sqlite";
+import { AssistantEntry, CompactionEntry, ToolResultEntry, ToolTask, type Conversation, type ConversationView, type Cursor, type EntryId, type LiveState, type TaskId, type ToolDiagnostic, type TypedEntry } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isToolCallSummary, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "@omarchy-bot/domain";
@@ -8,6 +9,7 @@ import type { EventLog } from "../events/eventLog.ts";
 
 type Segment = Exclude<AssistantMessage["content"][number], { type: "toolCall" }>;
 type Position = { id: string; seq: number };
+type PendingTool = { name: string; messageId: string | undefined };
 type Block = {
   position: Position;
   text: string;
@@ -24,9 +26,10 @@ export class DurableTranscript {
   private readonly seenEntries: Set<number>;
   private readonly noticedCompactions: Set<number>;
   private readonly blocks = new Map<string, Block>();
-  private toolPositions?: Map<string, Position>;
+  private readonly pendingTools = new Map<string, (PendingTool | undefined)[]>();
+  private pendingAssistant: TypedEntry<never> | undefined;
   private generation = 0;
-  constructor(private readonly threads: ThreadsService, private readonly bots: BotsService, private readonly events: EventLog, private readonly threadId: string, private readonly botId: string, private readonly turnId: string, initial: ConversationView) {
+  constructor(private readonly threads: ThreadsService, private readonly bots: BotsService, private readonly events: EventLog, private readonly threadId: string, private readonly botId: string, private readonly turnId: string, initial: ConversationView, private readonly db?: Database) {
     this.seenEntries = new Set(initial.entries.filter((entry) => !CompactionEntry.is(entry)).map((entry) => entry.id));
     const messages = threads.listMessages(threadId);
     for (const message of messages) {
@@ -49,12 +52,12 @@ export class DurableTranscript {
     this.update({ ...view, entries: view.entries.filter(CompactionEntry.is), docs: {} });
   }
 
-  async reconcileCompactions(view: ConversationView, conversation: Conversation): Promise<void> {
+  async reconcileCompactions(view: ConversationView, conversation: Conversation, writeService: (write: () => void) => void | Promise<void> = (write) => write()): Promise<void> {
     const lastNotice = Math.max(0, ...this.noticedCompactions);
     let cursor: Cursor | undefined;
     do {
       const page = await conversation.entries({ order: "ascending", ...(lastNotice ? { minEntryId: lastNotice as EntryId } : {}) }, 100, cursor, BACKGROUND_CONTEXT);
-      this.update({ ...view, entries: page.items.filter(CompactionEntry.is), docs: {} });
+      await writeService(() => this.update({ ...view, entries: page.items.filter(CompactionEntry.is), docs: {} }));
       cursor = page.next;
     } while (cursor);
   }
@@ -76,7 +79,7 @@ export class DurableTranscript {
       }
       if (AssistantEntry.is(entry)) {
         const message = entry.model?.find((item) => item.role === "assistant");
-        if (message) this.updateMessage(message, "committed");
+        if (message) this.updateMessage(message, { entry });
       } else if (ToolResultEntry.is(entry)) {
         this.updateToolResult(entry);
       }
@@ -95,15 +98,40 @@ export class DurableTranscript {
 
   private updateToolResult(entry: TypedEntry<{ diagnostics: ToolDiagnostic[] }>): void {
     const result = entry.model?.find((item) => item.role === "toolResult");
-    if (!result) return;
-    const interrupted = entry.data.diagnostics.some(({ severity, code }) => severity === "error" && code !== undefined && INTERRUPTED_TOOL_DIAGNOSTICS.has(code));
-    this.threads.projectToolResult(this.threadId, this.turnId, {
-      id: result.toolCallId,
-      name: result.toolName,
-      status: result.isError ? "error" : "completed",
-      ...(result.durationMs === undefined ? {} : { durationMs: result.durationMs }),
-      ...(result.isError ? { errorSummary: interrupted ? TOOL_CALL_INTERRUPTED_ERROR_SUMMARY : PI_TOOL_ERROR_SUMMARY } : {}),
-    });
+    const assistant = this.pendingAssistant;
+    if (!result || !assistant) return;
+    const pending = this.pendingTools.get(result.toolCallId);
+    if (!pending) return;
+    let index: number;
+    if (pending.length > 1 && this.db && entry.byTaskId !== undefined) {
+      // Pi creates tasks in assistant call order, even when results commit out of order.
+      // For a repeated ID, Pi reports the first call's name for every result.
+      const tasks = this.db.query<{ id: TaskId }, [number, number, number, string, number, string]>(`
+        SELECT id FROM pi_tasks
+        WHERE conversation_id = ? AND id > ? AND id < ? AND kind = ?
+          AND json_extract(record, '$.input.assistant') = ? AND record -> '$.input.callId' = ?
+        ORDER BY id
+      `).all(entry.conversationId, assistant.id, entry.id, JSON.stringify(ToolTask.definition.name), assistant.id, JSON.stringify(result.toolCallId));
+      // The generation itself writes results for the unstarted suffix when it aborts a sequential round.
+      index = entry.byTaskId === assistant.byTaskId
+        ? pending.findIndex((tool, position) => position >= tasks.length && tool !== undefined)
+        : tasks.findIndex(({ id }) => id === entry.byTaskId);
+    } else {
+      index = pending.findIndex((tool) => tool?.name === result.toolName);
+    }
+    const tool = pending[index];
+    if (!tool) return;
+    if (tool.messageId !== undefined) {
+      const interrupted = entry.data.diagnostics.some(({ severity, code }) => severity === "error" && code !== undefined && INTERRUPTED_TOOL_DIAGNOSTICS.has(code));
+      this.threads.projectToolResult(tool.messageId, {
+        id: result.toolCallId,
+        name: tool.name,
+        status: result.isError ? "error" : "completed",
+        ...(result.durationMs === undefined ? {} : { durationMs: result.durationMs }),
+        ...(result.isError ? { errorSummary: interrupted ? TOOL_CALL_INTERRUPTED_ERROR_SUMMARY : PI_TOOL_ERROR_SUMMARY } : {}),
+      });
+    }
+    pending[index] = undefined;
   }
 
   private removeBlocks(ids: string[]): void {
@@ -112,10 +140,18 @@ export class DurableTranscript {
     for (const id of ids) this.blocks.delete(id);
   }
 
-  private updateMessage(message: Pick<AssistantMessage, "content" | "timestamp" | "stopReason">, mode: "live" | "committed" | "resume"): void {
-    const toolPositions = mode === "committed" && message.stopReason === "toolUse"
-      ? (this.toolPositions ??= new Map(this.threads.listToolCallPositions(this.threadId, this.turnId).map(({ callId, id, seq }) => [callId, { id, seq }])))
+  private updateMessage(message: Pick<AssistantMessage, "content" | "timestamp" | "stopReason">, mode: "live" | "resume" | { entry: TypedEntry<never> }): void {
+    const committed = typeof mode === "object";
+    if (committed) {
+      this.pendingTools.clear();
+      this.pendingAssistant = mode.entry;
+    }
+    const toolPositions = committed && message.stopReason === "toolUse"
+      ? new Map(this.threads.listToolCallPositions(this.threadId, this.turnId).map(({ callId, id, seq, occurrence }) => [occurrence ?? JSON.stringify([callId]), { id, seq }]))
       : undefined;
+    const occurrences = committed && toolPositions ? message.content.map((part, index) => (
+      part.type === "toolCall" ? JSON.stringify([mode.entry.id, index, part.id]) : undefined
+    )) : undefined;
     const generation = `${this.turnId}-${this.generation}-`;
     const segments = message.content.filter((part) => part.type !== "toolCall");
     const blockIds = segments.map(({ type }, index) => `${generation}${type}-${index}`);
@@ -134,32 +170,38 @@ export class DurableTranscript {
     let blockIndex = blockIds.length;
     for (let index = message.content.length - 1; index >= 0; index--) {
       const part = message.content[index]!;
-      const position = part.type === "toolCall"
-        ? toolPositions?.get(part.id)
-        : this.blocks.get(blockIds[--blockIndex]!)?.position;
+      let position: Position | undefined;
+      if (part.type === "toolCall") {
+        const occurrence = occurrences?.[index];
+        if (occurrence !== undefined) position = toolPositions?.get(occurrence) ?? toolPositions?.get(JSON.stringify([part.id]));
+      } else {
+        position = this.blocks.get(blockIds[--blockIndex]!)?.position;
+      }
       following[index] = before?.id;
       if (position && (!before || position.seq < before.seq)) before = position;
     }
     let previousMessageId: string | undefined;
     for (const [index, part] of message.content.entries()) {
       if (part.type === "toolCall") {
-        if (toolPositions) {
+        const occurrence = occurrences?.[index];
+        if (occurrence !== undefined) {
           const toolCall = { id: part.id, name: part.name, status: "running" } as const;
-          if (isToolCallSummary(toolCall)) {
-            const row = this.threads.projectToolCall(this.threadId, this.turnId, toolCall, previousMessageId, following[index]);
-            if (row) {
-              toolPositions.set(part.id, { id: row.id, seq: row.seq });
-              previousMessageId = row.id;
-            }
-          }
+          const row = isToolCallSummary(toolCall)
+            ? this.threads.projectToolCall(this.threadId, this.turnId, occurrence, toolCall, previousMessageId, following[index])
+            : undefined;
+          // Preserve task positions even when a call has no Service row.
+          const pending = this.pendingTools.get(part.id) ?? [];
+          pending.push({ name: part.name, messageId: row?.id });
+          this.pendingTools.set(part.id, pending);
+          if (row) previousMessageId = row.id;
         }
         continue;
       }
-      const complete = mode === "committed" || blockIndex < blockIds.length - 1;
+      const complete = committed || blockIndex < blockIds.length - 1;
       previousMessageId = this.updateBlock(part, blockIds[blockIndex]!, complete, mode !== "live", following[index]);
       blockIndex++;
     }
-    if (mode === "committed") {
+    if (committed) {
       for (const id of blockIds) this.blocks.delete(id);
       this.generation++;
     }

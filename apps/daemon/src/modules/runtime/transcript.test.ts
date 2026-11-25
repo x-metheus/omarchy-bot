@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall, type AssistantMessage } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { AssistantEntry, createRegistry, defineTool, Harness, LiveDoc, ToolResultEntry, UserEntry, type ConversationView, type EntryDraft, type SubmissionId, type ToolExecutionResult } from "@earendil-works/pi-durable";
+import { AssistantEntry, createRegistry, defineTool, Harness, LiveDoc, ToolResultEntry, UserEntry, type ConversationView, type EntryDraft, type SubmissionId, type TaskId, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "@omarchy-bot/domain";
@@ -165,6 +165,8 @@ test("DurableTranscript reuses persisted rows and events when a new projector re
   steer();
   const inFlight = messages();
   const publishedBeforeResult = events();
+  // A row written before committed occurrence tracking still has its original public summary.
+  db.run("UPDATE messages SET payload = json_remove(payload, '$.durableToolOccurrence') WHERE kind = 'tool'");
   const resumed = projector();
   resumed.update(beforeResult);
   expect(messages()).toEqual(inFlight);
@@ -203,7 +205,7 @@ test("DurableTranscript ends aborted and unresolved calls with the worker interr
   expect(events().at(-1)?.payload).toEqual({ threadId, messageId: messages()[0]!.id, toolCall: interrupted });
 });
 
-async function withRecoveryJournal(entries: EntryDraft[], run: (services: ReturnType<typeof transcriptStore>, recover: () => Promise<void>) => Promise<void>): Promise<void> {
+async function withRecoveryJournal(entries: EntryDraft[], run: (services: ReturnType<typeof transcriptStore>, recover: () => Promise<void>) => Promise<void>, failedPredecessor = false): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "durable-transcript-recovery-"));
   const paths = { dbPath: join(root, "state.sqlite"), stateDir: root, homeDir: root, dataDir: root, sharedWorkspaceDir: root, downloadsDir: root };
   try {
@@ -211,23 +213,34 @@ async function withRecoveryJournal(entries: EntryDraft[], run: (services: Return
     const services = transcriptStore(db);
     const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
     const harness = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, context);
+    const steers: SubmissionId[] = [];
     try {
       const conversation = await openThreadConversation(db, harness, threadId, botId, context);
       await conversation.commit(async (tx) => {
         const user = await tx.appendEntry(conversation.id, { kind: UserEntry.kind, model: [{ role: "user", content: "Start", timestamp: Date.now() }] });
         const submission = await tx.createSubmission({ type: "input", status: "placed", entry: user.id, requestId: turnId, conversationId: conversation.id });
-        const inputs: SubmissionId[] = [submission.id];
+        const inputs: SubmissionId[] = [];
+        if (failedPredecessor) {
+          tx.settleSubmission(submission.id, { status: "unanswered", reason: "model_error" });
+          (await tx.doc(LiveDoc, conversation.id)).runFailure = {
+            taskId: 1 as TaskId, inputs: [submission.id], first: user.id, reason: "model_error",
+          };
+        } else {
+          inputs.push(submission.id);
+        }
         let answer = user.id;
         for (const entry of entries) {
           const stored = await tx.appendEntry(conversation.id, entry);
           if (AssistantEntry.is(stored)) answer = stored.id;
           if (UserEntry.is(stored)) {
             const steer = await tx.createSubmission({ type: "input", status: "placed", entry: stored.id, requestId: `${turnId}:steer:${stored.id}`, conversationId: conversation.id });
+            steers.push(steer.id);
             inputs.push(steer.id);
           }
         }
         for (const id of inputs) tx.settleSubmission(id, { status: "done", answer });
       }, context);
+      for (const id of steers) db.run("INSERT INTO pi_turn_submissions (turn_id, submission_id, kind, created_at) VALUES (?, ?, 'steer', '')", [turnId, id]);
     } finally {
       await harness.close(context);
       await storage.close(context);
@@ -235,10 +248,10 @@ async function withRecoveryJournal(entries: EntryDraft[], run: (services: Return
     await run(services, async () => {
       const runtime = await openBotRuntime(paths, db);
       try {
-        const outcomes: string[] = [];
-        const recovery = runtime.recoverTurns({ db, ...services, registered() {}, settled(_id, outcome) { outcomes.push(outcome.status); } });
+        const outcomes: unknown[] = [];
+        const recovery = runtime.recoverTurns({ db, ...services, registered() {}, settled(_id, outcome) { outcomes.push(outcome); } });
         await recovery.settled;
-        expect(outcomes).toEqual(["completed"]);
+        expect(outcomes).toEqual([{ status: "completed" }]);
       } finally {
         await runtime.close();
       }
@@ -276,6 +289,25 @@ test("recoverTurns inserts a missed tool before legacy responses and republishes
     expect(threads.listMessages(threadId)).toEqual(rows);
     expect(events.replay(0, events.oldestCursor()).events).toEqual(published);
   });
+});
+
+test("recoverTurns replays a settled failed reply before its already answered steer", async () => {
+  const timestamp = Date.now() - 1_000;
+  await withRecoveryJournal([
+    { kind: AssistantEntry.kind, model: [fauxAssistantMessage("Predecessor partial.", { stopReason: "error", timestamp })] },
+    { kind: UserEntry.kind, model: [{ role: "user", content: "Steer", timestamp }] },
+    { kind: AssistantEntry.kind, model: [fauxAssistantMessage("Steer reply.", { timestamp })] },
+  ], async ({ threads }, recover) => {
+    const partial = legacyResponse(threads, 0, "Predecessor partial.", "streaming");
+    await recover();
+    const responses = threads.listMessages(threadId);
+    expect(responses).toMatchObject([
+      { id: partial.id, text: "Predecessor partial.", response: { blockId: `${turnId}-0-text-0`, state: "completed" } },
+      { text: "Steer reply.", response: { blockId: `${turnId}-1-text-0`, state: "completed" } },
+    ]);
+    await recover();
+    expect(threads.listMessages(threadId)).toEqual(responses);
+  }, true);
 });
 
 test("recoverTurns replaces stale live content with the journal and removes orphaned blocks", async () => {
@@ -444,7 +476,7 @@ test("EventLog publishes tool events only after the outer transaction commits", 
   const toolRow = running();
   const received: { type: string; inTransaction: boolean }[] = [];
   events.subscribe(({ type }) => received.push({ type, inTransaction: db.inTransaction }));
-  const update = () => threads.projectToolResult(threadId, turnId, { id: callId, name: "check", status: "completed" });
+  const update = () => threads.projectToolResult(toolRow.id, { id: callId, name: "check", status: "completed" });
   expect(() => events.transaction(() => {
     update();
     expect(received).toEqual([]);

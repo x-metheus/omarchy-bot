@@ -1,4 +1,5 @@
-import { defineExtension, defineTool, LiveDoc, type ConversationId, type SubmissionId } from "@earendil-works/pi-durable";
+import { withAbortSignal, type Context } from "@earendil-works/chord/context";
+import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { AGENT_BROWSER_TOOL, BROWSER_TOOL_SCHEMA } from "@omarchy-bot/agent-contract";
 import type { BrowserAction } from "@omarchy-bot/domain";
 import { awaitWithSignal } from "../../computer/awaitWithSignal.ts";
@@ -9,7 +10,7 @@ const BROWSER_TIMEOUT_MS = 60_000;
 
 export function createBrowserExtension({ broker, owner, timeoutMs = BROWSER_TIMEOUT_MS }: {
   broker: Pick<ComputerBroker, "agentBrowserAct">;
-  owner(conversationId: ConversationId, submissionId: SubmissionId): (ComputerSurfaceOwner & { turnId: string }) | undefined;
+  owner(api: ToolExecutionApi, context: Context): Promise<(ComputerSurfaceOwner & { turnId: string }) | undefined>;
   timeoutMs?: number;
 }) {
   const tool = AGENT_BROWSER_TOOL;
@@ -36,12 +37,8 @@ export function createBrowserExtension({ broker, owner, timeoutMs = BROWSER_TIME
         const timer = setTimeout(() => controller.abort(new Error(`browser tool timed out after ${timeoutMs} ms`)), timeoutMs);
         try {
           signal.throwIfAborted();
-          const submissionId = await awaitWithSignal(api.commit(async (tx) => {
-            const live = await tx.doc(LiveDoc, api.conversationId);
-            return live.run?.inputs[0];
-          }, context), signal);
+          const binding = await awaitWithSignal(owner(api, withAbortSignal(signal, context)), signal);
           signal.throwIfAborted();
-          const binding = submissionId === undefined ? undefined : owner(api.conversationId, submissionId);
           if (binding === undefined) throw new Error("browser tool has no active Omarchy turn binding");
           const { turnId, ...activeOwner } = binding;
           const details = await broker.agentBrowserAct(activeOwner, turnId, api.callId, { name: action, args: args ?? {} }, signal);

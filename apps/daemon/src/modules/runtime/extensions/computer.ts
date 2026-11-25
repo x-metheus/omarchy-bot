@@ -1,6 +1,6 @@
-import { withAbortSignal } from "@earendil-works/chord/context";
+import { withAbortSignal, type Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
-import { defineExtension, defineTool, LiveDoc, type ConversationId, type SubmissionId } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { AGENT_COMPUTER_TOOL, COMPUTER_TOOL_SCHEMA } from "@omarchy-bot/agent-contract";
 import type { ComputerAction } from "@omarchy-bot/domain";
 import type { ComputerBroker, ComputerSurfaceOwner } from "../../computer/broker.ts";
@@ -10,7 +10,7 @@ const COMPUTER_TIMEOUT_MS = 60_000;
 
 export function createComputerExtension({ broker, owner, timeoutMs = COMPUTER_TIMEOUT_MS }: {
   broker: Pick<ComputerBroker, "agentToolAct">;
-  owner(conversationId: ConversationId, submissionId: SubmissionId): (ComputerSurfaceOwner & { turnId: string }) | undefined;
+  owner(api: ToolExecutionApi, context: Context): Promise<(ComputerSurfaceOwner & { turnId: string }) | undefined>;
   timeoutMs?: number;
 }) {
   const tool = AGENT_COMPUTER_TOOL;
@@ -37,12 +37,8 @@ export function createComputerExtension({ broker, owner, timeoutMs = COMPUTER_TI
         const timer = setTimeout(() => controller.abort(new Error(`computer tool timed out after ${timeoutMs} ms`)), timeoutMs);
         try {
           signal.throwIfAborted();
-          const submissionId = await api.commit(async (tx) => {
-            const live = await tx.doc(LiveDoc, api.conversationId);
-            return live.run?.inputs[0];
-          }, withAbortSignal(signal, context));
+          const binding = await owner(api, withAbortSignal(signal, context));
           signal.throwIfAborted();
-          const binding = submissionId === undefined ? undefined : owner(api.conversationId, submissionId);
           if (binding === undefined) throw new Error("computer tool has no active Omarchy turn binding");
           const { turnId, ...activeOwner } = binding;
           const { inlineImage, imageFile: _imageFile, windowList, ...details } = await broker.agentToolAct(

@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { DeviceLocalJobFrame, DeviceServerFrame } from "@omarchy-bot/protocol";
@@ -115,6 +116,47 @@ describe("SidecarBroker cancel", () => {
     expect(existsSync(path.join(root, "incoming/remote.bin"))).toBeFalse();
     expect(port.frames).toContainEqual({ type: "local.cancel", jobId: job.jobId });
   });
+
+  test("abort during async write preparation preserves an existing destination and removes the temporary file", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-workspace-"));
+    const destination = path.join(root, "existing.txt");
+    writeFileSync(destination, "original");
+    const broker = new SidecarBroker(root);
+    const port = new RecordingPort();
+    register(broker, port);
+    const controller = new AbortController();
+    const opened = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const open = fs.open;
+    const delayedOpen = spyOn(fs, "open").mockImplementation(async (target, flags, mode) => {
+      const file = await open(target, flags, mode);
+      opened.resolve();
+      await release.promise;
+      return file;
+    });
+    const pending = broker.execute(
+      { action: "transfer", path: "remote.txt", destination: "existing.txt", direction: "to-workspace" },
+      context,
+      controller.signal,
+      { checkCancellation: () => controller.signal.throwIfAborted() },
+    );
+    try {
+      const job = await port.waitForJob();
+      broker.complete(port, DEVICE_A, { type: "local.result", jobId: job.jobId, ok: true, text: "payload" });
+      await opened.promise;
+      controller.abort();
+      release.resolve();
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(readFileSync(destination, "utf8")).toBe("original");
+      expect(readdirSync(root)).toEqual(["existing.txt"]);
+    } finally {
+      release.resolve();
+      broker.close();
+      await pending.catch(() => {});
+      delayedOpen.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("SidecarBroker roster", () => {
@@ -223,6 +265,84 @@ describe("SidecarBroker This Device", () => {
   });
 });
 
+describe("SidecarBroker durable workspace writes", () => {
+  async function transfer(root: string, destination: string) {
+    const broker = new SidecarBroker(root);
+    brokers.push(broker);
+    const port = new RecordingPort();
+    register(broker, port);
+    const { signal } = new AbortController();
+    const pending = broker.execute(
+      { action: "transfer", path: "remote.txt", destination, direction: "to-workspace" },
+      context,
+      signal,
+      { checkCancellation: () => signal.throwIfAborted() },
+    );
+    const job = await port.waitForJob();
+    broker.complete(port, DEVICE_A, { type: "local.result", jobId: job.jobId, ok: true, text: "payload" });
+    return pending;
+  }
+
+  test("rejects a destination resolving to the Shared Workspace root before opening a temporary file", async () => {
+    const parent = mkdtempSync(path.join(os.tmpdir(), "omarchy-workspace-"));
+    const root = path.join(parent, "workspace");
+    mkdirSync(root);
+    const open = spyOn(fs, "open");
+    try {
+      await expect(transfer(root, "nested/..")).rejects.toThrow("Shared Workspace root");
+      expect(open).not.toHaveBeenCalled();
+      expect(readdirSync(parent)).toEqual(["workspace"]);
+      expect(readdirSync(root)).toEqual([]);
+    } finally {
+      open.mockRestore();
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  test.each([undefined, 0o400, 0o640])("creates a private temporary file and preserves destination mode %s", async (mode) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-workspace-"));
+    const destination = path.join(root, "existing.txt");
+    if (mode !== undefined) {
+      writeFileSync(destination, "original");
+      chmodSync(destination, mode);
+    }
+    const temporaryModes: number[] = [];
+    const open = fs.open;
+    const recordOpen = spyOn(fs, "open").mockImplementation(async (target, flags, requestedMode) => {
+      const file = await open(target, flags, requestedMode);
+      temporaryModes.push((await file.stat()).mode & 0o777);
+      return file;
+    });
+    try {
+      await expect(transfer(root, "existing.txt")).resolves.toMatchObject({ text: "payload" });
+      expect(temporaryModes).toEqual([0o600]);
+      expect(statSync(destination).mode & 0o777).toBe(mode ?? 0o600);
+      expect(readFileSync(destination, "utf8")).toBe("payload");
+      expect(readdirSync(root)).toEqual(["existing.txt"]);
+    } finally {
+      recordOpen.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([false, true])("rejects a symbolic link destination when the target exists = %s", async (targetExists) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-workspace-"));
+    const target = path.join(root, "target.txt");
+    const destination = path.join(root, "link.txt");
+    if (targetExists) writeFileSync(target, "original");
+    symlinkSync("target.txt", destination);
+    try {
+      await expect(transfer(root, "link.txt")).rejects.toThrow(/symbolic link/);
+      expect(lstatSync(destination).isSymbolicLink()).toBeTrue();
+      expect(readlinkSync(destination)).toBe("target.txt");
+      expect(readdirSync(root).sort()).toEqual(targetExists ? ["link.txt", "target.txt"] : ["link.txt"]);
+      if (targetExists) expect(readFileSync(target, "utf8")).toBe("original");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("SidecarBroker workspace transfer bounds", () => {
   test("an oversized from-workspace source is rejected before dispatch", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-workspace-"));
@@ -306,17 +426,20 @@ describe("SidecarBroker output", () => {
     expect(result.text).toHaveLength(8_192);
   });
 
-  test("transfer text reaches the workspace intact and reads from it through confinedPath", async () => {
+  test.each(["worker", "durable"])("%s transfer text reaches the workspace intact and reads from it through confinedPath", async (runtime) => {
     const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-workspace-"));
     const broker = new SidecarBroker(root);
     brokers.push(broker);
     const port = new RecordingPort();
     register(broker, port);
 
+    const { signal } = new AbortController();
+    const deadline = runtime === "durable" ? { checkCancellation: () => signal.throwIfAborted() } : undefined;
     const incoming = broker.execute(
       { action: "transfer", path: "remote.bin", destination: "incoming/remote.bin", direction: "to-workspace" },
       context,
-      new AbortController().signal,
+      signal,
+      deadline,
     );
     const incomingJob = await port.waitForJob();
     const payload = "token=abc123 not redacted for transfer";
@@ -329,7 +452,8 @@ describe("SidecarBroker output", () => {
     const outgoing = broker.execute(
       { action: "transfer", path: "outgoing/local.bin", destination: "/tmp/local.bin", direction: "from-workspace" },
       context,
-      new AbortController().signal,
+      signal,
+      deadline,
     );
     const outgoingJob = await port.waitForJob();
     expect(outgoingJob.contents).toBe("from workspace");
