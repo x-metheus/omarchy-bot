@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   createPiMcpAdapterTokenReader,
@@ -55,6 +55,52 @@ test("reads a plain adapter entry using the exact service and UTF-8 hashed accou
   expect("available" in reader).toBe(false);
   expect(Bun.deepEquals(await reader.read(serverName), plainEntry)).toBe(true);
   expect(fake.calls).toEqual(expectedGets(account));
+});
+
+function requireHeadlessKeychain() {
+  if (!Bun.secrets) throw new Error("Bun.secrets is undefined. Run with the headless-keychain preload configured in bunfig.toml.");
+}
+
+test("reads a plain adapter entry through the preloaded Bun.secrets stub", async () => {
+  requireHeadlessKeychain();
+  const get = spyOn(Bun.secrets, "get").mockImplementation(async ({ name }) => name === account ? JSON.stringify(plainEntry) : null);
+  try {
+    const reader = createPiMcpAdapterTokenReader({ get: (options) => Bun.secrets.get(options) });
+
+    expect(Bun.deepEquals(await reader.read(serverName), plainEntry)).toBe(true);
+    expect(get.mock.calls.map(([options]) => options)).toEqual(expectedGets(account));
+  } finally {
+    get.mockRestore();
+  }
+});
+
+test("reports a rejected get through the preloaded Bun.secrets stub as unavailable", async () => {
+  requireHeadlessKeychain();
+  const get = spyOn(Bun.secrets, "get").mockImplementation(async () => { throw new Error(`${accessToken} ${account}`); });
+  try {
+    const reader = createPiMcpAdapterTokenReader({ get: (options) => Bun.secrets.get(options) });
+
+    await expectSafeError(reader.read(serverName), PiMcpAdapterKeyringUnavailableError);
+    expect(get.mock.calls.map(([options]) => options)).toEqual(expectedGets(account));
+  } finally {
+    get.mockRestore();
+  }
+});
+
+test("reassembles a chunked adapter entry through the preloaded Bun.secrets stub", async () => {
+  requireHeadlessKeychain();
+  const entry = { ...plainEntry, tokens: { accessToken: accessToken.repeat(60) } };
+  const payload = JSON.stringify(entry);
+  const { names, values } = chunkedEntry(payload, [payload.slice(0, 1000), payload.slice(1000)]);
+  const get = spyOn(Bun.secrets, "get").mockImplementation(async ({ name }) => values.get(name) ?? null);
+  try {
+    const reader = createPiMcpAdapterTokenReader({ get: (options) => Bun.secrets.get(options) });
+
+    expect(Bun.deepEquals(await reader.read(serverName), entry)).toBe(true);
+    expect(get.mock.calls.map(([options]) => options)).toEqual(expectedGets(account, ...names));
+  } finally {
+    get.mockRestore();
+  }
 });
 
 test("returns undefined for a missing base entry without reading chunks", async () => {

@@ -828,18 +828,28 @@ test.each([
   expect(keyringAccessDisabled({ OMARCHY_TEST_DISABLE_KEYRING: value })).toBe(expected);
 });
 
-test("daemon product source references Bun.secrets exactly once through a get call in guarded bootstrap", async () => {
+test("daemon product source allows only the guarded Bun.secrets.get call and expected keychain files", async () => {
   const sourceDir = new URL("../../", import.meta.url);
   const sourceFiles = new Bun.Glob("**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}");
-  const references: { file: string; text: string }[] = [];
+  const secretReferences = /\bBun\s*(?:\.\s*secrets\b|\[\s*["']secrets["']\s*\])(\s*\.\s*get\s*\()?/g;
+  const mentioningFiles: string[] = [];
+  const getCalls: { file: string; text: string }[] = [];
   for await (const file of sourceFiles.scan({ cwd: fileURLToPath(sourceDir), dot: true })) {
     if (/\.(test|spec)\.[^.]+$/.test(file)) continue;
     const source = await Bun.file(new URL(file, sourceDir)).text();
-    for (const match of source.matchAll(/\bBun\s*(?:\.\s*secrets\b|\[\s*["']secrets["']\s*\])(?:\s*\.\s*get\s*\()?/g)) {
-      references.push({ file, text: match[0] });
+    if (source.search(secretReferences) !== -1) mentioningFiles.push(file);
+    const code = source.replace(/^[ \t]*(?:\/\/[^\r\n]*|\/\*[\s\S]*?\*\/)/gm, "");
+    for (const match of code.matchAll(secretReferences)) {
+      if (match[1]) getCalls.push({ file, text: match[0] });
     }
   }
-  expect(references).toEqual([{ file: "bootstrap/main.ts", text: "Bun.secrets.get(" }]);
+  // Task 22 added the keychain assignment in runtime.ts and the API comment in bunSecrets.ts.
+  expect(mentioningFiles.sort()).toEqual([
+    "bootstrap/main.ts",
+    "modules/runtime/bunSecrets.ts",
+    "modules/runtime/runtime.ts",
+  ]);
+  expect(getCalls).toEqual([{ file: "bootstrap/main.ts", text: "Bun.secrets.get(" }]);
 
   const bootstrapSource = await Bun.file(new URL("bootstrap/main.ts", sourceDir)).text();
   const guardedReader = /if \(!keyringAccessDisabled\(process\.env\) && typeof runtime\.mcpControl === "function"\) \{\s*const markerKey = [^\n]+\s*mcpOAuthImport = importMcpOAuthTokensOnce\(\{[^}]+createReader: \(\) => createPiMcpAdapterTokenReader\(\{ get: \(options\) => Bun\.secrets\.get\(/;
