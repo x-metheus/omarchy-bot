@@ -10,6 +10,7 @@ import {
   sendToThread,
   startDaemon,
   waitThreadIdle,
+  workerOnly,
   type Harness,
 } from "./helpers/harness.ts";
 import { LocalSidecarFixture } from "./helpers/localSidecar.ts";
@@ -170,7 +171,7 @@ describe("fail closed and keep Sidecars distinct", () => {
     expect(afterReconnect.some((message) => message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "completed")).toBeFalse();
   });
 
-  test("session open and resume describe only the sender's online device", async () => {
+  workerOnly("fake worker session.open and session.resume options for sender device identity")("session open and resume describe only the sender's online device", async () => {
     h = await startDaemon();
     const sidecar = await connect();
     await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });
@@ -195,7 +196,7 @@ describe("fail closed and keep Sidecars distinct", () => {
     ]);
   });
 
-  test("native bash with a Sidecar online keeps Shared Workspace cwd and creates no sidecar jobs", async () => {
+  workerOnly("fake worker session.open log for the Shared Workspace cwd")("native bash with a Sidecar online keeps Shared Workspace cwd and creates no sidecar jobs", async () => {
     h = await startDaemon();
     const sidecar = await connect();
     await sidecar.register({ deviceId: DEVICE_A, hostname: "laptop" });

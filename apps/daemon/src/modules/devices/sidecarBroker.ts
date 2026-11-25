@@ -22,6 +22,9 @@ export interface DevicePort {
   close(code?: number, reason?: string): void;
 }
 
+/** A broker failure whose text can be shown in the Service transcript. */
+export class PublicSidecarError extends Error {}
+
 const LOCAL_OUTPUT_MAX = 8_192;
 const HEARTBEAT_TIMEOUT_MS = 30_000;
 
@@ -236,13 +239,13 @@ export class SidecarBroker {
       const destination = confinedPath(params.destination ?? "", this.sharedWorkspaceDir);
       if (deadline) {
         if (destination === resolvePath(this.sharedWorkspaceDir)) {
-          throw new Error("Local Sidecar transfer destination cannot be the Shared Workspace root");
+          throw new PublicSidecarError("Local Sidecar transfer destination cannot be the Shared Workspace root");
         }
         const existing = await lstat(destination).catch((error: NodeJS.ErrnoException) => {
           if (error.code !== "ENOENT") throw error;
         });
         if (existing?.isSymbolicLink()) {
-          throw new Error("Local Sidecar transfer destination cannot be a symbolic link");
+          throw new PublicSidecarError("Local Sidecar transfer destination cannot be a symbolic link");
         }
         const directory = dirname(destination);
         await mkdir(directory, { recursive: true });
@@ -297,7 +300,12 @@ export class SidecarBroker {
       });
       return;
     }
-    pending.reject(new Error(parsed.data.error ?? "Local Sidecar job failed"));
+    // The transfer size rejection is fixed text from the Sidecar. Other remote errors can contain private output.
+    const transferLimit = `transfer exceeds the ${LOCAL_RESULT_TEXT_MAX} character result frame`;
+    const error = parsed.data.error;
+    pending.reject(pending.action === "transfer" && error === transferLimit
+      ? new PublicSidecarError(transferLimit)
+      : new Error(error ?? "Local Sidecar job failed"));
   }
 
   close(): void {

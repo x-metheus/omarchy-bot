@@ -91,6 +91,74 @@ test("durable scripts fail with worker fixture reasons and retain partial stream
   }
 });
 
+test.each(["tool-fail", "tool-hang"])("durable %s requests an interrupted bash round", async (prompt) => {
+  const reply = await suite()(prompt).result();
+  expect(reply.stopReason).toBe("toolUse");
+  expect(reply.content).toEqual([
+    { type: "toolCall", id: expect.any(String), name: "bash", arguments: { command: "safe interrupted operation" } },
+  ]);
+});
+
+test("durable tool-fail returns a terminal provider error after its bash round", async () => {
+  const run = suite();
+  const user = { role: "user", content: "tool-fail", timestamp: Date.now() } as const;
+  const first = await run([user]).result();
+  const call = first.content[0];
+  if (call?.type !== "toolCall") throw new Error("Expected a bash call");
+  const reply = await run([user, first, {
+    role: "toolResult", toolCallId: call.id, toolName: "bash", content: [], isError: true, timestamp: Date.now(),
+  }]).result();
+  expect(reply).toMatchObject({ stopReason: "error", errorMessage: "fake failure", content: [] });
+});
+
+test("durable Sidecar file directives preserve the worker's paths, contents, queries, and targets", async () => {
+  const run = suite();
+  const deviceId = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const directives = [
+    ["local.write:notes/empty.txt", { action: "write", path: "notes/empty.txt", contents: "" }],
+    ["local.write@this-device:notes/doc.txt:first:second", { action: "write", path: "notes/doc.txt", contents: "first:second", target: "this-device" }],
+    [`local.read@${deviceId}:notes/a:b.txt`, { action: "read", path: "notes/a:b.txt", target: deviceId }],
+    ["local.search@this-device:first:second", { action: "search", query: "first:second", target: "this-device" }],
+  ] as const;
+  for (const [directive, args] of directives) {
+    const reply = await run(directive).result();
+    expect(reply.stopReason).toBe("toolUse");
+    expect(reply.content).toEqual([{ type: "toolCall", id: expect.any(String), name: "local", arguments: args }]);
+  }
+});
+
+test("durable Sidecar fixtures pass transfer arguments and relay successful output", async () => {
+  const run = suite();
+  const transfer = await run("local.transfer:to-workspace:big.txt:inbox/big.txt").result();
+  expect(transfer.stopReason).toBe("toolUse");
+  expect(transfer.content).toMatchObject([{ type: "toolCall", name: "local", arguments: {
+    action: "transfer", direction: "to-workspace", path: "big.txt", destination: "inbox/big.txt",
+  } }]);
+  const user = { role: "user", content: "local.run:pwd", timestamp: Date.now() } as const;
+  const first = await run([user]).result();
+  const call = first.content[0];
+  if (call?.type !== "toolCall") throw new Error("Expected a Local Sidecar call");
+  const reply = await run([user, first, {
+    role: "toolResult", toolCallId: call.id, toolName: "local", content: [{ type: "text", text: "Sidecar output [redacted]" }], isError: false, timestamp: Date.now(),
+  }]).result();
+  expect(reply.content).toEqual([{ type: "text", text: "Sidecar output [redacted]" }]);
+});
+
+test.each([
+  ["a direct error", "transfer exceeds the 16384 character result frame", "transfer exceeds the 16384 character result frame"],
+  ["a harness diagnostic", "<harness>\n[error] This Device is offline or unknown\n</harness>", "This Device is offline or unknown"],
+])("durable Sidecar transfers fail the Turn with the reason from %s", async (_label, text, reason) => {
+  const run = suite();
+  const user = { role: "user", content: "local.transfer:to-workspace:big.txt:inbox/big.txt", timestamp: Date.now() } as const;
+  const first = await run([user]).result();
+  const call = first.content[0];
+  if (call?.type !== "toolCall") throw new Error("Expected a Local Sidecar call");
+  const reply = await run([user, first, {
+    role: "toolResult", toolCallId: call.id, toolName: "local", content: [{ type: "text", text }], isError: true, timestamp: Date.now(),
+  }]).result();
+  expect(reply).toMatchObject({ stopReason: "error", errorMessage: reason, content: [] });
+});
+
 test("durable hanging scripts remain open until aborted", async () => {
   const run = suite();
   for (const script of ["hang", "thinking-hang"]) {

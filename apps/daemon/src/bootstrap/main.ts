@@ -211,6 +211,7 @@ export async function main(options: MainOptions = {}): Promise<{
   }
   await screens.recover();
   const runtime = await openBotRuntime(cfg, db, {
+    get turnTimeoutMs() { return cfg.turnTimeoutMs; },
     events,
     mcp: {
       servers: mcpServers,
@@ -269,7 +270,7 @@ export async function main(options: MainOptions = {}): Promise<{
     threads,
     screens,
     cfg.sharedWorkspaceDir,
-    { secrets: runtime.secrets, terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs, projections },
+    { secrets: runtime.secrets, runtime, terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs, projections },
   );
 
   agents.init();

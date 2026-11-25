@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
-import type { BotViewDto, MessageDto } from "../../packages/protocol/src/index.ts";
+import type { BotViewDto, MessageDto, ThreadDto } from "../../packages/protocol/src/index.ts";
 import {
   api,
   makeBot,
@@ -9,6 +9,7 @@ import {
   sendToThread,
   startDaemon,
   waitThreadIdle,
+  workerOnly,
   type Harness,
 } from "./helpers/harness.ts";
 
@@ -84,7 +85,7 @@ describe("integration: ordered rich transcript QA", () => {
     ]);
   }, 20_000);
 
-  test("preserves mixed Agent blocks and Steering in exact occurrence order across restart", async () => {
+  workerOnly("fake worker fake.progress slot in the ordered transcript across restart")("preserves mixed Agent blocks and Steering in exact occurrence order across restart", async () => {
     const botId = await makeBot(h, "Ordered Transcript Bot");
     const sent = await sendToBot(h, botId, "ordered-transcript");
     await waitForRunningTool(h, sent.threadId, "read");
@@ -159,7 +160,7 @@ describe("integration: ordered rich transcript QA", () => {
     );
   });
 
-  test("keeps a completed process-only Turn quiet while Bot Activity remains state-driven", async () => {
+  workerOnly("fake worker process-only native event transcript row")("keeps a completed process-only Turn quiet while Bot Activity remains state-driven", async () => {
     const botId = await makeBot(h, "Quiet Process Bot");
     const sent = await sendToBot(h, botId, "process-only");
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
@@ -183,5 +184,25 @@ describe("integration: ordered rich transcript QA", () => {
         && (event.payload as { to?: string }).to === "completed"
       );
     expect(completion).toBeDefined();
+  });
+
+  test("a completed Thinking and read Turn leaves Bot Activity inactive without unread or preview content", async () => {
+    const botId = await makeBot(h, "Thinking and Read Bot");
+    const sent = await sendToBot(h, botId, "process-only");
+    const active = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
+    await waitThreadIdle(h, sent.threadId);
+    const inactive = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
+    const thread = await api<ThreadDto>(h, "GET", `/api/threads/${sent.threadId}`);
+
+    expect([active.status, inactive.status, thread.latestTurn?.status]).toEqual(["active", "inactive", "completed"]);
+    const { unreadCount, previewText, unreadThreadId } = inactive;
+    expect({ unreadCount, previewText, unreadThreadId }).toEqual({ unreadCount: 0, previewText: undefined, unreadThreadId: undefined });
+
+    const transcript = await messages(h, sent.threadId);
+    // Native events exist only on the worker path.
+    const visible = transcript.filter(({ kind }) => kind !== "event");
+    expect(visible.map(({ kind }) => kind)).toEqual(["text", "thinking", "tool"]);
+    expect(transcript.map(({ author }) => author.kind)).not.toContain("system");
+    expect(visible[2]?.toolCall).toEqual(expect.objectContaining({ name: "read", status: "completed" }));
   });
 });

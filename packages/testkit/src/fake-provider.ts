@@ -25,8 +25,9 @@ const orderedIntro = [
   "```ts", 'const order = ["response", "thinking", "tool", "response"];', "```", "", "Long-form context ".repeat(24).trim(),
 ].join("\n");
 
-function userTexts(context: TranscriptContext): string[] {
-  return context.messages.flatMap((message) => message.role === "user" ? [typeof message.content === "string" ? message.content : message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")] : []);
+function latestUserText(context: TranscriptContext): string {
+  const content = context.messages.findLast((message) => message.role === "user")?.content;
+  return typeof content === "string" ? content : content?.find((part) => part.type === "text")?.text ?? "";
 }
 
 export const durableSuiteToolCalls = {
@@ -35,10 +36,12 @@ export const durableSuiteToolCalls = {
   orderedRead: fauxToolCall("read", { path: "src/transcript.ts" }, { id: "ordered-steering" }),
   orderedWrite: fauxToolCall("write", { path: "src/transcript.ts", content: "" }, { id: "ordered-final" }),
   bash: fauxToolCall("bash", { command: "echo fake" }, { id: "fixture-bash" }),
+  failingBash: fauxToolCall("bash", { command: "safe interrupted operation" }, { id: "fixture-failing-bash" }),
+  interruptedBash: fauxToolCall("bash", { command: "safe interrupted operation" }, { id: "fixture-interrupted-bash" }),
 };
 
 function orderedTranscriptFixture(context: TranscriptContext) {
-  const text = userTexts(context).at(-1) ?? "";
+  const text = latestUserText(context);
   const lastUser = context.messages.findLastIndex((message) => message.role === "user");
   const priorAssistant = context.messages.slice(0, lastUser).findLast((message) => message.role === "assistant");
   const result = context.messages.at(-1);
@@ -81,7 +84,7 @@ function computerFixtureArgs(command: string, value: string) {
 }
 
 function graphicalToolFixture(context: TranscriptContext) {
-  const text = userTexts(context).at(-1) ?? "";
+  const text = latestUserText(context);
   const [toolName, command, ...tail] = text.split(":");
   if ((toolName !== "browser" && toolName !== "computer") || command === undefined || command === "crash-agent") return undefined;
   const lastUser = context.messages.findLastIndex((message) => message.role === "user");
@@ -100,29 +103,67 @@ function graphicalToolFixture(context: TranscriptContext) {
   return fauxAssistantMessage([fauxToolCall(toolName, params)], { stopReason: "toolUse" });
 }
 
+function localFixture(text: string, context: TranscriptContext) {
+  const run = /^local\.run(?:@(dev_[0-9a-f]{32}|this-device))?:(.*)$/.exec(text);
+  const transfer = /^local\.transfer(?:@(dev_[0-9a-f]{32}|this-device))?:(to-workspace|from-workspace):([^:]*):(.*)$/.exec(text);
+  const file = /^local\.(read|search|write)(?:@(dev_[0-9a-f]{32}|this-device))?:(.*)$/.exec(text);
+  const forgedRun = text.startsWith("local.run.forged:");
+  if (!run && !transfer && !file && !forgedRun) return undefined;
+  const latest = context.messages.at(-1);
+  if (latest?.role === "toolResult" && latest.toolName === "local") {
+    if (latest.isError) {
+      if (run || forgedRun) return fauxAssistantMessage("Local call finished.");
+      const errorMessage = latest.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
+        .replace(/^<harness>\n\[error\] ([\s\S]*)\n<\/harness>$/, "$1");
+      return fauxAssistantMessage([], { stopReason: "error", errorMessage });
+    }
+    return fauxAssistantMessage(latest.content.flatMap((part) => part.type === "text" ? [fauxText(part.text)] : []));
+  }
+  const target = (run ?? transfer)?.[1] ?? file?.[2];
+  let args: Record<string, string>;
+  if (run) {
+    args = { action: "run", command: run[2]! };
+  } else if (transfer) {
+    args = { action: "transfer", direction: transfer[2]!, path: transfer[3]!, destination: transfer[4]! };
+  } else if (file) {
+    const action = file[1]!;
+    const value = file[3]!;
+    if (action === "read") {
+      args = { action, path: value };
+    } else if (action === "search") {
+      args = { action, query: value };
+    } else {
+      const separator = value.indexOf(":");
+      const path = separator < 0 ? value : value.slice(0, separator);
+      const contents = separator < 0 ? "" : value.slice(separator + 1);
+      args = { action, path, contents };
+    }
+  } else {
+    args = { action: "run", command: text.slice("local.run.forged:".length), botId: "wrong-bot", turnId: "wrong-turn" };
+  }
+  return fauxAssistantMessage(fauxToolCall("local", { ...args, ...(target === undefined ? {} : { target }) }, { id: "local-run" }), { stopReason: "toolUse" });
+}
+
 /** The durable suite's scripted replies. */
 export function createDurableSuiteFakeProvider() {
   const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }], tokensPerSecond: 20, tokenSize: { min: 1, max: 1 } });
-  // The worker emits graphical responses and ordered transcript blocks at once.
+  // The worker emits scripted tool calls and ordered transcript blocks at once.
   const immediate = fauxProvider({ provider: "fake" });
   const failedSessions = new Set<string>();
   fake.setResponses(Array.from({ length: 1000 }, () => (context: TranscriptContext, options) => {
-    const text = userTexts(context).at(-1) ?? "";
+    const text = latestUserText(context);
     const lastUser = context.messages.findLastIndex((message) => message.role === "user");
+    if (text === "attachment-echo") {
+      const user = context.messages[lastUser];
+      const attachments = user?.role === "user" && Array.isArray(user.content)
+        ? user.content.slice(1).flatMap((part) => part.type === "text" ? [part.text] : [])
+        : [];
+      return fauxAssistantMessage(attachments.length ? attachments.join("\n") : []);
+    }
     const priorAssistant = context.messages.slice(0, lastUser).findLast((message) => message.role === "assistant");
     const boundary = priorAssistant?.role === "assistant" ? priorAssistant.content.find((part) => part.type === "toolCall" && part.name === "steer_boundary") : undefined;
     if (boundary?.type === "toolCall" && boundary.id === "steer-boundary") return fauxAssistantMessage(`steered: ${text}`);
     if (text === "steer-echo") return fauxAssistantMessage([fauxToolCall("steer_boundary", {}, { id: "steer-boundary" })], { stopReason: "toolUse" });
-    const localRun = /^local\.run(?:@(dev_[0-9a-f]{32}|this-device))?:(.*)$/.exec(text);
-    const forgedLocalRun = text.startsWith("local.run.forged:");
-    if (localRun || forgedLocalRun) {
-      const latest = context.messages.at(-1);
-      if (latest?.role === "toolResult" && latest.toolName === "local") return fauxAssistantMessage("Local call finished.");
-      const args = localRun
-        ? { action: "run", command: localRun[2]!, ...(localRun[1] === undefined ? {} : { target: localRun[1] }) }
-        : { action: "run", command: text.slice("local.run.forged:".length), botId: "wrong-bot", turnId: "wrong-turn" };
-      return fauxAssistantMessage(fauxToolCall("local", args, { id: "local-run" }), { stopReason: "toolUse" });
-    }
     if (text.startsWith("mcp-durable: ")) {
       const action = text.slice("mcp-durable: ".length);
       const latest = context.messages.at(-1);
@@ -158,6 +199,14 @@ export function createDurableSuiteFakeProvider() {
       if (continued) return fauxAssistantMessage("tool finished");
       return fauxAssistantMessage(durableSuiteToolCalls.bash, { stopReason: "toolUse" });
     }
+    if (text === "native-bash-cwd") {
+      // The harness intercepts durableSuiteToolCalls. This probe executes the real tool.
+      const call = fauxToolCall("bash", { command: "pwd" }, { id: "native-bash-cwd" });
+      if (latest?.role === "toolResult" && latest.toolCallId === call.id) {
+        return fauxAssistantMessage(latest.content.flatMap((part) => part.type === "text" ? [fauxText(part.text)] : []));
+      }
+      return fauxAssistantMessage(call, { stopReason: "toolUse" });
+    }
     if (text === "thinking-stream") return fauxAssistantMessage([fauxThinking("**Inspect inputs.**"), fauxText("Thinking complete.")]);
     if (text === "adjacent-responses") return fauxAssistantMessage([fauxText("First block."), fauxText("Second block.")]);
     if (text === "thinking-fail" || text === "thinking-crash" || text === "thinking-hang") return fauxAssistantMessage([fauxThinking("discard me")], text === "thinking-hang" ? {} : { stopReason: "error", errorMessage: text === "thinking-fail" ? "fake Thinking failure" : "Agent process loss" });
@@ -175,7 +224,7 @@ export function createDurableSuiteFakeProvider() {
   // Mail validation includes an oversized argument, so its fixtures stream without pacing.
   const mailbox = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }] });
   mailbox.setResponses(Array.from({ length: 1000 }, () => async (context: TranscriptContext, options) => {
-    const text = userTexts(context).at(-1) ?? "";
+    const text = latestUserText(context);
     const mail = /^send_bot_message:([^:]*):([\s\S]*)$/.exec(text);
     if (mail) {
       const latest = context.messages.at(-1);
@@ -214,12 +263,21 @@ export function createDurableSuiteFakeProvider() {
   }));
   const base = fake.provider;
   const streamSimple: typeof base.streamSimple = (model, context, options) => {
-    const reply = graphicalToolFixture(context) ?? orderedTranscriptFixture(context);
+    const text = latestUserText(context);
+    const latest = context.messages.at(-1);
+    const failingBash = durableSuiteToolCalls.failingBash;
+    const interruptedBash = text === "tool-fail"
+      ? latest?.role === "toolResult" && latest.toolCallId === failingBash.id
+        ? fauxAssistantMessage([], { stopReason: "error", errorMessage: "fake failure" })
+        : fauxAssistantMessage(failingBash, { stopReason: "toolUse" })
+      : text === "tool-hang"
+        ? fauxAssistantMessage(durableSuiteToolCalls.interruptedBash, { stopReason: "toolUse" })
+        : undefined;
+    const reply = interruptedBash ?? localFixture(text, context) ?? graphicalToolFixture(context) ?? orderedTranscriptFixture(context);
     if (reply !== undefined) {
       immediate.appendResponses([reply]);
       return immediate.provider.streamSimple(model, context, options);
     }
-    const text = userTexts(context).at(-1);
     if (text?.startsWith("send_bot_message:") || text?.startsWith("Message from Bot ")) {
       return mailbox.provider.streamSimple(model, context, options);
     }

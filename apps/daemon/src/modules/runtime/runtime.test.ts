@@ -3,19 +3,19 @@ import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Harness, createRegistry, type ConversationId } from "@earendil-works/pi-durable";
+import { Harness, createRegistry, type Conversation, type ConversationId } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentSystemPrompt, type TextContent, type TranscriptContext, type UserMessage } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AGENT_BROWSER_TOOL, AGENT_COMPUTER_TOOL, AGENT_LOCAL_TOOL } from "@omarchy-bot/agent-contract";
-import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
-import { until } from "../../../../../tests/integration/helpers/bot-screen-load-observe.ts";
+import { api, apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
+import { until, withTimeout } from "../../../../../tests/integration/helpers/bot-screen-load-observe.ts";
 import { FakeBotScreenRuntimeAdapter } from "../computer/fakeBotScreenRuntime.ts";
 import { ThreadsService } from "../threads/threads.ts";
-import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
+import type { DeleteBotResultDto, DeviceServerFrame, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
-import { withFakeRuntimeProvider } from "./harness-test-support.ts";
+import { installDurableSuiteProvider, withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore } from "./credentials.ts";
 import { fallbackSecretValuesPath, SecretStore } from "./secrets.ts";
 import { createRuntimeModels } from "./models.ts";
@@ -263,6 +263,438 @@ test("a durable Turn completes with a stored provider", () => withFakeRuntimePro
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
+
+test("durable user input retains managed text and JSON attachments across restart", () => {
+  const inputs: UserMessage["content"][][] = [];
+  const capture = ({ messages }: TranscriptContext) => {
+    inputs.push(messages.filter((message) => message.role === "user").map((message) => message.content));
+    return fauxAssistantMessage("ok");
+  };
+  return withFakeRuntimeProvider([capture, capture], {}, async () => {
+    const first = await startDaemon();
+    let daemon = first;
+    const stateDir = first.svc.cfg.stateDir;
+    try {
+      await first.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
+      setSetting(first.svc.db, "default_model", "fake/fake-model");
+      setSetting(first.svc.db, "runtime", "durable");
+      const botId = await makeBot(first, "Attachments across restart");
+      const draftToken = crypto.randomUUID();
+      const text = await first.svc.attachments.stage(botId, draftToken, new File(["line one\nline two | end"], "notes.txt"));
+      const json = await first.svc.attachments.stage(botId, draftToken, new File(['{"value":1}'], "data.json"));
+      const sent = await first.svc.turns.send(botId, null, "Review the files", [text.id, json.id], draftToken);
+      await waitThreadIdle(first, sent.threadId);
+      expect(first.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+      await first.stop();
+
+      daemon = await startDaemon(first.home, { stateDir });
+      const followUp = await sendToThread(daemon, sent.threadId, "Recall the files");
+      await waitThreadIdle(daemon, sent.threadId);
+      expect(daemon.svc.threads.turnRow(followUp.turnId)?.status).toBe("completed");
+      const attachmentInput: TextContent[] = [
+        { type: "text", text: "Review the files" },
+        { type: "text", text: `${text.id}|notes.txt|text/plain|line one\nline two | end` },
+        { type: "text", text: `${json.id}|data.json|application/json|{"value":1}` },
+      ];
+      expect(inputs).toEqual([
+        [attachmentInput],
+        [attachmentInput, "Recall the files"],
+      ]);
+    } finally {
+      await daemon.stop();
+      rmSync(first.home, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a durable Turn times out a hung provider while a completed Turn stays completed", () => {
+  const started = Promise.withResolvers<void>();
+  const aborted = Promise.withResolvers<void>();
+  return withFakeRuntimeProvider([
+    { segments: [{ type: "text", text: "Finished" }] },
+    async (_context, options) => {
+      started.resolve();
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted) resolve();
+        else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      aborted.resolve();
+      return fauxAssistantMessage([], { stopReason: "aborted" });
+    },
+  ], {}, async () => {
+    const h = await startDaemon();
+    try {
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
+      setSetting(h.svc.db, "default_model", "fake/fake-model");
+      setSetting(h.svc.db, "runtime", "durable");
+      h.svc.cfg.turnTimeoutMs = 250;
+      const completed = await sendToBot(h, await makeBot(h, "Completed durable Turn"), "Finish normally");
+      expect(await h.svc.turns.waitForTerminal(completed.turnId, 2_000)).toMatchObject({ status: "completed" });
+      const before = h.svc.threads.turnRow(completed.turnId);
+      const hung = await sendToBot(h, await makeBot(h, "Hung durable Turn"), "Wait until aborted");
+      await started.promise;
+      expect(await h.svc.turns.waitForTerminal(hung.turnId, 2_000)).toMatchObject({ status: "failed", reason: "timed out after 0s" });
+      await aborted.promise;
+      expect(h.svc.threads.turnRow(completed.turnId)).toEqual(before);
+      expect(h.svc.threads.listMessages(hung.threadId).map(({ author }) => author.kind)).toEqual(["user"]);
+      expect(h.svc.db.query("SELECT json_extract(record, '$.type') AS type FROM pi_submissions WHERE conversation_id = (SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?)").all(hung.threadId)).toEqual([{ type: "input" }]);
+      expect(h.svc.db.query("SELECT id FROM turns WHERE thread_id = ?").all(hung.threadId)).toEqual([{ id: hung.turnId }]);
+    } finally {
+      await h.stop();
+      rmSync(h.home, { recursive: true, force: true });
+      rmSync(h.svc.cfg.stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+async function withDeadlineTestDaemon(run: (h: Awaited<ReturnType<typeof startDaemon>>) => Promise<void>) {
+  const h = await startDaemon(undefined, { separateWorkspace: true });
+  try {
+    if (!h.svc.credentials.getForRuntime("fake")) {
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
+    }
+    setSetting(h.svc.db, "default_model", "fake/fake-model");
+    setSetting(h.svc.db, "runtime", "durable");
+    await run(h);
+  } finally {
+    await h.stop();
+    for (const directory of [h.home, `${h.home}-profile`, h.svc.cfg.stateDir]) rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function interceptDeadlineTestHarness(onConversation: (conversation: Conversation) => void) {
+  const open = Harness.open;
+  const spy = spyOn(Harness, "open").mockImplementation(async (...args) => {
+    const harness = await open(...args);
+    const create = harness.createConversation.bind(harness);
+    harness.createConversation = async (...args) => {
+      const conversation = await create(...args);
+      onConversation(conversation);
+      return conversation;
+    };
+    return harness;
+  });
+  return () => spy.mockRestore();
+}
+
+test("a durable approval and a queued follow-up can wait longer than the execution budget", async () => {
+  const outside = mkdtempSync(path.join(tmpdir(), "durable-deadline-approval-"));
+  const file = path.join(outside, "approved.txt");
+  const started = Promise.withResolvers<void>();
+  const allowRequest = Promise.withResolvers<void>();
+  try {
+    await withFakeRuntimeProvider([
+      async () => {
+        started.resolve();
+        await allowRequest.promise;
+        return fauxAssistantMessage(fauxToolCall("write", { path: file, content: "approved write\n" }), { stopReason: "toolUse" });
+      },
+      { segments: [{ type: "text", text: "Wrote the file" }] },
+      { segments: [{ type: "text", text: "Follow-up finished" }] },
+    ], {}, () => withDeadlineTestDaemon(async (h) => {
+      const budget = 1_000;
+      h.svc.cfg.turnTimeoutMs = budget;
+      const botId = await makeBot(h, "Approval deadline");
+      const sent = await sendToBot(h, botId, "Write outside the workspace");
+      const approvals = h.svc.approvals!;
+      try {
+        await started.promise;
+        h.svc.cfg.turnTimeoutMs = 150;
+        const queued = await h.svc.turns.send(botId, sent.threadId, "Continue after approval", [], undefined, { whenBusy: "followUp" });
+        await Bun.sleep(250);
+        expect(h.svc.threads.turnRow(queued.turnId)?.status).toBe("working");
+        allowRequest.resolve();
+        const approval = await until(() => approvals.listPending({ threadId: sent.threadId })[0], 2_000, "file approval did not become pending");
+        await Bun.sleep(budget + 150);
+        expect(approvals.get(approval.id)?.status).toBe("pending");
+        expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("working");
+        expect(h.svc.threads.turnRow(queued.turnId)?.status).toBe("working");
+        expect(existsSync(file)).toBeFalse();
+        approvals.answer(approval.id, "allow_once");
+        await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "completed" });
+        await expect(h.svc.turns.waitForTerminal(queued.turnId, 2_000)).resolves.toMatchObject({ status: "completed" });
+        expect(readFileSync(file, "utf8")).toBe("approved write\n");
+        expect(h.svc.threads.listMessages(sent.threadId).filter(({ kind }) => kind === "tool").map(({ toolCall }) => toolCall)).toEqual([
+          { id: expect.any(String), name: "write", status: "completed", target: file, durationMs: expect.any(Number) },
+        ]);
+      } finally { allowRequest.resolve(); }
+    }));
+  } finally { rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("a rejected durable deadline abort retries and fails the Turn without another message", () => {
+  return withFakeRuntimeProvider([async (_context, options) => {
+    if (!options?.signal?.aborted) await new Promise<void>((resolve) => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return fauxAssistantMessage([], { stopReason: "aborted" });
+  }], {}, async () => {
+    let attempts = 0;
+    const restore = interceptDeadlineTestHarness((conversation) => {
+      const abort = conversation.abort.bind(conversation);
+      conversation.abort = async (...args) => {
+        if (++attempts === 1) throw new Error("deadline abort rejected before marking the conversation");
+        return abort(...args);
+      };
+    });
+    try {
+      await withDeadlineTestDaemon(async (h) => {
+        h.svc.cfg.turnTimeoutMs = 500;
+        const sent = await sendToBot(h, await makeBot(h, "Retry deadline abort"), "Wait until the deadline retries");
+        await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "failed", reason: "timed out after 1s" });
+        expect(attempts).toBe(2);
+      });
+    } finally { restore(); }
+  });
+});
+
+test("a user abort racing a rejected durable deadline abort keeps the user's reason", () => {
+  const started = Promise.withResolvers<void>();
+  const abortRequested = Promise.withResolvers<void>();
+  const rejectDeadline = Promise.withResolvers<void>();
+  return withFakeRuntimeProvider([async (_context, options) => {
+    started.resolve();
+    if (!options?.signal?.aborted) await new Promise<void>((resolve) => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return fauxAssistantMessage([], { stopReason: "aborted" });
+  }], {}, async () => {
+    let attempted = false;
+    const rejectFirst = async () => {
+      if (attempted) return;
+      attempted = true;
+      abortRequested.resolve();
+      await rejectDeadline.promise;
+      throw new Error("deadline abort rejected before marking the conversation");
+    };
+    const restore = interceptDeadlineTestHarness((conversation) => {
+      const abort = conversation.abort.bind(conversation);
+      conversation.abort = async (...args) => { await rejectFirst(); return abort(...args); };
+    });
+    try {
+      await withDeadlineTestDaemon(async (h) => {
+        h.svc.cfg.turnTimeoutMs = 500;
+        const sent = await sendToBot(h, await makeBot(h, "User abort deadline race"), "Wait until cancelled");
+        await started.promise;
+        await abortRequested.promise;
+        const abort = h.svc.turns.abortTurn(sent.turnId, "user cancelled this Turn");
+        rejectDeadline.resolve();
+        await abort;
+        await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "cancelled", reason: "user cancelled this Turn" });
+      });
+    } finally { rejectDeadline.resolve(); restore(); }
+  });
+});
+
+test("a rejected explicit durable abort leaves the deadline armed for a hung provider", () => {
+  const started = Promise.withResolvers<void>();
+  return withFakeRuntimeProvider([async (_context, options) => {
+    started.resolve();
+    if (!options?.signal?.aborted) await new Promise<void>((resolve) => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return fauxAssistantMessage([], { stopReason: "aborted" });
+  }], {}, async () => {
+    let attempts = 0;
+    const restore = interceptDeadlineTestHarness((conversation) => {
+      const abort = conversation.abort.bind(conversation);
+      conversation.abort = async (...args) => {
+        if (++attempts === 1) throw new Error("explicit abort rejected before marking the conversation");
+        return abort(...args);
+      };
+    });
+    try {
+      await withDeadlineTestDaemon(async (h) => {
+        h.svc.cfg.turnTimeoutMs = 500;
+        const sent = await sendToBot(h, await makeBot(h, "Rejected explicit abort"), "Hang after the abort is rejected");
+        await started.promise;
+        await expect(h.svc.turns.abortTurn(sent.turnId, "explicit user reason")).rejects.toThrow("explicit abort rejected before marking the conversation");
+        expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("working");
+        await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "failed", reason: "timed out after 1s" });
+        expect(attempts).toBe(2);
+      });
+    } finally { restore(); }
+  });
+});
+
+test("a deadline delayed until its durable run settles leaves the successor and its queued input alone", () => {
+  const started = Promise.withResolvers<void>();
+  const finishFirst = Promise.withResolvers<void>();
+  const abortRequested = Promise.withResolvers<void>();
+  const finishDeadline = Promise.withResolvers<void>();
+  const successorStarted = Promise.withResolvers<void>();
+  const finishSuccessor = Promise.withResolvers<void>();
+  return withFakeRuntimeProvider([
+    async () => { started.resolve(); await finishFirst.promise; return fauxAssistantMessage("First finished"); },
+    async () => { successorStarted.resolve(); await finishSuccessor.promise; return fauxAssistantMessage("Successor finished"); },
+    { segments: [{ type: "text", text: "Last finished" }] },
+  ], {}, async () => {
+    const hold = async () => { abortRequested.resolve(); await finishDeadline.promise; };
+    const restore = interceptDeadlineTestHarness((conversation) => {
+      const abort = conversation.abort.bind(conversation);
+      conversation.abort = async (...args) => { await hold(); return abort(...args); };
+    });
+    try {
+      await withDeadlineTestDaemon(async (h) => {
+        h.svc.cfg.turnTimeoutMs = 500;
+        const botId = await makeBot(h, "Settled deadline race");
+        const first = await sendToBot(h, botId, "First request");
+        try {
+          await started.promise;
+          h.svc.cfg.turnTimeoutMs = 3_000;
+          const successor = await h.svc.turns.send(botId, first.threadId, "Successor request", [], undefined, { whenBusy: "followUp" });
+          await abortRequested.promise;
+          finishFirst.resolve();
+          await successorStarted.promise;
+          const last = await h.svc.turns.send(botId, first.threadId, "Last queued request", [], undefined, { whenBusy: "followUp" });
+          finishDeadline.resolve();
+          await expect(h.svc.turns.waitForTerminal(first.turnId, 2_000)).resolves.toMatchObject({ status: "completed" });
+          finishSuccessor.resolve();
+          await expect(h.svc.turns.waitForTerminal(successor.turnId, 2_000)).resolves.toMatchObject({ status: "completed" });
+          await expect(h.svc.turns.waitForTerminal(last.turnId, 2_000)).resolves.toMatchObject({ status: "completed" });
+        } finally { finishFirst.resolve(); finishDeadline.resolve(); finishSuccessor.resolve(); }
+      });
+    } finally { restore(); }
+  });
+});
+
+test("a timed-out durable run withdraws a queued follow-up on the same Thread", () => {
+  const started = Promise.withResolvers<void>();
+  return withFakeRuntimeProvider([
+    async (_context, options) => {
+      started.resolve();
+      if (!options?.signal?.aborted) await new Promise<void>((resolve) => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return fauxAssistantMessage([], { stopReason: "aborted" });
+    },
+    { segments: [{ type: "text", text: "Later reply" }] },
+  ], {}, () => withDeadlineTestDaemon(async (h) => {
+    h.svc.cfg.turnTimeoutMs = 500;
+    const botId = await makeBot(h, "Timeout with queued input");
+    const first = await sendToBot(h, botId, "Hang until timeout");
+    await started.promise;
+    h.svc.cfg.turnTimeoutMs = 2_000;
+    const queued = await h.svc.turns.send(botId, first.threadId, "Queued input", [], undefined, { whenBusy: "followUp" });
+    const submissions = (turnId: string) => h.svc.db.query("SELECT status FROM pi_submissions WHERE json_extract(record, '$.requestId') = ?").all(turnId);
+    expect(submissions(queued.turnId)).toEqual([{ status: "queued" }]);
+    await expect(h.svc.turns.waitForTerminal(first.turnId, 2_000)).resolves.toMatchObject({ status: "failed", reason: "timed out after 1s" });
+    await expect(h.svc.turns.waitForTerminal(queued.turnId, 2_000)).resolves.toMatchObject({ status: "cancelled" });
+    const later = await sendToThread(h, first.threadId, "Later input");
+    await expect(h.svc.turns.waitForTerminal(later.turnId, 2_000)).resolves.toMatchObject({ status: "completed" });
+    expect(submissions(first.turnId)).toEqual([{ status: "unanswered" }]);
+    expect(submissions(queued.turnId)).toEqual([{ status: "unanswered" }]);
+    expect(h.svc.threads.listMessages(first.threadId).filter(({ kind }) => kind === "response").map(({ response, text }) => [response?.blockId, text])).toEqual([
+      [`${later.turnId}-0-text-0`, "Later reply"],
+    ]);
+  }));
+});
+
+test.each(["replies", "times out"] as const)("the next ordinary send %s after a deadline withdraws a queued steer", (outcome) => {
+  const started = Promise.withResolvers<void>();
+  const aborted = Promise.withResolvers<void>();
+  const nextStarted = Promise.withResolvers<void>();
+  const nextAborted = Promise.withResolvers<void>();
+  return withFakeRuntimeProvider([
+    async (_context, options) => {
+      started.resolve();
+      if (!options?.signal?.aborted) await new Promise<void>((resolve) => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      aborted.resolve();
+      return fauxAssistantMessage([], { stopReason: "aborted" });
+    },
+    async (_context, options) => {
+      nextStarted.resolve();
+      if (outcome === "replies") return fauxAssistantMessage("Reply to the next send");
+      if (!options?.signal?.aborted) await new Promise<void>((resolve) => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      nextAborted.resolve();
+      return fauxAssistantMessage([], { stopReason: "aborted" });
+    },
+    { segments: [{ type: "text", text: "Cleanup reply" }] },
+  ], {}, async () => {
+    let conversation: Conversation | undefined;
+    const restore = interceptDeadlineTestHarness((created) => { conversation = created; });
+    try {
+      await withDeadlineTestDaemon(async (h) => {
+        h.svc.cfg.turnTimeoutMs = 500;
+        const sent = await sendToBot(h, await makeBot(h, "Timeout with queued steer"), "Hang until timeout");
+        await started.promise;
+        const steer = await sendToThread(h, sent.threadId, "Steer the hung Turn");
+        expect(steer).toMatchObject({ turnId: sent.turnId, action: "steered" });
+        const steerRecords = () => h.svc.db.query("SELECT status FROM pi_submissions WHERE json_extract(record, '$.requestId') = ?").all(`${sent.turnId}:steer:${steer.messageId}`);
+        expect(steerRecords()).toEqual([{ status: "queued" }]);
+        try {
+          await withTimeout(aborted.promise, 2_000, "deadline did not abort the provider");
+          await withTimeout(h.svc.turns.abortTurn(sent.turnId, "user abort after timeout"), 2_000, "user abort blocked after the deadline");
+          await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "failed", reason: "timed out after 1s" });
+          expect(h.svc.db.query("SELECT id FROM turns WHERE thread_id = ?").all(sent.threadId)).toEqual([{ id: sent.turnId }]);
+          expect(h.svc.threads.listMessages(sent.threadId).map(({ id, author, text }) => [id, author.kind, text])).toEqual([
+            [sent.messageId, "user", "Hang until timeout"], [steer.messageId, "user", "Steer the hung Turn"],
+          ]);
+
+          h.svc.cfg.turnTimeoutMs = 1_500;
+          const next = await sendToThread(h, sent.threadId, "Send after timeout");
+          expect(next).toMatchObject({ action: "sent" });
+          expect(next.turnId).not.toBe(sent.turnId);
+          await withTimeout(nextStarted.promise, 2_000, "the next send did not reach the provider");
+          const responses = () => h.svc.threads.listMessages(sent.threadId).filter(({ kind }) => kind === "response").map(({ response, text }) => [response?.blockId, text]);
+          if (outcome === "replies") {
+            await expect(h.svc.turns.waitForTerminal(next.turnId, 2_000)).resolves.toMatchObject({ status: "completed" });
+            expect(responses()).toEqual([[`${next.turnId}-0-text-0`, "Reply to the next send"]]);
+          } else {
+            await expect(h.svc.turns.waitForTerminal(next.turnId, 3_000)).resolves.toMatchObject({ status: "failed", reason: "timed out after 2s" });
+            await withTimeout(nextAborted.promise, 2_000, "the next deadline did not abort the provider");
+            expect(responses()).toEqual([]);
+          }
+          expect(steerRecords()).toEqual([{ status: "unanswered" }]);
+          await withTimeout(h.svc.turns.shutdown(), 2_000, "shutdown blocked after the deadline");
+        } finally {
+          // Let the daemon shut down even when the regression leaves it waiting on the queued steer.
+          if (h.svc.threads.turnRow(sent.turnId)?.status === "working") {
+            await conversation?.submit({ type: "input", content: "Release the queued steer during cleanup" }, BACKGROUND_CONTEXT);
+          }
+        }
+      });
+    } finally { restore(); }
+  });
+});
+
+test("the durable tool-fail fixture faults the run after its bash call starts", async () => {
+  const restore = process.env.OMARCHY_TEST_DURABLE === "1" ? undefined : installDurableSuiteProvider();
+  try {
+    await withDeadlineTestDaemon(async (h) => {
+      const sent = await sendToBot(h, await makeBot(h, "Failed tool round"), "tool-fail");
+      await expect(h.svc.turns.waitForTerminal(sent.turnId, 2_000)).resolves.toMatchObject({ status: "failed", reason: "fake failure" });
+      const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.filter(({ aggregateId }) => aggregateId === sent.threadId);
+      expect(events).toContainEqual(expect.objectContaining({ type: "message.appended", payload: expect.objectContaining({ toolCall: expect.objectContaining({ name: "bash", status: "running" }) }) }));
+      expect(events).toContainEqual(expect.objectContaining({ type: "tool.updated", payload: expect.objectContaining({ toolCall: expect.objectContaining({ name: "bash", status: "error", errorSummary: "Interrupted before completion." }) }) }));
+      expect(h.svc.db.query(`SELECT t.id FROM pi_tasks t JOIN pi_thread_conversations c ON c.conversation_id = t.conversation_id
+        WHERE c.thread_id = ? AND json_extract(t.record, '$.input.callId') = 'fixture-failing-bash'`).all(sent.threadId)).toHaveLength(1);
+    });
+  } finally { restore?.(); }
+});
+
+test("durable native bash uses the Shared Workspace cwd with a Sidecar online and sends no Sidecar jobs", async () => {
+  const previous = process.env.OMARCHY_TEST_DURABLE;
+  process.env.OMARCHY_TEST_DURABLE = "1";
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  try {
+    h = await startDaemon(undefined, { separateWorkspace: true });
+    const deviceId = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const frames: DeviceServerFrame[] = [];
+    const port = { send: (frame: DeviceServerFrame) => { frames.push(frame); }, close: () => {} };
+    expect(h.svc.devices.register(port, {
+      type: "register", deviceId, hostname: "laptop", os: "linux", shell: "posix-sh", capabilities: ["shell"],
+    }).ok).toBeTrue();
+
+    const sent = await sendToBot(h, await makeBot(h, "Native cwd Bot"), "native-bash-cwd", deviceId);
+    await waitThreadIdle(h, sent.threadId);
+    const transcript = await messages(h, sent.threadId);
+    expect(transcript.find(({ toolCall }) => toolCall?.name === "bash")?.toolCall?.status).toBe("completed");
+    expect(transcript.find(({ kind }) => kind === "response")?.text?.trim()).toBe(h.svc.cfg.sharedWorkspaceDir);
+    expect(frames).toEqual([]);
+  } finally {
+    try {
+      await h?.stop();
+      if (h) for (const directory of [h.home, `${h.home}-profile`, h.svc.cfg.stateDir]) rmSync(directory, { recursive: true, force: true });
+    } finally {
+      if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
+      else process.env.OMARCHY_TEST_DURABLE = previous;
+    }
+  }
+});
 
 test("a durable provider failure redacts app and Bot secrets from the Turn and its status event", () => {
   const apiKey = "test-provider-key-sentinel";

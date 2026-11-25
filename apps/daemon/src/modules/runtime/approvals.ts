@@ -35,6 +35,7 @@ export class ApprovalStore {
     private readonly db: Database,
     private readonly events: Pick<EventLog, "append">,
     private readonly now: () => number = Date.now,
+    private readonly pendingChanged?: (conversationId: number) => void,
   ) {}
 
   /** Find the task's request, or record a new pending one. */
@@ -53,7 +54,10 @@ export class ApprovalStore {
     // A replayed task must ask about the same call and path, or its recorded intent changed under it.
     if (row.call_id !== input.callId || row.tool !== input.tool || row.path !== input.path) throw new Error("approval request does not match its tool call");
     const dto = toDto(row);
-    if (inserted.changes > 0) this.events.append("thread", dto.threadId, "approval.requested", dto);
+    if (inserted.changes > 0) {
+      this.pendingChanged?.(input.conversationId);
+      this.events.append("thread", dto.threadId, "approval.requested", dto);
+    }
     return dto;
   }
 
@@ -73,6 +77,12 @@ export class ApprovalStore {
 
   hasPending(threadId: string, botId: string): boolean {
     return this.db.query("SELECT 1 FROM approvals WHERE thread_id = ? AND bot_id = ? AND status = 'pending'").get(threadId, botId) !== null;
+  }
+
+  hasPendingForTasks(conversationId: number, taskIds: ReadonlySet<number>): boolean {
+    if (taskIds.size === 0) return false;
+    const pending = this.db.query<{ task_id: number }, [number]>("SELECT task_id FROM approvals WHERE conversation_id = ? AND status = 'pending'").all(conversationId);
+    return pending.some(({ task_id }) => taskIds.has(task_id));
   }
 
   answer(id: string, answer: ApprovalAnswerBodyDto["answer"]): ApprovalDto {
@@ -127,7 +137,9 @@ export class ApprovalStore {
   }
 
   #announce(id: string): ApprovalDto {
-    const dto = this.get(id)!;
+    const row = this.db.query<ApprovalRow & { conversation_id: number }, [string]>("SELECT * FROM approvals WHERE id = ?").get(id)!;
+    const dto = toDto(row);
+    this.pendingChanged?.(row.conversation_id);
     this.events.append("thread", dto.threadId, "approval.resolved", dto);
     for (const wake of this.#waiters.get(id) ?? []) wake();
     return dto;

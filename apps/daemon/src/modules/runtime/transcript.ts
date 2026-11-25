@@ -1,15 +1,16 @@
 import type { Database } from "bun:sqlite";
 import { AssistantEntry, CompactionEntry, ToolResultEntry, ToolTask, type Conversation, type ConversationView, type Cursor, type EntryId, type LiveState, type TaskId, type ToolDiagnostic, type TypedEntry } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { isToolCallSummary, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "@omarchy-bot/domain";
+import type { AssistantMessage, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
+import { redactToolErrorSummary } from "@omarchy-bot/agent-contract";
+import { isToolCallSummary, TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "@omarchy-bot/domain";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
 
 type Segment = Exclude<AssistantMessage["content"][number], { type: "toolCall" }>;
 type Position = { id: string; seq: number };
-type PendingTool = { name: string; messageId: string | undefined };
+type PendingTool = { name: string; messageId: string | undefined; target: string | undefined };
 type Block = {
   position: Position;
   text: string;
@@ -17,9 +18,46 @@ type Block = {
   recoveredStartedAt?: number;
 };
 
-// Match the Pi worker's public summary. Result text and diagnostics can contain private data.
-const PI_TOOL_ERROR_SUMMARY = "Tool call failed.";
 const INTERRUPTED_TOOL_DIAGNOSTICS = new Set(["aborted", "interrupted", "abandoned", "restart_limit"]);
+// Structured target text may contain a private payload in its entirety.
+const STRUCTURED_TARGET_TEXT = /\{\s*(?:\\?["']|\})|\[\s*(?:\\?["']|[\[\]{])/;
+const JSON_UNQUOTED_SCALAR = String.raw`(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)`;
+const JSON_SCALAR_TARGET = new RegExp(String.raw`^\s*(?:"(?:[^"\\]|\\.)*"|${JSON_UNQUOTED_SCALAR})\s*$`);
+const JSON_SCALAR_FIRST_ARRAY = new RegExp(String.raw`\[\s*${JSON_UNQUOTED_SCALAR}\s*[,\]]`);
+
+function isJsonLookingTarget(value: string): boolean {
+  return STRUCTURED_TARGET_TEXT.test(value) || JSON_SCALAR_FIRST_ARRAY.test(value) || JSON_SCALAR_TARGET.test(value);
+}
+const TOOL_TARGET_FIELDS = new Map<string, readonly string[]>([
+  ["bash", ["command"]],
+  ["read", ["path"]], ["write", ["path"]], ["edit", ["path"]],
+  ["search", ["query", "path"]], ["glob", ["query", "path", "pattern"]],
+  ["web_search", ["query"]],
+  ["local", ["command", "path", "query", "action"]],
+  ["computer", ["action"]], ["browser", ["action"]],
+]);
+
+function redactToolTarget(value: string): string {
+  return redactToolErrorSummary(value.replace(/:\/\/[^/?#\s]*@/g, "://[redacted]@"));
+}
+
+function toolTarget(call: ToolCall): string | undefined {
+  for (const field of TOOL_TARGET_FIELDS.get(call.name) ?? []) {
+    const value = call.arguments[field];
+    if (typeof value !== "string" || !value.trim()) continue;
+    if (isJsonLookingTarget(value)) return undefined;
+    return redactToolTarget(value);
+  }
+}
+
+function toolErrorSummary(toolName: string, result: ToolResultMessage, diagnostics: readonly ToolDiagnostic[]): string {
+  if (diagnostics.some(({ severity, code }) => severity === "error" && code !== undefined && INTERRUPTED_TOOL_DIAGNOSTICS.has(code))) return TOOL_CALL_INTERRUPTED_ERROR_SUMMARY;
+  const details = result.details;
+  const publicError = toolName === "local" && details && typeof details === "object" && "publicError" in details && typeof details.publicError === "string"
+    ? details.publicError
+    : undefined;
+  return redactToolErrorSummary(publicError);
+}
 
 /** Project committed generation updates into the existing Service transcript. */
 export class DurableTranscript {
@@ -122,13 +160,20 @@ export class DurableTranscript {
     const tool = pending[index];
     if (!tool) return;
     if (tool.messageId !== undefined) {
-      const interrupted = entry.data.diagnostics.some(({ severity, code }) => severity === "error" && code !== undefined && INTERRUPTED_TOOL_DIAGNOSTICS.has(code));
+      const details = result.details;
+      const hostname = tool.name === "local" && details && typeof details === "object" && "hostname" in details && typeof details.hostname === "string"
+        ? details.hostname.trim()
+        : undefined;
+      const target = hostname && !isJsonLookingTarget(hostname) && tool.target !== undefined
+        ? `${redactToolTarget(hostname)} ${tool.target}`.slice(0, TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH)
+        : tool.target;
       this.threads.projectToolResult(tool.messageId, {
         id: result.toolCallId,
         name: tool.name,
         status: result.isError ? "error" : "completed",
+        ...(target === undefined ? {} : { target }),
         ...(result.durationMs === undefined ? {} : { durationMs: result.durationMs }),
-        ...(result.isError ? { errorSummary: interrupted ? TOOL_CALL_INTERRUPTED_ERROR_SUMMARY : PI_TOOL_ERROR_SUMMARY } : {}),
+        ...(result.isError ? { errorSummary: toolErrorSummary(tool.name, result, entry.data.diagnostics) } : {}),
       });
     }
     pending[index] = undefined;
@@ -146,12 +191,19 @@ export class DurableTranscript {
       this.pendingTools.clear();
       this.pendingAssistant = mode.entry;
     }
-    const toolPositions = committed && message.stopReason === "toolUse"
+    // Pi commits this assistant entry and its tool round together. Failed replies can carry unexecuted calls.
+    const projectsCalls = committed && message.stopReason === "toolUse";
+    const toolPositions = projectsCalls
       ? new Map(this.threads.listToolCallPositions(this.threadId, this.turnId).map(({ callId, id, seq, occurrence }) => [occurrence ?? JSON.stringify([callId]), { id, seq }]))
       : undefined;
-    const occurrences = committed && toolPositions ? message.content.map((part, index) => (
-      part.type === "toolCall" ? JSON.stringify([mode.entry.id, index, part.id]) : undefined
-    )) : undefined;
+    const seenCallIds = new Set<string>();
+    const duplicateCallIds = new Set<string>();
+    const occurrences = projectsCalls ? message.content.map((part, index) => {
+      if (part.type !== "toolCall") return undefined;
+      if (seenCallIds.has(part.id)) duplicateCallIds.add(part.id);
+      seenCallIds.add(part.id);
+      return JSON.stringify([mode.entry.id, index, part.id]);
+    }) : undefined;
     const generation = `${this.turnId}-${this.generation}-`;
     const segments = message.content.filter((part) => part.type !== "toolCall");
     const blockIds = segments.map(({ type }, index) => `${generation}${type}-${index}`);
@@ -185,13 +237,15 @@ export class DurableTranscript {
       if (part.type === "toolCall") {
         const occurrence = occurrences?.[index];
         if (occurrence !== undefined) {
-          const toolCall = { id: part.id, name: part.name, status: "running" } as const;
+          // Pi resolves duplicate IDs to the first call's arguments, so a target would be ambiguous.
+          const target = duplicateCallIds.has(part.id) ? undefined : toolTarget(part);
+          const toolCall = { id: part.id, name: part.name, status: "running", ...(target === undefined ? {} : { target }) } as const;
           const row = isToolCallSummary(toolCall)
             ? this.threads.projectToolCall(this.threadId, this.turnId, occurrence, toolCall, previousMessageId, following[index])
             : undefined;
           // Preserve task positions even when a call has no Service row.
           const pending = this.pendingTools.get(part.id) ?? [];
-          pending.push({ name: part.name, messageId: row?.id });
+          pending.push({ name: part.name, messageId: row?.id, target });
           this.pendingTools.set(part.id, pending);
           if (row) previousMessageId = row.id;
         }

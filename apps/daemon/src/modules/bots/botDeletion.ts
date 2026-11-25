@@ -7,6 +7,8 @@ import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { AvatarService } from "../avatars/avatarService.ts";
 import type { BotScreenManager } from "../computer/botScreenManager.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import { deleteConversation } from "../runtime/conversationDeletion.ts";
+import type { BotRuntime } from "../runtime/runtime.ts";
 import type { SecretStore } from "../runtime/secrets.ts";
 import { removePrivateFolder } from "../workspace/sharedWorkspace.ts";
 import { HttpError } from "./bots.ts";
@@ -59,6 +61,7 @@ export class BotDeletionService {
     private readonly workspaceDir: string,
     private readonly options: {
       secrets: Pick<SecretStore, "deleteAll">;
+      runtime?: Pick<BotRuntime, "quiesceConversation" | "writeService">;
       terminalWaitTimeoutMs?: number;
       projections?: BotScreenProjectionCleanup;
     },
@@ -235,7 +238,13 @@ export class BotDeletionService {
     };
 
     try {
-      this.events.transaction(() => {
+      const runtime = this.options.runtime;
+      for (const conversationId of this.#conversationIds(botId)) {
+        await runtime?.quiesceConversation(conversationId, this.options.terminalWaitTimeoutMs ?? 30_000);
+      }
+      const writeService = runtime?.writeService ?? ((write) => write());
+      await writeService(() => this.events.transaction(() => {
+        for (const conversationId of this.#conversationIds(botId)) deleteConversation(this.db, conversationId);
         this.db.query(
           `DELETE FROM events WHERE
              (aggregate_type = 'bot' AND aggregate_id = ?)
@@ -262,7 +271,7 @@ export class BotDeletionService {
         this.db.query(`DELETE FROM bot_surfaces WHERE surface_id = ?`).run(bot.surface_id);
         this.db.query(`DELETE FROM bots WHERE id = ?`).run(botId);
         this.events.append("bot", botId, "bot.deleted", { ...deleted, surfaceId: bot.surface_id });
-      });
+      }));
     } catch (error) {
       const databaseFailure: DeleteBotFailureDto = { stage: "database", resource: botId, message: errorMessage(error) };
       this.#recordFailure(botId, [databaseFailure]);
@@ -274,6 +283,22 @@ export class BotDeletionService {
       };
     }
     return deleted;
+  }
+
+  #conversationIds(botId: string): Set<number> {
+    const bindings = this.db.query<{ conversation_id: number; bot_id: string; thread_bot_id: string; shared: number }, [string]>(`
+      SELECT binding.conversation_id, binding.bot_id, thread.bot_id AS thread_bot_id, EXISTS (
+        SELECT 1 FROM pi_thread_conversations AS other
+        WHERE other.conversation_id = binding.conversation_id AND other.bot_id <> ?1
+      ) AS shared
+      FROM pi_thread_conversations AS binding
+      JOIN threads AS thread ON thread.id = binding.thread_id
+      WHERE binding.bot_id = ?1 OR thread.bot_id = ?1
+    `).all(botId);
+    if (bindings.some((binding) => binding.bot_id !== botId || binding.thread_bot_id !== botId || binding.shared)) {
+      throw new Error("Inconsistent durable conversation ownership");
+    }
+    return new Set(bindings.map(({ conversation_id }) => conversation_id));
   }
 
   async #removeOldSessionFiles(botId: string): Promise<number> {
