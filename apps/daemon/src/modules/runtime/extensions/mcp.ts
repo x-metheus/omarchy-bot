@@ -490,11 +490,10 @@ export function createMcpExtension({
       if (entry.disabled || effective.configurationError || "configurationError" in server ||
         connection?.retiring || connection?.client.connectionState === "connected") return entry;
       failures.set(name, { revision: effective.revision, status: "needs-auth" });
-      if (!rejectedServers.has(name)) {
-        rejectedServers.add(name);
-        if (rejectedServers.size > MAX_REJECTED_SERVERS) rejectedServers.delete(rejectedServers.values().next().value!);
-        persistRejectedServers();
-      }
+      rejectedServers.delete(name);
+      rejectedServers.add(name);
+      if (rejectedServers.size > MAX_REJECTED_SERVERS) rejectedServers.delete(rejectedServers.values().next().value!);
+      persistRejectedServers();
       return { ...entry, status: "needs-auth" };
     },
     status(): NativeMcpStatus[] {

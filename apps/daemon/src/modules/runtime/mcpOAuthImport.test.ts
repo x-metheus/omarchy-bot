@@ -9,6 +9,7 @@ import type { ToolExecutionApi } from "@earendil-works/pi-durable";
 import { OAuthIssuerMismatchError } from "@earendil-works/pi-mcp/oauth";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import ts from "typescript";
 import { closeRuntimeAfterMcpOAuthImport, keyringAccessDisabled } from "../../bootstrap/main.ts";
 import type { EffectiveMcpServers } from "../plugins/nativeMcp.ts";
 import { createMcpExtension } from "./extensions/mcp.ts";
@@ -828,20 +829,41 @@ test.each([
   expect(keyringAccessDisabled({ OMARCHY_TEST_DISABLE_KEYRING: value })).toBe(expected);
 });
 
+export function countBunSecretsGetCalls(source: string, file = "source.ts"): number {
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest);
+  let count = 0;
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "get") {
+      const receiver = node.expression.expression;
+      if (ts.isPropertyAccessExpression(receiver) && receiver.name.text === "secrets" &&
+        ts.isIdentifier(receiver.expression) && receiver.expression.text === "Bun") {
+        count++;
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return count;
+}
+
+test("countBunSecretsGetCalls counts calls and ignores comments and strings", () => {
+  expect(countBunSecretsGetCalls("Bun.secrets.get(options); // Bun.secrets.get(")).toBe(1);
+  expect(countBunSecretsGetCalls("// Bun.secrets.get(")).toBe(0);
+  expect(countBunSecretsGetCalls('const text = "Bun.secrets.get(";')).toBe(0);
+});
+
 test("daemon product source allows only the guarded Bun.secrets.get call and expected keychain files", async () => {
   const sourceDir = new URL("../../", import.meta.url);
   const sourceFiles = new Bun.Glob("**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}");
   const secretReferences = /\bBun\s*(?:\.\s*secrets\b|\[\s*["']secrets["']\s*\])(\s*\.\s*get\s*\()?/g;
   const mentioningFiles: string[] = [];
-  const getCalls: { file: string; text: string }[] = [];
+  const getCalls: { file: string; count: number }[] = [];
   for await (const file of sourceFiles.scan({ cwd: fileURLToPath(sourceDir), dot: true })) {
     if (/\.(test|spec)\.[^.]+$/.test(file)) continue;
     const source = await Bun.file(new URL(file, sourceDir)).text();
     if (source.search(secretReferences) !== -1) mentioningFiles.push(file);
-    const code = source.replace(/^[ \t]*(?:\/\/[^\r\n]*|\/\*[\s\S]*?\*\/)/gm, "");
-    for (const match of code.matchAll(secretReferences)) {
-      if (match[1]) getCalls.push({ file, text: match[0] });
-    }
+    const count = countBunSecretsGetCalls(source, file);
+    if (count > 0) getCalls.push({ file, count });
   }
   // Task 22 added the keychain assignment in runtime.ts and the API comment in bunSecrets.ts.
   expect(mentioningFiles.sort()).toEqual([
@@ -849,7 +871,7 @@ test("daemon product source allows only the guarded Bun.secrets.get call and exp
     "modules/runtime/bunSecrets.ts",
     "modules/runtime/runtime.ts",
   ]);
-  expect(getCalls).toEqual([{ file: "bootstrap/main.ts", text: "Bun.secrets.get(" }]);
+  expect(getCalls).toEqual([{ file: "bootstrap/main.ts", count: 1 }]);
 
   const bootstrapSource = await Bun.file(new URL("bootstrap/main.ts", sourceDir)).text();
   const guardedReader = /if \(!keyringAccessDisabled\(process\.env\) && typeof runtime\.mcpControl === "function"\) \{\s*const markerKey = [^\n]+\s*mcpOAuthImport = importMcpOAuthTokensOnce\(\{[^}]+createReader: \(\) => createPiMcpAdapterTokenReader\(\{ get: \(options\) => Bun\.secrets\.get\(/;

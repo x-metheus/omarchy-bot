@@ -550,6 +550,30 @@ test("MCP keeps only the newest 64 rejected servers and never restores the oldes
   }
 });
 
+test("MCP retains a re-rejected server and evicts the second-oldest at the 64-server cap", () => {
+  const names = Array.from({ length: 65 }, (_, index) => `remote-${index}`);
+  const oldest = names[0]!;
+  const newest = names[64]!;
+  const servers = Object.fromEntries(names.map((name) => [name, {
+    disabled: false, transport: { type: "sse" as const },
+  }]));
+  let revision = "initial";
+  let persisted: readonly string[] = [];
+  const mcp = createMcpExtension({
+    servers: () => ({ revision, secrets: [], servers }),
+    onRejectedChange: (rejected) => { persisted = rejected; },
+  });
+  for (const name of names.slice(0, 64)) mcp.markNeedsAuth(name);
+  mcp.markNeedsAuth(oldest);
+  mcp.markNeedsAuth(newest);
+
+  // A revision change drops transient failures so status reflects the retained names.
+  revision = "current";
+  const rejectedNames = mcp.status().filter(({ status }) => status === "needs-auth").map(({ name }) => name);
+  expect(rejectedNames).toEqual([oldest, ...names.slice(2)]);
+  expect(persisted).toEqual([...names.slice(2, -1), oldest, newest]);
+});
+
 test("markNeedsAuth leaves retirement queued behind an active MCP call after a URL change", async () => {
   const started = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
