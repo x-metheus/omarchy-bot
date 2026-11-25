@@ -92,17 +92,17 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 ### Phase 4: MCP, web, and workspace
 - [x] Task 13: MCP through `pi-mcp`
 - [x] Task 22: Secret store, secrets tool, and a clean shell environment (`Bun.secrets` keychain; the manual Linux Secret Service run is pending)
-- [x] Task 14: MCP OAuth sign-in and token import (a manual sign-in to a real service, and keyring interoperability with pi-mcp-adapter, are pending)
+- [x] Task 14: MCP OAuth sign-in and token import (token import removed 2026-11-25; a manual sign-in to a real service is pending)
 - [x] Task 15: `web_fetch` and `web_search`
 - [x] Task 16: Provider import, Settings providers screen, and per-Bot model
-- [x] Task 17: Workspace cleanup
+- [x] ~~Task 17: Workspace cleanup~~ (removed 2026-11-25: no migration before public release)
 
 ### Checkpoint D
 - [ ] Every tool in the spec's tools table works with the switch on
 - [ ] Settings can add an OpenAI-compatible provider and a built-in `pi-ai` provider, and each completes a Turn
 
 ### Phase 5: Migration and cutover
-- [x] Task 18: Old session migration on a Thread's first Turn
+- [x] ~~Task 18: Old session migration on a Thread's first Turn~~ (removed 2026-11-25: no migration before public release)
 - [ ] Task 19: Cutover and deletion
 - [ ] Task 20: Remove the Pi worker, agent protocol, and Agent UI
 - [ ] Task 21: Real scenarios, end-to-end tests, and docs
@@ -121,7 +121,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 | Approval tasks use pi-durable restart retries | Medium | Clean shutdown uses none; the limit and the behavior are tested in Task 9 |
 | Transcript order differs from today's (ADR 0007's guarantee) | High | Task 3 compares Messages from the same fake run on both paths |
 | Compaction loses authors | Medium | Task 6 attribution test and structured digest; test each default model before launch |
-| Session migration loses context | Medium | Native mapping, labeled-text fallback, transcript seed as last resort, each tested with real files |
+| Session migration loses context | — | Removed 2026-11-25: no migration before public release; a Thread's first durable Turn starts an empty conversation |
 | Large TurnService change | Medium | The switch keeps the old path until Task 19; Tasks 3–5 add the new path beside it |
 | OAuth token import fails | Low | Signing in again is accepted |
 

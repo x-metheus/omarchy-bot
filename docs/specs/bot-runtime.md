@@ -22,7 +22,7 @@ This spec covers the runtime: running Turns, storage, tools, models, and file ac
 
 1. As a user, I want every Bot to behave as a personal assistant, so that coding-agent defaults do not shape it.
 2. As a user, I want to create a Bot without choosing an Agent, so that I only decide who the Bot is.
-3. As a user, I want my existing Bots, Threads, and transcripts kept, and my Threads to continue, so that I lose no history.
+3. As a user, I want my existing Bots, Threads, and transcripts kept, and my Threads to continue, so that I lose no history. Before the app is public, a Thread continues with its transcript kept, but its model context starts fresh on this runtime (see [No migration before public](#no-migration-before-public)).
 4. As a user, I want to add model providers in Settings with a URL and key, so that Bots do not depend on another app's login files.
 5. As a user, I want to choose which model each Bot uses, so that a Bot no longer depends on a coding agent's settings.
 6. As a user, I want computer, browser, Bot mail, Local Sidecar, plugin, web, and MCP tools to keep working, so that Bots lose no abilities.
@@ -39,7 +39,7 @@ This spec covers the runtime: running Turns, storage, tools, models, and file ac
 ### Success criteria
 
 - No Bot Turn imports `pi-coding-agent` or `pi-agent-core`, and none reads `~/.pi`.
-- Existing Threads continue after upgrade, with their history and each Bot's model.
+- Existing Threads continue on this runtime with their transcripts and each Bot's model. Old model context is not carried over before the app is public.
 - A Service killed mid-reply resumes or clearly fails that reply on next start, and no Turn is lost silently.
 - No secret value is kept in a plain file where an OS keychain is available, or is sent to a model by the app. The keychain does not stop a Bot's own shell; see the limits under [Secrets](#secrets).
 - Every [prototype](#prototype) check and every [test](#testing-strategy) passes.
@@ -102,17 +102,11 @@ This keeps an upgrade of the experimental package to one module.
 - **Transcript:** the Service's Message records stay the source the clients read today. The runtime module writes them from committed pi-durable entries, so the order and content of blocks match today's ordered transcript (ADR 0007's guarantee).
 - **Deletion:** Threads cannot be deleted; Bots can. Bot Deletion deletes all of that Bot's conversations and their entries, which makes it a real deletion, unlike the old Agent-owned sessions. The memory spec's conversation reset after a forget also deletes the old conversation's entries.
 - **Deleting conversations:** pi-durable 1.5.2 has no public delete. The runtime module owns one contained function that deletes a conversation's rows from the `pi_` tables in a transaction. It is the only place that writes to pi-durable's tables directly, it has a test that runs on every Pi upgrade, and it is replaced when an upstream request for a public delete lands.
-- **Migration on a Thread's first Turn after upgrade:**
-  1. Read the Thread's old Pi session file, read-only.
-  2. Write the latest compaction summary and the messages after it into a new conversation.
-  3. Map each old message to its native pi-durable entry: user messages, assistant messages with their Tool Calls, and tool results keep their roles. Old thinking is not replayed to the model. A message that cannot be mapped is written as labeled text, such as "[old tool result: name]", and counted in the log.
-  4. Session metadata and non-message entries (model changes, labels, custom entries) are dropped. The Bot's model comes from the Service, not the old session.
-  5. If the whole migration fails, seed the conversation from the Service transcript and log it.
-  6. Either way, the Thread continues.
+- **No session migration before public release:** a Thread's first Turn on this runtime starts a new, empty conversation. Its Service transcript stays visible to the user, but old Pi session files are not read. Old session files stay until their Bot is deleted, and deletion removes only the exact recorded path.
 
-  The prototype (check 4) proved a real session continues when everything is flattened to labeled text. Native mapping is the target because it keeps Tool Call structure for the model; the labeled-text fallback is what the prototype proved.
+### No migration before public
 
-  Old session files stay until their Bot is deleted, and deletion removes only the exact recorded path.
+The app migrates no data from earlier builds until it is usable and public (decided 2026-11-25). The runtime has no one-time import of old Pi sessions, `~/.pi` providers or keys, `pi-mcp-adapter` tokens, the earlier credential file, or old workspace folders. Schema changes to the Service database still run as forward migrations. Copies that the old worker wrote into the workspace (`.pi/`, `.codex/`, `.claude/`) are not read by the runtime; they are deleted once the worker is removed.
 
 ### Turns, Steering, and the input queue
 
@@ -134,8 +128,7 @@ Non-user entries such as Bot mail and Group Thread entries carry their author la
 
 - **Keys:** provider keys live in the app's [secret store](#secrets), never in a plain file where a keychain is available.
 - **Settings screen:** you add a provider by protocol, either OpenAI-compatible or Anthropic Messages, with a name, base URL, and key. Built-in `pi-ai` providers can be added with only a key. No provider gets special-case code.
-- **One-time import:** on first start after upgrade, keys found in `~/.pi/agent/auth.json`, and providers found in `~/.pi/agent/models.json`, are copied into the app store if those files exist. The files are read-only to the app and never written. After the import, nothing reads them.
-- **Per-Bot model:** each Bot has an optional model. An unset Bot uses one Service-wide default. A change applies from that Bot's next Turn. The default is seeded once from the user's current Pi default model, so existing Bots keep their model.
+- **Per-Bot model:** each Bot has an optional model. An unset Bot uses one Service-wide default. A change applies from that Bot's next Turn. The Service default is set in Settings; nothing reads `~/.pi`.
 
 ### Tools
 
@@ -211,7 +204,6 @@ Bots can keep sensitive data privately, such as passwords, tokens, and account n
 - **Never stored elsewhere:** secret values never go into `pi_` entries, Service Messages, logs, or memory.
 - **Typing a secret into a Thread** sends it to the model like any message. Settings lists each Bot's secrets by name and lets you add, replace, and remove them without the model seeing the value.
 - **Bot Deletion** removes that Bot's secrets, and the confirmation says so.
-- **Moving existing keys:** on first start, keys in the earlier 0600 credential file move into the keychain, and the file is removed.
 - **Limits, stated honestly:** replacing values catches exact copies, not changed ones, such as a value a script re-encodes. A Bot that runs a command using a secret can still send it somewhere through that command. This keeps secrets out of the model's sight; it does not stop a Bot told to misuse one. The keychain is not a sandbox either. A Bot's shell runs as you and can ask the keychain for a value directly, for example with `secret-tool`. The keychain keeps secrets out of files, backups, and the model's view; only an OS sandbox around the shell, which is later work, would stop a Bot that tries.
 
 ### Prompt and Skills
@@ -229,7 +221,6 @@ Bots can keep sensitive data privately, such as passwords, tokens, and account n
   - an `McpOAuthStateStore` backed by the app secret store, holding client registration, tokens, and pending sign-in state
   - a loopback callback listener on `127.0.0.1` for the browser redirect
   - a sign-in action in the Services panel that opens the authorization URL on the user's device
-- **Token import:** `pi-mcp-adapter` keeps OAuth tokens in the system keyring (Secret Service on Linux). On first start, the Service reads them once, read-only, through `Bun.secrets`, and converts the fields, including expiry from seconds to milliseconds. A token that cannot be converted or no longer works is dropped, and that service shows as needing sign-in again. Signing in again is acceptable.
 - **Panel:** the Services panel's status and control behavior is unchanged.
 - **Not in v1:** sampling, elicitation, and MCP app UI panels.
 
@@ -259,11 +250,7 @@ Bots get two web tools built by the app:
 - **Enforced where the Service can:** app file tools and Local Sidecar transfers refuse paths inside another Bot's folder. The shell runs as your user, so another Bot can still read the folder that way, and the wording says so.
 - **Not here:** memory, Bot sessions, and secrets stay in Service-owned storage, so a Bot's file tools cannot edit its own memory.
 - **Bot Deletion** removes the Bot's private folder, and the confirmation says so. The rest of the Shared Workspace stays.
-- **Workspace cleanup** runs once at Service start, after the new runtime is in place:
-  1. **MCP:** servers in `.pi/mcp.json` and `.codex/config.toml` that are missing from `.mcp.json` are added to it. If the same name differs, `.mcp.json` wins, and the conflict is logged.
-  2. **Skills:** Skills in `.pi/skills` and `.claude/skills` that are missing from `.agents/skills` are moved there. If the same name exists, `.agents/skills` wins.
-  3. **Old folders:** `.claude`, `.codex`, and `.pi` are moved, not deleted, to a dated backup folder in the data directory, including anything the cleanup did not recognize.
-  4. **Failure:** if any step fails, nothing is moved, and the Service reports it and retries on next start. A marker file prevents a second run.
+- **One place for each:** the runtime reads Skills only from `.agents/skills` and MCP servers only from `.mcp.json` and connected service accounts. There is no cleanup of old `.pi`, `.codex`, or `.claude` folders before public release.
 
 ### Platform paths
 
@@ -308,7 +295,7 @@ OMARCHY_BOT_DEV=1 bun run dev
 ```
 apps/daemon/src/modules/runtime/      new: the only importer of pi-durable
   runtime.ts                          Harness lifecycle, public API for other modules
-  conversations.ts                    Thread ↔ conversation mapping, migration
+  conversations.ts                    Thread ↔ conversation mapping
   transcript.ts                       entries → Service Messages and client stream
   models.ts                           secret store → pi-ai providers
   secrets.ts                          OS keychain store, the secrets tool, value filling and replacing
@@ -353,11 +340,11 @@ export interface BotRuntime {
   - outside a folder asks first, with allow once, always allow, and deny
   - symbolic link and `..` escapes are refused
   - the data directory and other Bots' folders are always refused
-- **Migration:** use a database and session files from the current release. Check that each Thread continues, each Bot keeps its model, keys and providers are imported, and the `~/.pi` files are unchanged.
+- **No migration:** a Thread's first Turn on this runtime starts an empty conversation, each Bot keeps its model, and nothing reads or writes `~/.pi`.
 - **Providers:** check that one OpenAI-compatible provider and one built-in `pi-ai` provider each complete a Turn.
 - **Web:** rate limits on both signals, the internal-address refusal and its exemption, and the size and time limits.
-- **Workspace cleanup and private folders:** each cleanup step, a failed step that moves nothing, and the marker file; private folder creation, rename, refusal from another Bot, and removal on Bot Deletion.
-- **Secrets:** a value is filled in at run time and replaced in the result; another Bot cannot list or use it; it never appears in entries, Messages, or logs; the fallback file and its warning; existing keys move into the keychain.
+- **Private folders:** creation, rename, refusal from another Bot, and removal on Bot Deletion.
+- **Secrets:** a value is filled in at run time and replaced in the result; another Bot cannot list or use it; it never appears in entries, Messages, or logs; the fallback file and its warning; fallback values move into the keychain once it is available.
 - **Deleting conversations:** Bot Deletion and a memory reset leave no rows for the conversation in any `pi_` table.
 - **Real scenarios:** rerun the computer and browser scenarios, and a small set of everyday tasks before and after.
 - **Boundary:** `bun run lint:boundaries` fails on a pi-durable import outside the runtime module.
@@ -431,6 +418,7 @@ The prototype is in `prototypes/bot-runtime/` on branch `proto/bot-runtime`, wit
 - **2026-11-25:**
   - the keychain is reached through Bun's built-in `Bun.secrets` (no new dependency), with a start-up check and a marker so a keychain outage fails closed, and Bun is pinned exactly to 1.4.5
   - the secret limits say plainly that the keychain does not stop a Bot's own shell
+  - no migration of earlier data before the app is public: the old session migration, `~/.pi` import, token import, credential-file move, and workspace cleanup are removed
 
 ## Open questions
 
