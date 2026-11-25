@@ -103,7 +103,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 
 ### Phase 5: Migration and cutover
 - [x] ~~Task 18: Old session migration on a Thread's first Turn~~ (removed 2026-11-25: no migration before public release)
-- [ ] Task 19: Cutover and deletion
+- [x] Task 19: Cutover and deletion
 - [ ] Task 20: Remove the Pi worker, agent protocol, and Agent UI
 - [ ] Task 21: Real scenarios, end-to-end tests, and docs
 
