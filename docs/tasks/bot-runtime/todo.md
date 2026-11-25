@@ -748,10 +748,10 @@ Carried from Task 13 (2026-11-25): with the switch on, the Services panel takes 
 pi-durable 1.5.2 exposes no conversation deletion API, so the runtime module adds one contained function that deletes a conversation's rows from the `pi_` tables in a transaction, as the spec's Storage section describes. It is the only direct write to pi-durable's tables, it has a test that runs on every Pi upgrade, and the memory spec's conversation reset reuses it. An index insertion failure can leave an unindexed conversation; Task 19 also sweeps such orphaned conversations.
 
 **Acceptance criteria:**
-- [ ] Every existing Thread, mailbox, attachment, and lifecycle test passes on the runtime
-- [ ] Deleting a Bot leaves no `pi_` rows for any of its conversations
-- [ ] The delete function's test fails if a pi-durable upgrade adds a `pi_` table it does not cover
-- [ ] Creating a Bot needs no Agent
+- [x] Every existing Thread, mailbox, attachment, and lifecycle test passes on the runtime
+- [x] Deleting a Bot leaves no `pi_` rows for any of its conversations
+- [x] The delete function's test fails if a pi-durable upgrade adds a `pi_` table it does not cover
+- [x] Creating a Bot needs no Agent
 
 **Verification:** default commands plus `bun test`.
 
@@ -760,6 +760,46 @@ pi-durable 1.5.2 exposes no conversation deletion API, so the runtime module add
 **Files likely touched:** `apps/daemon/src/modules/turns/turns.ts`, `apps/daemon/src/modules/bots/botDeletion.ts`, `apps/daemon/src/modules/threads/threads.ts`, `apps/daemon/src/modules/bots/bots.ts`
 
 **Estimated scope:** Medium
+
+### Decisions
+
+- **Durable is the only path.** The `runtime` Service setting and every read of it are gone: the worker branch of `TurnService` (start, steer, abort, event routing, timeouts, tool handlers, worker crash and frame hooks), mailbox's `durable` branch, bootstrap's plugins/MCP control branches, and the setting conjunct in `recoverOnStartup`. `BotRuntime` is a required `TurnService` dependency, so a missing runtime is a wiring error. `workers/pi`, `agent-protocol.ts`, `AgentsRegistry`, `bots.agent_id` and the Agent DTO fields stay for Task 20.
+- **Startup recovery** preserves a working Turn when a `pi_thread_conversations` row exists for its Thread and Bot, and keeps the `pi_turn_submissions` guard; the worker peer-mail exception is gone. A Turn whose submission is missing still reaches the runtime, which settles it as failed.
+- **One fixed internal `agent_id`.** Every created Bot stores `pi`, the seeded Agent row that satisfies the existing foreign key. `CreateBotBody.agentId` is optional and ignored; an unrecognized id still fails schema validation. `BotDto.agentId` stays an enum so the web client and the Agent picker compile unchanged until Task 20. `BotsService.create` no longer reads Agent readiness. No schema change or migration was needed.
+- **Turn admission ignores Agent readiness** because the readiness gate lived only in the removed worker branch. Peer-mail dispatch keeps its `agents.isReady` hold: it is outside this task's criteria, about 15 durable mailbox tests use readiness as their queue hold, and Task 20 must revisit it when the registry goes.
+- **Bot deletion** already went through `deleteConversation` per conversation; Task 19 adds the proof and leaves the pi-table-set and unknown-table guards unchanged. The new test deletes a Bot with three direct conversations through the HTTP route, captures the rows each `pi_` table gains per conversation, and requires zero survivors while the sibling Bot's rows stay byte-identical. A trigger fails the delete after the first conversation and during the second; the whole delete rolls back and the retry removes all three.
+- **Orphan sweep** runs inside `openBotRuntime`, after the durable database and writer are available and before `Harness.open`, so `resume()` can never run an orphaned task. It reads mappings from Service storage and conversation ids from the durable database, so it also holds when tests split the two handles; an empty sweep takes no write transaction and logs nothing.
+- **The integration harness** installs the scripted durable provider by default (with the existing opt-out for provider-configuring tests), and `workerOnly` always skips with its reason; the 34 registrations are unchanged for Task 20. `runtime-parity` proves a Turn completes while `isReady("pi")` is false and that a `runtime=worker` row written before boot is inert.
+- **e2e** reuses the integration test-only provider hook in its own entrypoint; no production path imports it, and the provider store stays empty for the provider-management specs. The testkit fake provider regained the `tool adjacent` and `tool separated` rounds and the runtime's real `timed out after 30s` wording. The deletion spec waits for the fetched Thread to bind before typing a draft; the web draft window itself is recorded below, not fixed.
+- **Deleted integration cases** were only those whose subject was the worker protocol (worker session ids, `session.open`, native events, worker quarantine, worker MCP control). Their durable-visible assertions were kept. `plugin-services` OAuth now runs through `runtime.mcpControl` with the stale-completion, expiry, late-callback and retry paths asserted.
+
+### Evidence
+
+Measured at `4297264` (main `312d5c5` merged; `bun install --frozen-lockfile` reported no changes), with `TMPDIR` on a tmpfs, default commands:
+
+- `bun run typecheck` passed; `bun run lint:boundaries` passed 6 tests.
+- `bun test apps/daemon` passed 636 with 1 existing skip (637 tests, 33 files); `bun test apps/web` passed 114.
+- `bun test tests/integration` in its single mode: 831 pass, 58 skip, 13 fail across 902 tests and 105 files. Same-host control on main `312d5c5`: 857 pass, 24 skip, 18 fail across 899 tests. The branch's failing set is a subset of main's, with zero new failures; the five main-only failures are host-environment cases that passed here.
+  - The 13: three `cloud-environment.test.ts` bootstrap cases (retired `.cursor/install.sh`, exit 127), four `service-install.test.ts` listener cases, one `bot-screen-sway-popups.test.ts`, two `bot-computer.test.ts`, and three `bot-screen-sway-runtime.test.ts`. All are host-environment. Of the 10 failures this task expected, 8 appear; the TypeScript Sidecar packaging check passes because there is no stray ignored `apps/sidecar/node_modules`, and the `workerOnly` self-test now asserts the always-skip behavior instead of running the child case.
+- `bun test` (whole repo): 1803 pass, 59 skip, 16 fail across 1878 tests and 184 files. Same-host main control: 1829 pass, 25 skip, 16 fail across 1870 tests; the failing sets are identical, including the `tests/conformance/pi.test.ts` real-bundle case, so nothing is new and nothing was fixed by weakening.
+- The 34 `workerOnly` cases skip with their Task 20 reason, and the self-test proves `OMARCHY_TEST_DURABLE` unset, `0` and `1` are all inert.
+- e2e: `bunx playwright test -c tests/e2e specs/11-permanent-deletion.spec.ts specs/16-providers-and-folders.spec.ts specs/16-working-tree-changes.spec.ts specs/19-approvals.spec.ts` passed 14/14, as on main. Spec 11's active-work deletion case passed 3/3 in isolated runs after the synchronization wait.
+- Bot deletion left zero rows for all three conversations across every `pi_` table: 120 captured ids (conversations 3, documents 18 including one task-scoped per conversation, document revisions 18, entries 15, record ids 48, submissions 3, tasks 9, Thread bindings 3, Turn submissions 3), with the sibling snapshot and the shared metadata tables unchanged. Adding a `pi_future_records` table fails the table-set test, and the unknown-table refusal leaves existing rows intact.
+- Startup-sweep tests prove an orphan with committed entries and unfinished work is deleted before `Harness.open` with zero pi rows and no provider call, a mapped conversation of the same shape survives and resumes, the rejected-mapping crash window is swept on the next start, and a second start is silent, for both shared and split database layouts.
+
+Host note: during the task the host accumulated leaked test-process markers, and `bun test apps/daemon` intermittently failed with 5-second worker timeouts. A main control reproduced the same failures, and a private-namespace run passed 634 at `6e536a6` and 636 with the sweep, so those failures were environmental, not branch regressions. The final default-command run above was green.
+
+### Known limits
+
+- Peer-mail dispatch still requires `agents.isReady`. Task 20 removes the registry and must replace that hold and the tests that use it.
+- `thinkingAvailability` and attachment capability checks still read `capabilityInventory`. Once Task 20 deletes `workers/pi`, the `pi` Agent never becomes ready, so both call sites need fixed durable defaults in Task 20.
+- Group Thread deletion is unsupported: the schema has no nullable `threads.bot_id` and no membership table, and deletion's ownership guard would refuse a group binding. Group Threads are not implemented here; deletion covers direct Threads and refuses a binding it cannot attribute.
+- Two Services on one durable database are out of contract (the spec makes the Service the tables' only writer, and the packaged launcher holds a per-user lock). The sweep does not guard against a second Service deleting a conversation another is creating.
+- Unindexed conversations created after startup are swept at the next startup; there is no periodic sweep.
+- e2e Chat keeps three failures: two assertions depend on worker-native event records the durable runtime does not produce, and the Thinking announcement case fails identically on main. Task 20 or 21 owns updating or removing them.
+- Web draft window: the selected Thread URL updates before `threads.data` binds, so text typed in that window can be saved to the blank draft and cleared by the fetch (`apps/web/src/routes/index.tsx:193,273`; `apps/web/src/components/ChatPanel.tsx:524,592`). It reproduced in 2 of 3 isolated branch runs and 0 of 3 on main; the e2e spec synchronizes instead of fixing it, and the web app is unchanged.
+- Image attachments are still not delivered to the durable model (Checkpoint C limit).
+- Old session files stay until their Bot is deleted, and the workspace copies the worker wrote (`.pi/`, `.codex/`, `.claude/`) remain; Task 20 deletes the copies.
 
 ---
 
