@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import path from "node:path";
 import { z } from "zod";
 import type { Config } from "../bootstrap/config.ts";
 import { hostIdentity } from "../bootstrap/hostIdentity.ts";
@@ -24,17 +25,26 @@ import { handleApprovalRequest } from "./approvalRoutes.ts";
 import type { ApprovalStore } from "../modules/runtime/approvals.ts";
 import type { CredentialStore } from "../modules/runtime/credentials.ts";
 import type { SecretStore } from "../modules/runtime/secrets.ts";
+import { resolveImplicitDownloads } from "../modules/runtime/extensions/files-shell.ts";
+import {
+  addSettingsAllowedFolder,
+  isAllowedFolderPath,
+  readAllowedFolders,
+  readSettingsAllowedFolders,
+  removeSettingsAllowedFolder,
+} from "../modules/workspace/allowedFolders.ts";
 import { handleBotDeletionRequest } from "./botDeletionRoutes.ts";
 import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleProjectionRequest } from "./projectionRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import { handlePluginRequest } from "./pluginRoutes.ts";
+import { createProviderRoutes } from "./providerRoutes.ts";
 import type { PluginsService } from "../modules/plugins/plugins.ts";
 import type { DevicePort, SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import type { PairingService } from "../modules/pairing/pairing.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { isIPv4 } from "node:net";
-import { CreateBotBody, PatchBotBody, SendMessageBody, PROTOCOL_VERSION } from "@omarchy-bot/protocol";
+import { AllowedFolderBody, type AllowedFoldersDto, CreateBotBody, PatchBotBody, SendMessageBody, PROTOCOL_VERSION } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
 import { AGENT_IDS, type AgentId } from "@omarchy-bot/domain";
 import daemonPackage from "../../package.json" with { type: "json" };
@@ -159,6 +169,7 @@ const PairingExchangeBody = z.object({
  * loopback is not exempt (ADR 0014).
  */
 export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; port: number } {
+  const handleProviderRequest = createProviderRoutes(svc.credentials);
   // Only what Bun.serve needs from a socket: revoke closes these directly.
   const pairedSockets = new Map<string, Set<{ close(code?: number, reason?: string): void }>>();
 
@@ -283,6 +294,23 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
 
     if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, version: DAEMON_VERSION, protocol: PROTOCOL_VERSION });
     if (pathname === "/api/secrets/status" && req.method === "GET") return json({ backend: svc.secretsBackend });
+
+    if (pathname === "/api/settings/allowed-folders" && (req.method === "GET" || req.method === "POST" || req.method === "DELETE")) {
+      const alwaysAllowed = readAllowedFolders(undefined, { ...svc.cfg, downloadsDir: resolveImplicitDownloads(svc.cfg) });
+      if (req.method !== "GET") {
+        const { folder } = await parseBody(req, AllowedFolderBody);
+        if (!isAllowedFolderPath(folder)) throw new HttpError(400, "Allowed folder must be an absolute path without NUL");
+        if (!alwaysAllowed.includes(path.resolve(folder))) {
+          if (req.method === "POST") addSettingsAllowedFolder(svc.db, folder);
+          else removeSettingsAllowedFolder(svc.db, folder);
+        }
+      }
+      return json({ folders: [...readSettingsAllowedFolders(svc.db)], alwaysAllowed: [...alwaysAllowed] } satisfies AllowedFoldersDto);
+    }
+
+    const providerResponse = await handleProviderRequest(req, pathname);
+    if (providerResponse !== undefined) return providerResponse;
+
     if (pathname === "/api/host-identity" && req.method === "GET") {
       const identity = hostIdentity(svc.cfg.stateDir);
       return identity ? json(identity) : json({ error: "Service host identity is unavailable" }, 503);

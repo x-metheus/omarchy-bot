@@ -52,8 +52,45 @@ function safeText(keys: readonly string[]): (value: string) => boolean {
   return (value) => !keys.some((key) => value.includes(key));
 }
 
+function safeProviderMetadataText(keys: readonly string[]): (value: string) => boolean {
+  const safe = safeText(keys);
+  return (value) => {
+    if (!safe(value)) return false;
+    if (!/%[0-9a-f]{2}/i.test(value)) return true;
+    try { return safe(decodeURIComponent(value)); }
+    catch { return false; }
+  };
+}
+
 function hasSafeFields(record: ProviderRecord, safe: (value: string) => boolean): boolean {
   return safe(record.id) && safe(record.name) && (record.baseUrl === undefined || safe(record.baseUrl));
+}
+
+export function uniqueProviderModels<T extends Pick<StoredModel, "id">>(models: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return models.filter(({ id }) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+export function projectProviderModels(models: unknown[], safe: (value: string) => boolean): StoredModel[] {
+  return models.flatMap((model) => {
+    if (!model || typeof model !== "object") return [];
+    const { id, name, contextWindow, maxTokens, reasoning, input, cost } = model as Partial<StoredModel>;
+    if (typeof id !== "string" || !safe(id) || (typeof name === "string" && !safe(name))) return [];
+    return [{
+      id,
+      ...(typeof name === "string" ? { name } : {}),
+      ...(typeof contextWindow === "number" ? { contextWindow } : {}),
+      ...(typeof maxTokens === "number" ? { maxTokens } : {}),
+      ...(typeof reasoning === "boolean" ? { reasoning } : {}),
+      ...(Array.isArray(input) && input.every((value) => value === "text" || value === "image") ? { input: [...input] } : {}),
+      ...(cost && typeof cost.input === "number" && typeof cost.output === "number" && typeof cost.cacheRead === "number" && typeof cost.cacheWrite === "number"
+        ? { cost: { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite } } : {}),
+    }];
+  });
 }
 
 function providerRecord(record: ProviderRecord, safe: (value: string) => boolean): ProviderRecord {
@@ -61,25 +98,14 @@ function providerRecord(record: ProviderRecord, safe: (value: string) => boolean
   return {
     id, name, protocol,
     ...(baseUrl === undefined ? {} : { baseUrl }),
-    ...(models === undefined ? {} : {
-      models: models.filter(({ id, name }) => safe(id) && (typeof name !== "string" || safe(name)))
-        .map(({ id, name, contextWindow, maxTokens, reasoning, input, cost }) => ({
-          id,
-          ...(typeof name === "string" ? { name } : {}),
-          ...(typeof contextWindow === "number" ? { contextWindow } : {}),
-          ...(typeof maxTokens === "number" ? { maxTokens } : {}),
-          ...(typeof reasoning === "boolean" ? { reasoning } : {}),
-          ...(Array.isArray(input) && input.every((value) => value === "text" || value === "image") ? { input: [...input] } : {}),
-          ...(cost && typeof cost.input === "number" && typeof cost.output === "number" && typeof cost.cacheRead === "number" && typeof cost.cacheWrite === "number"
-            ? { cost: { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite } } : {}),
-        })),
-    }),
+    ...(models === undefined ? {} : { models: projectProviderModels(models, safe) }),
   };
 }
 
 /** Service-only provider credentials. Expose metadata through list(), never the runtime accessors. */
 export class CredentialStore {
   readonly #providers = new Map<string, StoredProvider>();
+  readonly #pendingRemovals = new Set<string>();
   readonly #app: SecretScope;
   #pending: Promise<void> = Promise.resolve();
 
@@ -131,23 +157,43 @@ export class CredentialStore {
     return store;
   }
 
-  getForRuntime(id: string): StoredProvider | undefined { return structuredClone(this.#providers.get(id)); }
-  getAllForRuntime(): StoredProvider[] { return structuredClone([...this.#providers.values()]); }
+  has(id: string): boolean { return this.#providers.has(id); }
 
-  list(): ProviderProjection[] {
-    const records = [...this.#providers.values()];
-    const safe = safeText(records.map(({ apiKey }) => apiKey));
-    return records.filter((record) => hasSafeFields(record, safe)).map((record) => ({
-      ...providerRecord(record, safe), hasKey: record.apiKey.length > 0,
-    }));
+  getForRuntime(id: string): StoredProvider | undefined {
+    return this.#pendingRemovals.has(id) ? undefined : structuredClone(this.#providers.get(id));
   }
 
-  async add(provider: StoredProvider): Promise<void> {
+  getAllForRuntime(): StoredProvider[] {
+    return structuredClone([...this.#providers.values()].filter(({ id }) => !this.#pendingRemovals.has(id)));
+  }
+
+  redactKeys(text: string): string {
+    const keys = [...this.#providers.values()].map(({ apiKey }) => apiKey).sort((a, b) => b.length - a.length);
+    if (!keys.length) return text;
+    const pattern = new RegExp(keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+    return text.replace(pattern, "[redacted]");
+  }
+
+  list(projectModels?: (record: Pick<ProviderRecord, "id" | "protocol" | "models">) => unknown[]): ProviderProjection[] {
+    const records = [...this.#providers.values()];
+    const safe = safeProviderMetadataText(records.map(({ apiKey }) => apiKey));
+    return records.filter((record) => hasSafeFields(record, safe)).map((record) => {
+      const metadata = providerRecord(record, safe);
+      if (projectModels) metadata.models = projectProviderModels(projectModels(metadata), safe);
+      if (metadata.models) metadata.models = uniqueProviderModels(metadata.models);
+      return { ...metadata, hasKey: record.apiKey.length > 0 };
+    });
+  }
+
+  async add(provider: StoredProvider, { checkEncodedKeys = false } = {}): Promise<void> {
     if (!isStoredProvider(provider)) throw new Error("Invalid model provider");
     const input = structuredClone(provider);
     return this.#write(async () => {
-      const safe = safeText([input.apiKey, ...[...this.#providers.values()].map(({ apiKey }) => apiKey)]);
-      const record = await this.#save(input, safe);
+      const keys = [input.apiKey, ...[...this.#providers.values()].map(({ apiKey }) => apiKey)];
+      if (checkEncodedKeys && !hasSafeFields(input, safeProviderMetadataText(keys))) {
+        throw new Error("Provider metadata must not contain a key");
+      }
+      const record = await this.#save(input, safeText(keys));
       this.#providers.delete(record.id);
       this.#providers.set(record.id, record);
     });
@@ -155,9 +201,11 @@ export class CredentialStore {
 
   remove(id: string): Promise<void> {
     return this.#write(async () => {
-      // Stop using the cached key while a failed backend deletion can still be retried.
-      this.#providers.delete(id);
+      // Retain the record for retries and hide its key while the deletion outcome is unresolved.
+      if (this.#providers.has(id)) this.#pendingRemovals.add(id);
       await this.#app.delete(secretName(id));
+      this.#providers.delete(id);
+      this.#pendingRemovals.delete(id);
     });
   }
 

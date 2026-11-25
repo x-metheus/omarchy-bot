@@ -45,9 +45,11 @@ export default async function globalSetup(): Promise<void> {
   const runDir = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-e2e-"));
   const dataDir = path.join(runDir, "data");
   const stateDir = path.join(runDir, "state");
+  const agentDir = path.join(runDir, "pi-agent");
   const conformanceDir = path.join(dataDir, "conformance");
   mkdirSync(conformanceDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });
+  mkdirSync(agentDir, { mode: 0o700 });
   writeFileSync(path.join(conformanceDir, "pi-fake-pi-1.json"), JSON.stringify({ ok: true }));
 
   const port = new URL(SERVICE_ORIGIN).port || "80";
@@ -55,6 +57,8 @@ export default async function globalSetup(): Promise<void> {
     cwd: repoRoot,
     env: {
       ...process.env,
+      HOME: runDir,
+      PI_CODING_AGENT_DIR: agentDir,
       OMARCHY_BOT_HOME: dataDir,
       OMARCHY_BOT_STATE: stateDir,
       OMARCHY_BOT_PORT: port,

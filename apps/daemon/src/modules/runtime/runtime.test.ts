@@ -452,9 +452,15 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
   }));
   const ids: ConversationId[] = [];
   const ctx = BACKGROUND_CONTEXT;
+  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const callerAgentDir = path.join(root, "caller-pi-agent");
+  const callerKey = "test-recovery-caller-pi-key";
   let runtime: BotRuntime | undefined;
   let restoreOpen: (() => void) | undefined;
   try {
+    mkdirSync(callerAgentDir, { mode: 0o700 });
+    writeFileSync(path.join(callerAgentDir, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: callerKey } }), { mode: 0o600 });
+    process.env.PI_CODING_AGENT_DIR = callerAgentDir;
     const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
     const initial = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, ctx);
     try {
@@ -515,7 +521,13 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
       return harness;
     };
     restoreOpen = () => { Harness.open = originalOpen; };
+    const agentDir = path.join(root, "empty-pi-agent");
+    mkdirSync(agentDir, { mode: 0o700 });
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     runtime = await openBotRuntime(paths, db);
+    const runtimeProviders = runtime.credentials.getAllForRuntime();
+    expect(runtimeProviders.some(({ apiKey }) => apiKey === callerKey)).toBeFalse();
+    expect(runtimeProviders.map(({ id }) => id)).toEqual(["fake"]);
     expect(resumed).toBe(0);
     const callbackError = new Error("callback failure");
     const registered: string[] = [];
@@ -553,6 +565,8 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
     }
     expect(resumed).toBe(1);
   } finally {
+    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
     restoreOpen?.();
     await runtime?.close();
     db.close();
