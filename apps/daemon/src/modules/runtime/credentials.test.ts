@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, w
 import os from "node:os";
 import path from "node:path";
 import { CredentialStore, MODEL_CREDENTIALS_FILENAME, type StoredProvider } from "./credentials.ts";
+import { EXA_SEARCH_KEY_DESCRIPTION, EXA_SEARCH_KEY_SECRET } from "./extensions/web.ts";
 import { SecretStore, type SecretBackend } from "./secrets.ts";
 
 const providers = [
@@ -43,6 +44,105 @@ test("migrates two legacy providers into app secrets once and reloads them witho
   expect(existsSync(file)).toBeFalse();
   await reopened.remove(providers[0].id);
   expect((await CredentialStore.open(dir, secrets)).getAllForRuntime()).toEqual([providers[1]]);
+}));
+
+test("provider listings hide model metadata containing the Exa app secret", () => withCredentialDirectory(async (dir) => {
+  const secrets = new SecretStore(dir);
+  await secrets.forApp().save(EXA_SEARCH_KEY_SECRET, EXA_SEARCH_KEY_DESCRIPTION, "exa-test+metadata-key \t");
+  const rawKey = (await secrets.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET))!;
+  const key = rawKey.trim();
+  const existing = await CredentialStore.open(dir, secrets);
+  const model = { id: "safe-model", name: "Safe model" };
+  await existing.add({
+    ...providers[0],
+    models: [model, { id: "unsafe-model", name: `Contains ${rawKey}` }, { id: key }],
+  });
+  const store = await CredentialStore.open(dir, secrets, { sensitiveValues: [rawKey, key] });
+  expect(store.list()[0]?.models).toEqual([model]);
+  expect(store.list(({ models }) => [...(models ?? []), { id: encodeURIComponent(key) }])[0]?.models).toEqual([model]);
+}));
+
+test("adding a provider rejects raw, trimmed, and URL-encoded Exa secrets in metadata before saving", () => withCredentialDirectory(async (dir) => {
+  const secrets = new SecretStore(dir);
+  await secrets.forApp().save(EXA_SEARCH_KEY_SECRET, EXA_SEARCH_KEY_DESCRIPTION, "exa-test+write-key \t");
+  const rawKey = (await secrets.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET))!;
+  const key = rawKey.trim();
+  const encodedKey = encodeURIComponent(key);
+  const store = await CredentialStore.open(dir, secrets, { sensitiveValues: [rawKey, key] });
+  const before = await secrets.forApp().list();
+  const { apiKey, ...normal } = providers[0];
+  const unsafeMetadata: Partial<StoredProvider>[] = [
+    { name: `Provider ${rawKey}` },
+    { name: `Provider ${encodedKey}` },
+    { id: `provider-${key}` },
+    { baseUrl: `https://example.test?token=${encodedKey}` },
+    { models: [{ id: "model", name: `Model ${key}` }] },
+    { models: [{ id: "model", name: `Model ${encodeURIComponent(rawKey)}` }] },
+    { models: [{ id: `model-${encodedKey}` }] },
+  ];
+  for (const metadata of unsafeMetadata) {
+    await expect(store.add({ ...normal, apiKey, ...metadata })).rejects.toThrow(/^Provider metadata must not contain a key$/);
+  }
+  expect(await secrets.forApp().list()).toEqual(before);
+  expect(store.list()).toEqual([]);
+  await store.add({ ...normal, apiKey });
+  expect(store.list()).toEqual([{ ...normal, hasKey: true }]);
+}));
+
+test("doubly encoded Exa keys and over-depth escapes are rejected before saving provider metadata", () => withCredentialDirectory(async (dir) => {
+  const secrets = new SecretStore(dir);
+  await secrets.forApp().save(EXA_SEARCH_KEY_SECRET, EXA_SEARCH_KEY_DESCRIPTION, "exa+nested-write-key \t");
+  const rawKey = (await secrets.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET))!;
+  const key = rawKey.trim();
+  const encodedKey = encodeURIComponent(encodeURIComponent(key));
+  const store = await CredentialStore.open(dir, secrets, { sensitiveValues: [rawKey, key] });
+  const { apiKey, ...normal } = providers[0];
+  await store.add({ ...normal, apiKey });
+  const before = await secrets.forApp().list();
+  const unsafeMetadata: Partial<StoredProvider>[] = [
+    { models: [{ id: `model-${encodedKey}` }] },
+    { baseUrl: `https://example.test?token=${encodedKey}` },
+    { models: [{ id: "model-%25252541" }] },
+  ];
+  for (const metadata of unsafeMetadata) {
+    await expect(store.add({ ...normal, apiKey, ...metadata })).rejects.toThrow(/^Provider metadata must not contain a key$/);
+  }
+  expect(await secrets.forApp().list()).toEqual(before);
+  expect(store.getForRuntime(normal.id)).toEqual({ ...normal, apiKey });
+  expect(store.list()).toEqual([{ ...normal, hasKey: true }]);
+}));
+
+test("list hides legacy metadata containing doubly encoded Exa keys", () => withCredentialDirectory(async (dir, file) => {
+  const secrets = new SecretStore(dir);
+  await secrets.forApp().save(EXA_SEARCH_KEY_SECRET, EXA_SEARCH_KEY_DESCRIPTION, "exa+legacy-key \t");
+  const rawKey = (await secrets.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET))!;
+  const key = rawKey.trim();
+  const encodedKey = encodeURIComponent(encodeURIComponent(key));
+  const { apiKey, ...normal } = providers[0];
+  writeFileSync(file, JSON.stringify([
+    { ...normal, apiKey, models: [{ id: "safe" }, { id: `model-${encodedKey}` }, { id: "model-%25252541" }] },
+    { ...normal, id: "legacy-url", apiKey: "legacy-api-key", baseUrl: `https://example.test?token=${encodedKey}` },
+  ]), { mode: 0o600 });
+  const store = await CredentialStore.open(dir, secrets, { sensitiveValues: [rawKey, key] });
+  expect(store.list()).toEqual([{ ...normal, hasKey: true, models: [{ id: "safe" }] }]);
+}));
+
+test("provider redaction checks decoded forms of configured keys and bounds selection decoding", () => withCredentialDirectory(async (dir) => {
+  const secrets = new SecretStore(dir);
+  const exaKey = "exa%252Bnested-key";
+  await secrets.forApp().save(EXA_SEARCH_KEY_SECRET, EXA_SEARCH_KEY_DESCRIPTION, exaKey);
+  const exaValue = (await secrets.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET))!;
+  const store = await CredentialStore.open(dir, secrets, { sensitiveValues: [exaValue] });
+  await store.add({ ...providers[0], apiKey: "provider%252Bnested-key" });
+  for (const key of ["exa+nested-key", "provider+nested-key"]) {
+    expect(store.redactKeys(`missing/${key}`)).toBe("missing/[redacted]");
+    const encodedKey = encodeURIComponent(encodeURIComponent(key));
+    expect(store.redactKeys(`missing/${encodedKey}`)).not.toContain(encodedKey);
+  }
+  expect(store.redactKeys("missing/model-%25252541")).toBe("[redacted]");
+  expect(store.redactKeys("missing/model-%252541")).toBe("missing/model-%252541");
+  const overlappingKey = new CredentialStore(secrets, { sensitiveValues: ["25"] });
+  expect(overlappingKey.redactKeys("missing/model-%25252541")).toBe("[redacted]");
 }));
 
 test("keeps the legacy file until every provider verifies and retries without duplicate secrets", () => withCredentialDirectory(async (dir, file) => {

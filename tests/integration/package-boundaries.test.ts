@@ -14,13 +14,12 @@ function sourceFiles(directory: string): string[] {
   });
 }
 
-function moduleImports(file: string): string[] {
-  const source = readFileSync(path.join(root, file), "utf8")
-    .split("\n")
+function moduleImports(file: string, contents = readFileSync(path.join(root, file), "utf8")): string[] {
+  const source = contents.split("\n")
     .filter((line) => !/^\s*(?:\/\/|\*|#)/.test(line))
     .join("\n");
   const imports = [...source.matchAll(
-    /\b(?:import|export)\s+(?:type\s+)?(?:[^;"'`]*?\s+from\s*)?["']([^"']+)["']|\b(?:import|require)\s*\(\s*["']([^"']+)["']/g,
+    /\b(?:import|export)\b\s*(?:[^;"'`]*?\bfrom\b\s*)?["']([^"']+)["']|\b(?:import|require)\s*\(\s*["']([^"']+)["']/g,
   )].map((match) => match[1] ?? match[2]!);
   if (file.endsWith(".sh")) {
     return [...source.matchAll(/^\s*(?:source|\.)\s+["']?([^\s"';]+)/gm)]
@@ -77,6 +76,41 @@ test("durable runtime dependencies are imported only by the runtime module", () 
       for (const specifier of moduleImports(file)) {
         const target = repositoryPath(file, specifier);
         if (/^@earendil-works\/(?:pi-durable|chord)(?:\/|$)/.test(target)) {
+          violations.push(`${file} imports ${specifier}`);
+        }
+      }
+    }
+  }
+  expect(violations).toEqual([]);
+});
+
+test("moduleImports recognizes compact and multiline module syntax", () => {
+  const source = [
+    'import{parse}from"compact-named"',
+    'import"compact-side-effect"',
+    'import type{', '  Document,', '}from"multiline-type"',
+    'export*from"compact-reexport"',
+    'const lazy = import("dynamic-import");',
+    'const legacy = require("commonjs-require");',
+    '// import{ignored}from"commented-import"',
+  ].join("\n");
+  expect(moduleImports("fixture.ts", source)).toEqual([
+    "compact-named", "compact-side-effect", "multiline-type", "compact-reexport", "dynamic-import", "commonjs-require",
+  ]);
+});
+
+test("web extraction dependencies are imported only by the web extension", () => {
+  const extensionFiles = new Set([
+    "apps/daemon/src/modules/runtime/extensions/web.ts",
+    "apps/daemon/src/modules/runtime/extensions/web.worker.ts",
+  ]);
+  const violations: string[] = [];
+  for (const directory of ["apps", "packages", "workers", "scripts", "tests"]) {
+    for (const file of sourceFiles(directory)) {
+      if (extensionFiles.has(file)) continue;
+      for (const specifier of moduleImports(file)) {
+        const target = repositoryPath(file, specifier);
+        if (/^(?:@mozilla\/readability|linkedom|turndown)(?:\/|$)/.test(target)) {
           violations.push(`${file} imports ${specifier}`);
         }
       }

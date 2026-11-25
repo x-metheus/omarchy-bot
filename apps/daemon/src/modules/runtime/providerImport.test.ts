@@ -301,6 +301,22 @@ test("skips base URLs with userinfo and keeps their password out of provider met
   expect(result.imported).toEqual([gatewayId]);
 });
 
+test("skips both provider metadata rejections and finishes importing later Pi providers", async () => {
+  writePi("models.json", { providers: {
+    "unsafe-encoding": { ...gateway, baseUrl: `${gatewayUrl}?nested=%25252541` },
+    "secret-name-collision": { ...gateway, apiKey: "provider-" },
+    [gatewayId]: gateway,
+  } });
+
+  expect(await runImport()).toEqual({ imported: [gatewayId] });
+  expect(credentials.list().map(({ id }) => id)).toEqual([gatewayId]);
+  expect(getSetting(db, PI_PROVIDER_IMPORT_SETTING)).toBe("1");
+
+  await credentials.remove(gatewayId);
+  expect(await runImport()).toEqual({ imported: [] });
+  expect(credentials.list()).toEqual([]);
+});
+
 test("marks a pass with no Pi files and ignores files that appear later", async () => {
   expect(await runImport()).toEqual({ imported: [] });
   expect(getSetting(db, PI_PROVIDER_IMPORT_SETTING)).not.toBeNull();

@@ -18,6 +18,8 @@ type ProviderRecord = Omit<StoredProvider, "apiKey">;
 export type ProviderProjection = ProviderRecord & { hasKey: boolean };
 export const MODEL_CREDENTIALS_FILENAME = "model-credentials.json";
 const PROVIDER_PREFIX = "provider-";
+const MAX_METADATA_DECODES = 3;
+const PERCENT_ESCAPE = /%[0-9a-f]{2}/i;
 
 function secretName(id: string): string {
   return PROVIDER_PREFIX + createHash("sha256").update(id).digest("hex").slice(0, 48);
@@ -52,13 +54,34 @@ function safeText(keys: readonly string[]): (value: string) => boolean {
   return (value) => !keys.some((key) => value.includes(key));
 }
 
-function safeProviderMetadataText(keys: readonly string[]): (value: string) => boolean {
-  const safe = safeText(keys);
+function percentDecodedForms(value: string): { forms: string[]; complete: boolean } {
+  const forms = [value];
+  while (PERCENT_ESCAPE.test(value)) {
+    if (forms.length > MAX_METADATA_DECODES) return { forms, complete: false };
+    try { value = decodeURIComponent(value); }
+    catch { return { forms, complete: false }; }
+    forms.push(value);
+  }
+  return { forms, complete: true };
+}
+
+function keyVariants(keys: readonly string[]): string[] {
+  const variants = new Set<string>();
+  for (const key of keys) {
+    for (const value of [key, key.trim()]) {
+      for (const form of percentDecodedForms(value).forms) {
+        if (form.length > 0) variants.add(form);
+      }
+    }
+  }
+  return [...variants];
+}
+
+function safeProviderMetadataText(variants: readonly string[]): (value: string) => boolean {
+  const safe = safeText(variants);
   return (value) => {
-    if (!safe(value)) return false;
-    if (!/%[0-9a-f]{2}/i.test(value)) return true;
-    try { return safe(decodeURIComponent(value)); }
-    catch { return false; }
+    const { forms, complete } = percentDecodedForms(value);
+    return complete && forms.every(safe);
   };
 }
 
@@ -107,12 +130,16 @@ export class CredentialStore {
   readonly #providers = new Map<string, StoredProvider>();
   readonly #pendingRemovals = new Set<string>();
   readonly #app: SecretScope;
+  readonly #sensitiveValues: readonly string[];
   #pending: Promise<void> = Promise.resolve();
 
-  constructor(secrets: SecretStore) { this.#app = secrets.forApp(); }
+  constructor(secrets: SecretStore, { sensitiveValues = [] }: { sensitiveValues?: readonly string[] } = {}) {
+    this.#app = secrets.forApp();
+    this.#sensitiveValues = sensitiveValues.filter((value) => value.length > 0);
+  }
 
-  static async open(stateDir: string, secrets: SecretStore): Promise<CredentialStore> {
-    const store = new CredentialStore(secrets);
+  static async open(stateDir: string, secrets: SecretStore, options?: { sensitiveValues?: readonly string[] }): Promise<CredentialStore> {
+    const store = new CredentialStore(secrets, options);
     const file = path.join(stateDir, MODEL_CREDENTIALS_FILENAME);
     const legacy = readLegacyProviders(file);
     if (legacy) {
@@ -168,15 +195,21 @@ export class CredentialStore {
   }
 
   redactKeys(text: string): string {
-    const keys = [...this.#providers.values()].map(({ apiKey }) => apiKey).sort((a, b) => b.length - a.length);
-    if (!keys.length) return text;
-    const pattern = new RegExp(keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
-    return text.replace(pattern, "[redacted]");
+    const { forms, complete } = percentDecodedForms(text);
+    if (!complete) return "[redacted]";
+    const variants = keyVariants([...this.#sensitiveValues, ...Array.from(this.#providers.values(), ({ apiKey }) => apiKey)]);
+    const safe = safeText(variants);
+    // A match after decoding may have no literal span to replace in the original text.
+    if (safe(text)) return forms.every(safe) ? text : "[redacted]";
+    variants.sort((a, b) => b.length - a.length);
+    const pattern = new RegExp(variants.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+    const redacted = text.replace(pattern, "[redacted]");
+    return safeProviderMetadataText(variants)(redacted) ? redacted : "[redacted]";
   }
 
   list(projectModels?: (record: Pick<ProviderRecord, "id" | "protocol" | "models">) => unknown[]): ProviderProjection[] {
     const records = [...this.#providers.values()];
-    const safe = safeProviderMetadataText(records.map(({ apiKey }) => apiKey));
+    const safe = safeProviderMetadataText(keyVariants([...this.#sensitiveValues, ...records.map(({ apiKey }) => apiKey)]));
     return records.filter((record) => hasSafeFields(record, safe)).map((record) => {
       const metadata = providerRecord(record, safe);
       if (projectModels) metadata.models = projectProviderModels(projectModels(metadata), safe);
@@ -189,8 +222,10 @@ export class CredentialStore {
     if (!isStoredProvider(provider)) throw new Error("Invalid model provider");
     const input = structuredClone(provider);
     return this.#write(async () => {
-      const keys = [input.apiKey, ...[...this.#providers.values()].map(({ apiKey }) => apiKey)];
-      if (checkEncodedKeys && !hasSafeFields(input, safeProviderMetadataText(keys))) {
+      const keys = [input.apiKey, ...Array.from(this.#providers.values(), ({ apiKey }) => apiKey)];
+      const checkedKeys = checkEncodedKeys ? [...this.#sensitiveValues, ...keys] : this.#sensitiveValues;
+      const safe = safeProviderMetadataText(keyVariants(checkedKeys));
+      if (!hasSafeFields(input, safe) || input.models?.some(({ id, name }) => !safe(id) || (typeof name === "string" && !safe(name)))) {
         throw new Error("Provider metadata must not contain a key");
       }
       const record = await this.#save(input, safeText(keys));

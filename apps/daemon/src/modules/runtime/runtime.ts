@@ -26,6 +26,7 @@ import { createPluginsExtension } from "./extensions/plugins.ts";
 import { buildSystemPrompt } from "./extensions/prompt.ts";
 import { createSecretsExtension, type BotSecretAccess } from "./extensions/secrets.ts";
 import { listWorkspaceSkills } from "./extensions/skills.ts";
+import { createWebExtension, EXA_SEARCH_KEY_SECRET, readWebExemptRanges } from "./extensions/web.ts";
 import { importPiProviders } from "./providerImport.ts";
 import { SecretStore } from "./secrets.ts";
 import { McpOAuthManager, type McpOAuthManagerDeps } from "./mcpOAuth.ts";
@@ -175,9 +176,11 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     reportedCredentialsFailure = true;
     console.warn("Unable to load model credential store; continuing without stored providers");
   };
-  const credentials = await CredentialStore.open(paths.stateDir, secretStore).catch(() => {
+  const exaSearchKey = await secretStore.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET).catch(() => undefined);
+  const credentialOptions = { sensitiveValues: exaSearchKey === undefined ? [] : [exaSearchKey, exaSearchKey.trim()] };
+  const credentials = await CredentialStore.open(paths.stateDir, secretStore, credentialOptions).catch(() => {
     reportCredentialsFailure();
-    return new CredentialStore(secretStore);
+    return new CredentialStore(secretStore, credentialOptions);
   });
   if (db && !reportedCredentialsFailure) {
     try { await importPiProviders({ db, credentials, homeDir: paths.homeDir }); }
@@ -365,6 +368,10 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     registry.install(createLocalExtension(db, () => services?.sidecars, active, dispatched));
     registry.install(createMailExtension(db, () => services?.mailbox, active, undefined, writeService));
     registry.install(createPluginsExtension(db, () => services?.plugins, active, dispatched));
+    registry.install(createWebExtension({
+      exemptRanges: () => readWebExemptRanges(db),
+      searchKey: () => secretStore.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET),
+    }));
     const harness = await Harness.open(storage, { models: () => {
       try { return createRuntimeModels(credentials, selections); } catch {
         reportCredentialsFailure();
