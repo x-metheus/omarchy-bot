@@ -9,11 +9,11 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentSystemPromp
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AGENT_BROWSER_TOOL, AGENT_COMPUTER_TOOL, AGENT_LOCAL_TOOL } from "@omarchy-bot/agent-contract";
-import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
+import { api, apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
 import { until, withTimeout } from "../../../../../tests/integration/helpers/bot-screen-load-observe.ts";
 import { FakeBotScreenRuntimeAdapter } from "../computer/fakeBotScreenRuntime.ts";
 import { ThreadsService } from "../threads/threads.ts";
-import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
+import type { DeleteBotResultDto, DeviceServerFrame, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
 import { installDurableSuiteProvider, withFakeRuntimeProvider } from "./harness-test-support.ts";
 import { CredentialStore, MODEL_CREDENTIALS_FILENAME } from "./credentials.ts";
@@ -690,6 +690,36 @@ test("the durable tool-fail fixture faults the run after its bash call starts", 
         WHERE c.thread_id = ? AND json_extract(t.record, '$.input.callId') = 'fixture-failing-bash'`).all(sent.threadId)).toHaveLength(1);
     });
   } finally { restore?.(); }
+});
+
+test("durable native bash uses the Shared Workspace cwd with a Sidecar online and sends no Sidecar jobs", async () => {
+  const previous = process.env.OMARCHY_TEST_DURABLE;
+  process.env.OMARCHY_TEST_DURABLE = "1";
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  try {
+    h = await startDaemon(undefined, { separateWorkspace: true });
+    const deviceId = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const frames: DeviceServerFrame[] = [];
+    const port = { send: (frame: DeviceServerFrame) => { frames.push(frame); }, close: () => {} };
+    expect(h.svc.devices.register(port, {
+      type: "register", deviceId, hostname: "laptop", os: "linux", shell: "posix-sh", capabilities: ["shell"],
+    }).ok).toBeTrue();
+
+    const sent = await sendToBot(h, await makeBot(h, "Native cwd Bot"), "native-bash-cwd", deviceId);
+    await waitThreadIdle(h, sent.threadId);
+    const transcript = await messages(h, sent.threadId);
+    expect(transcript.find(({ toolCall }) => toolCall?.name === "bash")?.toolCall?.status).toBe("completed");
+    expect(transcript.find(({ kind }) => kind === "response")?.text?.trim()).toBe(h.svc.cfg.sharedWorkspaceDir);
+    expect(frames).toEqual([]);
+  } finally {
+    try {
+      await h?.stop();
+      if (h) for (const directory of [h.home, `${h.home}-profile`, h.svc.cfg.stateDir]) rmSync(directory, { recursive: true, force: true });
+    } finally {
+      if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
+      else process.env.OMARCHY_TEST_DURABLE = previous;
+    }
+  }
 });
 
 test("a durable provider failure redacts app and Bot secrets from the Turn and its status event", () => {

@@ -111,6 +111,22 @@ test("durable tool-fail returns a terminal provider error after its bash round",
   expect(reply).toMatchObject({ stopReason: "error", errorMessage: "fake failure", content: [] });
 });
 
+test("durable Sidecar file directives preserve the worker's paths, contents, queries, and targets", async () => {
+  const run = suite();
+  const deviceId = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const directives = [
+    ["local.write:notes/empty.txt", { action: "write", path: "notes/empty.txt", contents: "" }],
+    ["local.write@this-device:notes/doc.txt:first:second", { action: "write", path: "notes/doc.txt", contents: "first:second", target: "this-device" }],
+    [`local.read@${deviceId}:notes/a:b.txt`, { action: "read", path: "notes/a:b.txt", target: deviceId }],
+    ["local.search@this-device:first:second", { action: "search", query: "first:second", target: "this-device" }],
+  ] as const;
+  for (const [directive, args] of directives) {
+    const reply = await run(directive).result();
+    expect(reply.stopReason).toBe("toolUse");
+    expect(reply.content).toEqual([{ type: "toolCall", id: expect.any(String), name: "local", arguments: args }]);
+  }
+});
+
 test("durable Sidecar fixtures pass transfer arguments and relay successful output", async () => {
   const run = suite();
   const transfer = await run("local.transfer:to-workspace:big.txt:inbox/big.txt").result();

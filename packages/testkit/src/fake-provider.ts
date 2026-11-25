@@ -105,24 +105,41 @@ function graphicalToolFixture(context: TranscriptContext) {
 function localFixture(text: string, context: TranscriptContext) {
   const run = /^local\.run(?:@(dev_[0-9a-f]{32}|this-device))?:(.*)$/.exec(text);
   const transfer = /^local\.transfer(?:@(dev_[0-9a-f]{32}|this-device))?:(to-workspace|from-workspace):([^:]*):(.*)$/.exec(text);
+  const file = /^local\.(read|search|write)(?:@(dev_[0-9a-f]{32}|this-device))?:(.*)$/.exec(text);
   const forgedRun = text.startsWith("local.run.forged:");
-  if (!run && !transfer && !forgedRun) return undefined;
+  if (!run && !transfer && !file && !forgedRun) return undefined;
   const latest = context.messages.at(-1);
   if (latest?.role === "toolResult" && latest.toolName === "local") {
     if (latest.isError) {
-      if (!transfer) return fauxAssistantMessage("Local call finished.");
+      if (run || forgedRun) return fauxAssistantMessage("Local call finished.");
       const errorMessage = latest.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
         .replace(/^<harness>\n\[error\] ([\s\S]*)\n<\/harness>$/, "$1");
       return fauxAssistantMessage([], { stopReason: "error", errorMessage });
     }
     return fauxAssistantMessage(latest.content.flatMap((part) => part.type === "text" ? [fauxText(part.text)] : []));
   }
-  const target = (run ?? transfer)?.[1];
-  const args = run
-    ? { action: "run", command: run[2]! }
-    : transfer
-      ? { action: "transfer", direction: transfer[2]!, path: transfer[3]!, destination: transfer[4]! }
-      : { action: "run", command: text.slice("local.run.forged:".length), botId: "wrong-bot", turnId: "wrong-turn" };
+  const target = (run ?? transfer)?.[1] ?? file?.[2];
+  let args: Record<string, string>;
+  if (run) {
+    args = { action: "run", command: run[2]! };
+  } else if (transfer) {
+    args = { action: "transfer", direction: transfer[2]!, path: transfer[3]!, destination: transfer[4]! };
+  } else if (file) {
+    const action = file[1]!;
+    const value = file[3]!;
+    if (action === "read") {
+      args = { action, path: value };
+    } else if (action === "search") {
+      args = { action, query: value };
+    } else {
+      const separator = value.indexOf(":");
+      const path = separator < 0 ? value : value.slice(0, separator);
+      const contents = separator < 0 ? "" : value.slice(separator + 1);
+      args = { action, path, contents };
+    }
+  } else {
+    args = { action: "run", command: text.slice("local.run.forged:".length), botId: "wrong-bot", turnId: "wrong-turn" };
+  }
   return fauxAssistantMessage(fauxToolCall("local", { ...args, ...(target === undefined ? {} : { target }) }, { id: "local-run" }), { stopReason: "toolUse" });
 }
 
@@ -173,6 +190,14 @@ export function createDurableSuiteFakeProvider() {
     if (text === "tool" || text === "tool please") {
       if (continued) return fauxAssistantMessage("tool finished");
       return fauxAssistantMessage(durableSuiteToolCalls.bash, { stopReason: "toolUse" });
+    }
+    if (text === "native-bash-cwd") {
+      // The harness intercepts durableSuiteToolCalls. This probe executes the real tool.
+      const call = fauxToolCall("bash", { command: "pwd" }, { id: "native-bash-cwd" });
+      if (latest?.role === "toolResult" && latest.toolCallId === call.id) {
+        return fauxAssistantMessage(latest.content.flatMap((part) => part.type === "text" ? [fauxText(part.text)] : []));
+      }
+      return fauxAssistantMessage(call, { stopReason: "toolUse" });
     }
     if (text === "thinking-stream") return fauxAssistantMessage([fauxThinking("**Inspect inputs.**"), fauxText("Thinking complete.")]);
     if (text === "adjacent-responses") return fauxAssistantMessage([fauxText("First block."), fauxText("Second block.")]);
