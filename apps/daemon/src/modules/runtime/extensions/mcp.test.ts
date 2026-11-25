@@ -895,6 +895,43 @@ test.each(["request timeout", "invocation deadline"] as const)("a timed-out HTTP
   }
 });
 
+test.each([
+  ["startup provisioning", false],
+  ["credential refresh", true],
+] as const)("PluginsService.prepareServiceCredentials reports failed %s", async (_phase, nativeManaged) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-preparation-failure-"));
+  const privateDir = path.join(root, "private");
+  const publisher = "https://publisher.invalid";
+  const tokenEndpoint = `${publisher}/api/plugins/oauth/token`;
+  const accountId = "fixture";
+  const fetchMock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+    if (String(input) !== tokenEndpoint) throw new Error("Unexpected request during credential preparation.");
+    return Response.json({ error: "Fixture publisher rejected the refresh." }, { status: 401 });
+  }, { preconnect: fetch.preconnect }));
+  let plugins: PluginsService | undefined;
+  try {
+    await mkdir(privateDir);
+    await writeFile(path.join(privateDir, "configuration.json"), JSON.stringify({ version: 1, revision: 0, cloudUrl: publisher, mcp: [], skills: [], accounts: [{
+      id: accountId, providerId: "github", label: "Fixture", identity: "github:fixture", status: "connected", enabledServices: ["github"], nativeManaged,
+      grant: { generation: "fixture", accessToken: crypto.randomUUID(), refreshToken: crypto.randomUUID(), expiresAt: Date.now() - 10_000, scopes: [], cloudUrl: publisher },
+    }] }));
+    plugins = new PluginsService(privateDir, root, async () => ({ skills: [] }));
+
+    expect(await plugins.prepareServiceCredentials()).toEqual({ failed: [accountId] });
+    expectSafeEqual(fetchMock.mock.calls.map(([input]) => String(input)), [tokenEndpoint]);
+    const lease = await plugins.acquire();
+    try {
+      expect(lease.snapshot.diagnostics).toContainEqual(expect.stringContaining("Needs attention: Fixture publisher rejected the refresh."));
+    } finally { lease.release(); }
+  } finally {
+    try { await plugins?.shutdown(); }
+    finally {
+      fetchMock.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("MCP shutdown drains publisher credential preparation after a call is aborted", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-close-preparation-"));
   const privateDir = path.join(root, "private");
@@ -914,7 +951,7 @@ test("MCP shutdown drains publisher credential preparation after a call is abort
   }, { preconnect: fetch.preconnect }));
   let plugins: PluginsService | undefined;
   let mcp: ReturnType<typeof createMcpExtension> | undefined;
-  const preparations: Promise<void>[] = [];
+  const preparations: Promise<unknown>[] = [];
   try {
     await mkdir(privateDir);
     await writeFile(path.join(privateDir, "configuration.json"), JSON.stringify({ version: 1, revision: 0, cloudUrl: publisher, mcp: [], skills: [], accounts: [{

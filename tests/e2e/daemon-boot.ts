@@ -99,6 +99,7 @@ db.query(
 db.query(`DELETE FROM schema_migrations WHERE name = '0014-enforce-current-avatar-recipes'`).run();
 db.close();
 
+process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
 const { port } = await main({
   useHostApplicationUnits: false,
   botScreenRuntimeDir: path.join(dataDir, "r"),

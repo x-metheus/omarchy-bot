@@ -12,6 +12,7 @@ const runtimeRoot = process.env.OMARCHY_BOT_SCREEN_RUNTIME_DIR;
 if (dataDir === undefined || runtimeRoot === undefined) {
   throw new Error("OMARCHY_BOT_HOME and OMARCHY_BOT_SCREEN_RUNTIME_DIR are required");
 }
+process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
 const { port } = await main({
   useHostApplicationUnits: true,
   botComputerAssetSupply: createFixtureFontSupply(path.join(dataDir, "font-fixture")),

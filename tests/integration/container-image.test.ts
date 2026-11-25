@@ -63,6 +63,7 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
     "--mount", `type=volume,source=${volume},target=/var/lib/omarchy-bot`,
     "--mount", `type=bind,source=${path.resolve(import.meta.dir, "fake-workers")},target=${runtime}/tests/integration/fake-workers,readonly`,
     "--env", `OMARCHY_BOT_WORKERS_DIR=${runtime}/tests/integration/fake-workers`,
+    "--env", "OMARCHY_TEST_DISABLE_KEYRING=1",
     "--env", "OMARCHY_BOT_SCREEN_PROFILE=720p", image!);
   const title = `OFFLINE-${name}`;
   // Same origin after recreation: browser localStorage must survive on the state volume.
@@ -181,6 +182,7 @@ containerTest("fresh TLS image prints a one-time pairing URL and exec CLI suppor
     await docker("run", "-d", "--pull=never", "--name", name, "--network=none",
       "--mount", `type=volume,source=${volume},target=/var/lib/omarchy-bot`,
       "--mount", `type=bind,source=${root},target=/fixture-tls,readonly`,
+      "--env", "OMARCHY_TEST_DISABLE_KEYRING=1",
       "--env", "OMARCHY_BOT_TLS_CERT=/fixture-tls/cert.pem", "--env", "OMARCHY_BOT_TLS_KEY=/fixture-tls/key.pem", image!);
     const lines = await until(async () => {
       const lines = (await docker("logs", name)).split("\n").filter(line => line.startsWith("pairing:"));

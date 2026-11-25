@@ -206,6 +206,7 @@ async function bootService(port: number, tls: false | "trusted" | "untrusted" = 
   const child = Bun.spawn(command, {
     env: { ...process.env, OMARCHY_BOT_HOME: path.join(dir, "data"), OMARCHY_BOT_STATE: path.join(dir, "state"),
       OMARCHY_BOT_PORT: String(port), OMARCHY_BOT_HOST: host, OMARCHY_BOT_DEV: "0",
+      OMARCHY_TEST_DISABLE_KEYRING: "1",
       OMARCHY_BOT_MACHINE_ID_FILE: machineIdFile,
       OMARCHY_BOT_SCREEN_PROFILE: "720p",
       OMARCHY_BOT_WORKERS_DIR: path.resolve("tests/integration/fake-workers"),

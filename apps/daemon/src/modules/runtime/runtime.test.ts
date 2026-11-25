@@ -121,7 +121,7 @@ test("a plain 403 during OAuth import leaves the MCP service needing sign-in", a
     const report = await importMcpOAuthTokens({
       secrets: botRuntime.secrets,
       snapshot,
-      reader: { available: true, read: async () => ({ tokens: { accessToken } }) },
+      reader: { read: async () => ({ serverUrl: fixture.url.href, tokens: { accessToken } }) },
       async check(server) {
         const result = await botRuntime.mcpControl({ action: "connect", server });
         expect(result).toMatchObject({ servers: [{ name, status: "failed" }], result: { error: "connect_failed" } });

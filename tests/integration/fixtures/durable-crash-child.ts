@@ -9,6 +9,7 @@ installDurableCrashProvider();
 const state = process.env.OMARCHY_BOT_STATE!;
 const credentials = await CredentialStore.open(state, new SecretStore(process.env.OMARCHY_BOT_HOME!));
 await credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
 const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
 const daemon = await main({ useHostApplicationUnits: false, botScreenAdapter: new FakeBotScreenRuntimeAdapter(), botScreenRuntimeDir: path.join(process.env.OMARCHY_BOT_HOME!, "r") });
 setSetting(daemon.svc.db, "default_model", "fake/fake-model");

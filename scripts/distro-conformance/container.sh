@@ -42,7 +42,7 @@ export OMARCHY_BOT_DESKTOP_BIN=$current/sway/bin/omarchy-bot-desktop
 export OMARCHY_BOT_X11_FIXTURE=/usr/local/bin/x11-fixture
 [[ ! -e $XDG_RUNTIME_DIR/systemd/private ]] || { echo 'A real user manager must not be used' >&2; exit 1; }
 # A container entrypoint supervises the same foreground entry used by systemd.
-bash "$current/scripts/serve.sh" >"$root/service.log" 2>&1 &
+OMARCHY_TEST_DISABLE_KEYRING=1 bash "$current/scripts/serve.sh" >"$root/service.log" 2>&1 &
 service=$!
 bun "$current/scripts/distro-conformance/smoke.ts"
 kill -INT "$service"

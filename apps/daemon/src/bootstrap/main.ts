@@ -8,7 +8,8 @@ import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { openBotRuntime } from "../modules/runtime/runtime.ts";
-import { importMcpOAuthTokensOnce, pendingPiMcpAdapterTokenReader } from "../modules/runtime/mcpOAuthImport.ts";
+import { importMcpOAuthTokensOnce } from "../modules/runtime/mcpOAuthImport.ts";
+import { createPiMcpAdapterTokenReader } from "../modules/runtime/mcpOAuthKeyringReader.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker, type ComputerSurfaceOwner } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
@@ -36,6 +37,15 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
   const tmp = `${statusPath}.tmp`;
   writeFileSync(tmp, JSON.stringify(data, null, 2));
   renameSync(tmp, statusPath);
+}
+
+export function keyringAccessDisabled(env: Record<string, string | undefined>): boolean {
+  return env.OMARCHY_TEST_DISABLE_KEYRING === "1";
+}
+
+export async function closeRuntimeAfterMcpOAuthImport(importing: Promise<unknown> | undefined, closeRuntime: () => Promise<void>): Promise<void> {
+  await importing;
+  await closeRuntime();
 }
 
 export interface MainOptions {
@@ -179,10 +189,13 @@ export async function main(options: MainOptions = {}): Promise<{
     if (origin.hostname === "[::]") origin.hostname = "[::1]";
     return origin.origin;
   }, (event) => { events.append("plugin", event.accountId ?? event.mcpId ?? event.providerId ?? "plugins", `plugin.authorization_${event.status}`, event); });
-  if (typeof runtime.mcpControl === "function") {
+  let mcpOAuthImport: Promise<unknown> | undefined;
+  // Test fixtures set this guard to avoid opening the host keyring during startup.
+  if (!keyringAccessDisabled(process.env) && typeof runtime.mcpControl === "function") {
     const markerKey = "mcpOAuthAdapterImport";
-    void importMcpOAuthTokensOnce({
-      reader: pendingPiMcpAdapterTokenReader,
+    mcpOAuthImport = importMcpOAuthTokensOnce({
+      preparePlugins: async () => (await plugins.prepareServiceCredentials()).failed.length === 0,
+      createReader: () => createPiMcpAdapterTokenReader({ get: (options) => Bun.secrets.get(options) }),
       secrets: runtime.secrets,
       snapshot: mcpServers,
       check: (name) => runtime.mcpControl({ action: "connect", server: name })
@@ -353,7 +366,7 @@ export async function main(options: MainOptions = {}): Promise<{
     devices.close();
     mailbox.pauseDispatch();
     await turns.shutdown().catch(reportStopFailure("turns"));
-    await runtime.close().catch(reportStopFailure("runtime"));
+    await closeRuntimeAfterMcpOAuthImport(mcpOAuthImport, () => runtime.close()).catch(reportStopFailure("runtime"));
     computer.shutdown();
     await projections.shutdown().catch(reportStopFailure("projections"));
     await screens.shutdown().catch(reportStopFailure("screens"));
@@ -373,7 +386,7 @@ export async function main(options: MainOptions = {}): Promise<{
     devices.close();
     mailbox.pauseDispatch();
     await turns.shutdown({ reason: "daemon restart" });
-    await runtime.close();
+    await closeRuntimeAfterMcpOAuthImport(mcpOAuthImport, () => runtime.close());
     computer.shutdown();
     await projections.shutdown();
     screens.detach();
