@@ -61,7 +61,6 @@ test.each(["SIGKILL", "graceful restart"])("%s of the plugin session leaves the 
     OMARCHY_BOT_OPEN: "true",
     CALLS: path.join(root, "systemctl-calls"),
     SERVICE_PID: path.join(root, "service.pid"),
-    OMARCHY_BOT_WORKERS_DIR: path.join(projectRoot, "tests/integration/fake-workers"),
     ARCHIVE: path.join(root, "runtime.tar.zst"),
   };
   mkdirSync(env.HOME!, { recursive: true });
@@ -72,8 +71,6 @@ test.each(["SIGKILL", "graceful restart"])("%s of the plugin session leaves the 
   mkdirSync(path.dirname(shellConfig), { recursive: true });
   const enabledConfig = JSON.stringify({ version: 1, plugins: [{ id: "io.github.xmethues.omarchy-bot" }] });
   writeFileSync(shellConfig, enabledConfig);
-  mkdirSync(path.join(env.OMARCHY_BOT_HOME!, "conformance"), { recursive: true });
-  writeFileSync(path.join(env.OMARCHY_BOT_HOME!, "conformance/pi-fake-pi-1.json"), JSON.stringify({ ok: true, image: "verified" }));
   const manager = path.join(env.XDG_RUNTIME_DIR!, "systemd");
   mkdirSync(manager, { recursive: true });
   const socket = Bun.listen({ unix: path.join(manager, "private"), socket: { data() {} } });
@@ -124,7 +121,6 @@ import {FakeBotScreenRuntimeAdapter} from ${JSON.stringify(path.join(projectRoot
 import {installDurableSuiteProvider} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/modules/runtime/harness-test-support.ts"))};
 import {setSetting} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/persistence/settings.ts"))};
 process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
-process.env.PI_CODING_AGENT_DIR = process.env.HOME + "/.pi/agent";
 const restoreProvider = installDurableSuiteProvider();
 const daemon = await main({useHostApplicationUnits:false,botScreenAdapter:new FakeBotScreenRuntimeAdapter(),botScreenRuntimeDir:process.env.HOME+"/r"});
 if (!daemon.svc.credentials.getForRuntime("fake")) {
@@ -185,7 +181,6 @@ process.once("SIGINT", async () => {
     if (!response.ok) throw new Error(`${route}: ${response.status} ${await response.text()}`);
     return response.json() as Promise<T>;
   }
-  // Agent readiness and Turn status come from the installed Service process.
   async function until(condition: () => Promise<boolean>) {
     for (let attempt = 0; attempt < 250; attempt++) {
       if (await condition()) return;
@@ -193,7 +188,6 @@ process.once("SIGINT", async () => {
     }
     throw new Error("scripted Turn condition did not arrive");
   }
-  await until(async () => (await api<Array<{ id: string; status: string }>>("/api/agents")).some(agent => agent.id === "pi" && agent.status === "ready"));
   const bot = await api<{ id: string }>("/api/bots", { name: "Surviving Turn", agentId: "pi" });
   const sent = await api<{ threadId: string; turnId: string }>(`/api/bots/${bot.id}/messages`, { text: "steer-echo" });
   const threadRoute = `/api/threads/${sent.threadId}`;

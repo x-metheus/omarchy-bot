@@ -2,6 +2,6 @@
   "name": "@omarchy-bot/testkit",
   "version": "0.1.0",
   "type": "module",
-  "exports": { ".": "./src/index.ts", "./fake-agent-worker": "./src/fake-agent-worker.ts" },
-  "dependencies": { "@earendil-works/pi-ai": "1.5.2", "@omarchy-bot/agent-contract": "workspace:*", "@omarchy-bot/domain": "workspace:*" }
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@earendil-works/pi-ai": "1.5.2", "@omarchy-bot/domain": "workspace:*" }
 }

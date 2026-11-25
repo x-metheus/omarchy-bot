@@ -178,7 +178,7 @@ describe("cross-origin Service boundary", () => {
     let dev: Harness;
     try {
       process.env.OMARCHY_BOT_DEV = "1";
-      dev = await startDaemon(undefined, { waitForAgentReady: false });
+      dev = await startDaemon();
     } finally {
       if (original === undefined) delete process.env.OMARCHY_BOT_DEV;
       else process.env.OMARCHY_BOT_DEV = original;

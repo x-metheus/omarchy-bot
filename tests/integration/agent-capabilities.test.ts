@@ -1,8 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { AgentCapabilityInventory } from "../../packages/agent-contract/src/index.ts";
-import type { AgentDto, AttachmentDto } from "../../packages/protocol/src/index.ts";
+import type { AttachmentDto } from "../../packages/protocol/src/index.ts";
 import { api, authedFetch, apiStatus, makeBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 async function stage(
@@ -29,23 +28,7 @@ async function stage(
   };
 }
 
-const PI_CONFORMANCE_FILE = "pi-fake-pi-1.json";
-
-function setProbeControl(h: Harness, control: Record<string, unknown> = {}): void {
-  writeFileSync(
-    path.join(h.home, "conformance", PI_CONFORMANCE_FILE),
-    JSON.stringify({ ok: true, image: "verified", ...control }),
-  );
-}
-
-async function piAgent(h: Harness): Promise<AgentDto> {
-  const agents = await api<AgentDto[]>(h, "GET", "/api/agents");
-  const pi = agents.find((agent) => agent.id === "pi");
-  if (pi === undefined) throw new Error("missing pi agent");
-  return pi;
-}
-
-describe("agent capability inventory", () => {
+describe("durable attachment policy and Turn timeouts", () => {
   let h: Harness;
 
   beforeAll(async () => {
@@ -57,23 +40,7 @@ describe("agent capability inventory", () => {
     rmSync(h.home, { recursive: true, force: true });
   });
 
-  test("publishes the exact versioned capability inventory", async () => {
-    const worker = await h.svc.supervisor.agentWorker("pi");
-    const initialProbe = await worker.request({ type: "probe" }, 30_000) as {
-      capabilities: AgentCapabilityInventory;
-    };
-    expect(initialProbe.capabilities).toEqual({
-      version: 4,
-      steering: true,
-      abort: true,
-      botMail: true,
-      plugins: false,
-      nativeThreadActions: ["resume", "history", "close"],
-      thinking: { supported: true, streaming: true },
-      attachments: { text: true, image: true },
-      nativeEventFamilies: ["fake.progress", "fake.diagnostic-progress", "fake.secret-progress"],
-    });
-
+  test("accepts text attachments and rejects legacy staged images at send time", async () => {
     const botId = await makeBot(h, "Capability Bot");
     const draftToken = crypto.randomUUID();
     const textUpload = await stage(h, botId, new Blob(["supported text"]), "notes.txt", draftToken);
@@ -118,19 +85,6 @@ describe("agent capability inventory", () => {
       ).status,
     ).toBe(200);
 
-    setProbeControl(h, { image: "provider-unsupported" });
-    await h.svc.agents.recheck("pi");
-    const reprobe = await worker.request({ type: "probe" }, 30_000) as {
-      capabilities: AgentCapabilityInventory;
-    };
-    expect(reprobe.capabilities.attachments).toEqual({ text: true, image: false });
-
-    const rejectedStage = await stage(h, botId, new Blob([pngBytes]), "second.png", draftToken);
-    expect(rejectedStage).toEqual({
-      status: 400,
-      body: { error: "Unsupported attachment media type image/png (second.png)" },
-    });
-
     const sent = await api<{ threadId: string }>(h, "POST", `/api/bots/${botId}/messages`, {
       text: "attachment-echo",
       attachmentIds: [(textUpload.body as AttachmentDto).id],
@@ -153,38 +107,8 @@ describe("agent capability inventory", () => {
     ).toBe(200);
   });
 
-  test("invalid and offline rechecks clear the published policy", async () => {
-    setProbeControl(h);
-    const ready = await h.svc.agents.recheck("pi");
-    expect(ready.status).toBe("ready");
-    expect(ready.capabilities?.steering).toBeTrue();
-    expect(h.svc.agents.capabilityInventory("pi")?.steering).toBeTrue();
-
-    try {
-
-      setProbeControl(h, { fakeProbe: "invalid" });
-      const invalid = await h.svc.agents.recheck("pi");
-      expect(invalid.status).toBe("incompatible");
-      expect(invalid.capabilities).toBeUndefined();
-      expect(h.svc.agents.capabilityInventory("pi")).toBeUndefined();
-      expect((await piAgent(h)).capabilities).toBeUndefined();
-
-      setProbeControl(h, { fakeProbe: "offline" });
-      const offline = await h.svc.agents.recheck("pi");
-      expect(offline.status).toBe("offline");
-      expect(offline.capabilities).toBeUndefined();
-      expect(h.svc.agents.capabilityInventory("pi")).toBeUndefined();
-      expect((await piAgent(h)).capabilities).toBeUndefined();
-    } finally {
-      setProbeControl(h);
-      await h.svc.agents.recheck("pi");
-    }
-  });
-
-  test("serializes simultaneous timeouts for independent sessions on one Agent", async () => {
+  test("serializes simultaneous timeouts for independent Bot sessions", async () => {
     const previousTimeout = h.svc.cfg.turnTimeoutMs;
-    setProbeControl(h);
-    await h.svc.agents.recheck("pi");
     h.svc.cfg.turnTimeoutMs = 25;
     try {
       const [firstBot, secondBot] = await Promise.all([
@@ -209,7 +133,6 @@ describe("agent capability inventory", () => {
           message.author.kind === "system" && message.text?.includes("timed out after") === true
         )).toBeFalse();
       }
-      expect((await piAgent(h)).status).toBe("ready");
     } finally {
       h.svc.cfg.turnTimeoutMs = previousTimeout;
     }

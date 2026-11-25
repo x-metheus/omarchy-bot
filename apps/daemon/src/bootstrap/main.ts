@@ -22,7 +22,6 @@ import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { PluginsService } from "../modules/plugins/plugins.ts";
-import { preparePiAgentDirectory, Supervisor } from "../supervision/supervisor.ts";
 import { SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import { PairingService } from "../modules/pairing/pairing.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
@@ -61,9 +60,6 @@ export async function main(options: MainOptions = {}): Promise<{
   svc: DaemonServices;
 }> {
   const cfg = loadConfig();
-  // The remaining worker probes and inventory requests use Service-owned Pi state.
-  const piAgentDir = path.resolve(cfg.dataDir, "pi-agent");
-  preparePiAgentDirectory(piAgentDir);
   if (options.botScreenCapacity !== undefined) cfg.botScreenCapacity = options.botScreenCapacity;
   if (options.botScreenRuntimeDir !== undefined) cfg.botScreenRuntimeDir = options.botScreenRuntimeDir;
   const db = openDb(cfg);
@@ -74,22 +70,6 @@ export async function main(options: MainOptions = {}): Promise<{
   const sharedWorkspaceDir = prepareSharedWorkspace(cfg.sharedWorkspaceDir);
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
-  const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
-  const agentsDir = path.resolve(workersDir);
-  const supervisor: Supervisor = new Supervisor(
-    {
-      onAgentEvent: (agentId, event) => {
-        if (agentId === "pi" && event.type === "native" && event.capability === "mcp.authorization") {
-          plugins.handleNativeAuthorization(event.payload);
-        }
-      },
-      onWorkerCrash: (agentId, err) => {
-        events.append("agent", agentId, "agent.worker_crash", { agentId, message: err.message });
-        agents.markOffline(agentId, err.message);
-      },
-    },
-    { agents: agentsDir, piAgentDir },
-  );
   const browserSelectionNotice = ignoredBrowserSelectionNotice(process.env);
   if (browserSelectionNotice !== undefined) console.warn(browserSelectionNotice);
   const productionScreenAdapter = new SwayBotScreenRuntimeAdapter({
@@ -228,7 +208,7 @@ export async function main(options: MainOptions = {}): Promise<{
     computer,
   });
 
-  const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
+  const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir });
   const threads: ThreadsService = new ThreadsService(db, events, agents);
   const bots = new BotsService(db, events, threads);
   const attachments = new AttachmentsService(db, cfg.attachmentsDir);
@@ -285,11 +265,6 @@ export async function main(options: MainOptions = {}): Promise<{
   mailbox.reconcileStartup();
   if (recoveringMail) turns.recoverTurns();
 
-  // Recheck every agent in the background: probe + conformance gate.
-  for (const a of agents.list()) {
-    void agents.recheck(a.id).catch(() => {});
-  }
-
   const svc: DaemonServices = {
     ...(runtime.approvals ? { approvals: runtime.approvals } : {}),
     credentials: runtime.credentials,
@@ -311,7 +286,6 @@ export async function main(options: MainOptions = {}): Promise<{
     devices,
     pairing,
     pairingHostSecret,
-    supervisor,
   };
   const http = startHttp(svc);
 
@@ -362,7 +336,6 @@ export async function main(options: MainOptions = {}): Promise<{
     computer.shutdown();
     await projections.shutdown().catch(reportStopFailure("projections"));
     await screens.shutdown().catch(reportStopFailure("screens"));
-    await supervisor.stopAll().catch(reportStopFailure("workers"));
     await plugins.shutdown().catch(reportStopFailure("plugins"));
     http.stop();
     db.close();
@@ -382,7 +355,6 @@ export async function main(options: MainOptions = {}): Promise<{
     computer.shutdown();
     await projections.shutdown();
     screens.detach();
-    await supervisor.stopAll();
     await plugins.shutdown();
     http.stop();
     db.close();

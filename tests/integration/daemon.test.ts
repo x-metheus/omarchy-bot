@@ -1,7 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 let h: Harness;
@@ -57,37 +54,22 @@ describe("integration: agents API", () => {
     for (const expected of ["pi", "omp", "codex", "claude", "grok", "opencode", "gemini", "copilot", "crush"]) {
       expect(ids).toContain(expected);
     }
-    for (const a of agents) {
-      expect(typeof a.displayName).toBe("string");
-      expect(typeof a.version).toBe("string");
-      expect(["ready", "missing", "unconfigured", "incompatible", "checking", "offline"]).toContain(a.status);
+    for (const agent of agents) {
+      expect(agent.displayName).toBeString();
+      expect(agent.version).toBeString();
+      expect(agent.status).toBe("missing");
+      expect(agent.reason).toBeString();
+      expect(agent.guidance).toBeString();
     }
-    const pi = agents.find((a) => a.id === "pi")!;
-    expect(pi.status).toBe("ready");
-    expect(pi.version).toBe("fake-pi-1");
-    // Unavailable agents carry plain-language guidance.
-    const unavailable = agents.filter((a) => a.status !== "ready" && a.status !== "checking");
-    expect(unavailable.length).toBeGreaterThan(0);
-    for (const a of unavailable) expect(typeof a.guidance).toBe("string");
   });
 
-  test("keeps its worker environment when process configuration changes", async () => {
-    const foreignHome = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-foreign-home-"));
-    const priorHome = process.env.OMARCHY_BOT_HOME;
-    let imageCapability: boolean | undefined;
-    try {
-      process.env.OMARCHY_BOT_HOME = foreignHome;
-      await h.svc.supervisor.stopAgentWorker("pi");
-      imageCapability = (await h.svc.agents.recheck("pi")).capabilities?.attachments.image;
-    } finally {
-      if (priorHome === undefined) delete process.env.OMARCHY_BOT_HOME;
-      else process.env.OMARCHY_BOT_HOME = priorHome;
-      await h.svc.supervisor.stopAgentWorker("pi");
-      await h.svc.agents.recheck("pi");
-      rmSync(foreignHome, { recursive: true, force: true });
-    }
-    expect(imageCapability).toBeTrue();
-  }, 15_000);
+  test("rechecking an Agent clears historical readiness", async () => {
+    h.svc.db.query("UPDATE agents SET status = 'ready' WHERE id = 'pi'").run();
+    const agent = await api<{ status: string; capabilities?: unknown }>(h, "POST", "/api/agents/pi/recheck");
+    expect(agent.status).toBe("missing");
+    expect(agent.capabilities).toBeUndefined();
+    expect(h.svc.agents.status("pi")).toBe("missing");
+  });
 });
 
 describe("integration: bots API", () => {

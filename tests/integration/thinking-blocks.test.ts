@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { rmSync, writeFileSync } from "node:fs";
-import path from "node:path";
+import { rmSync } from "node:fs";
 import type { BotViewDto, MessageDto } from "../../packages/protocol/src/index.ts";
 import {
   api,
@@ -135,7 +134,7 @@ describe("integration: ordered Thinking blocks", () => {
     expect((await messages(h, sent.threadId)).some((message) => message.kind === "thinking")).toBeFalse();
   });
 
-  test("keeps Thinking available and retains history after Pi reports no Thinking support", async () => {
+  test("keeps Thinking available and retains history after restart", async () => {
     const botId = await makeBot(h, "Historical Thinking Bot");
     const sent = await sendToBot(h, botId, "thinking-order");
     await waitThreadIdle(h, sent.threadId);
@@ -144,16 +143,10 @@ describe("integration: ordered Thinking blocks", () => {
       .map((message) => message.thinking!.blockId);
     expect(retainedIds).toHaveLength(2);
 
-    writeFileSync(
-      path.join(h.home, "conformance", "pi-fake-pi-1.json"),
-      JSON.stringify({
-        ok: true,
-        image: "verified",
-        fakeCapabilities: { thinking: { supported: false, streaming: false } },
-      }),
-    );
-    const pi = await h.svc.agents.recheck("pi");
-    expect(pi.capabilities?.thinking.supported).toBeFalse();
+    const home = h.home;
+    await h.disconnectForRestart();
+    h = await startDaemon(home);
+    expect(h.svc.agents.capabilityInventory("pi")).toBeUndefined();
 
     expect(await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).toMatchObject({
       thinkingAvailability: "supported",

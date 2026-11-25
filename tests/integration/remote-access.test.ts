@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadConfig } from "../../apps/daemon/src/bootstrap/config.ts";
@@ -102,7 +102,7 @@ for (const scenario of [
       }
       return originalFetch(request);
     }, { preconnect: originalFetch.preconnect });
-    const h = await startDaemon(path.join(root, "daemon"), { waitForAgentReady: false });
+    const h = await startDaemon(path.join(root, "daemon"));
     daemon = h;
     // Peer identity comes from the socket, never forwarded-for headers.
     const response = await fetch(`${h.baseUrl}/api/plugins/authorize`, {
@@ -126,10 +126,6 @@ test("HTTPS and WSS preserve the paired-device gate", async () => {
   process.env.OMARCHY_BOT_TRUSTED_PROXY = "127.0.0.1";
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.HOME = root;
-  const agentDir = path.join(root, "pi-agent");
-  mkdirSync(agentDir, { mode: 0o700 });
-  process.env.PI_CODING_AGENT_DIR = agentDir;
-  process.env.OMARCHY_BOT_WORKERS_DIR = path.resolve(import.meta.dir, "fake-workers");
   process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
   // Boot after configuring the isolated environment, matching the harness loading boundary.
   const { main } = await import("../../apps/daemon/src/bootstrap/main.ts");
@@ -174,7 +170,7 @@ test("HTTPS and WSS preserve the paired-device gate", async () => {
 }, 15000);
 
 test("Service serves no SPA documents even with a device token", async () => {
-  const h = await startDaemon(path.join(root, "daemon"), { waitForAgentReady: false });
+  const h = await startDaemon(path.join(root, "daemon"));
   daemon = h;
   for (const pathname of ["/", "/index.html", "/client/route"]) {
     const response = await fetch(`${h.baseUrl}${pathname}?access_token=private`);

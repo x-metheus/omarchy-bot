@@ -42,7 +42,6 @@ import { createProviderRoutes } from "./providerRoutes.ts";
 import type { PluginsService } from "../modules/plugins/plugins.ts";
 import type { DevicePort, SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import type { PairingService } from "../modules/pairing/pairing.ts";
-import type { Supervisor } from "../supervision/supervisor.ts";
 import { isIPv4 } from "node:net";
 import { AllowedFolderBody, type AllowedFoldersDto, CreateBotBody, PatchBotBody, SendMessageBody, PROTOCOL_VERSION } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
@@ -77,7 +76,6 @@ export interface DaemonServices {
   /** Mode-0600 Service Host secret. Required to mint pairing codes; never logged. */
   pairingHostSecret: string;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
-  supervisor: Supervisor;
 }
 
 const JSON_HEADERS = { "content-type": "application/json" };

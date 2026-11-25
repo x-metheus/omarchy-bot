@@ -11,7 +11,6 @@ import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "@omarchy-bot/domain";
 import { applyMigration, MIGRATIONS } from "../../persistence/db.ts";
-import { Supervisor } from "../../supervision/supervisor.ts";
 import { AgentsRegistry } from "../agents/registry.ts";
 import { BotsService } from "../bots/bots.ts";
 import { EventLog } from "../events/eventLog.ts";
@@ -29,8 +28,7 @@ const tool = () => fauxToolCall("check", { privateInput: "never projected" }, { 
 function transcriptStore(db: Database) {
   for (const migration of MIGRATIONS) applyMigration(db, migration);
   const events = new EventLog(db);
-  const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {} }, { agents: "" });
-  const agents = new AgentsRegistry(db, events, { conformanceDir: "", workersAgentsDir: "" }, supervisor);
+  const agents = new AgentsRegistry(db, events, { conformanceDir: "" });
   const threads = new ThreadsService(db, events, agents);
   const bots = new BotsService(db, events, threads);
   threads.insertThreadRow(threadId, botId, "Transcript");

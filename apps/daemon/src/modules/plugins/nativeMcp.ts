@@ -16,6 +16,7 @@ type RuntimeConnection = Common & { oauth?: NativeMcpOAuthSettings };
 
 export type EffectiveMcpServer = { configurationError: string; transport?: never; disabled?: never } | {
   disabled: boolean;
+  packageRevision?: string;
   transport:
     | { type: "stdio"; command: string; args: string[]; env?: Record<string, string> }
     | { type: "http"; url: string; headers?: Record<string, string>; oauth?: NativeMcpOAuthSettings }
@@ -347,8 +348,12 @@ export class NativeMcpStore {
     }
     const secrets = resolveNativeMcpCredentials({ mcpServers: connections }, metadata, { literalSecrets: true });
     for (const [name, { command, args, env, url, headers, disabled, oauth }] of Object.entries(connections)) {
-      if (command !== undefined) servers[name] = { transport: { type: "stdio", command, args: args ?? [], ...(env ? { env } : {}) }, disabled };
-      else if (url !== undefined) servers[name] = { transport: { type: "http", url, ...(headers ? { headers } : {}), ...(oauth ? { oauth } : {}) }, disabled };
+      if (command !== undefined) {
+        const id = metadata.entries[name]?.id;
+        const packageRevision = id === undefined ? undefined : metadata.packageRevisions[id];
+        servers[name] = { transport: { type: "stdio", command, args: args ?? [], ...(env ? { env } : {}) }, disabled,
+          ...(packageRevision !== undefined ? { packageRevision } : {}) };
+      } else if (url !== undefined) servers[name] = { transport: { type: "http", url, ...(headers ? { headers } : {}), ...(oauth ? { oauth } : {}) }, disabled };
       if (oauth?.clientSecret) secrets.add(oauth.clientSecret);
       for (const [key, value] of Object.entries(env ?? headers ?? {})) {
         if (/secret|token|key|password|credential|auth|cookie/i.test(key)) secrets.add(value);

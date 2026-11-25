@@ -30,7 +30,6 @@ bun /src/scripts/distro-conformance/install.ts /bundle/runtime.tar.zst "$current
 cp -R /src/tests "$current/tests"
 mkdir -p "$current/scripts/distro-conformance"
 cp /src/scripts/distro-conformance/smoke.ts "$current/scripts/distro-conformance/"
-export OMARCHY_BOT_WORKERS_DIR=$current/tests/integration/fake-workers
 export OMARCHY_BOT_SWAY_BUNDLE_DIR=$current/sway OMARCHY_BOT_DISTRO_SWAY_DIR=$current/sway OMARCHY_BOT_FONT_DIR=$current/fonts
 export OMARCHY_BOT_BROWSER_PACK_DIR=$OMARCHY_BOT_HOME/runtime/browser
 export OMARCHY_BOT_SWAY_BIN=$current/sway/bin/sway OMARCHY_BOT_SWAYMSG_BIN=$current/sway/bin/swaymsg

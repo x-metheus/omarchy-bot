@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "engines": { "bun": "1.4.5" },
-  "workspaces": ["packages/*", "workers/*", "apps/*", "tests/*"],
+  "workspaces": ["packages/*", "apps/*", "tests/*"],
   "scripts": {
     "dev": "bun run --filter='@omarchy-bot/daemon' --filter='@omarchy-bot/web' dev",
     "start": "bun run --filter='@omarchy-bot/daemon' start",
@@ -28,7 +28,6 @@
     "@types/node": "26.4.0"
   },
   "patchedDependencies": {
-    "@astryxdesign/core@0.5.2": "patches/@astryxdesign%2Fcore@0.5.2.patch",
-    "pi-mcp-adapter@2.33.0": "patches/pi-mcp-adapter@2.33.0.patch"
+    "@astryxdesign/core@0.5.2": "patches/@astryxdesign%2Fcore@0.5.2.patch"
   }
 }

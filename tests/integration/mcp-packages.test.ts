@@ -6,8 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import type { PluginsService } from "../../apps/daemon/src/modules/plugins/plugins.ts";
 import type { McpConnectionDto } from "../../packages/protocol/src/plugins.ts";
-import { WorkerClient } from "../../apps/daemon/src/supervision/workerClient.ts";
-import type { NativeMcpControlResult } from "../../packages/agent-contract/src/index.ts";
 import { apiStatus, startDaemon, type Harness } from "./helpers/harness.ts";
 
 const daemon = path.resolve(import.meta.dir, "../../apps/daemon");
@@ -31,9 +29,6 @@ test("managed npm updates preserve live native processes, local edits and failed
   let service: PluginsService | undefined;
   let harness: Harness | undefined;
   const clients: Array<InstanceType<typeof Client>> = [];
-  const worker = new WorkerClient({ name: "managed-package-binary", script: path.resolve(daemon, "../../workers/pi/src/worker.ts"),
-    env: { HOME: home, OMARCHY_BOT_HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin",
-      XDG_CONFIG_HOME: path.join(home, ".config"), XDG_DATA_HOME: path.join(home, ".local/share") }, onEvent: () => {} });
   try {
     await mkdir(workspace, { recursive: true });
     for (let version = 1; version <= 7; version++) {
@@ -46,12 +41,12 @@ test("managed npm updates preserve live native processes, local edits and failed
       await writeFile(path.join(source, "value.txt"), String(version));
       if (version === 7) await writeFile(path.join(source, "alternate.mjs"), "process.argv.push('alternate'); await import('./server.mjs');\n");
       await writeFile(path.join(source, "server.mjs"), `
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { McpServer } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/mcp.js", daemon))};
 import { StdioServerTransport } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/stdio.js", daemon))};
 if (!process.env.MANAGED_TOKEN) throw new Error('Fixture authentication required');
-writeFileSync(${JSON.stringify(startup)}, JSON.stringify({args:process.argv.slice(2),auth:createHash('sha256').update(process.env.MANAGED_TOKEN).digest('hex')}));
+appendFileSync(${JSON.stringify(startup)}, JSON.stringify({args:process.argv.slice(2),auth:createHash('sha256').update(process.env.MANAGED_TOKEN).digest('hex')}) + '\\n');
 const server = new McpServer({name:'managed-fixture',version:${JSON.stringify(`${version}.0.0`)}});
 server.registerTool('read', {inputSchema:{}}, async () => ({content:[{type:'text',text:JSON.stringify({value:readFileSync(new URL('./value.txt',import.meta.url),'utf8'),auth:createHash('sha256').update(process.env.MANAGED_TOKEN).digest('hex'),args:process.argv.slice(2)})}]}));
 await server.connect(new StdioServerTransport());
@@ -204,16 +199,22 @@ await server.connect(new StdioServerTransport());
     expect(replaced.transport).toMatchObject({ envKeys: [] });
     await service.saveMcp(scoped.id, { name: "credential-scope", package: { name: otherPackage, env: { MANAGED_TOKEN: token } } });
     for (const retired of [".pi", ".codex"]) await expect(lstat(path.join(workspace, retired))).rejects.toMatchObject({ code: "ENOENT" });
-    await worker.start();
-    const connected: NativeMcpControlResult = await worker.request({ type: "mcp.control", cwd: workspace, action: "connect", server: "credential-scope" }, 30_000);
+    const runtime = harness.svc.turns["runtime"];
+    const connected = await runtime.mcpControl({ action: "connect", server: "credential-scope" });
+    expect(connected.result?.error).toBeUndefined();
     expect(connected.servers.find((entry) => entry.name === "credential-scope")).toMatchObject({ status: "connected", toolCount: 1 });
-    expect(JSON.parse(await readFile(startup, "utf8"))).toEqual({ args: [], auth: createHash("sha256").update(token).digest("hex") });
-    // Selecting another executable in the SAME immutable package version must
-    // invalidate the real native runtime, not leave its cached old executable.
+    const initialLaunches = await readFile(startup, "utf8");
+    expect(JSON.parse(initialLaunches.trimEnd().split("\n").at(-1)!)).toEqual({ args: [], auth: createHash("sha256").update(token).digest("hex") });
+    expect(await runtime.mcpControl({ action: "connect", server: "credential-scope" })).toEqual(connected);
+    expect(await readFile(startup, "utf8")).toBe(initialLaunches);
+    // Selecting another executable in the same immutable package version must
+    // invalidate the durable runtime's cached connection.
     await service.saveMcp(scoped.id, { name: "credential-scope", package: { name: otherPackage, bin: "alternate" } });
-    const switched: NativeMcpControlResult = await worker.request({ type: "mcp.control", cwd: workspace, action: "connect", server: "credential-scope" }, 30_000);
+    const switched = await runtime.mcpControl({ action: "connect", server: "credential-scope" });
+    expect(switched.result?.error).toBeUndefined();
     expect(switched.servers.find((entry) => entry.name === "credential-scope")).toMatchObject({ status: "connected", toolCount: 1 });
-    expect(JSON.parse(await readFile(startup, "utf8"))).toEqual({ args: ["alternate"], auth: createHash("sha256").update(token).digest("hex") });
+    const switchedLaunches = await readFile(startup, "utf8");
+    expect(JSON.parse(switchedLaunches.trimEnd().split("\n").at(-1)!)).toEqual({ args: ["alternate"], auth: createHash("sha256").update(token).digest("hex") });
     const native = await service.saveMcp(scoped.id, { name: "credential-scope", transport: { type: "stdio", command: "node", args: [path.join(home, "fixture-1/package/server.mjs")] } });
     expect(native.transport).toMatchObject({ envKeys: [] });
     service.removeMcp(scoped.id);
@@ -221,7 +222,6 @@ await server.connect(new StdioServerTransport());
     globalThis.fetch = originalFetch;
     await Promise.allSettled(clients.map((client) => client.close()));
     await harness?.stop();
-    await worker.stop();
     await rm(home, { recursive: true, force: true });
     if (harness) await rm(path.dirname(harness.svc.cfg.statusPath), { recursive: true, force: true });
   }

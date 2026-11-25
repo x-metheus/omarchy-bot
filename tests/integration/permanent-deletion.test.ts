@@ -119,7 +119,6 @@ describe("local Bot deletion", () => {
 
     const sibling = await api<BotViewDto>(h, "GET", `/api/bots/${siblingId}`);
     expect(sibling.agentId).toBe("pi");
-    expect(h.svc.agents.get("pi")?.status).toBe("ready");
     const siblingTurn = await sendToBot(h, siblingId, "say: sibling still works");
     await waitThreadIdle(h, siblingTurn.threadId);
   });

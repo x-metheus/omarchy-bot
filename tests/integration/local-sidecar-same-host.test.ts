@@ -42,8 +42,6 @@ describe("same-host viewers have no This Device", () => {
     const native = await sendToBot(h, botId, "tool");
     await waitThreadIdle(h, native.threadId);
     expect((await messages(h, native.threadId)).some((message) => message.kind === "tool" && message.toolCall?.name === "bash")).toBeTrue();
-    const agents = await api<{ id: string; status: string }[]>(h, "GET", "/api/agents");
-    expect(agents.find((agent) => agent.id === "pi")?.status).toBe("ready");
   });
 
   test("a distinct host over a loopback tunnel approves local.run on the client machine", async () => {

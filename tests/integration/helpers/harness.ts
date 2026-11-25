@@ -1,9 +1,9 @@
 import type { BotComputerAssetSupply } from "../../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 /**
  * Daemon harness for integration tests: boots the real daemon in-process with
- * an isolated data dir, random port, and the scripted fake workers.
+ * an isolated data dir, random port, and the scripted durable provider.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
@@ -51,13 +51,10 @@ export interface HarnessOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
   botComputerAssetSupply?: BotComputerAssetSupply;
   botScreenCapacity?: number;
-  waitForAgentReady?: boolean;
   /** Use false when the test configures its own providers and models. */
   seedDurableProvider?: boolean;
   dataDir?: string;
   stateDir?: string;
-  /** Worker tree override; defaults to the shared fake workers. */
-  workersDir?: string;
   onDurableMailReplay?: DurableMailReplayObserver;
   pauseMailboxDispatchOnStartup?: boolean;
   /** Keep the Shared Workspace outside the protected Service data directory. */
@@ -117,38 +114,24 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   const data = options.dataDir ?? home;
   const state = options.stateDir ?? path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const profile = options.separateWorkspace ? `${home}-profile` : home;
-  const agentDir = path.join(profile, ".pi", "agent");
   mkdirSync(home, { recursive: true });
   mkdirSync(state, { recursive: true });
   process.env.OMARCHY_BOT_STATE = state;
-  mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-  // Fake conformance record so the fake pi worker probes to `ready`.
-  const conf = path.join(data, "conformance");
-  mkdirSync(conf, { recursive: true });
-  writeFileSync(
-    path.join(conf, "pi-fake-pi-1.json"),
-    JSON.stringify({ ok: true, image: "verified" }),
-  );
 
   process.env.HOME = profile;
   process.env.OMARCHY_BOT_HOME = data;
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
-  process.env.OMARCHY_BOT_WORKERS_DIR = options.workersDir ?? path.resolve(import.meta.dir, "../fake-workers");
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
     options.botDeletionTerminalTimeoutMs ?? 30_000,
   );
 
-  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
   let base: Harness | undefined;
   let restoreRuntime: (() => void) | undefined;
   let restoredFixtures = false;
   const restoreFixtures = () => {
     if (restoredFixtures) return;
     restoredFixtures = true;
-    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
     restoreRuntime?.();
   };
 
@@ -200,17 +183,6 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
       setSetting(svc.db, "default_model", "fake/fake-model");
     }
     base.token = await pairForToken(base.baseUrl, state);
-    if (options.waitForAgentReady !== false) {
-      // Wait until the fake pi agent finishes its probe and reports ready.
-      const deadline = Date.now() + 20_000;
-      for (;;) {
-        const agents = (await fetch(`${base.baseUrl}/api/agents`, { headers: authHeaders(base) }).then((r) => r.json())) as { id: string; status: string }[];
-        const pi = agents.find((a) => a.id === "pi");
-        if (pi?.status === "ready") break;
-        if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
-        await Bun.sleep(150);
-      }
-    }
     return base;
   } catch (error) {
     if (base) await base.stop();
@@ -252,7 +224,7 @@ export async function apiStatus(h: Harness, method: string, p: string, body?: un
   return { status: res.status, body: bodyJson };
 }
 
-/** Create a Bot on the ready pi agent and return its id. */
+/** Create a Bot and return its id. */
 export async function makeBot(h: Harness, name = "Test Bot", instructions = ""): Promise<string> {
   const bot = await api<{ id: string }>(h, "POST", "/api/bots", { name, instructions, agentId: "pi" });
   return bot.id;

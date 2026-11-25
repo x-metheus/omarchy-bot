@@ -93,7 +93,7 @@ function errorResult(message: string, redact?: Redact): ToolExecutionResult {
 }
 
 function fingerprint(server: ConfiguredMcpServer, cwd: string | undefined): string {
-  return createHash("sha256").update(JSON.stringify([server.transport, server.transport.type === "stdio" ? cwd : undefined])).digest("hex");
+  return createHash("sha256").update(JSON.stringify([server.transport, server.transport.type === "stdio" ? cwd : undefined, server.packageRevision])).digest("hex");
 }
 
 function fillFields(fields: Record<string, string> | undefined, fill: (value: string) => string) {

@@ -5,7 +5,7 @@
  * processes it owns, and the fixture manager's own log.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { SurfaceId } from "../../packages/domain/src/index.ts";
@@ -38,7 +38,6 @@ import {
   startManagedService,
   startUnrelatedSentinel,
   waitFor,
-  workerProcesses,
   writeOrphanApplication,
   writeResistantApplication,
   type FakeManager,
@@ -64,7 +63,6 @@ const priorEnvironment = {
   XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
   DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
   OMARCHY_BOT_HOST_SESSION_MARKER: process.env.OMARCHY_BOT_HOST_SESSION_MARKER,
-  PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
 };
 
 const roots: string[] = [];
@@ -253,7 +251,7 @@ describe("Service supervision without a user manager", () => {
     );
   }, 60_000);
 
-  test("Service shutdown leaves no Bot Computer, application, or worker descendant", async () => {
+  test("Service shutdown leaves no Bot Computer or application descendant", async () => {
     const fixture = await scriptedScreen();
     const scratch = scratchRoot("shutdown");
     const pidFile = path.join(scratch, "resistant.pid");
@@ -271,7 +269,6 @@ describe("Service supervision without a user manager", () => {
     await harness.svc.screens.act(surface, { name: "open_app", args: { app: application } });
     const descendant = await descendantPid(harness, pidFile, surface);
 
-    expect(workerProcesses(home).length).toBeGreaterThan(0);
     const runtimeRoot = path.join(home, "r");
     expect(processesUnder(runtimeRoot).length).toBeGreaterThan(0);
 
@@ -288,11 +285,6 @@ describe("Service supervision without a user manager", () => {
       10_000,
       "the TERM-resistant application descendant to be killed with its group",
     );
-    await waitFor(
-      () => (workerProcesses(home).length === 0 ? true : undefined),
-      15_000,
-      "every Agent worker to exit on Service shutdown",
-    );
     expect(sentinel.alive()).toBeTrue();
   }, 90_000);
 
@@ -300,14 +292,11 @@ describe("Service supervision without a user manager", () => {
     await scriptedScreen();
     seedHostSession();
     const before = hostSession();
-    const callerAgentDir = scratchRoot("environment-caller-pi");
-    process.env.PI_CODING_AGENT_DIR = callerAgentDir;
     harness = await startDaemon(undefined, {
       useProductionBotScreen: true,
       botComputerAssetSupply: createFixtureFontSupply(scratchRoot("environment-fonts")),
       useHostApplicationUnits: false,
     });
-    expect(process.env.PI_CODING_AGENT_DIR).toBe(path.join(harness.home, ".pi", "agent"));
     const botId = await makeBot(harness, "Explicit environment");
     const surface = await owner(harness, botId);
     await waitScreenReady(harness, surface);
@@ -334,7 +323,6 @@ describe("Service supervision without a user manager", () => {
     await harness.stop();
     harness = undefined;
     expect(hostSession()).toEqual(before);
-    expect(process.env.PI_CODING_AGENT_DIR).toBe(callerAgentDir);
   }, 60_000);
 });
 
@@ -346,16 +334,11 @@ describe("Service supervision with a user manager present", () => {
     const home = path.join(scratch, "home");
     const state = path.join(scratch, "state");
     const runtimeRoot = path.join(home, "r");
-    const callerAgentDir = path.join(scratch, "caller-pi-agent");
-    mkdirSync(callerAgentDir, { mode: 0o700 });
-    writeFileSync(path.join(callerAgentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "test-managed-caller-pi-key" } }), { mode: 0o600 });
-    process.env.PI_CODING_AGENT_DIR = callerAgentDir;
     managed = await startManagedService({
       home,
       state,
       manager,
       binEnv: fixture.binEnv,
-      workersDir: path.resolve(import.meta.dir, "fake-workers"),
       runtimeRoot,
     });
     expect(existsSync(path.join(home, "secret-index.json"))).toBeFalse();
@@ -374,14 +357,6 @@ describe("Service supervision with a user manager present", () => {
       return (await response.json()) as T;
     };
 
-    await waitFor(
-      async () => {
-        const agents = await request<Array<{ id: string; status: string }>>("GET", "/api/agents");
-        return agents.find((agent) => agent.id === "pi")?.status === "ready" ? true : undefined;
-      },
-      30_000,
-      "the managed Service agent to become ready",
-    );
     const bot = await request<{ id: string; surfaceId: SurfaceId }>("POST", "/api/bots", {
       name: "Managed Screen",
       instructions: "",

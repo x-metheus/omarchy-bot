@@ -13,7 +13,6 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { createModels } from "@earendil-works/pi-ai/models";
 import { applyMigration, MIGRATIONS } from "../../../persistence/db.ts";
 import { setSetting } from "../../../persistence/settings.ts";
-import { Supervisor } from "../../../supervision/supervisor.ts";
 import { ApprovalStore } from "../approvals.ts";
 import { AgentsRegistry } from "../../agents/registry.ts";
 import { BotsService } from "../../bots/bots.ts";
@@ -579,8 +578,7 @@ test.skipIf(process.platform === "win32")("bash keeps an out-of-band Bot secret 
   try {
     for (const migration of MIGRATIONS) applyMigration(db, migration);
     const eventLog = new EventLog(db);
-    const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {} }, { agents: "" });
-    const agents = new AgentsRegistry(db, eventLog, { conformanceDir: "", workersAgentsDir: "" }, supervisor);
+    const agents = new AgentsRegistry(db, eventLog, { conformanceDir: "" });
     const threads = new ThreadsService(db, eventLog, agents);
     const bots = new BotsService(db, eventLog, threads);
     threads.insertThreadRow("thread", "bot-a", "Shell secret fixture");

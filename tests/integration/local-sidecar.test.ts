@@ -17,7 +17,7 @@ describe("outbound Local Sidecar device roster", () => {
   });
 
   async function boot(): Promise<Harness> {
-    h = await startDaemon(undefined, { waitForAgentReady: false });
+    h = await startDaemon();
     return h;
   }
 

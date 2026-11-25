@@ -31,30 +31,13 @@ interface DeliveryStateRow {
   failure_reason: string | null;
 }
 
-const emptyWorkersDir = mkdtempSync(path.join(tmpdir(), "no-agent-workers-"));
-const PI_CONFORMANCE_FILE = "pi-fake-pi-1.json";
 const forgedIdentityError = 'Validation failed for tool "send_bot_message":\n  - botId: unknown field\n  - turnId: unknown field';
 
-// Durable mailbox dispatch works without an Agent worker to start or shut down.
 function startMailboxDaemon(
   home = mkdtempSync(path.join(tmpdir(), "mailbox-")),
   options?: Pick<HarnessOptions, "onDurableMailReplay" | "pauseMailboxDispatchOnStartup" | "separateWorkspace">,
 ): Promise<Harness> {
-  return startDaemon(home, { ...options, stateDir: `${home}-state`, waitForAgentReady: false, workersDir: emptyWorkersDir });
-}
-
-function setPiProbeCapabilities(
-  h: Harness,
-  capabilities: { botMail: boolean },
-): void {
-  writeFileSync(
-    path.join(h.home, "conformance", PI_CONFORMANCE_FILE),
-    JSON.stringify({
-      ok: true,
-      image: "verified",
-      fakeCapabilities: capabilities,
-    }),
-  );
+  return startDaemon(home, { ...options, stateDir: `${home}-state` });
 }
 
 function deliveryRow(h: Harness, deliveryId: string): DeliveryStateRow {
@@ -398,14 +381,11 @@ describe("durable Bot mailbox", () => {
     }]);
   });
 
-  test("uses the active Turn for mail authorization when the Agent inventory disables Bot mail", async () => {
+  test("uses the active Turn for mail authorization without an Agent capability inventory", async () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Capability-bound source");
     const targetBotId = await makeBot(h, "Capability-bound target");
-    expect(h.svc.agents.capabilityInventory("pi")?.botMail).toBeTrue();
-    setPiProbeCapabilities(h, { botMail: false });
-    await h.svc.agents.recheck("pi");
-    expect(h.svc.agents.capabilityInventory("pi")?.botMail).toBeFalse();
+    expect(h.svc.agents.capabilityInventory("pi")).toBeUndefined();
 
     const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:durable authority`);
     const deliveryId = await durableAcknowledgement(h, source.threadId);

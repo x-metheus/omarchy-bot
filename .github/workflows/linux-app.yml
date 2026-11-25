@@ -15,7 +15,6 @@ on:
       - "scripts/build-sway-runtime.sh"
       - "scripts/prepare-fonts.sh"
       - "scripts/*browser*"
-      - "tests/integration/fake-workers/**"
       - "tests/e2e/daemon-boot.ts"
       - "bun.lock"
       - ".github/workflows/linux-app.yml"

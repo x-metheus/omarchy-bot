@@ -61,8 +61,6 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
   const launch = () => docker("run", "-d", "--pull=never", "--name", name, "--network=none",
     "--shm-size=512m", "--security-opt", "seccomp=unconfined",
     "--mount", `type=volume,source=${volume},target=/var/lib/omarchy-bot`,
-    "--mount", `type=bind,source=${path.resolve(import.meta.dir, "fake-workers")},target=${runtime}/tests/integration/fake-workers,readonly`,
-    "--env", `OMARCHY_BOT_WORKERS_DIR=${runtime}/tests/integration/fake-workers`,
     "--env", "OMARCHY_TEST_DISABLE_KEYRING=1",
     "--env", "OMARCHY_BOT_SCREEN_PROFILE=720p", image!);
   const title = `OFFLINE-${name}`;
@@ -73,7 +71,6 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
   try {
     await docker("volume", "create", volume);
     await launch();
-    await docker("exec", name, "sh", "-c", 'mkdir -p "$OMARCHY_BOT_HOME/conformance"; printf %s \'{"ok":true,"image":"verified"}\' > "$OMARCHY_BOT_HOME/conformance/pi-fake-pi-1.json"');
     expect(await healthy()).toEqual({ ok: true, version: "0.1.0", protocol: 1 });
     expect(Number(await docker("exec", name, "id", "-u"))).toBeGreaterThan(0);
     expect(await docker("exec", name, "bun", "-e", 'console.log(require("node:fs").readFileSync("/proc/1/status", "utf8").match(/^Uid:\\s+(\\d+)/m)[1])')).toBe("1000");
@@ -89,10 +86,6 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
     expect(exchanged.status).toBe(201);
     const paired = await exchanged.json() as { token: string; device: { id: string } };
     token = paired.token;
-    await until(async () => {
-      const agents = await api<Array<{ id: string; status: string }>>("/api/agents");
-      return agents.some((agent) => agent.id === "pi" && agent.status === "ready") ? true : undefined;
-    }, "scripted Agent readiness");
     const bot = await api<{ id: string; surfaceId: string }>("/api/bots", { name: "Container Bot", agentId: "pi" });
     let threadId: string | undefined;
     async function turn(text: string): Promise<MessageDto[]> {
@@ -144,7 +137,6 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
     expect(await api<MessageDto[]>(`/api/threads/${threadId}/messages`)).toEqual(before);
     expect((await api<{ devices: Array<{ id: string }> }>("/api/devices/paired")).devices.some((device) => device.id === paired.device.id)).toBe(true);
     expect(await docker("exec", name, "cat", "/var/lib/omarchy-bot/home/workspace-marker")).toBe("workspace");
-    await until(async () => (await api<Array<{ id: string; status: string }>>("/api/agents")).some((agent) => agent.id === "pi" && agent.status === "ready") ? true : undefined, "Agent after recreation");
     await startPage();
     await turn("computer:open_url:http://127.0.0.1:7999/");
     await waitBrowser(2);
@@ -154,7 +146,6 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
     expect(await api(`/api/bots/${bot.id}`)).toMatchObject({ id: bot.id });
     expect(await api<MessageDto[]>(`/api/threads/${threadId}/messages`)).toEqual(afterRecreation);
     expect((await api<{ devices: Array<{ id: string }> }>("/api/devices/paired")).devices.some((device) => device.id === paired.device.id)).toBe(true);
-    await until(async () => (await api<Array<{ id: string; status: string }>>("/api/agents")).some((agent) => agent.id === "pi" && agent.status === "ready") ? true : undefined, "Agent after restart");
     await startPage();
     await turn("computer:open_url:http://127.0.0.1:7999/");
     await waitBrowser(3);
