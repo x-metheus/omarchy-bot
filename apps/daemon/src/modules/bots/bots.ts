@@ -17,6 +17,9 @@ import type { EventLog } from "../events/eventLog.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { ThreadsService } from "../threads/threads.ts";
 
+// Internal placeholder for bots.agent_id until Task 20 removes Agent identity.
+const BOT_AGENT_ID_PLACEHOLDER = "pi";
+
 interface BotRow {
   surface_id: string;
   id: string; name: string; instructions: string; agent_id: string; model: string | null;
@@ -66,23 +69,14 @@ export class BotsService {
     return this.db.query(`SELECT * FROM bot_state WHERE bot_id = ?`).get(botId) as BotStateRow | undefined;
   }
 
-  create(input: { name: string; instructions?: string | undefined; agentId: AgentId; maxTurns?: number | null | undefined }): BotDto {
-    const readiness = this.agents.get(input.agentId);
-    if (!readiness) throw new HttpError(400, `unknown agent '${input.agentId}'`);
-    if (readiness.status !== "ready") {
-      throw new HttpError(
-        400,
-        readiness.guidance ?? `agent '${input.agentId}' is not ready (${readiness.status})`,
-        { agentStatus: readiness.status },
-      );
-    }
+  create(input: { name: string; instructions?: string | undefined; maxTurns?: number | null | undefined }): BotDto {
     const id = `bot_${randomUUID().replace(/-/g, "")}`;
     const surfaceId = `surf_${randomUUID().replace(/-/g, "")}` as SurfaceId;
     const now = new Date().toISOString();
     const tx = this.db.transaction(() => {
       this.db
         .query(`INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at, max_turns, model) VALUES (?, ?, ?, ?, 'generated', ?, ?, ?, ?, NULL)`)
-        .run(id, input.name, input.instructions ?? "", input.agentId, defaultAvatarRecipe(id), now, now, input.maxTurns ?? null);
+        .run(id, input.name, input.instructions ?? "", BOT_AGENT_ID_PLACEHOLDER, defaultAvatarRecipe(id), now, now, input.maxTurns ?? null);
       this.db.query(`INSERT INTO bot_state (bot_id) VALUES (?)`).run(id);
       this.db.query(`INSERT INTO bot_surfaces (surface_id, bot_id, transitioned_at) VALUES (?, ?, ?)`).run(surfaceId, id, now);
     });

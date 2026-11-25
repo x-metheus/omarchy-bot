@@ -186,15 +186,19 @@ describe("binary Bot Activity", () => {
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
   });
 
-  test("keeps Agent Readiness separate from Bot activity and rejects creation while offline", async () => {
+  test("keeps Agent Readiness separate from Bot activity and allows creation while offline", async () => {
     const botId = await makeBot(h, "Readiness Bot");
-    h.svc.agents.markOffline("pi", "credentials expired");
+    for (const { id } of h.svc.agents.list()) {
+      h.svc.agents.markOffline(id, "credentials expired");
+    }
 
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
-    expect((await apiStatus(h, "POST", "/api/bots", {
-      name: "Rejected Bot",
+    const created = await apiStatus(h, "POST", "/api/bots", {
+      name: "Created while offline",
       agentId: "pi",
-    })).status).toBe(400);
+    });
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ name: "Created while offline", agentId: "pi" });
 
     await h.svc.agents.recheck("pi");
     const active = await sendToBot(h, botId, "hang");
@@ -206,6 +210,18 @@ describe("binary Bot Activity", () => {
     await h.svc.turns.abortTurn(active.turnId, "cleanup");
     await h.svc.turns.waitForTerminal(active.turnId);
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
+  });
+
+  test("creates Bots with an omitted or non-ready legacy Agent ID", async () => {
+    expect(h.svc.agents.isReady("codex")).toBeFalse();
+
+    const withoutAgent = await apiStatus(h, "POST", "/api/bots", { name: "No Agent ID" });
+    const withLegacyAgent = await apiStatus(h, "POST", "/api/bots", { name: "Legacy Agent ID", agentId: "codex" });
+
+    expect(withoutAgent.status).toBe(201);
+    expect(withoutAgent.body).toMatchObject({ name: "No Agent ID", agentId: "pi" });
+    expect(withLegacyAgent.status).toBe(201);
+    expect(withLegacyAgent.body).toMatchObject({ name: "Legacy Agent ID", agentId: "pi" });
   });
 
   workerOnly("the durable runtime has no worker to be unready for a send")("rejects sends on a non-ready Agent", async () => {
