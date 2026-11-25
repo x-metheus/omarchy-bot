@@ -462,8 +462,7 @@ export class NativeMcpStore {
         return {};
       }
     };
-    const sources = { shared: readDocument(this.#shared), pi: readDocument(this.#pi), codex: readDocument(this.#codex) };
-    const { shared, pi, codex } = sources;
+    const shared = readDocument(this.#shared);
     const privateContents = read(this.#file, "native-mcp.json");
     let metadata = emptyNativeMcpMetadata();
     if (privateContents === undefined) {
@@ -474,39 +473,26 @@ export class NativeMcpStore {
         this.#metadata = metadata;
       } catch { errors.push("native-mcp.json: invalid JSON or private metadata"); }
     }
-    const names = new Set([...Object.keys(shared), ...Object.keys(pi), ...Object.keys(codex)]);
     const connections: Record<string, RuntimeConnection> = Object.create(null);
     const servers: Record<string, EffectiveMcpServer> = Object.create(null);
-    for (const name of names) {
-      const sourceDefinition = (source: NativeSource) => Object.hasOwn(sources[source], name) ? sources[source][name] : undefined;
-      const previous = metadata.entries[name]?.sources;
-      if (hasSourceDeletion(previous, (source) => sourceDefinition(source) !== undefined)) {
-        if (hasConcurrentSourceEdit(previous, (source) => sourceFingerprint(sourceDefinition(source)))) {
-          servers[name] = { configurationError: SOURCE_DELETION_CONFLICT };
-        }
-        continue;
-      }
-      const definition = effectiveDefinition(sourceDefinition("shared"), sourceDefinition("pi"));
-      const codexDefinition = sourceDefinition("codex");
-      const source = definition ?? codexDefinition;
-      const unsupported = source?.type === "sse" || source?.httpTransport === "sse" ? "sse"
-        : source?.type === "socket" || typeof source?.socket === "string" ? "socket" : undefined;
+    for (const name of Object.keys(shared)) {
+      const definition = shared[name];
+      const unsupported = definition?.type === "sse" || definition?.httpTransport === "sse" ? "sse"
+        : definition?.type === "socket" || typeof definition?.socket === "string" ? "socket" : undefined;
       if (unsupported) {
-        servers[name] = { transport: { type: unsupported }, disabled: definition ? source?.disabled === true : source?.enabled === false };
+        servers[name] = { transport: { type: unsupported }, disabled: definition?.disabled === true };
         continue;
       }
       try {
-        const fromPi = common(definition);
-        const value = fromPi ?? common(codexDefinition, true);
+        const value = common(shared[name]);
         if (!value) continue;
-        const selected = fromPi ? definition : codexDefinition;
-        if ((selected?.auth !== undefined && !hasOAuthMarker(selected)) ||
-          (value.url !== undefined && selected?.bearerToken !== undefined)) {
+        if ((definition?.auth !== undefined && !hasOAuthMarker(definition)) ||
+          (value.url !== undefined && definition?.bearerToken !== undefined)) {
           servers[name] = { configurationError: "Unsupported MCP authentication settings. Check the configuration for this connection." };
           continue;
         }
         if (value.url !== undefined) {
-          const oauth = projectNativeMcpOAuth(selected?.oauth);
+          const oauth = projectNativeMcpOAuth(definition?.oauth);
           if (oauth === null) {
             servers[name] = { configurationError: "Invalid MCP OAuth configuration. Check the OAuth settings for this connection." };
             continue;

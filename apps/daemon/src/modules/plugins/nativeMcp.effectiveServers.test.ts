@@ -6,14 +6,13 @@ import { nativeMcpConfigFile, nativeMcpEndpoint, nativeMcpSecretKey } from "@oma
 import { nativeMcpRevision } from "@omarchy-bot/agent-contract/native-mcp-revision";
 import { NativeMcpStore } from "./nativeMcp.ts";
 
-test("effectiveServers merges native definitions and resolves private credentials for the runtime", () => {
+test("effectiveServers reads shared definitions and resolves private credentials for the runtime", () => {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-")));
   const workspace = path.join(root, "workspace");
   const privateDir = path.join(root, "private");
   const file = nativeMcpConfigFile(privateDir);
   try {
-    mkdirSync(path.join(workspace, ".pi"), { recursive: true });
-    mkdirSync(path.join(workspace, ".codex"));
+    mkdirSync(workspace);
     mkdirSync(privateDir);
     const stdio = { command: "fixture", args: ["initial"], env: { SETTING: "${SETTING}", MODE: "type", API_KEY: "k" } };
     writeFileSync(path.join(workspace, ".mcp.json"), JSON.stringify({ mcpServers: {
@@ -24,12 +23,7 @@ test("effectiveServers merges native definitions and resolves private credential
       events: { type: "sse", url: "https://events.example/mcp" },
       socket: { type: "socket", socket: "/tmp/fixture.sock" },
     } }));
-    writeFileSync(path.join(workspace, ".pi", "mcp.json"), JSON.stringify({ mcpServers: {
-      local: { args: ["override"] },
-      piOnly: { command: "pi-fixture" },
-    } }));
-    writeFileSync(path.join(workspace, ".codex", "config.toml"), '[mcp_servers.codexOnly]\ncommand = "codex-fixture"\n');
-    const endpoint = nativeMcpEndpoint({ ...stdio, args: ["override"] });
+    const endpoint = nativeMcpEndpoint(stdio);
     const key = nativeMcpSecretKey("local", endpoint, "env", "SETTING");
     writeFileSync(file, JSON.stringify({ version: 1, entries: {}, secrets: {
       [key]: { server: "local", endpoint, kind: "env", field: "SETTING", value: "!fixture-secret" },
@@ -44,20 +38,44 @@ test("effectiveServers merges native definitions and resolves private credential
     expect(effective).toEqual({
       revision: nativeMcpRevision(workspace, file),
       servers: {
-        local: { disabled: false, transport: { type: "stdio", command: "fixture", args: ["override"], env: { SETTING: "!fixture-secret", MODE: "type", API_KEY: "k" } } },
+        local: { disabled: false, transport: { type: "stdio", command: "fixture", args: ["initial"], env: { SETTING: "!fixture-secret", MODE: "type", API_KEY: "k" } } },
         remote: { disabled: false, transport: { type: "http", url: "https://remote.example/mcp", headers: { "X-Project": "example" } } },
         disabled: { disabled: true, transport: { type: "stdio", command: "disabled-fixture", args: [] } },
-        piOnly: { disabled: false, transport: { type: "stdio", command: "pi-fixture", args: [] } },
-        codexOnly: { disabled: false, transport: { type: "stdio", command: "codex-fixture", args: [] } },
         account: { disabled: false, transport: { type: "http", url, headers: { Authorization: "Bearer fixture-account-token" } } },
         events: { disabled: false, transport: { type: "sse" } },
         socket: { disabled: false, transport: { type: "socket" } },
       },
     });
     const panel = store.list(true);
-    expect(panel.find(({ name }) => name === "local")?.transport).toEqual({ type: "stdio", command: "fixture", args: ["override"], envKeys: ["SETTING", "MODE", "API_KEY"] });
+    expect(panel.find(({ name }) => name === "local")?.transport).toEqual({ type: "stdio", command: "fixture", args: ["initial"], envKeys: ["SETTING", "MODE", "API_KEY"] });
     expect(panel.find(({ name }) => name === "remote")?.transport).toEqual({ type: "http", url: "https://remote.example/mcp", headerKeys: ["X-Project"] });
     expect(JSON.stringify(panel)).not.toContain("fixture-account-token");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("effectiveServers ignores workspace Pi and Codex definitions", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-shared-only-"));
+  try {
+    const store = new NativeMcpStore(root, path.join(root, "private"));
+    writeFileSync(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: {
+      local: { command: "fixture", args: ["shared"] },
+    } }));
+    const initialRevision = store.effectiveServers().revision;
+    mkdirSync(path.join(root, ".pi"), { recursive: true });
+    mkdirSync(path.join(root, ".codex"));
+    writeFileSync(path.join(root, ".pi", "mcp.json"), JSON.stringify({ mcpServers: {
+      local: { args: ["override"] },
+      piOnly: { command: "pi-fixture" },
+    } }));
+    writeFileSync(path.join(root, ".codex", "config.toml"), '[mcp_servers.codexOnly]\ncommand = "codex-fixture"\n');
+
+    const { servers, revision } = store.effectiveServers();
+    expect(servers.piOnly).toBeUndefined();
+    expect(servers.codexOnly).toBeUndefined();
+    expect(servers.local).toEqual({ disabled: false, transport: { type: "stdio", command: "fixture", args: ["shared"] } });
+    expect(revision).toBe(initialRevision);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -276,19 +294,17 @@ test("effectiveServers collects individual values from a saved private cookie he
   }
 });
 
-test("effectiveServers omits a deleted shared server even while its Codex copy remains", () => {
+test("effectiveServers omits a server deleted from the shared file", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-deletion-"));
   const privateDir = path.join(root, "private");
   const shared = path.join(root, ".mcp.json");
-  const codex = path.join(root, ".codex", "config.toml");
   try {
     const store = new NativeMcpStore(root, privateDir);
-    store.save(null, { name: "removed", enabled: true, transport: { type: "stdio", command: "fixture" } });
+    writeFileSync(shared, JSON.stringify({ mcpServers: { removed: { command: "fixture" } } }));
     expect(store.effectiveServers().servers.removed).toBeDefined();
-    expect(Bun.TOML.parse(readFileSync(codex, "utf8"))).toMatchObject({ mcp_servers: { removed: { command: "fixture" } } });
 
     writeFileSync(shared, '{ "mcpServers": {} }\n');
-    const files = [shared, codex, nativeMcpConfigFile(privateDir)];
+    const files = [shared, nativeMcpConfigFile(privateDir)];
     const before = files.map((file) => readFileSync(file, "utf8"));
     const effective = store.effectiveServers();
     expect(files.map((file) => readFileSync(file, "utf8"))).toEqual(before);

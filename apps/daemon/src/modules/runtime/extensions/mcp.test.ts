@@ -952,11 +952,9 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("MCP reports a shared deletion conflict while another service remains callable", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-deletion-conflict-"));
+test("MCP keeps another service callable after a shared server is deleted", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-shared-deletion-"));
   const shared = path.join(root, ".mcp.json");
-  const pi = path.join(root, ".pi", "mcp.json");
-  const secret = "fixture-conflict-key";
   let mcp: ReturnType<typeof createMcpExtension> | undefined;
   try {
     const script = await writeStdioFixture(root, `
@@ -964,29 +962,16 @@ server.registerTool("run", {}, () => ({ content: [{ type: "text", text: "finishe
 await server.connect(new StdioServerTransport());
 `);
     const definition = { command: process.execPath, args: [script] };
-    await mkdir(path.dirname(pi));
     await writeFile(shared, JSON.stringify({ mcpServers: { local: definition, other: definition } }));
-    await writeFile(pi, JSON.stringify({ mcpServers: { local: definition } }));
     const store = new NativeMcpStore(root, path.join(root, "private"));
-    expect(store.list().find(({ name }) => name === "local")?.status).not.toBe("conflict");
+    expect(store.effectiveServers().servers.local).toBeDefined();
 
     await writeFile(shared, JSON.stringify({ mcpServers: { other: definition } }));
-    await writeFile(pi, JSON.stringify({ mcpServers: { local: { ...definition, env: { API_KEY: secret } } } }));
     const effective = store.effectiveServers();
-    expect(store.list().find(({ name }) => name === "local")).toMatchObject({
-      status: "conflict", error: expect.stringMatching(/deletion conflicts/i),
-    });
     expect(effective.configurationError).toBeUndefined();
-    expect(effective.servers.local).toEqual({ configurationError: expect.stringMatching(/deletion conflicts/i) });
-    expect(JSON.stringify(effective.servers.local).includes(secret)).toBe(false);
+    expect(effective.servers.local).toBeUndefined();
 
     mcp = createMcpExtension({ servers: () => store.effectiveServers() });
-    for (const action of ["search", "describe", "call"]) {
-      const result = await executeMcp(mcp, { action, service: "local", tool: "run" });
-      expect(result.isError).toBe(true);
-      expect(result.output).toEqual([{ type: "text", text: expect.stringMatching(/deletion conflicts/i) }]);
-      expect(JSON.stringify(result).includes(secret)).toBe(false);
-    }
     const result = await executeMcp(mcp, { action: "call", service: "other", tool: "run" });
     expect(result.isError).toBe(false);
     expect(result.output).toEqual([{ type: "text", text: "finished" }]);
