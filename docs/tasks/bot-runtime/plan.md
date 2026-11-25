@@ -79,13 +79,13 @@ The durable fake provider and harness reproduce the worker scripts so existing i
 - [x] Task 8: Files and shell tools with allowed folders
 - [x] Task 9: Approval flow on the Service
 - [x] Task 10: Approval UI in the web client
-- [ ] Task 11: Computer and browser tools in process
+- [x] Task 11: Computer and browser tools in process
 - [x] Task 12: Bot mail, Local Sidecar, and plugin tools in process
 
 ### Checkpoint C
 Mailbox, attachments, and every failure caused by tools not yet built in process move here from Checkpoint B, including tool-call projection, native events, capability inventory, the `process-only` fixture, computer and browser tools, and sidecar tools.
 
-- [ ] Agent computer, browser, mailbox, and sidecar integration tests pass with the switch on
+- [x] Agent computer, browser, mailbox, and sidecar integration tests pass with the switch on (native-event and `process-only` cases still open; see todo.md)
 - [x] A write outside the allowed folders asks, survives a restart, and writes once
 - [ ] Review with the human
 

@@ -335,7 +335,9 @@ The Service transcript projects each committed call by assistant entry and conte
 ## Checkpoint C: after Tasks 7–12
 Mailbox, attachments, and every failure caused by tools not yet built in process move here from Checkpoint B, including tool-call projection, native events, capability inventory, the `process-only` fixture, computer and browser tools, and sidecar tools.
 
-- [ ] Computer, browser, mailbox, and sidecar integration tests pass with the switch on
+- [x] Computer, browser, mailbox, and sidecar integration tests pass with the switch on
+  - Measured on main at `bcfaaf9` (2026-11-25) with the switch on: agent-computer-tool 16 pass and 3 skip, agent-browser-tool 10 pass and 1 skip, bot-mailbox 18 pass, local-sidecar-dispatch 2 pass. All pass with the switch off. The skips are the approved `workerOnly` cases.
+  - Still open from the Checkpoint B list, with no task assigned: across the 12 Thread and lifecycle files, 4 tests fail with the switch on and none with it off (127 pass). The native-event cases are "Tool Calls, residual Native Events, and Responses remain distinct records" and "tool activity remains, the public abort route is absent, and no approval is pending" in `daemon.test.ts`, and "preserves mixed Agent blocks and Steering in exact occurrence order across restart" in `ordered-transcript-qa.test.ts`. They expect the worker's native `fake.progress` event record and tool-summary fields that the durable path does not produce. The `process-only` case is "keeps a completed process-only Turn quiet while Bot Activity remains state-driven" in `ordered-transcript-qa.test.ts`. Task 19 requires these to pass on the runtime, so the review must decide whether the runtime adds an equivalent or the tests change.
 - [x] A write outside the allowed folders asks, survives a restart, and writes once (Task 9, `restart.test.ts`)
 - [ ] Review with the human before proceeding
 
