@@ -11,12 +11,14 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { MIGRATIONS } from "../../../persistence/db.ts";
+import { applyMigration, MIGRATIONS } from "../../../persistence/db.ts";
 import { setSetting } from "../../../persistence/settings.ts";
+import { Supervisor } from "../../../supervision/supervisor.ts";
 import { ApprovalStore } from "../approvals.ts";
-import type { BotsService } from "../../bots/bots.ts";
-import type { EventLog } from "../../events/eventLog.ts";
-import type { ThreadsService } from "../../threads/threads.ts";
+import { AgentsRegistry } from "../../agents/registry.ts";
+import { BotsService } from "../../bots/bots.ts";
+import { EventLog } from "../../events/eventLog.ts";
+import { ThreadsService } from "../../threads/threads.ts";
 import { SecretStore, type SecretBackend } from "../secrets.ts";
 import { DurableTranscript } from "../transcript.ts";
 import { ALLOWED_FOLDERS_SETTING, readSettingsAllowedFolders } from "../../workspace/allowedFolders.ts";
@@ -572,28 +574,24 @@ test.skipIf(process.platform === "win32")("bash keeps an out-of-band Bot secret 
   const consoleCalls: unknown[][] = [];
   const consoleSpies = (["debug", "info", "log", "warn", "error"] as const).map((method) =>
     spyOn(console, method).mockImplementation((...args) => { consoleCalls.push(args); }));
-  const messages: unknown[] = [];
-  const events: unknown[] = [];
   const views: ConversationView[] = [];
-  const threads = Object.assign({} as ThreadsService, {
-    listMessages: () => messages,
-    appendMessage: (_threadId: string, message: unknown) => { messages.push(message); },
-    appendResponseDelta: (_threadId: string, _turnId: string, _blockId: string, delta: string) => {
-      const message = { text: delta };
-      messages.push(message);
-      return message;
-    },
-    completeResponse: () => undefined,
-  });
-  const eventLog = { append: (...args: unknown[]) => { events.push(args); } } as unknown as EventLog;
-  let transcript: DurableTranscript | undefined;
+  const db = new Database(":memory:");
   try {
+    for (const migration of MIGRATIONS) applyMigration(db, migration);
+    const eventLog = new EventLog(db);
+    const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {}, async onAgentToolFrame() { return undefined; } }, { agents: "" });
+    const agents = new AgentsRegistry(db, eventLog, { conformanceDir: "", workersAgentsDir: "" }, supervisor);
+    const threads = new ThreadsService(db, eventLog, agents);
+    const bots = new BotsService(db, eventLog, agents, threads);
+    threads.insertThreadRow("thread", "bot-a", "Shell secret fixture");
+    threads.insertTurnRow({ id: "turn", threadId: "thread", botId: "bot-a", nativeSessionId: "" });
+    let transcript: DurableTranscript | undefined;
     await secretStore.forBot("bot-a").save("token", "Service token", value);
     const { entries, results, settlement } = await withTurn(dirs, [printToken], undefined, {
       secretStore, botId: "bot-a", echoToolResult: true,
       observe(view) {
         views.push(view);
-        transcript ??= new DurableTranscript(threads, {} as BotsService, eventLog, "thread", "bot-a", "turn", view);
+        transcript ??= new DurableTranscript(threads, bots, eventLog, "thread", "bot-a", "turn", view);
         transcript.update(view);
       },
     });
@@ -602,6 +600,8 @@ test.skipIf(process.platform === "win32")("bash keeps an out-of-band Bot secret 
     expect(exec.mock.calls.some(([command]) => typeof command === "string" && command.includes(value))).toBe(true);
     expect(exec.mock.calls[0]?.[1]?.spill).toBeUndefined();
     expect(JSON.stringify(entries)).toContain(JSON.stringify(printToken.args.command));
+    const messages = threads.listMessages("thread");
+    const { events } = eventLog.replay(0, eventLog.oldestCursor());
     expect(JSON.stringify(messages)).toContain(tokenPlaceholder);
     expect(JSON.stringify(events)).toContain(tokenPlaceholder);
     for (const observed of [entries, views, messages, events]) {
@@ -611,6 +611,7 @@ test.skipIf(process.platform === "win32")("bash keeps an out-of-band Bot secret 
   } finally {
     exec.mockRestore();
     for (const spy of consoleSpies) spy.mockRestore();
+    db.close();
     dirs.close();
   }
 });

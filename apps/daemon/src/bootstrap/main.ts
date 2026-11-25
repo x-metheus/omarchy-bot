@@ -91,21 +91,6 @@ export async function main(options: MainOptions = {}): Promise<{
   const events = new EventLog(db);
   let plugins!: PluginsService;
   const mcpServers = () => plugins?.mcp.effectiveServers() ?? { revision: "", servers: {}, secrets: [] };
-  const runtime = await openBotRuntime(cfg, db, {
-    events,
-    mcp: {
-      servers: mcpServers,
-      async prepareServers() {
-        await plugins?.prepareServiceCredentials();
-        return mcpServers();
-      },
-    },
-    mcpOAuth: {
-      initialRejectedServers: readMcpOAuthRejectedServers(db),
-      onRejectedChange: (names) => setSetting(db, MCP_OAUTH_REJECTED_SERVERS_SETTING, JSON.stringify(names.slice(-MAX_MCP_OAUTH_REJECTED_SERVERS))),
-      onAuthorization: (outcome) => { plugins?.handleNativeAuthorization(outcome); },
-    },
-  });
   const sharedWorkspaceDir = prepareSharedWorkspace(cfg.sharedWorkspaceDir);
   try {
     cleanupWorkspace({ workspaceDir: cfg.sharedWorkspaceDir, dataDir: cfg.dataDir });
@@ -194,6 +179,89 @@ export async function main(options: MainOptions = {}): Promise<{
     },
   );
 
+  const lease = new ScreenInputLease({
+    grant: async (surfaceId, epoch, generation, kind, signal) => {
+      const source = await screens.projectionSource(ownerFor(surfaceId), signal);
+      if (source === undefined) throw new Error("Bot Screen is unavailable");
+      // A grant for a replaced runtime must not arm the new compositor.
+      if (generation !== undefined && source.runtimeGeneration !== generation) {
+        throw new Error(`stale runtime generation ${generation}`);
+      }
+      return source.setInputAuthority(epoch, kind, signal);
+    },
+    deliver: async (surfaceId, epoch, event, sequence = 1, generation, signal) => {
+      const source = await screens.projectionSource(ownerFor(surfaceId), signal);
+      if (source === undefined) throw new Error("Bot Screen is unavailable");
+      if (generation !== undefined && source.runtimeGeneration !== generation) {
+        throw new Error(`stale runtime generation ${generation}`);
+      }
+      await source.input({
+        surfaceId,
+        runtimeGeneration: source.runtimeGeneration,
+        geometryGeneration: source.geometryGeneration,
+        controllerEpoch: epoch,
+        ...event,
+        sequence,
+      }, signal);
+    },
+    release: async (surfaceId, epoch, held, nextSequence = 1, generation) => {
+      const source = await screens.projectionSource(ownerFor(surfaceId));
+      if (source === undefined) return;
+      // The old compositor is gone: its held keys die with it.
+      if (generation !== undefined && source.runtimeGeneration !== generation) return;
+      let sequence = nextSequence;
+      const context = {
+        surfaceId,
+        runtimeGeneration: source.runtimeGeneration,
+        geometryGeneration: source.geometryGeneration,
+        controllerEpoch: epoch,
+      };
+      try {
+        for (const keyCode of held.keys) {
+          await source.input({ ...context, sequence: sequence++, type: "key", keyCode, state: "released" });
+        }
+        for (const button of held.buttons) {
+          await source.input({
+            ...context,
+            sequence: sequence++,
+            type: "button",
+            x: 0,
+            y: 0,
+            button,
+            state: "released",
+          });
+        }
+      } finally {
+        await source.releaseInput(epoch);
+      }
+    },
+    capture: (surfaceId) => screens.capture(ownerFor(surfaceId)),
+  });
+  const projections = new ScreenProjectionService(screens, new InputDiagnostics(db), lease);
+  const computer = new ComputerBroker(db, events, screens, cfg.artifactsDir, lease, projections);
+  function ownerFor(surfaceId: SurfaceId): ComputerSurfaceOwner {
+    const row = db.query(`SELECT bot_id FROM bot_surfaces WHERE surface_id = ?`).get(surfaceId) as { bot_id: string } | null;
+    if (row === null) throw new Error("unknown Computer Surface");
+    return { botId: row.bot_id, surfaceId };
+  }
+  await screens.recover();
+  const runtime = await openBotRuntime(cfg, db, {
+    events,
+    mcp: {
+      servers: mcpServers,
+      async prepareServers() {
+        await plugins?.prepareServiceCredentials();
+        return mcpServers();
+      },
+    },
+    mcpOAuth: {
+      initialRejectedServers: readMcpOAuthRejectedServers(db),
+      onRejectedChange: (names) => setSetting(db, MCP_OAUTH_REJECTED_SERVERS_SETTING, JSON.stringify(names.slice(-MAX_MCP_OAUTH_REJECTED_SERVERS))),
+      onAuthorization: (outcome) => { plugins?.handleNativeAuthorization(outcome); },
+    },
+    computer,
+  });
+
   const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
   const threads: ThreadsService = new ThreadsService(db, events, agents);
   const bots = new BotsService(db, events, agents, threads);
@@ -247,68 +315,6 @@ export async function main(options: MainOptions = {}): Promise<{
   const recoveringMail = mailbox.recoverAcceptedMail();
   if (recoveringMail) await recoveringMail;
   else turns.recoverTurns();
-  const lease = new ScreenInputLease({
-    grant: async (surfaceId, epoch, generation, kind) => {
-      const source = await screens.projectionSource(ownerFor(surfaceId));
-      if (source === undefined) throw new Error("Bot Screen is unavailable");
-      // A grant for a replaced runtime must not arm the new compositor.
-      if (generation !== undefined && source.runtimeGeneration !== generation) {
-        throw new Error(`stale runtime generation ${generation}`);
-      }
-      return source.setInputAuthority(epoch, kind);
-    },
-    deliver: async (surfaceId, epoch, event, sequence = 1, generation) => {
-      const source = await screens.projectionSource(ownerFor(surfaceId));
-      if (source === undefined) throw new Error("Bot Screen is unavailable");
-      if (generation !== undefined && source.runtimeGeneration !== generation) {
-        throw new Error(`stale runtime generation ${generation}`);
-      }
-      await source.input({
-        surfaceId,
-        runtimeGeneration: source.runtimeGeneration,
-        geometryGeneration: source.geometryGeneration,
-        controllerEpoch: epoch,
-        ...event,
-        sequence,
-      });
-    },
-    release: async (surfaceId, epoch, held, nextSequence = 1, generation) => {
-      const source = await screens.projectionSource(ownerFor(surfaceId));
-      if (source === undefined) return;
-      // The old compositor is gone: its held keys die with it.
-      if (generation !== undefined && source.runtimeGeneration !== generation) return;
-      let sequence = nextSequence;
-      const context = {
-        surfaceId,
-        runtimeGeneration: source.runtimeGeneration,
-        geometryGeneration: source.geometryGeneration,
-        controllerEpoch: epoch,
-      };
-      for (const keyCode of held.keys) {
-        await source.input({ ...context, sequence: sequence++, type: "key", keyCode, state: "released" });
-      }
-      for (const button of held.buttons) {
-        await source.input({
-          ...context,
-          sequence: sequence++,
-          type: "button",
-          x: 0,
-          y: 0,
-          button,
-          state: "released",
-        });
-      }
-      await source.releaseInput(epoch);
-    },
-    capture: (surfaceId) => screens.capture(ownerFor(surfaceId)),
-  });
-  const projections = new ScreenProjectionService(screens, new InputDiagnostics(db), lease);
-  const computer = new ComputerBroker(db, events, screens, cfg.artifactsDir, lease, projections);
-  function ownerFor(surfaceId: SurfaceId): ComputerSurfaceOwner {
-    const row = db.query(`SELECT bot_id FROM bot_surfaces WHERE surface_id = ?`).get(surfaceId) as { bot_id: string } | null;
-    if (row === null) throw new Error("unknown Computer Surface");
-    return { botId: row.bot_id, surfaceId };
-  }
   const botDeletions = new BotDeletionService(
     db,
     events,
@@ -320,7 +326,6 @@ export async function main(options: MainOptions = {}): Promise<{
     cfg.sharedWorkspaceDir,
     { secrets: runtime.secrets, terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs, projections },
   );
-  await screens.recover();
 
   agents.init();
   mailbox.reconcileStartup();

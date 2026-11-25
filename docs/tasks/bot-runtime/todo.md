@@ -256,19 +256,30 @@ Decided 2026-11-24: the approval UI reuses the inline `Banner` + `Button` compos
 
 ## Task 11: Computer and browser tools in process
 
-**Description:** Port the computer and browser tools from `workers/pi/src` to runtime extensions that call `ComputerBroker` directly.
+**Description:** Port the computer and browser tools from `workers/pi/src` to runtime extensions that call `ComputerBroker` directly. Also project committed durable tool calls and results into the same tool Messages and events the worker path produces.
 
 **Acceptance criteria:**
-- [ ] Computer and browser tool calls behave as on the worker path
-- [ ] Each tool has a time limit and honors abort
+- [x] Computer and browser tool calls behave as on the worker path — `agent-computer-tool.test.ts` durable 16 passed with 3 workerOnly skips against 19 passed switch-off; `agent-browser-tool.test.ts` durable 10 passed with 1 workerOnly skip against 11 passed switch-off
+- [x] Each tool has a time limit and honors abort — `computer.test.ts` and `browser.test.ts` cover timeout and abort through the Harness; `agent-computer-tool.test.ts` covers a queued press and a grant queued behind a capture; `bot-screen-sway-projection.test.ts` covers an aborted launch and reattach, 16/16 in both modes; `screen-input-lease.test.ts` 19/19 in both modes
 
-**Verification:** default commands; `agent-computer-tool` and `agent-browser-tool` integration tests pass with the switch on.
+**Verification:** default commands and the integration files in both modes. Final: `bun run lint:boundaries` 4/0; `bun test apps/daemon` 158 passed, 1 existing skip; `bun run typecheck` exits 2 on the one pre-existing `daemon.test.ts:289` error, unchanged by this branch. `thinking-blocks.test.ts` passes 7/7 in both modes and Bot Screen lifecycle's first graphical use passes on the durable path. Durable residuals: `ordered-transcript-qa.test.ts` 1 passed, 2 failed and `daemon.test.ts` 16 passed, 2 failed, 2 existing skips — both need native `event` projection, and the Daemon cases also compare the fake worker's `target`/`durationMs`; `permanent-deletion.test.ts` 3 passed, 1 failed, 4 existing skips — the screenshot artifact is created before deletion, and the run fails at the message count (4 against the worker's 5) because the durable fixture has no `attachment-echo` reply, which is Checkpoint C attachment work.
 
 **Dependencies:** Task 3
 
 **Files likely touched:** `apps/daemon/src/modules/runtime/extensions/computer.ts`, `apps/daemon/src/modules/runtime/extensions/browser.ts`, tests
 
 **Estimated scope:** Small
+
+Decided 2026-11-25:
+
+- Tool-call projection is part of this task. A committed tool call becomes one `kind: "tool"` Message at its position in the assistant content with `message.appended`; its committed result updates that row with `tool.updated`, never a new row. Recovery reuses persisted rows and their IDs, renumbers sequence numbers when it repairs order, reconciles stale live text against the journal, places a missing tool after the preceding row of the same assistant entry (so it stays before a later steer), and does not publish a call that an aborted partial never started. Projected tool and block writes commit with their events; EventLog publishes synchronously after the outermost managed commit; replay and retry do not duplicate rows, text or events in the tested cases. The rules use only durable entries, so Task 12's tools can reuse the projector; that reuse is an inference until their tests land.
+- Pi progress is persisted with `progress.persistWithinMs: 0`, which shortens the window where a live partial exists only in memory before a crash. Recovery still removes a Service-only partial with no journal counterpart.
+- Every computer and browser action has a 60-second deadline. Reaching it or aborting the Turn cancels the broker call: queued input is not written, an undispatched routing command is not sent, and cleanup is awaited. A Sway command already written cannot be undone. Standalone snapshot capture has a 5-second deadline and a separate 1-second SIGTERM-to-SIGKILL grace. Application units use `application-${randomUUID()}` so an aborted launch after reattach cannot stop a surviving unit.
+- A queued press is released only after the pointer helper acknowledged it, and Screen authority is released in `finally`. A Web Control claim made while screenshot persistence is pending survives the tool's cleanup.
+- The three computer cases whose subject is the worker transport (forged ToolChannel bindings, worker exit during a held Takeover or tool dispatch) and the browser forged-binding case are `workerOnly`, with a one-line reason. They are the only new skips on this branch and are removed with the worker in Task 20.
+- The held-Takeover restart case uses `disconnectForRestart()` rather than `h.stop()`: a clean shutdown cancels a running Turn by spec, while SIGTERM for restart fails it with `daemon restart`.
+- Durable fixtures parse the worker fixture's computer and browser command syntax instead of test names. The thinking-order reply now ends at its `read` and emits the trailing thinking and text after the result; the ordered-transcript boundary emits `read`; the process-only and tool scripts follow the worker's boundaries. In the fixture commit, the thinking-order assertion, the ordered-transcript boundary assertion and the harness reply list changed to those outputs, and the harness appends two verbatim worker responses. No existing scenario assertion outside the harness changed.
+- Follow-ups outside this task: `bun run typecheck` still exits 2 on the pre-existing `tests/integration/daemon.test.ts:289` approvals-list type, which this branch does not touch; computer and browser each read the active Turn for themselves while sharing the SQL owner resolver (extract one helper); native `event` projection is absent and tracked at Checkpoint C, which blocks the two Ordered Transcript and two Daemon cases; Permanent Deletion's remaining failure is the missing attachment echo tracked with attachments at Checkpoint C; the Daemon tool summary also compares the fake worker's hard-coded `target: "echo fake"` and `durationMs: 12`, while the durable projector carries a duration only when the Harness supplies one.
 
 ---
 
@@ -286,7 +297,7 @@ Decided 2026-11-24: the approval UI reuses the inline `Banner` + `Button` compos
 - [x] A Skill installed from the catalog appears in the Bot's Skills list on its next Turn
   - `runtime.test.ts` verifies “a catalog Skill installed with manage_plugins appears in the next durable Turn's model system prompt” for a user Turn. `extensions/mail.test.ts` verifies “peer mail preserves an active user reply's configuration and refreshes its own model prompt with new instructions and Skills”.
 
-The owning pi-durable run's primary placed input identifies the active Service Turn. All placed inputs must agree on that owner, and the working Turn must match the conversation's Bot and Thread. Tool schemas reject caller-supplied identity fields.
+The owning pi-durable run's primary placed input identifies the active Service Turn. All placed inputs must agree on that owner, and the working Turn must match the conversation's Bot and Thread. The runtime can resolve a placed input by its request ID before the Service writes the association. Computer and browser use the same Turn resolver and dispatch to the resolved Bot's screen. Tool schemas reject caller-supplied identity fields.
 
 Bot mail uses one `input` submission with the target Turn ID as its request ID. It places a `write` entry with `author`, `text`, and `deliveryId` in its data and `formatAuthorText` as the source of its author-labeled model content. A standalone `write` submission only appends an entry. Before sending the `input` on an existing Thread, the runtime waits for the conversation to be idle and refreshes the model, thinking level, Turn limit, and prompt from current Bot settings and workspace Skills. The configuration commit retries if a run has started. New conversations receive this configuration in their creation commit. The `input` starts the reply or queues it with `whenBusy: "followUp"` if a run starts after configuration.
 
@@ -302,7 +313,7 @@ Mail, local, and plugin calls honor abort and have 120-second deadlines. Abort o
 
 Ambiguous call IDs in the same assistant response are rejected. `local` and `manage_plugins` share an in-memory, per-Turn registry that rejects reuse of dispatched IDs in later responses with `tool call was already dispatched`. The registry releases IDs when the Turn settles and resets on restart, matching the worker channel's lifetime. Mail uses the durable pi task key. Replaying the same task returns the original delivery, and distinct tasks reusing a call ID can enqueue separately.
 
-Service transcript tool records wait on Task 11. Durable tests assert committed pi tool results. The six `bot-mailbox.test.ts` cases that rely on Service tool projection cover the acknowledgement and repeated send, a forged source Bot, disabled Agent inventory, invalid addressing, the isolated target session's `read`, and enqueue during target deletion.
+The Service transcript projects each committed call by assistant entry and content position, so distinct calls can share a model call ID. When calls in the same entry share an ID, the projector uses the result's durable task position to update the corresponding row. Replaying the same occurrence preserves its row and events. Recovery projects owned journal ranges in entry order before resuming the live reply. Durable mailbox and local dispatch integration tests assert both the committed Pi results and their projected Service tool rows.
 
 **Verification:** recorded final matrix.
 

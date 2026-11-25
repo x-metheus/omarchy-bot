@@ -3,6 +3,8 @@ import type { AgentBotMessageToolOutput, AgentCommand, NativeMcpControlResult, N
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import type { SurfaceId } from "@omarchy-bot/domain";
+import type { ComputerBroker } from "../computer/broker.ts";
 import type { PluginsService } from "../plugins/plugins.ts";
 import type { SidecarBroker } from "../devices/sidecarBroker.ts";
 import { readAllowedFolders, readSettingsAllowedFolders } from "../workspace/allowedFolders.ts";
@@ -10,14 +12,17 @@ import type { PlatformPaths } from "../workspace/paths.ts";
 import { openThreadConversation } from "./conversations.ts";
 import { seedFirstTurnConversation, transcriptBeforeTurn } from "./sessionMigration.ts";
 import { DurableTranscript } from "./transcript.ts";
+import { resolveActiveTurnIdentity } from "./active-turn.ts";
 import { resolveModelForBot } from "./models.ts";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { awaitWithContext, BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
+import { awaitWithContext, BACKGROUND_CONTEXT, withCancel, type Context } from "@earendil-works/chord/context";
 import { CredentialStore } from "./credentials.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { createRuntimeModels } from "./models.ts";
 import { compactionExtension, compactionSettings, formatAuthorText } from "./compaction.ts";
 import { createFilesEnvironment, createFilesShellExtension, resolveImplicitDownloads } from "./extensions/files-shell.ts";
+import { createComputerExtension } from "./extensions/computer.ts";
+import { createBrowserExtension } from "./extensions/browser.ts";
 import { createLocalExtension } from "./extensions/local.ts";
 import { createMailExtension } from "./extensions/mail.ts";
 import { createMcpExtension, type McpExtensionDeps } from "./extensions/mcp.ts";
@@ -31,7 +36,7 @@ import { importPiProviders } from "./providerImport.ts";
 import { BunSecretsBackend, probeBunSecrets } from "./bunSecrets.ts";
 import { SecretStore } from "./secrets.ts";
 import { McpOAuthManager, type McpOAuthManagerDeps } from "./mcpOAuth.ts";
-import { AssistantEntry, configure, ConversationIdle, createRegistry, Harness, InboxDoc, LiveDoc, type AgentChange, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type LiveState, type SettledSubmissionRecord, type SubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
+import { AssistantEntry, configure, ConversationIdle, createRegistry, Harness, InboxDoc, LiveDoc, type AgentChange, type Conversation, type ConversationId, type ConversationWatch, type EntryId, type EntryRecord, type LiveState, type ToolExecutionApi, type SettledSubmissionRecord, type SubmissionRecord, type Submission, type SubmissionId, type Cursor } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 
@@ -134,6 +139,7 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
   mcpOAuth?: Pick<McpExtensionDeps, "initialRejectedServers" | "onRejectedChange"> & {
     onAuthorization?: (outcome: McpAuthorizationOutcome) => void;
   };
+  computer?: Pick<ComputerBroker, "agentToolAct" | "agentBrowserAct">;
 } = {}): Promise<BotRuntime> {
   const secretsApi = typeof Bun === "undefined" ? undefined : Bun.secrets;
   const secretStore = new SecretStore(paths.dataDir, secretsApi ? {
@@ -242,10 +248,9 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     let updating: Promise<void> | undefined;
     const projectedAnswers = new Set<EntryId>();
     let lastProjectedAnswer: EntryId | undefined;
-    let failedRunBoundary: { first: EntryId; successor: EntryId } | undefined;
+    let lastProjectedFailure: EntryId | undefined;
 
     async function successorFirst(failedFirst: EntryId, failedInputs: readonly SubmissionId[]): Promise<EntryId | undefined> {
-      if (failedRunBoundary?.first === failedFirst) return failedRunBoundary.successor;
       // pi keeps runFailure visible after its successor settles. The next placed input bounds the failed run even then.
       const priorInputs = new Set(failedInputs);
       let successor: EntryId | undefined;
@@ -259,7 +264,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         }
         cursor = page.next;
       } while (cursor);
-      if (successor !== undefined) failedRunBoundary = { first: failedFirst, successor };
       return successor;
     }
 
@@ -273,11 +277,24 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       } while (cursor);
     }
 
-    async function projectAnswers(records: readonly (SubmissionRecord | undefined)[]): Promise<void> {
-      const answered = records.filter((record) => record?.type === "input" && record.status === "done")
-        .sort((left, right) => left.answer - right.answer);
+    async function projectSettled(view: ConversationWatch["value"], records: readonly (SubmissionRecord | undefined)[], settledAfterView = false): Promise<void> {
+      const ranges: { first: EntryId; last: EntryId; failed?: true }[] = [];
+      const live = view.docs["pi.live"] as LiveState | undefined;
+      const failure = live?.runFailure;
+      const failedFirst = failure?.first;
+      const failedPrimary = failure?.inputs[0];
+      const latest = view.entries.at(-1)?.id ?? view.before;
+      if (failure && failedFirst !== undefined && failedFirst !== lastProjectedFailure && failedPrimary !== undefined && turn.inputs.has(failedPrimary) && latest !== undefined) {
+        const successor = await successorFirst(failedFirst, failure.inputs);
+        const last = successor !== undefined && successor <= latest ? (successor - 1) as EntryId : latest;
+        if (last >= failedFirst) ranges.push({ first: failedFirst, last, failed: true });
+      }
+      const answered = records.filter((record) => record?.type === "input" && record.status === "done");
+      const answers = new Set<EntryId>();
       for (const record of answered) {
-        if (projectedAnswers.has(record.answer)) continue;
+        // Storage can already hold a newer answer than this watch revision.
+        if (projectedAnswers.has(record.answer) || answers.has(record.answer) || (!settledAfterView && (latest === undefined || record.answer > latest))) continue;
+        answers.add(record.answer);
         // For a run that has already ended, its earliest placed input is the first submission sharing its answer.
         let primary = record;
         if (current?.input !== record.id) {
@@ -290,33 +307,33 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
             cursor = page.next;
           } while (cursor);
         }
-        if (turn.inputs.has(primary.id)) {
-          await projectEntries(watch.value, primary.entry, record.answer);
-          if (lastProjectedAnswer === undefined || record.answer > lastProjectedAnswer) lastProjectedAnswer = record.answer;
+        if (turn.inputs.has(primary.id)) ranges.push({ first: primary.entry, last: record.answer });
+        else projectedAnswers.add(record.answer);
+      }
+      // A settled steer and the failed run it followed can both be present when recovery first attaches.
+      for (const { first, last, failed } of ranges.sort((left, right) => left.first - right.first)) {
+        await projectEntries(view, first, last);
+        if (failed) {
+          lastProjectedFailure = first;
+          continue;
         }
-        projectedAnswers.add(record.answer);
+        projectedAnswers.add(last);
+        if (lastProjectedAnswer === undefined || last > lastProjectedAnswer) lastProjectedAnswer = last;
       }
     }
 
-    async function projectView(view: ConversationWatch["value"]): Promise<void> {
+    async function projectView(view: ConversationWatch["value"], recoveryRecords?: readonly SubmissionRecord[]): Promise<void> {
       const live = view.docs["pi.live"] as LiveState | undefined;
       const first = live?.run?.first;
       const primary = live?.run?.inputs[0];
-      if (current && current.first !== first) {
-        await projectAnswers([await storage.submission(current.input, context)]);
-        current = undefined;
-      }
-      const failure = live?.runFailure;
-      const failedFirst = failure?.first;
-      const failedPrimary = failure?.inputs[0];
-      if (failure && failedFirst !== undefined && failedPrimary !== undefined && turn.inputs.has(failedPrimary)) {
-        const cutoff = first ?? await successorFirst(failedFirst, failure.inputs);
-        const failedEntries = view.entries.filter((entry) => entry.id >= failedFirst && (cutoff === undefined || entry.id < cutoff) && shouldProjectEntry(entry, turn.lastEntryBeforeAbort));
-        await writeService(() => transcript.update({ ...view, entries: failedEntries, docs: {} }));
-      }
+      const ended = current?.first !== first ? current : undefined;
+      await projectSettled(view, ended ? [await storage.submission(ended.input, context)] : recoveryRecords ?? []);
+      if (ended) current = undefined;
+      const recovering = recoveryRecords !== undefined;
       // Recovery can settle a run before its watch has delivered the ending revision.
       if (first === undefined || primary === undefined || !turn.inputs.has(primary) || (lastProjectedAnswer !== undefined && first <= lastProjectedAnswer)) {
         await transcript.reconcileCompactions(view, conversation, writeService);
+        if (recovering) await writeService(() => transcript.resume({ ...view, docs: {} }));
         return;
       }
       if (current === undefined && view.before !== undefined && view.before >= first) {
@@ -324,13 +341,19 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       }
       current = { first, input: primary };
       const entries = view.entries.filter((entry) => entry.id >= first && shouldProjectEntry(entry, turn.lastEntryBeforeAbort));
-      await writeService(() => transcript.update({ ...view, entries }));
+      await writeService(() => {
+        if (recovering) {
+          transcript.update({ ...view, entries, docs: {} });
+          transcript.resume(view);
+        } else {
+          transcript.update({ ...view, entries });
+        }
+      });
     }
 
     return {
-      projectAnswers,
-      async start() {
-        await projectView(watch.value);
+      async start(recoveryRecords?: readonly SubmissionRecord[]) {
+        await projectView(watch.value, recoveryRecords);
         watch.start((call) => {
           if (call.kind !== "value") return Promise.resolve();
           updating = projectView(call.value);
@@ -340,7 +363,14 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       async finish(settlements: readonly SettledSubmissionRecord[]) {
         await watch.stop();
         await updating;
-        await projectAnswers(settlements);
+        if (settlements.some((record) => record.status === "unanswered" && record.entry !== undefined)) {
+          // Stopping a watch drops buffered revisions, which can include a settled failure.
+          const settledWatch = await conversation.watch(context, { min: 1, max: 1 });
+          try { await projectSettled(settledWatch.value, settlements); }
+          finally { await settledWatch.stop(); }
+        } else {
+          await projectSettled(watch.value, settlements, true);
+        }
       },
     };
   }
@@ -378,6 +408,20 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
     registry.install(createLocalExtension(db, () => services?.sidecars, active, dispatched));
     registry.install(createMailExtension(db, () => services?.mailbox, active, undefined, writeService));
     registry.install(createPluginsExtension(db, () => services?.plugins, active, dispatched));
+    const computer = options.computer;
+    if (db && computer) {
+      const findSurface = db.query<{ surfaceId: SurfaceId }, [string]>("SELECT surface_id AS surfaceId FROM bot_surfaces WHERE bot_id = ?");
+      const owner = async (api: ToolExecutionApi, context: Context) => {
+        const { botId, turnId } = await resolveActiveTurnIdentity(api, context, db, active);
+        const surface = findSurface.get(botId);
+        return surface ? { botId, turnId, surfaceId: surface.surfaceId } : undefined;
+      };
+      registry.install(createComputerExtension({
+        broker: { agentToolAct: (owner, turnId, toolCallId, action, signal) => computer.agentToolAct(owner, turnId, toolCallId, action, signal, true) },
+        owner,
+      }));
+      registry.install(createBrowserExtension({ broker: computer, owner }));
+    }
     registry.install(createWebExtension({
       exemptRanges: () => readWebExemptRanges(db),
       searchKey: () => secretStore.getAppSecretForRuntime(EXA_SEARCH_KEY_SECRET),
@@ -388,7 +432,11 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         return createModels();
       }
     }, registry, env: ({ conversationId, cwd }) => createFilesEnvironment(paths, readSettingsAllowedFolders(db), cwd, conversationBots.get(conversationId)),
-    settings: { afterFailedRun: "continue", restartLimit: 5, compaction: compactionSettings } }, context);
+    settings: {
+      afterFailedRun: "continue", restartLimit: 5, compaction: compactionSettings,
+      // Request persistence as soon as Pi publishes progress that the Service can project.
+      progress: { persistWithinMs: 0 },
+    } }, context);
     let resumed = false;
     const resumeScheduler = () => {
       if (resumed) return;
@@ -433,135 +481,151 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       active.set(input.turnId, turn);
       let watch: ConversationWatch | undefined;
       let bookkeeping: Promise<void> | undefined;
-      try {
-        const privateDir = "privateDir" in input ? input.privateDir : await awaitWithContext(writeService(() => {
-          waitingContext.abortSignal?.throwIfAborted();
-          return input.announce();
-        }), waitingContext);
-        // Submitting a fresh Turn can start the global scheduler while recovery is still mapping Bots.
-        if (recoveryRegistration) await awaitWithContext(recoveryRegistration, waitingContext);
-        const currentSettings = (): AgentChange => {
-          const model = resolveModelForBot(input.db, credentials, input.botId);
-          rememberModelSelection(model.provider, model.id);
-          const bot = input.bots.getDto(input.botId);
-          const instructions = buildSystemPrompt({
-            botName: bot.name,
-            instructions: "instructions" in input ? input.instructions : bot.instructions,
-            workspaceDir: input.workspaceDir,
-            privateDir,
-            allowedFolders: readAllowedFolders(db, { ...paths, downloadsDir: resolveImplicitDownloads(paths) }),
-            skills: listWorkspaceSkills(input.workspaceDir),
-          });
-          return { cwd: paths.sharedWorkspaceDir, model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions, maxTurns: bot.maxTurns ?? DEFAULT_MAX_TURNS };
-        };
-        const userSettings = peerMail ? undefined : currentSettings();
-        let configuredOnCreate = false;
-        waitingContext.abortSignal?.throwIfAborted();
-        const conversation = await awaitWithContext(
-          openThreadConversation(input.db, harness, input.threadId, input.botId, context, {
-            writeService,
-            async seed(conversation, seedContext) {
-              const userMessageSeq = "userMessageSeq" in input ? input.userMessageSeq : undefined;
-              await seedFirstTurnConversation(conversation, seedContext, {
-                threadId: input.threadId,
-                legacySessionPath: input.threads.getNativeSession(input.threadId),
-                transcript: () => transcriptBeforeTurn(() => input.threads.listMessages(input.threadId), userMessageSeq),
-              });
-            },
-            ...(peerMail ? {
-              initialSettings() {
-                configuredOnCreate = true;
-                return currentSettings();
-              },
-            } : {}),
-          }),
-          waitingContext,
-        );
-        conversationBots.set(conversation.id, input.botId);
-        waitingContext.abortSignal?.throwIfAborted();
-        if (userSettings) {
-          await conversation.configure(userSettings, context);
-        } else if (!configuredOnCreate) {
-          for (;;) {
-            await conversation.waitForIdle(waitingContext);
-            waitingContext.abortSignal?.throwIfAborted();
-            // An input can start a run between the idle wait and this commit.
-            const configured = await awaitWithContext(conversation.commit(async (tx) => {
-              if ((await tx.doc(LiveDoc, conversation.id)).run) return false;
-              waitingContext.abortSignal?.throwIfAborted();
-              await configure(tx, conversation.id, currentSettings());
-              return true;
-            }, waitingContext), waitingContext);
-            if (configured) break;
-          }
-        }
-
-        const attaching = conversation.watch(context);
+      const runTurn = async () => {
         try {
-          watch = await awaitWithContext(attaching, waitingContext);
-        } catch (error) {
-          void attaching.then((attached) => attached.stop(), () => {});
-          throw error;
-        }
-        const ownedWatch = watch;
-        const transcript = new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, { ...ownedWatch.value, entries: [] });
-        const projection = projectTurn(conversation, ownedWatch, turn, transcript);
-        const register = (submission: Submission) => {
-          turn.inputs.add(submission.id);
-          admission.resolve({ conversation, submission });
-          input.admitted?.();
-        };
-
-        if (peerMail) {
-          await awaitWithContext(writeService(() => {
+          const privateDir = "privateDir" in input ? input.privateDir : await awaitWithContext(writeService(() => {
             waitingContext.abortSignal?.throwIfAborted();
-            input.working();
+            return input.announce();
           }), waitingContext);
-        } else {
-          input.working();
-        }
-        let submission: Submission;
-        if ("peerMail" in input) {
-          const { author, text, deliveryId } = input.peerMail;
+          // Submitting a fresh Turn can start the global scheduler while recovery is still mapping Bots.
+          if (recoveryRegistration) await awaitWithContext(recoveryRegistration, waitingContext);
+          const currentSettings = (): AgentChange => {
+            const model = resolveModelForBot(input.db, credentials, input.botId);
+            rememberModelSelection(model.provider, model.id);
+            const bot = input.bots.getDto(input.botId);
+            const instructions = buildSystemPrompt({
+              botName: bot.name,
+              instructions: "instructions" in input ? input.instructions : bot.instructions,
+              workspaceDir: input.workspaceDir,
+              privateDir,
+              allowedFolders: readAllowedFolders(db, { ...paths, downloadsDir: resolveImplicitDownloads(paths) }),
+              skills: listWorkspaceSkills(input.workspaceDir),
+            });
+            return { cwd: paths.sharedWorkspaceDir, model: { provider: model.provider, modelId: model.id }, thinkingLevel: "medium", instructions, maxTurns: bot.maxTurns ?? DEFAULT_MAX_TURNS };
+          };
+          const userSettings = peerMail ? undefined : currentSettings();
+          let configuredOnCreate = false;
           waitingContext.abortSignal?.throwIfAborted();
-          submission = await conversation.submit({
-            type: "input",
-            requestId: input.turnId,
-            whenBusy: "followUp",
-            content: formatAuthorText(author, text),
-            entry: { kind: "write", data: { author, text, deliveryId } },
-          }, waitingContext);
-          clearTimeout(admissionTimer);
-          delete turn.cancelAdmission;
-          register(submission);
-          bookkeeping = recordPeerMailAcceptance(input.db, input.turnId, submission.id, input.markDelivered).catch((error: unknown) => {
-            console.error(`peer-mail Turn ${input.turnId} was admitted but Service bookkeeping failed`, error);
-          });
-        } else {
-          try {
-            submission = await conversation.submit({ type: "input", content: input.text, requestId: input.turnId, ...(whenBusy ? { whenBusy, whenIdle: "reject" as const } : {}) }, context);
-          } catch (error) {
-            if (!(whenBusy && error instanceof ConversationIdle)) throw error;
-            submission = await conversation.submit({ type: "input", content: input.text, requestId: input.turnId }, context);
+          const conversation = await awaitWithContext(
+            openThreadConversation(input.db, harness, input.threadId, input.botId, context, {
+              writeService,
+              async seed(conversation, seedContext) {
+                const userMessageSeq = "userMessageSeq" in input ? input.userMessageSeq : undefined;
+                await seedFirstTurnConversation(conversation, seedContext, {
+                  threadId: input.threadId,
+                  legacySessionPath: input.threads.getNativeSession(input.threadId),
+                  transcript: () => transcriptBeforeTurn(() => input.threads.listMessages(input.threadId), userMessageSeq),
+                });
+              },
+              ...(peerMail ? {
+                initialSettings() {
+                  configuredOnCreate = true;
+                  return currentSettings();
+                },
+              } : {}),
+            }),
+            waitingContext,
+          );
+          conversationBots.set(conversation.id, input.botId);
+          waitingContext.abortSignal?.throwIfAborted();
+          if (userSettings) {
+            await conversation.configure(userSettings, context);
+          } else if (!configuredOnCreate) {
+            for (;;) {
+              await conversation.waitForIdle(waitingContext);
+              waitingContext.abortSignal?.throwIfAborted();
+              // An input can start a run between the idle wait and this commit.
+              const configured = await awaitWithContext(conversation.commit(async (tx) => {
+                if ((await tx.doc(LiveDoc, conversation.id)).run) return false;
+                waitingContext.abortSignal?.throwIfAborted();
+                await configure(tx, conversation.id, currentSettings());
+                return true;
+              }, waitingContext), waitingContext);
+              if (configured) break;
+            }
           }
-          await writeService(() => associateSubmission(input.db, input.turnId, submission.id, "input"));
-          register(submission);
+
+          const attaching = conversation.watch(context);
+          try {
+            watch = await awaitWithContext(attaching, waitingContext);
+          } catch (error) {
+            void attaching.then((attached) => attached.stop(), () => {});
+            throw error;
+          }
+          const ownedWatch = watch;
+          const transcript = new DurableTranscript(input.threads, input.bots, input.events, input.threadId, input.botId, input.turnId, { ...ownedWatch.value, entries: [] }, input.db);
+          const projection = projectTurn(conversation, ownedWatch, turn, transcript);
+          const register = (submission: Submission) => {
+            turn.inputs.add(submission.id);
+            admission.resolve({ conversation, submission });
+            input.admitted?.();
+          };
+
+          if (peerMail) {
+            await awaitWithContext(writeService(() => {
+              waitingContext.abortSignal?.throwIfAborted();
+              input.working();
+            }), waitingContext);
+          } else {
+            input.working();
+          }
+          let submission: Submission;
+          if ("peerMail" in input) {
+            const { author, text, deliveryId } = input.peerMail;
+            waitingContext.abortSignal?.throwIfAborted();
+            submission = await conversation.submit({
+              type: "input",
+              requestId: input.turnId,
+              whenBusy: "followUp",
+              content: formatAuthorText(author, text),
+              entry: { kind: "write", data: { author, text, deliveryId } },
+            }, waitingContext);
+            clearTimeout(admissionTimer);
+            delete turn.cancelAdmission;
+            register(submission);
+            bookkeeping = recordPeerMailAcceptance(input.db, input.turnId, submission.id, input.markDelivered).catch(async (error: unknown) => {
+              const reason = await redactFailure(failureMessage(error), input.botId);
+              console.error(`peer-mail Turn ${input.turnId} was admitted but Service bookkeeping failed`, reason);
+            });
+          } else {
+            try {
+              submission = await conversation.submit({ type: "input", content: input.text, requestId: input.turnId, ...(whenBusy ? { whenBusy, whenIdle: "reject" as const } : {}) }, context);
+            } catch (error) {
+              if (!(whenBusy && error instanceof ConversationIdle)) throw error;
+              submission = await conversation.submit({ type: "input", content: input.text, requestId: input.turnId }, context);
+            }
+            await writeService(() => associateSubmission(input.db, input.turnId, submission.id, "input"));
+            register(submission);
+          }
+          await projection.start();
+          const settlements = [await submission.wait(context)];
+          for (let index = 0; index < turn.pending.length; index++) {
+            const steered = await turn.pending[index]!;
+            if (steered) settlements.push(steered);
+          }
+          await projection.finish(settlements);
+          if (!settlements.some((item) => item.status === "done")) {
+            const failed = settlements.find((item) => item.status === "unanswered");
+            if (!failed || failed.status !== "unanswered") throw new Error("Durable turn did not complete");
+            if (failed.reason === "aborted") throw new DurableRunAborted();
+            const failure = ownedWatch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; reason: string; detail?: string } } | undefined;
+            const runFailure = failure?.runFailure?.inputs.includes(failed.id) ? failure.runFailure : undefined;
+            throw new Error(runFailure?.detail ?? (typeof failed.detail === "string" ? failed.detail : failed.reason));
+          }
+        } finally {
+          clearTimeout(admissionTimer);
+          try { await watch?.stop(); }
+          finally {
+            try { await bookkeeping; }
+            finally { releaseTurn(input.turnId); }
+          }
         }
-        await projection.start();
-        const settlements = [await submission.wait(context)];
-        for (let index = 0; index < turn.pending.length; index++) {
-          const steered = await turn.pending[index]!;
-          if (steered) settlements.push(steered);
-        }
-        await projection.finish(settlements);
-        if (!settlements.some((item) => item.status === "done")) {
-          const failed = settlements.find((item) => item.status === "unanswered");
-          if (!failed || failed.status !== "unanswered") throw new Error("Durable turn did not complete");
-          if (failed.reason === "aborted") throw new DurableRunAborted();
-          const failure = ownedWatch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; reason: string; detail?: string } } | undefined;
-          const runFailure = failure?.runFailure?.inputs.includes(failed.id) ? failure.runFailure : undefined;
-          throw new Error(runFailure?.detail ?? (typeof failed.detail === "string" ? failed.detail : failed.reason));
-        }
+      };
+      try {
+        await runTurn().finally(async () => {
+          // Shutdown can suspend a tool that will resume the next time the Service opens.
+          if (!closing) await writeService(() => input.threads.finalizeDurableToolCalls(input.turnId));
+        });
       } catch (error) {
         let failure = error;
         if (!(error instanceof DurableRunAborted)) {
@@ -571,13 +635,6 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
         }
         admission.reject(failure);
         throw failure;
-      } finally {
-        clearTimeout(admissionTimer);
-        try { await watch?.stop(); }
-        finally {
-          await bookkeeping;
-          releaseTurn(input.turnId);
-        }
       }
     }
 
@@ -590,33 +647,48 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
       startPeerMailTurn: startTurn,
       writeService,
       async recoverPeerMailAcceptance(input) {
-        const indexed = input.db.query<{ conversation_id: ConversationId }, [string, string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?").get(input.threadId, input.botId);
-        if (!indexed) return false;
-        const submission = await harness.commit(async (tx) => {
-          const conversationId = indexed.conversation_id;
-          const record = await tx.submissionByRequest(conversationId, input.turnId);
-          if (record?.type !== "input") return;
-          if (record.entry !== undefined) {
-            return (await tx.entry(record.entry))?.kind === "write" ? record : undefined;
-          }
-          if (record.status === "queued") {
-            const inbox = await tx.doc(InboxDoc, conversationId);
-            return inbox.items.find((item) => item.id === record.id)?.entry?.kind === "write" ? record : undefined;
-          }
-          // Withdrawing a queued input removes its inbox item. This request ID belongs to the mailbox's own Turn.
-          if (record.status === "unanswered") return record;
-        }, context);
-        if (!submission) return false;
-        await recordPeerMailAcceptance(input.db, input.turnId, submission.id, input.markDelivered);
-        return true;
+        try {
+          const indexed = input.db.query<{ conversation_id: ConversationId }, [string, string]>("SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ? AND bot_id = ?").get(input.threadId, input.botId);
+          if (!indexed) return false;
+          const submission = await harness.commit(async (tx) => {
+            const conversationId = indexed.conversation_id;
+            const record = await tx.submissionByRequest(conversationId, input.turnId);
+            if (record?.type !== "input") return;
+            if (record.entry !== undefined) {
+              return (await tx.entry(record.entry))?.kind === "write" ? record : undefined;
+            }
+            if (record.status === "queued") {
+              const inbox = await tx.doc(InboxDoc, conversationId);
+              return inbox.items.find((item) => item.id === record.id)?.entry?.kind === "write" ? record : undefined;
+            }
+            // Withdrawing a queued input removes its inbox item. This request ID belongs to the mailbox's own Turn.
+            if (record.status === "unanswered") return record;
+          }, context);
+          if (!submission) return false;
+          await recordPeerMailAcceptance(input.db, input.turnId, submission.id, input.markDelivered);
+          return true;
+        } catch (error) {
+          throw new Error(await redactFailure(failureMessage(error), input.botId));
+        }
       },
       recoverTurns(input) {
         const jobs: Promise<void>[] = [];
         const rows = input.db.query<{ id: string; thread_id: string; bot_id: string }, []>("SELECT id, thread_id, bot_id FROM turns WHERE status = 'working' ORDER BY started_at, id").all();
-        const settleTurn = (...args: Parameters<typeof input.settled>) => writeService(() => input.settled(...args));
-        const reportFailure = async (row: (typeof rows)[number], reason: string) => {
-          const redacted = await redactFailure(reason, row.bot_id);
-          await settleTurn(row.id, { status: "failed", reason: redacted });
+        type Outcome = Parameters<typeof input.settled>[1];
+        const settle = async (row: (typeof rows)[number], outcome: Outcome) => {
+          try {
+            if (!closing) await writeService(() => input.threads.finalizeDurableToolCalls(row.id));
+          } catch (error) {
+            outcome = { status: "failed", reason: failureMessage(error) };
+          }
+          if (outcome.status === "failed") {
+            outcome = { status: "failed", reason: await redactFailure(outcome.reason, row.bot_id) };
+          }
+          try {
+            await writeService(() => input.settled(row.id, outcome));
+          } catch (error) {
+            throw new Error(await redactFailure(failureMessage(error), row.bot_id));
+          }
         };
         const registered = (async () => {
           const prepared: {
@@ -653,14 +725,14 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
               failed.push({ row, reason: failureMessage(error) });
             }
           }
-          for (const { row, reason } of failed) await reportFailure(row, reason);
+          for (const { row, reason } of failed) await settle(row, { status: "failed", reason });
           for (const { row, conversation, owned, associations } of prepared) {
             try {
               const admission = { conversation, submission: owned };
               const turn: ActiveTurn = { db: input.db, threadId: row.thread_id, admitted: Promise.resolve(admission), pending: [], steers: [], inputs: new Set([owned.id]), recovering: true };
               active.set(row.id, turn);
               input.registered(row.id);
-              jobs.push((async () => {
+              const recover = async (): Promise<Outcome> => {
                 let watch: ConversationWatch | undefined;
                 try {
                   const steerIds = new Set(associations.filter((item) => item.kind === "steer").map((item) => item.submission_id));
@@ -684,51 +756,51 @@ export async function openBotRuntime(paths: PlatformPaths & { dbPath: string }, 
                     await writeService(() => associateSubmission(input.db, row.id, steer.id, "steer"));
                   }
                   turn.recovering = false;
-                  const firstEntry = (await owned.status(context)).entry;
+                  const records = await Promise.all([owned, ...turn.steers].map((submission) => submission.status(context)));
+                  const firstEntry = records[0]?.entry;
                   watch = await conversation.watch(context, { ...(firstEntry === undefined ? {} : { from: firstEntry }), min: 100, max: 200 });
                   const ownedWatch = watch;
-                  const transcript = await writeService(() => {
-                    const removed = input.db.query<{ kind: string; count: number }, [string]>("SELECT kind, count(*) AS count FROM messages WHERE turn_id = ? AND kind IN ('response', 'thinking') GROUP BY kind").all(row.id);
-                    input.db.query("DELETE FROM messages WHERE turn_id = ? AND kind IN ('response', 'thinking')").run(row.id);
-                    for (const item of removed) input.events.append("thread", row.thread_id, `${item.kind}.removed`, { threadId: row.thread_id, turnId: row.id, count: item.count });
-                    return new DurableTranscript(input.threads, input.bots, input.events, row.thread_id, row.bot_id, row.id, { ...ownedWatch.value, entries: [] });
-                  });
+                  const transcript = new DurableTranscript(input.threads, input.bots, input.events, row.thread_id, row.bot_id, row.id, { ...ownedWatch.value, entries: [] }, input.db);
                   const projection = projectTurn(conversation, ownedWatch, turn, transcript);
-                  await projection.projectAnswers(await Promise.all([owned, ...turn.steers].map((submission) => submission.status(context))));
-                  await projection.start();
+                  await projection.start(records);
                   const settlements = [await owned.wait(context)];
                   for (let i = 0; i < turn.pending.length; i++) {
                     const item = await turn.pending[i];
                     if (item) settlements.push(item);
                   }
                   await projection.finish(settlements);
-                  if (settlements.some((item) => item.status === "done")) await settleTurn(row.id, { status: "completed" });
-                  else {
-                    const failed = settlements.find((item) => item.status === "unanswered");
-                    if (!failed || failed.status !== "unanswered") throw new Error("Durable turn did not complete");
-                    if (failed.reason === "aborted") {
-                      await ownedWatch.stop();
-                      await settleTurn(row.id, { status: "cancelled" });
-                    } else {
-                      const live = ownedWatch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; detail?: string } } | undefined;
-                      const reason = (live?.runFailure?.inputs.includes(failed.id) ? live.runFailure.detail : undefined) ?? (typeof failed.detail === "string" ? failed.detail : failed.reason);
-                      await reportFailure(row, reason);
-                    }
-                  }
-                } catch (error) { await reportFailure(row, failureMessage(error)); }
-                finally {
-                  try { await watch?.stop(); }
-                  finally { releaseTurn(row.id); }
+                  if (settlements.some((item) => item.status === "done")) return { status: "completed" };
+                  const failed = settlements.find((item) => item.status === "unanswered");
+                  if (!failed || failed.status !== "unanswered") throw new Error("Durable turn did not complete");
+                  if (failed.reason === "aborted") return { status: "cancelled" };
+                  const live = ownedWatch.value.docs["pi.live"] as { runFailure?: { inputs: readonly number[]; detail?: string } } | undefined;
+                  const reason = (live?.runFailure?.inputs.includes(failed.id) ? live.runFailure.detail : undefined) ?? (typeof failed.detail === "string" ? failed.detail : failed.reason);
+                  return { status: "failed", reason };
+                } finally {
+                  await watch?.stop();
                 }
-              })());
+              };
+              const job = recover().then(
+                (outcome) => settle(row, outcome),
+                (error: unknown) => settle(row, { status: "failed", reason: failureMessage(error) }),
+              ).finally(() => { releaseTurn(row.id); });
+              // A job can reject before registration finishes and the drain observes it.
+              void job.catch(() => {});
+              jobs.push(job);
             } catch (error) {
               releaseTurn(row.id);
-              await reportFailure(row, failureMessage(error));
+              await settle(row, { status: "failed", reason: failureMessage(error) });
             }
           }
         })().finally(resumeScheduler);
         recoveryRegistration = registered;
-        const settled = registered.finally(async () => { await Promise.allSettled(jobs); });
+        const settled = registered.finally(async () => {
+          const results = await Promise.allSettled(jobs);
+          const failure = results.find((result) => result.status === "rejected");
+          if (failure) throw failure.reason;
+        });
+        // Recovery runs in the background, and callers can await settlement later.
+        void settled.catch(() => {});
         return { registered, settled };
       },
       async activeTurn(threadId) {

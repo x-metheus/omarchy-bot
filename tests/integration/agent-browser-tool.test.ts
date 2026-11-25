@@ -3,7 +3,7 @@ import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/compu
 import { BROWSER_PACK_MISSING } from "../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 import type { SurfaceId } from "../../packages/domain/src/index.ts";
 import type { ComputerViewDto } from "../../packages/protocol/src/index.ts";
-import { api, authedFetch, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { api, authedFetch, makeBot, messages, sendToBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
 import { until } from "./helpers/bot-screen-load-observe.ts";
 
 async function owner(h: Harness, botId: string): Promise<{ botId: string; surfaceId: SurfaceId }> {
@@ -32,19 +32,21 @@ describe("Bot-bound Agent browser tool", () => {
     const binding = await owner(h, botId);
     const other = await owner(h, await makeBot(h, "Browser peer"));
     const url = "https://example.test/form?next=https://example.test/done";
+    expect(h.svc.screens.status(binding)).toEqual({ state: "stopped" });
 
     const sent = await sendToBot(h, botId, `browser:navigate:${JSON.stringify({ url })}`);
     await waitThreadIdle(h, sent.threadId);
 
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
     expect(adapter.browserActions).toContainEqual({ surfaceId: binding.surfaceId, action: { name: "navigate", args: { url } } });
+    expect(h.svc.screens.status(binding)).toEqual({ state: "ready" });
     expect(h.svc.screens.status(other)).toEqual({ state: "stopped" });
     const transcript = await messages(h, sent.threadId);
     expect(transcript.some((message) => message.kind === "tool" && message.toolCall?.name === "browser")).toBeTrue();
     expect(transcript.some((message) => message.text?.includes(binding.surfaceId))).toBeTrue();
   });
 
-  test("rejects every stale or mismatched binding before touching either Screen", async () => {
+  workerOnly("forges worker ToolChannel bindings", { timeout: 15_000 })("rejects every stale or mismatched binding before touching either Screen", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const botId = await makeBot(h, "Browser binding owner");
@@ -69,7 +71,7 @@ describe("Bot-bound Agent browser tool", () => {
         outcome_reason: index === 4 ? "tool call has not started" : "browser tool context is stale or mismatched",
       });
     }
-  }, 15_000);
+  });
 
   test("an Agent takeover request shows its reason and holds the invocation until I'm done", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();

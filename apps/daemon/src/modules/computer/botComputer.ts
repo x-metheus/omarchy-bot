@@ -114,7 +114,6 @@ export interface BotComputer {
   wlrRandr: string;
   surfaceIds: Set<SurfaceId>;
   applicationProcesses: Set<ApplicationProcess>;
-  applicationSequence: number;
   browser?: BrowserRuntime;
   browserHandler?: { close(): void };
   /** The Screen adapter's long-lived compositor window subscription, when one is open. */
@@ -484,7 +483,6 @@ export class BotComputerRuntime {
       wlrRandr: tools.wlrRandr,
       surfaceIds: new Set(),
       applicationProcesses: new Set(),
-      applicationSequence: 0,
       ensureFonts: () => this.#ensureFonts(computer),
       running: () => this.#running(computer),
       exited: () => this.#exited(computer),
@@ -652,7 +650,6 @@ export class BotComputerRuntime {
         wlrRandr: tools.wlrRandr,
         surfaceIds: new Set(),
         applicationProcesses: new Set(),
-        applicationSequence: 0,
         ensureFonts: () => this.#ensureFonts(computer),
         running: () => this.#running(computer),
         exited: () => this.#exited(computer),

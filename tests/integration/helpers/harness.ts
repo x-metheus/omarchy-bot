@@ -133,20 +133,15 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
 
   const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
-  let restoredPiAgentDir = false;
-  const restorePiAgentDir = () => {
-    if (restoredPiAgentDir) return;
-    restoredPiAgentDir = true;
-    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
-  };
-
   let base: Harness | undefined;
   let restoreRuntime: (() => void) | undefined;
+  let restoredFixtures = false;
   const restoreFixtures = () => {
-    restorePiAgentDir();
+    if (restoredFixtures) return;
+    restoredFixtures = true;
+    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
     restoreRuntime?.();
-    restoreRuntime = undefined;
   };
 
   try {

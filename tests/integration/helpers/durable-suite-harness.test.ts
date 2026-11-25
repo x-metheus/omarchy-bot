@@ -61,6 +61,7 @@ test("ordered transcript waits for steering and resumes with the text and thinki
     expect(parts.map((message) => message.text)).toEqual([
       expect.stringContaining("## Release notes"), "**Inspect** every ordered boundary.", "Steering received: continue",
       "Adjacent response remains in the same visual reply.", "Check the final interleaving.",
+      "Final response after the second tool.", "Response after an unrendered Native Event boundary.",
     ]);
   } finally {
     await h.stop();

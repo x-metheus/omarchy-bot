@@ -8,8 +8,11 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { AGENT_LOCAL_TOOL } from "@omarchy-bot/agent-contract";
+import { AGENT_BROWSER_TOOL, AGENT_COMPUTER_TOOL, AGENT_LOCAL_TOOL } from "@omarchy-bot/agent-contract";
 import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "../../../../../tests/integration/helpers/harness.ts";
+import { until } from "../../../../../tests/integration/helpers/bot-screen-load-observe.ts";
+import { FakeBotScreenRuntimeAdapter } from "../computer/fakeBotScreenRuntime.ts";
+import { ThreadsService } from "../threads/threads.ts";
 import type { DeleteBotResultDto, ThreadDto } from "@omarchy-bot/protocol";
 import { setSetting } from "../../persistence/settings.ts";
 import { withFakeRuntimeProvider } from "./harness-test-support.ts";
@@ -289,6 +292,7 @@ test("runtime opens and creates durable tables with corrupt credentials", async 
     const settings = typeof options.settings === "function" ? options.settings() : options.settings;
     expect(settings?.afterFailedRun).toBe("continue");
     expect(settings?.restartLimit).toBe(5);
+    expect(settings?.progress?.persistWithinMs).toBe(0);
     if (typeof options.models === "function") {
       options.models();
       options.models();
@@ -381,6 +385,57 @@ test("a durable provider failure redacts app and Bot secrets from the Turn and i
     }
   });
 });
+
+test.each(["new", "recovered"])("a throwing durable tool finalizer fails a %s Turn once with a redacted reason", (mode) =>
+  withFakeRuntimeProvider([{ segments: [{ type: "text", text: "Finished" }] }], {}, async () => {
+    const secret = "test-tool-finalizer-secret";
+    const reason = "Tool finalization failed for {{secret:finalizer}}";
+    const h = await startDaemon();
+    const stateDir = h.svc.cfg.stateDir;
+    let restarted: typeof h | undefined;
+    try {
+      await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model" }] });
+      const botId = await makeBot(h, "Failed tool finalizer");
+      await new SecretStore(h.svc.cfg.dataDir).forBot(botId).save("finalizer", "Finalizer fixture", secret);
+      setSetting(h.svc.db, "default_model", "fake/fake-model");
+      setSetting(h.svc.db, "runtime", "durable");
+      const send = () => sendToBot(h, botId, "Finish the durable Turn");
+      const recovered = mode === "recovered" ? await send() : undefined;
+      if (recovered) {
+        expect((await h.svc.turns.waitForTerminal(recovered.turnId)).status).toBe("completed");
+        h.svc.db.run("UPDATE turns SET status = 'working', finished_at = NULL, outcome_reason = NULL WHERE id = ?", [recovered.turnId]);
+        await h.stop();
+      }
+
+      const originalFinalize = ThreadsService.prototype.finalizeDurableToolCalls;
+      const finalize = spyOn(ThreadsService.prototype, "finalizeDurableToolCalls").mockImplementation(function (this: ThreadsService, id) {
+        const turn = this.turnRow(id)!;
+        this.projectToolCall(turn.thread_id, id, "unfinished-occurrence", { id: "unfinished-call", name: "check", status: "running" });
+        originalFinalize.call(this, id);
+        throw new Error(`Tool finalization failed for ${secret}`);
+      });
+      try {
+        if (recovered) restarted = await startDaemon(h.home, { stateDir });
+        const daemon = restarted ?? h;
+        const sent = recovered ?? await send();
+        const turn = await daemon.svc.turns.waitForTerminal(sent.turnId, 2_000);
+        const events = daemon.svc.events.replay(0, daemon.svc.events.oldestCursor()).events;
+        const statuses = events.filter((event) => event.type === "turn.status" && event.aggregateId === sent.turnId);
+        expect(turn.status).toBe("failed");
+        expect(daemon.svc.threads.turnRow(sent.turnId)?.outcome_reason === reason).toBeTrue();
+        expect(statuses.at(-1)?.payload).toMatchObject({ to: "failed", reason });
+        expect(daemon.svc.threads.listMessages(sent.threadId).flatMap((message) => message.toolCall ?? []))
+          .toMatchObject([{ id: "unfinished-call", status: "error" }]);
+        expect(finalize).toHaveBeenCalledTimes(1);
+      } finally { finalize.mockRestore(); }
+    } finally {
+      await restarted?.stop();
+      await h.stop();
+      rmSync(h.home, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  }),
+);
 
 test("runtime imports a healthy legacy provider when another record fails and retains the file", async () => {
   const healthyKey = "test-healthy-key-sentinel";
@@ -488,7 +543,29 @@ test("configured conversation uses the Service limit for unset and null Bots and
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 }));
 
-test("the model request contains the app prompt, Shared Workspace Skills, and Local Sidecar and Bot mail guidance", () => {
+test("a steer placed at a final Harness boundary resolves its owning Omarchy turn for computer", async () => {
+  const previous = process.env.OMARCHY_TEST_DURABLE;
+  process.env.OMARCHY_TEST_DURABLE = "1";
+  const adapter = new FakeBotScreenRuntimeAdapter();
+  let h: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  try {
+    const daemon = h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const botId = await makeBot(h, "Steered computer Bot");
+    const sent = await sendToBot(h, botId, `say: ${"initial reply ".repeat(3)}`);
+    await until(() => daemon.svc.db.query("SELECT 1 FROM messages WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming'").get(sent.turnId), 3_000, "initial reply did not start streaming");
+    const steered = await sendToThread(h, sent.threadId, "computer:click:first");
+    expect(steered).toMatchObject({ turnId: sent.turnId, action: "steered" });
+    await waitThreadIdle(h, sent.threadId);
+    expect(adapter.inputEvents).toHaveLength(3);
+    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+  } finally {
+    await h?.stop();
+    if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
+    else process.env.OMARCHY_TEST_DURABLE = previous;
+  }
+});
+
+test("the model request contains the app prompt, Shared Workspace Skills, and Local Sidecar, Bot mail, computer, and browser guidance", () => {
   const prompts: string[] = [];
   return withFakeRuntimeProvider([{ segments: [{ type: "text", text: "ok" }] }], { onSystemPrompt: (prompt) => prompts.push(prompt) }, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "bot-prompt-home-"));
@@ -553,6 +630,9 @@ test("the model request contains the app prompt, Shared Workspace Skills, and Lo
         allowedFolders,
         skills: [{ name: "Workspace Skill", description: "Workspace skill description sentinel", path: ".agents/skills/workspace/SKILL.md" }],
       });
+      const toolSections = [AGENT_COMPUTER_TOOL, AGENT_BROWSER_TOOL].map(({ name, systemPrompt: { summary, guidelines } }) =>
+        [`<${name}>`, summary, ...guidelines.map((guideline) => `- ${guideline}`), `</${name}>`].join("\n"),
+      );
       expect(prompt).toBe([
         "<local>",
         AGENT_LOCAL_TOOL.systemPrompt.summary,
@@ -566,6 +646,7 @@ test("the model request contains the app prompt, Shared Workspace Skills, and Lo
         "After a successful queued acknowledgement, conclude your response; the target Bot's later output is not returned to this Turn.",
         "</send_bot_message>",
         "",
+        ...toolSections.flatMap((section) => [section, ""]),
         `<instructions>\n${appPrompt}\n</instructions>`,
       ].join("\n"));
     } finally {
@@ -640,6 +721,9 @@ test("a catalog Skill installed with manage_plugins appears in the next durable 
     const first = await sendToBot(h, botId, "Install the catalog Skill.");
     await waitThreadIdle(h, first.threadId);
     expect(installResult).toMatchObject({ role: "toolResult", toolName: "manage_plugins", isError: false });
+    expect(h.svc.threads.listMessages(first.threadId).flatMap((message) => message.toolCall ?? [])).toMatchObject([
+      { id: "catalog-install", name: "manage_plugins", status: "completed" },
+    ]);
     expect(requests.filter((url) => url !== `${publisher}/api/plugins/providers`)).toEqual([detailUrl, indexUrl, documentUrl]);
     expect(readFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, relativePath), "utf8")).toBe(document);
     expect(prompts).toHaveLength(2);
@@ -785,7 +869,7 @@ test("deletion refuses a private folder symlink and preserves the sibling Bot's 
   } finally { await h.stop(); rmSync(h.home, { recursive: true, force: true }); }
 });
 
-test.each([false, true])("recovery maps both working Bots before waits and new admissions and resumes even if callbacks throw (%s)", async (throwFromCallbacks) => {
+test.each(["none", "registration", "settlement"] as const)("recovery maps both working Bots before waits and new admissions and resumes even if callbacks throw (%s)", async (callbackFailure) => {
   const root = mkdtempSync(path.join(tmpdir(), "bot-runtime-recovery-mapping-"));
   const paths = {
     dbPath: path.join(root, "durable.sqlite"), homeDir: root,
@@ -884,36 +968,63 @@ test.each([false, true])("recovery maps both working Bots before waits and new a
     expect(runtimeProviders.some(({ apiKey }) => apiKey === callerKey)).toBeFalse();
     expect(runtimeProviders.map(({ id }) => id)).toEqual(["fake"]);
     expect(resumed).toBe(0);
-    const callbackError = new Error("callback failure");
+    const settlementSecret = "test-recovery-settlement-secret";
+    const registrationError = new Error(`Registration failed for ${settlementSecret}`);
+    const settlementError = new Error(`Settlement failed for ${settlementSecret}`);
+    if (callbackFailure !== "none") {
+      await runtime.secrets.forBot(rows[0]!.bot).save("settlement", "Settlement fixture", settlementSecret);
+    }
     const registered: string[] = [];
     const settled: string[] = [];
+    let failedReason: string | undefined;
     type Recovery = Parameters<BotRuntime["recoverTurns"]>[0];
-    const threads = { listMessages: () => [] } as unknown as Recovery["threads"];
+    const threads = { listMessages: () => [], finalizeDurableToolCalls() {} } as unknown as Recovery["threads"];
     const bots = { getDto: () => ({ name: "Recovery Bot", maxTurns: null }) } as unknown as Recovery["bots"];
     const events = {} as Recovery["events"];
     const recovery = runtime.recoverTurns({
       db, threads, bots, events,
       registered: (id) => {
         registered.push(id);
-        if (throwFromCallbacks) throw callbackError;
+        if (callbackFailure === "registration") throw registrationError;
       },
       settled: (id, outcome) => {
         settled.push(`${id}:${outcome.status}`);
-        if (throwFromCallbacks) throw callbackError;
+        if (outcome.status === "failed") failedReason = outcome.reason;
+        if (callbackFailure === "registration" || (callbackFailure === "settlement" && id === rows[0]!.turn)) {
+          throw settlementError;
+        }
       },
     });
-    if (throwFromCallbacks) {
-      await expect(recovery.settled).rejects.toBe(callbackError);
+    if (callbackFailure === "registration") {
+      const error = await recovery.settled.catch((error: unknown) => error);
+      expect(error instanceof Error).toBeTrue();
+      expect(error).not.toBe(registrationError);
+      expect(error).not.toBe(settlementError);
+      const reason = error instanceof Error ? error.message : "";
+      expect(reason.includes(settlementSecret)).toBeFalse();
+      expect(reason === "Settlement failed for {{secret:settlement}}").toBeTrue();
+      expect(failedReason === "Registration failed for {{secret:settlement}}").toBeTrue();
       expect(waited).toEqual([]);
       expect(settled).toEqual([`${rows[0]!.turn}:failed`]);
     } else {
-      const [first] = rows;
-      const fresh = expect(runtime.startTurn({
-        db, threads, bots, events, botId: first!.bot, threadId: first!.thread, turnId: "fresh-turn", text: "Try a fresh Turn",
-        instructions: "", workspaceDir: paths.sharedWorkspaceDir, privateDir: path.dirname(first!.privateFile), working() {},
-      })).rejects.toBe(freshSubmit);
-      await Promise.all([recovery.settled, fresh]);
-      expect(freshPrivateAccess).toEqual([true, true]);
+      if (callbackFailure === "settlement") {
+        const rejection = recovery.settled.catch((error: unknown) => error);
+        await expect(recovery.registered).resolves.toBeUndefined();
+        const error = await rejection;
+        expect(error instanceof Error).toBeTrue();
+        expect(error).not.toBe(settlementError);
+        const reason = error instanceof Error ? error.message : "";
+        expect(reason.includes(settlementSecret)).toBeFalse();
+        expect(reason === "Settlement failed for {{secret:settlement}}").toBeTrue();
+      } else {
+        const [first] = rows;
+        const fresh = expect(runtime.startTurn({
+          db, threads, bots, events, botId: first!.bot, threadId: first!.thread, turnId: "fresh-turn", text: "Try a fresh Turn",
+          instructions: "", workspaceDir: paths.sharedWorkspaceDir, privateDir: path.dirname(first!.privateFile), working() {},
+        })).rejects.toBe(freshSubmit);
+        await Promise.all([recovery.settled, fresh]);
+        expect(freshPrivateAccess).toEqual([true, true]);
+      }
       expect(registered).toEqual(rows.map(({ turn }) => turn));
       expect(waited.sort((a, b) => a.submission - b.submission)).toEqual(rows.map(({ submission }) => ({ submission, privateAccess: [true, true] })));
       expect(settled.sort()).toEqual(rows.map(({ turn }) => `${turn}:cancelled`));

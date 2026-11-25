@@ -93,7 +93,7 @@ export class MailboxService {
     const threadId = randomUUID();
     const now = new Date().toISOString();
 
-    const enqueue = this.db.transaction(() => {
+    const delivery = this.events.transaction(() => {
       const duplicate = this.#delivery(context.turnId, context.toolCallId);
       if (duplicate !== undefined) return duplicate;
 
@@ -159,7 +159,6 @@ export class MailboxService {
       return { id: deliveryId, thread_id: threadId, message_id: message.id } satisfies DeliveryRow;
     });
 
-    const delivery = enqueue();
     this.#scheduleDispatch(delivery.id);
     return { deliveryId: delivery.id, queued: true };
   }

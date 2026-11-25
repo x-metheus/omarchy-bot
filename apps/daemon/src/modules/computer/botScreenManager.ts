@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { awaitWithSignal } from "./awaitWithSignal.ts";
 import type { BrowserAction, ComputerAction, SurfaceId } from "@omarchy-bot/domain";
 import type {
   AgentComputerToolOutput,
@@ -137,8 +138,8 @@ export interface BotScreenProjectionSource {
   capture(signal?: AbortSignal): Promise<BotScreenCapture>;
   openCaptureStream(): Promise<BotScreenCaptureStream>;
   acquireExpandedView(): Promise<BotScreenExpandedView>;
-  setInputAuthority(controllerEpoch: number, kind?: "web" | "bot"): Promise<number>;
-  input(event: BotScreenInputEvent): Promise<void>;
+  setInputAuthority(controllerEpoch: number, kind?: "web" | "bot", signal?: AbortSignal): Promise<number>;
+  input(event: BotScreenInputEvent, signal?: AbortSignal): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
 }
 
@@ -168,14 +169,14 @@ export interface BotScreenRuntime {
   openCaptureStream(): Promise<BotScreenCaptureStream>;
   acquireExpandedView(): Promise<BotScreenExpandedView>;
   /** Windows this Screen routes to its workspace, in Screen coordinates. */
-  listWindows(): Promise<ComputerWindowListItem[]>;
+  listWindows(signal?: AbortSignal): Promise<ComputerWindowListItem[]>;
   /** Focuses one window this Screen returned. */
-  focusWindow(window: ComputerWindowListItem): Promise<void>;
+  focusWindow(window: ComputerWindowListItem, signal?: AbortSignal): Promise<void>;
   /** Opens an application or URL on this Screen. */
-  launch(request: BotScreenLaunchRequest): Promise<{ text?: string }>;
-  setInputAuthority(controllerEpoch: number, kind?: "web" | "bot"): Promise<number>;
+  launch(request: BotScreenLaunchRequest, signal?: AbortSignal): Promise<{ text?: string }>;
+  setInputAuthority(controllerEpoch: number, kind?: "web" | "bot", signal?: AbortSignal): Promise<number>;
   browser?(action: BrowserAction, input: (action: ComputerAction) => Promise<void>, signal: AbortSignal): Promise<{ text: string; truncated?: boolean }>;
-  input(event: BotScreenInputEvent): Promise<void>;
+  input(event: BotScreenInputEvent, signal?: AbortSignal): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
   /** Resolves only for an unexpected component exit; deliberate stops are ignored by the manager. */
   outcome: Promise<BotScreenRuntimeOutcome>;
@@ -198,21 +199,23 @@ async function runBotScreenAction(
   runtime: BotScreenRuntime,
   action: ComputerAction,
   send?: (event: BotScreenInputAction) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<BotScreenActionResult> {
+  signal?.throwIfAborted();
   switch (action.name) {
     case "screenshot":
-      return { image: await runtime.capture() };
+      return { image: await runtime.capture(signal) };
     case "list_windows":
-      return { windowList: await runtime.listWindows() };
+      return { windowList: await runtime.listWindows(signal) };
     case "observe": {
-      const windowList = await runtime.listWindows();
-      return { image: await runtime.capture(), windowList };
+      const windowList = await runtime.listWindows(signal);
+      return { image: await runtime.capture(signal), windowList };
     }
     case "focus_window": {
-      const matches = resolveFocusMatches(await runtime.listWindows(), action.args);
+      const matches = resolveFocusMatches(await runtime.listWindows(signal), action.args);
       if (matches.length === 0) throw new Error("focus_window did not match a window");
       if (matches.length > 1) throw new Error("focus_window matched multiple windows");
-      await runtime.focusWindow(matches[0]!);
+      await runtime.focusWindow(matches[0]!, signal);
       return {};
     }
     case "click":
@@ -222,9 +225,9 @@ async function runBotScreenAction(
       await deliverScreenInput(action, send);
       return {};
     case "open_app":
-      return runtime.launch({ app: launchTarget(action.args.app, "open_app requires args.app") });
+      return runtime.launch({ app: launchTarget(action.args.app, "open_app requires args.app") }, signal);
     case "open_url":
-      return runtime.launch({ url: launchTarget(action.args.url, "open_url requires args.url") });
+      return runtime.launch({ url: launchTarget(action.args.url, "open_url requires args.url") }, signal);
   }
 }
 
@@ -528,17 +531,20 @@ export class BotScreenManager {
   }
 
   async capture(owner: ComputerSurfaceOwner): Promise<BotScreenCapture | undefined> {
+    // Keep a stalled standalone capture from holding the Screen queue and blocking input cleanup.
+    const signal = AbortSignal.timeout(5_000);
     return this.#serialize(owner.surfaceId, async () => {
-      const runtime = await this.#readyRuntime(owner);
+      const runtime = await this.#readyRuntime(owner, signal);
       const entry = this.#entries.get(owner.surfaceId);
       if (runtime === undefined || entry?.runtime !== runtime) return undefined;
-      return this.#invoke(owner.surfaceId, entry, () => runtime.capture());
-    });
+      // The capture promise includes child teardown. Keep the queue held until it settles.
+      return this.#invoke(owner.surfaceId, entry, () => runtime.capture(signal), signal);
+    }, signal);
   }
 
-  async projectionSource(owner: ComputerSurfaceOwner): Promise<BotScreenProjectionSource | undefined> {
+  async projectionSource(owner: ComputerSurfaceOwner, signal?: AbortSignal): Promise<BotScreenProjectionSource | undefined> {
     return this.#serialize(owner.surfaceId, async () => {
-      const runtime = await this.#readyRuntime(owner);
+      const runtime = await this.#readyRuntime(owner, signal);
       const entry = this.#entries.get(owner.surfaceId);
       if (runtime === undefined || entry?.runtime !== runtime) return undefined;
       const { geometryGeneration, logicalWidth, logicalHeight, scale } = runtime.readiness.output;
@@ -640,13 +646,13 @@ export class BotScreenManager {
             },
           };
         },
-        setInputAuthority: (controllerEpoch, kind) =>
+        setInputAuthority: (controllerEpoch, kind, signal) =>
           this.#serialize(owner.surfaceId, () =>
-            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.setInputAuthority(controllerEpoch, kind))
+            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.setInputAuthority(controllerEpoch, kind, signal), signal), signal
           ),
-        input: (event) =>
+        input: (event, signal) =>
           this.#serialize(owner.surfaceId, () =>
-            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.input(event))
+            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.input(event, signal), signal), signal
           ),
         releaseInput: (controllerEpoch) =>
           this.#serialize(owner.surfaceId, async () => {
@@ -654,7 +660,7 @@ export class BotScreenManager {
             await runtime.releaseInput(controllerEpoch);
           }),
       };
-    });
+    }, signal);
   }
 
   /**
@@ -666,17 +672,19 @@ export class BotScreenManager {
     owner: ComputerSurfaceOwner,
     action: ComputerAction,
     send?: (event: BotScreenInputAction) => Promise<void>,
+    signal?: AbortSignal,
   ): Promise<BotScreenBoundActionResult> {
-    const prepared = await this.#serialize(owner.surfaceId, async () => {
-      const runtime = await this.#readyRuntime(owner);
+    const prepared = await awaitWithSignal(this.#serialize(owner.surfaceId, async () => {
+      const runtime = await this.#readyRuntime(owner, signal);
       const entry = this.#entries.get(owner.surfaceId);
       if (runtime === undefined || entry?.runtime !== runtime) {
         throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
       return { runtime, entry, runtimeGeneration: this.#row(owner.surfaceId).runtime_generation };
-    });
-    const result = await runBotScreenAction(prepared.runtime, action, send);
-    return this.#serialize(owner.surfaceId, async () => {
+    }), signal);
+    const result = await runBotScreenAction(prepared.runtime, action, send, signal);
+    return awaitWithSignal(this.#serialize(owner.surfaceId, async () => {
+      signal?.throwIfAborted();
       if (this.#entries.get(owner.surfaceId) !== prepared.entry || prepared.entry.runtime !== prepared.runtime) {
         throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
@@ -684,7 +692,7 @@ export class BotScreenManager {
         ...result,
         desktopSession: { botId: owner.botId, surfaceId: owner.surfaceId, runtimeGeneration: prepared.runtimeGeneration },
       };
-    });
+    }), signal);
   }
   async browserAct(
     owner: ComputerSurfaceOwner,
@@ -692,8 +700,7 @@ export class BotScreenManager {
     send?: (event: BotScreenInputAction) => Promise<void>,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<BotScreenBoundActionResult & { truncated?: boolean }> {
-    signal.throwIfAborted();
-    const runtime = await this.#readyRuntime(owner);
+    const runtime = await this.#readyRuntime(owner, signal);
     const entry = this.#entries.get(owner.surfaceId);
     if (runtime === undefined || entry?.runtime !== runtime) throw new Error("Bot Screen is unavailable");
     if (runtime.browser === undefined) throw new Error("Browser tool unavailable: this runtime has no owned CDP pipe; computer tools remain available.");
@@ -711,8 +718,8 @@ export class BotScreenManager {
   }
 
 
-  async ensureReady(owner: ComputerSurfaceOwner): Promise<boolean> {
-    return (await this.#readyRuntime(owner)) !== undefined;
+  async ensureReady(owner: ComputerSurfaceOwner, signal?: AbortSignal): Promise<boolean> {
+    return (await this.#readyRuntime(owner, signal)) !== undefined;
   }
   async destroy(surfaceId: SurfaceId): Promise<void> {
     await this.#stop(surfaceId);
@@ -838,20 +845,23 @@ export class BotScreenManager {
     }
   }
 
-  async #readyRuntime(owner: ComputerSurfaceOwner): Promise<BotScreenRuntime | undefined> {
+  async #readyRuntime(owner: ComputerSurfaceOwner, signal?: AbortSignal): Promise<BotScreenRuntime | undefined> {
+    signal?.throwIfAborted();
     const lifecycle = this.open(owner);
     if (lifecycle.state === "failed" || lifecycle.state === "stopped") return undefined;
     const entry = this.#entries.get(owner.surfaceId);
     if (entry === undefined) return undefined;
-    await entry.start.catch(() => undefined);
+    // Screen startup belongs to the manager. Cancelling a request releases its wait for readiness.
+    await awaitWithSignal(entry.start.catch(() => undefined), signal);
+    signal?.throwIfAborted();
     return this.#entries.get(owner.surfaceId)?.runtime;
   }
 
-  async #invoke<T>(surfaceId: SurfaceId, entry: RuntimeEntry, operation: () => Promise<T>): Promise<T> {
+  async #invoke<T>(surfaceId: SurfaceId, entry: RuntimeEntry, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     try {
       return await operation();
     } catch (error) {
-      if (!(error instanceof BotScreenInputRejectedError) && this.#entries.get(surfaceId) === entry) {
+      if (!signal?.aborted && !(error instanceof BotScreenInputRejectedError) && this.#entries.get(surfaceId) === entry) {
         await this.#failRuntime(surfaceId, entry, error);
       }
       throw error;
@@ -934,19 +944,23 @@ export class BotScreenManager {
     };
   }
 
-  async #serialize<T>(surfaceId: SurfaceId, operation: () => Promise<T>): Promise<T> {
+  async #serialize<T>(surfaceId: SurfaceId, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    const queued = new AbortController();
+    const cancel = () => queued.abort(signal?.reason);
+    signal?.addEventListener("abort", cancel, { once: true });
     const previous = this.#operations.get(surfaceId) ?? Promise.resolve();
-    const result = previous.catch(() => {}).then(operation);
-    const settled = result.then(
-      () => {},
-      () => {},
-    );
+    const result = previous.then(() => {
+      signal?.removeEventListener("abort", cancel);
+      signal?.throwIfAborted();
+      return operation();
+    });
+    const settled = result.then(() => {}, () => {});
     this.#operations.set(surfaceId, settled);
-    try {
-      return await result;
-    } finally {
+    void settled.then(() => {
       if (this.#operations.get(surfaceId) === settled) this.#operations.delete(surfaceId);
-    }
+    });
+    return awaitWithSignal(result, signal === undefined ? undefined : queued.signal);
   }
 
   #outcomeFailure(outcome: BotScreenRuntimeOutcome): Error {

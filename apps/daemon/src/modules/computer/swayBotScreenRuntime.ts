@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -12,6 +13,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { createConnection } from "node:net";
+import { awaitWithSignal } from "./awaitWithSignal.ts";
 import { CdpPipe } from "./cdpPipe.ts";
 import { BrowserRuntime, BrowserWindowAttributionError } from "./browserRuntime.ts";
 import sharp from "sharp";
@@ -108,6 +110,11 @@ interface SwaySurfaceState {
   desktopIdentity?: OwnedProcessIdentity | undefined;
 }
 
+interface LaunchedApplication {
+  text: string;
+  stop(): Promise<void>;
+}
+
 interface SwaySession {
   provision: BotScreenProvision;
   computer: BotComputer;
@@ -143,9 +150,10 @@ function botDesktopWorkspaceCriteria(workspaceName: string): string {
 async function hideBotDesktop(
   swayIpc: SwayIpcClient,
   workspaceName: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
-    await swayIpc.runCommand(`${botDesktopWorkspaceCriteria(workspaceName)} move scratchpad`);
+    await swayIpc.runCommand(`${botDesktopWorkspaceCriteria(workspaceName)} move scratchpad`, signal);
   } catch (error) {
     if (error instanceof Error && error.message.includes("(No matching node.)")) return;
     throw error;
@@ -468,8 +476,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     }
     const swayIpc = new SwayIpcClient(computer.sockets.swaySock);
     const outputX = (Number(session.outputName.slice("HEADLESS-".length)) - 1) * OUTPUT_SLOT_WIDTH;
-    const listWindows = async (): Promise<ComputerWindowListItem[]> =>
-      listApplicationToplevels(await swayIpc.getTree())
+    const listWindows = async (signal?: AbortSignal): Promise<ComputerWindowListItem[]> =>
+      listApplicationToplevels(await swayIpc.getTree(signal))
         .filter((window) => window.workspace === session.workspaceName)
         .map((window) => window.bounds === undefined ? window : {
           ...window,
@@ -661,37 +669,19 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         captureStreamStarts.delete(opening.promise);
       }
     };
-    const focusWindow = async (window: ComputerWindowListItem): Promise<void> => {
+    const focusWindow = async (window: ComputerWindowListItem, signal?: AbortSignal): Promise<void> => {
       if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
       if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
       await this.#withInputLease(session, async () => {
-        await swayIpc.runCommand(`[con_id=${window.id}] focus`);
-        const confirmed = (await listWindows()).find((candidate) => candidate.id === window.id);
+        await swayIpc.runCommand(`[con_id=${window.id}] focus`, signal);
+        const confirmed = (await listWindows(signal)).find((candidate) => candidate.id === window.id);
         if (confirmed?.focused !== true) throw new Error("Sway window focus was not confirmed");
-      });
+      }, signal);
     };
     const launch = async (request: BotScreenLaunchRequest, signal?: AbortSignal): Promise<{ text?: string }> => {
       if (stopped || !computer.running()) throw new Error("Bot Computer compositor is not running");
       if (!this.#desktopRunning(session)) throw new Error("Bot Desktop is not running");
-      return this.#withInputLease(session, async () => {
-        let launched = false;
-        try {
-          const result = await this.#launchApplication(session, request, signal);
-          launched = true;
-          return result;
-        } finally {
-          // The full-screen floating Bot Desktop stays visible until the
-          // launched window paints over it, including when the launch fails.
-          try {
-            await hideBotDesktop(swayIpc, session.workspaceName);
-          } catch (error) {
-            // A failed launch keeps its own error; only a successful launch
-            // reports that the Desktop could not be hidden.
-            if (launched) throw error;
-            console.error("Bot Desktop could not be hidden after a failed launch", error);
-          }
-        }
-      });
+      return this.#withInputLease(session, () => this.#launchAndHideDesktop(session, request, signal, { hideAfterFailure: true }), signal);
     };
     const cleanupSurface = async (): Promise<void> => {
       stopped = true;
@@ -913,15 +903,15 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (computer.browser?.alive !== true) throw new Error("Browser tool unavailable: browser CDP pipe closed; close browser windows and relaunch. Computer tools remain available.");
         return computer.browser.perform(provision.surfaceId, action, { windows: listWindows, focusWindow, input }, signal);
       },
-      setInputAuthority: async (controllerEpoch, kind = "bot") => {
+      setInputAuthority: async (controllerEpoch, kind = "bot", signal) => {
         if (!Number.isSafeInteger(controllerEpoch) || controllerEpoch <= lastInputEpoch) {
           throw new BotScreenInputRejectedError("stale controller epoch");
         }
-        const acquired = await this.#acquireInputLease(provision.surfaceId);
+        const acquired = await this.#acquireInputLease(provision.surfaceId, signal);
         try {
-          await this.#focusWorkspace(session);
+          await this.#focusWorkspace(session, signal);
+          await virtualInput.setInputAuthority(controllerEpoch, signal);
           lastInputEpoch = controllerEpoch;
-          await virtualInput.setInputAuthority(controllerEpoch);
           this.#humanLease = kind === "web" ? { session, epoch: controllerEpoch } : undefined;
           return controllerEpoch;
         } catch (error) {
@@ -929,11 +919,11 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           throw error;
         }
       },
-      input: async (event) => {
+      input: async (event, signal) => {
         if (event.controllerEpoch !== lastInputEpoch || this.#inputLeaseOwner !== provision.surfaceId) {
           throw new BotScreenInputRejectedError("stale controller epoch");
         }
-        await virtualInput.input(event);
+        await virtualInput.input(event, signal);
       },
       releaseInput: async (controllerEpoch) => {
         if (controllerEpoch !== undefined && controllerEpoch !== lastInputEpoch) {
@@ -951,14 +941,40 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     return runtime;
   }
 
+  async #launchAndHideDesktop(
+    session: SwaySession,
+    request: BotScreenLaunchRequest,
+    signal: AbortSignal | undefined,
+    options: { inheritedTargets?: Set<string> | undefined; hideAfterFailure?: boolean },
+  ): Promise<{ text: string }> {
+    const ipc = new SwayIpcClient(session.computer.sockets.swaySock);
+    let launched: LaunchedApplication | undefined;
+    try {
+      launched = await this.#launchApplication(session, request, signal, options.inheritedTargets);
+      return { text: launched.text };
+    } finally {
+      try {
+        signal?.throwIfAborted();
+        // Direct launches also hide the desktop on a non-cancellation failure.
+        if (launched || options.hideAfterFailure) await hideBotDesktop(ipc, session.workspaceName, signal);
+      } catch (error) {
+        if (launched) {
+          if (signal?.aborted) await launched.stop();
+          throw error;
+        }
+        if (!signal?.aborted) console.error("Bot Desktop could not be hidden after a failed launch", error);
+      }
+    }
+  }
+
   async #launchApplication(
     session: SwaySession,
     request: BotScreenLaunchRequest,
     signal?: AbortSignal,
     inheritedTargets?: Set<string>,
-  ): Promise<{ text?: string }> {
+  ): Promise<LaunchedApplication> {
     const surfaceLifetime = this.#ownership.surfaceSignal(session.provision.surfaceId);
-    await this.options.onLaunch?.();
+    await awaitWithSignal(Promise.resolve(this.options.onLaunch?.()), signal);
     surfaceLifetime.throwIfAborted();
     if (session.computer !== this.#computer.current() || this.#sessions.get(session.provision.surfaceId) !== session) throw new Error("Browser Screen changed before launch");
     signal?.throwIfAborted();
@@ -970,11 +986,12 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     // The tree is shared by every Screen, so this snapshot is tree-wide: it names
     // the windows that already exist on every Surface, not just this one.
     const before = new Map(
-      listApplicationToplevels(await swayIpc.getTree())
+      listApplicationToplevels(await swayIpc.getTree(signal))
         .map((window) => [window.id, window] as const),
     );
     // Fonts are only needed by graphical children, so fake-runtime tests stay offline.
-    await session.computer.ensureFonts();
+    await awaitWithSignal(session.computer.ensureFonts(), signal);
+    signal?.throwIfAborted();
     let argv: string[];
     if (request.app !== undefined) {
       // Refuse by name first: a host browser's desktop entry need not resolve to be refused.
@@ -982,7 +999,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       argv = desktopApplicationCommand(request.app, session.computer.childEnv);
       this.#browser.refuseHostBrowser(request.app, argv);
     } else {
-      argv = await this.#browser.launchCommand(request.url!);
+      argv = await awaitWithSignal(this.#browser.launchCommand(request.url!), signal);
     }
     const text = request.app !== undefined ? `launched ${request.app}` : `opened ${request.url}`;
     const browserPipe = argv.includes("--remote-debugging-pipe");
@@ -990,6 +1007,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     // but the CDP pipe that could drive it is gone, so a new piped pack would
     // forward to it and exit. Replace it first: its tabs and URL are lost, its
     // sign-ins stay in the profile (Computer ADR 0013).
+    signal?.throwIfAborted();
     if (browserPipe) await this.#browser.stopOrphanPacks();
     const lifetime = AbortSignal.any([surfaceLifetime, AbortSignal.timeout(30_000), ...(signal ? [signal] : [])]);
     lifetime.throwIfAborted();
@@ -1002,27 +1020,30 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     if (binding) {
       session.pendingBinding = binding.promise;
     }
+    let stop: (() => Promise<void>) | undefined;
     try {
-      const role = `application-${++session.computer.applicationSequence}` as const;
+      const generation = session.computer.generation;
+      const role = `application-${randomUUID()}` as const;
+      const unitCommand = browserPipe ? [] : this.#units.computerCommand(generation, role, session.computer.childEnv, cwd);
       const application = spawnDetachedChild({
-        argv: [
-          ...(browserPipe ? [] : this.#units.computerCommand(
-            session.computer.generation,
-            role,
-            session.computer.childEnv,
-            cwd,
-          )),
-          ...argv,
-        ],
+        argv: [...unitCommand, ...argv],
         env: browserPipe ? session.computer.childEnv : this.#units.launcherEnvironment(session.computer.childEnv),
         cwd,
         output: "ignore",
         // A pack that dies during startup is diagnosed from the end of its stderr.
         captureStderr: browserPipe,
         // Extra CDP descriptors cannot pass through systemd-run's stdio forwarding.
-        owned: browserPipe || !this.#units.enabled,
+        owned: unitCommand.length === 0,
         browserPipe,
       });
+      stop = async () => {
+        try {
+          await terminateOwnedChild(application);
+        } finally {
+          // A systemd-run client can exit before its transient application service.
+          if (unitCommand.length > 0) await this.#units.stopComputerRole(generation, role);
+        }
+      };
       if (browserPipe) {
         const writer = createConnection({ fd: application.process.stdio[3]! });
         const reader = createConnection({ fd: application.process.stdio[4]! });
@@ -1085,7 +1106,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
             return;
           }
           void (async () => {
-            const foreign = this.#foreignBrowserWindows(session, listApplicationToplevels(await swayIpc.getTree()));
+            const foreign = this.#foreignBrowserWindows(session, listApplicationToplevels(await swayIpc.getTree(signal)));
             binding.reject(new BrowserWindowAttributionError("launch", new Error("No stamped browser window appeared"
               + (foreign.length ? `; the shared browser window ${foreign.map(({ window, surfaceId }) => `${window.id} on Screen ${surfaceId}`).join(", ")} was left in place` : ""))));
           })().catch(error => binding.reject(new BrowserWindowAttributionError("launch", error)));
@@ -1094,7 +1115,8 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (lifetime.aborted) abort();
         try {
           await binding.promise;
-          return { text };
+          lifetime.throwIfAborted();
+          return { text, stop };
         } finally {
           lifetime.removeEventListener("abort", abort);
           if (this.#launchClaim?.result === binding) this.#launchClaim = undefined;
@@ -1115,25 +1137,19 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           return [...applications, ...stamped];
         },
         settled: (current) => current?.workspace === session.workspaceName && current.visible === true,
-        beforePoll: async () => {
-          if (signal?.aborted) {
-            await terminateOwnedChild(application);
-            signal.throwIfAborted();
-          }
-        },
+        signal: signal === undefined ? surfaceLifetime : AbortSignal.any([surfaceLifetime, signal]),
       });
-      if (settled) {
-        return { text };
-      }
+      if (settled) return { text, stop };
       if (claimed.length > 0) {
         // A claimed window that never settles is a failure, but the reason differs:
         // it can disappear, stay on another workspace, or stay mapped invisible.
         let current: ComputerWindowListItem[] = [];
         try {
-          current = listApplicationToplevels(await swayIpc.getTree());
+          current = listApplicationToplevels(await swayIpc.getTree(signal));
         } catch {
           // The launch already failed; a divergent final read must not replace its reason.
         }
+        signal?.throwIfAborted();
         const absent: string[] = [];
         const misplaced: string[] = [];
         const invisible: string[] = [];
@@ -1162,11 +1178,12 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       try {
         foreign = this.#foreignBrowserWindows(
           session,
-          listApplicationToplevels(await swayIpc.getTree()),
+          listApplicationToplevels(await swayIpc.getTree(signal)),
         );
       } catch {
         // The launch already failed; a second IPC error must not replace its reason.
       }
+      signal?.throwIfAborted();
       throw new Error(
         `Launched ${target} but no window owned by the launched process appeared on workspace `
         + `${session.workspaceName} within ${timeoutMs}ms`
@@ -1176,6 +1193,9 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
             foreign.map(({ window, surfaceId }) => `${window.id} on Screen ${surfaceId}`).join(", ")
           } was left in place`),
       );
+    } catch (error) {
+      if (signal?.aborted || surfaceLifetime.aborted) await stop?.();
+      throw error;
     } finally {
       launchClaim.active = false;
       if (this.#launchClaim === launchClaim) this.#launchClaim = undefined;
@@ -1196,48 +1216,49 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       timeoutMs: number;
       discover: (tree: readonly ComputerWindowListItem[]) => ComputerWindowListItem[];
       settled: (current: ComputerWindowListItem | undefined) => boolean;
-      /** Runs before each poll; throws to stop waiting, e.g. when the caller aborts. */
-      beforePoll?: () => Promise<void>;
+      signal: AbortSignal;
     },
   ): Promise<{ claimed: ComputerWindowListItem[]; settled: boolean }> {
     // Sway announces a container before it is mapped and routed, so a claimed
     // window that is absent, still elsewhere, or not yet settled is a transient
     // state: retry it within the same deadline instead of failing.
+    const { signal } = options;
     const claimed = new Map<string, ComputerWindowListItem>();
     const deadline = Date.now() + options.timeoutMs;
     while (Date.now() < deadline && session.computer.running()) {
-      await options.beforePoll?.();
-      const tree = listApplicationToplevels(await swayIpc.getTree());
+      const tree = listApplicationToplevels(await swayIpc.getTree(signal));
+      signal.throwIfAborted();
       const moved: ComputerWindowListItem[] = [];
       for (const window of options.discover(tree)) {
         if (claimed.has(window.id)) continue;
         claimed.set(window.id, window);
         if (window.pid !== undefined && this.#browser.isPackBrowser(window.pid)) continue;
         await swayIpc.runCommand(
-          `[con_id=${window.id}] move container to workspace ${session.workspaceName}`,
+          `[con_id=${window.id}] move container to workspace ${session.workspaceName}`, signal,
         );
         moved.push(window);
       }
       if (moved.length > 0) {
-        await this.#focusWorkspace(session);
+        await this.#focusWorkspace(session, signal);
         // A just-routed tiled window is not arranged until it is focused: on
         // Sway 1.10 the tabbed container stays 0x0 and the window unmapped, so
         // focus only the routed windows before the caller's settle check.
         for (const window of moved) {
-          await swayIpc.runCommand(`[con_id=${window.id}] focus`);
+          await swayIpc.runCommand(`[con_id=${window.id}] focus`, signal);
         }
       }
       if (claimed.size > 0) {
         // Re-read the claimed containers themselves: a window on the right
         // workspace that Sway still hides (scratchpad) has not settled.
         const routed = moved.length > 0
-          ? listApplicationToplevels(await swayIpc.getTree())
+          ? listApplicationToplevels(await swayIpc.getTree(signal))
           : tree;
+        signal.throwIfAborted();
         const allSettled = [...claimed.keys()].every((id) =>
           options.settled(routed.find((candidate) => candidate.id === id)));
         if (allSettled) return { claimed: [...claimed.values()], settled: true };
       }
-      await Bun.sleep(20);
+      await awaitWithSignal(Bun.sleep(20), signal);
     }
     return { claimed: [...claimed.values()], settled: false };
   }
@@ -1262,8 +1283,7 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           signal.throwIfAborted();
           const previous = this.#launchClaim;
           try {
-            await this.#launchApplication(session, { url }, signal, activeLaunch?.targets);
-            await hideBotDesktop(new SwayIpcClient(computer.sockets.swaySock), session.workspaceName);
+            await this.#launchAndHideDesktop(session, { url }, signal, { inheritedTargets: activeLaunch?.targets });
           }
           finally {
             if (previous?.active && !previous.signal.aborted && this.#sessions.get(previous.session.provision.surfaceId) === previous.session) this.#launchClaim = previous;
@@ -1491,22 +1511,30 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   async #withInputLease<T>(
     session: SwaySession,
     operation: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
-    const acquired = await this.#acquireInputLease(session.provision.surfaceId);
+    const acquired = await this.#acquireInputLease(session.provision.surfaceId, signal);
     try {
-      await this.#focusWorkspace(session);
+      await this.#focusWorkspace(session, signal);
       return await operation();
     } finally {
       if (acquired) this.#releaseInputLease(session.provision.surfaceId);
     }
   }
 
-  async #acquireInputLease(surfaceId: SurfaceId): Promise<boolean> {
+  async #acquireInputLease(surfaceId: SurfaceId, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted();
     if (this.#inputLeaseOwner === surfaceId) return false;
-    const previous = this.#inputTail;
+    const previous = this.#inputTail.catch(() => {});
     const gate = Promise.withResolvers<void>();
-    this.#inputTail = previous.catch(() => {}).then(() => gate.promise);
-    await previous.catch(() => {});
+    this.#inputTail = previous.then(() => gate.promise);
+    try {
+      await awaitWithSignal(previous, signal);
+      signal?.throwIfAborted();
+    } catch (error) {
+      gate.resolve();
+      throw error;
+    }
     this.#inputLeaseOwner = surfaceId;
     this.#inputLeaseRelease = () => {
       if (this.#inputLeaseOwner !== surfaceId) return;
@@ -1522,12 +1550,12 @@ export class SwayBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     if (this.#inputLeaseOwner === surfaceId) this.#inputLeaseRelease?.();
   }
 
-  async #focusWorkspace(session: SwaySession): Promise<void> {
+  async #focusWorkspace(session: SwaySession, signal?: AbortSignal): Promise<void> {
     if (!session.computer.running()) {
       throw new Error("Bot Computer compositor is not running");
     }
     await new SwayIpcClient(session.computer.sockets.swaySock)
-      .runCommand(`workspace ${session.workspaceName}`);
+      .runCommand(`workspace ${session.workspaceName}`, signal);
   }
 
   async #stopSession(

@@ -9,8 +9,10 @@ import { AssistantEntry, createRegistry, Harness, ToolResultEntry, type Conversa
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { api, makeBot, messages, sendToBot, sendToThread, startDaemon } from "../../../../../../tests/integration/helpers/harness.ts";
 import { setSetting } from "../../../persistence/settings.ts";
+import { FakeBotScreenRuntimeAdapter } from "../../computer/fakeBotScreenRuntime.ts";
 import type { RuntimeServices } from "../runtime.ts";
 import { createMailExtension } from "./mail.ts";
+import { DurableTranscript } from "../transcript.ts";
 
 const mail = { targetBotId: "bot-target", text: "Check the delivery queue." };
 const acknowledgement = "Bot message delivery-id queued. Conclude your response without waiting for the target Bot.";
@@ -168,6 +170,7 @@ async function withMailDaemon(
   provider: ReturnType<typeof fauxProvider>["provider"],
   run: (daemon: Awaited<ReturnType<typeof startDaemon>>, harness: Harness) => Promise<void>,
   onReplay?: (first: ToolExecutionResult, replayed: ToolExecutionResult) => void,
+  botScreenAdapter?: FakeBotScreenRuntimeAdapter,
 ) {
   let harness: Harness | undefined;
   const originalOpen = Harness.open;
@@ -199,7 +202,7 @@ async function withMailDaemon(
   };
   let daemon: Awaited<ReturnType<typeof startDaemon>> | undefined;
   try {
-    daemon = await startDaemon();
+    daemon = await startDaemon(undefined, botScreenAdapter ? { botScreenAdapter } : {});
     if (process.env.OMARCHY_TEST_DURABLE !== "1") {
       await daemon.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(daemon.svc.db, "default_model", "fake/fake-model");
@@ -428,6 +431,7 @@ test.each([
         { kind: "response", text: "Initial reply.", deliveryId: undefined },
         { kind: "text", text: "A user message", deliveryId: undefined },
         { kind: "text", text: "A competing user message", deliveryId: undefined },
+        { kind: "tool", text: undefined, deliveryId: undefined },
         { kind: "response", text: "User reply.", deliveryId: undefined },
         { kind: "response", text: "Mail reply.", deliveryId: undefined },
       ]);
@@ -1122,6 +1126,87 @@ test.each([
   });
 });
 
+test.each([
+  ["runs a computer action before Service bookkeeping", false],
+  ["refuses a computer action when a steer and follow-up have different owners", true],
+] as const)("peer mail %s", async (_name, mixedOwners) => {
+  let targetBotId = "";
+  let result: unknown;
+  const adapter = new FakeBotScreenRuntimeAdapter();
+  const releaseBookkeeping = Promise.withResolvers<void>();
+  const mailStarted = Promise.withResolvers<void>();
+  const releaseMail = Promise.withResolvers<void>();
+  const toolFinished = Promise.withResolvers<void>();
+  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model" }] });
+  const computerCall = () => fauxAssistantMessage(fauxToolCall("computer", { action: "click", args: { x: 3, y: 4 } }, { id: "peer-computer" }), { stopReason: "toolUse" });
+  fake.setResponses([
+    () => fauxAssistantMessage(fauxToolCall("send_bot_message", { targetBotId, text: mail.text }, { id: "peer-mail" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage("Mail queued."),
+    async () => {
+      mailStarted.resolve();
+      await releaseMail.promise;
+      return mixedOwners ? fauxAssistantMessage("Mail reply.") : computerCall();
+    },
+    ...(mixedOwners ? [computerCall] : []),
+    ({ messages }) => {
+      result = messages.at(-1);
+      toolFinished.resolve();
+      return fauxAssistantMessage("Finished.");
+    },
+  ]);
+  await withMailDaemon(fake.provider, async (h, harness) => {
+    try {
+      if (!mixedOwners) {
+        const create = harness.createConversation.bind(harness);
+        harness.createConversation = async (...args) => {
+          const conversation = await create(...args);
+          const submit = conversation.submit.bind(conversation);
+          conversation.submit = new Proxy(submit, {
+            async apply(target, receiver, args) {
+              const [draft] = args;
+              const submission = await Reflect.apply(target, receiver, args);
+              if (draft.type === "input" && draft.entry?.kind === "write") await releaseBookkeeping.promise;
+              return submission;
+            },
+          });
+          return conversation;
+        };
+      }
+      const source = await makeBot(h, "Sender");
+      targetBotId = await makeBot(h, "Recipient");
+      h.svc.agents.markOffline("pi", "Hold delivery until the sender's reply settles");
+      const sent = await sendToBot(h, source, "Send mail");
+      expect(await h.svc.turns.waitForTerminal(sent.turnId, 5_000)).toMatchObject({ status: "completed" });
+      await h.svc.agents.recheck("pi");
+      await mailStarted.promise;
+      const { thread_id: threadId, target_turn_id: turnId } = await waitForPeerMailDelivery(h, mixedOwners ? "delivered" : "dispatching");
+      let followUp: { turnId: string } | undefined;
+      if (mixedOwners) {
+        expect(await sendToThread(h, threadId, "Steer the reply")).toMatchObject({ action: "steered", turnId });
+        followUp = await api(h, "POST", `/api/threads/${threadId}/messages`, { text: "A different Turn", whenBusy: "followUp" });
+      }
+      releaseMail.resolve();
+      await toolFinished.promise;
+      if (mixedOwners) {
+        expect(followUp?.turnId).not.toBe(turnId);
+        expect(result).toMatchObject({ role: "toolResult", isError: true, content: [{ type: "text", text: expect.stringContaining("live run has no unique Service Turn owner") }] });
+        expect(adapter.inputEvents).toEqual([]);
+        expect(await h.svc.turns.waitForTerminal(followUp!.turnId, 5_000)).toMatchObject({ status: "completed" });
+      } else {
+        expect(h.svc.db.query("SELECT 1 FROM pi_turn_submissions WHERE turn_id = ?").get(turnId)).toBeNull();
+        const { surfaceId } = await api<{ surfaceId: string }>(h, "GET", `/api/bots/${targetBotId}`);
+        expect(result).toMatchObject({ role: "toolResult", isError: false, details: { desktopSession: { botId: targetBotId, surfaceId } } });
+        expect(adapter.inputEvents.map((event) => event.surfaceId)).toEqual([surfaceId, surfaceId, surfaceId]);
+      }
+      releaseBookkeeping.resolve();
+      expect(await h.svc.turns.waitForTerminal(turnId, 5_000)).toMatchObject({ status: "completed" });
+    } finally {
+      releaseBookkeeping.resolve();
+      releaseMail.resolve();
+    }
+  }, undefined, adapter);
+}, 15_000);
+
 test("send_bot_message rejects both calls with the same ID in one assistant response", async () => {
   let firstTarget = "";
   let secondTarget = "";
@@ -1161,6 +1246,58 @@ test("send_bot_message rejects both calls with the same ID in one assistant resp
   });
 });
 
+test("DurableTranscript settles send_bot_message and computer sharing a call ID in one assistant entry", async () => {
+  let targetBotId = "";
+  const fake = fauxProvider({ provider: "fake", models: [{ id: "fake-model", reasoning: true }] });
+  fake.setResponses([
+    () => fauxAssistantMessage([
+      fauxToolCall("send_bot_message", { targetBotId, text: "First message" }, { id: "mixed-call" }),
+      fauxToolCall("computer", { action: "screenshot" }, { id: "mixed-call" }),
+    ], { stopReason: "toolUse" }),
+    fauxAssistantMessage("Finished"),
+  ]);
+  await withMailDaemon(fake.provider, async (h, harness) => {
+    const sender = await makeBot(h, "Sender");
+    targetBotId = await makeBot(h, "Recipient");
+    h.svc.agents.markOffline("pi", "Keep any unexpected mail deliveries queued during this test");
+    const sent = await sendToBot(h, sender, "Try both tools");
+    expect((await h.svc.turns.waitForTerminal(sent.turnId)).status).toBe("completed");
+
+    const { db, threads, bots, events } = h.svc;
+    const binding = db.query<{ conversation_id: ConversationId }, [string]>(
+      "SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?",
+    ).get(sent.threadId)!;
+    const conversation = (await harness.conversation(binding.conversation_id, BACKGROUND_CONTEXT))!;
+    const watch = await conversation.watch(BACKGROUND_CONTEXT);
+    try {
+      const view = { ...watch.value, docs: {} };
+      const results = view.entries.filter(ToolResultEntry.is);
+      expect(results).toHaveLength(2);
+      expect(results[0]!.byTaskId).toBeDefined();
+      expect(results[1]!.byTaskId).toBeDefined();
+      expect(results[0]!.byTaskId).not.toBe(results[1]!.byTaskId);
+      for (const entry of results) {
+        expect(entry.model?.[0]).toMatchObject({ role: "toolResult", toolCallId: "mixed-call", toolName: "send_bot_message", isError: true });
+      }
+
+      const rows = threads.listMessages(sent.threadId).filter(({ kind }) => kind === "tool");
+      expect(rows.map(({ toolCall }) => toolCall)).toEqual(["send_bot_message", "computer"].map((name, index) => {
+        const result = results[index]!.model?.[0];
+        if (result?.role !== "toolResult") throw new Error("Missing model tool result");
+        return { id: "mixed-call", name, status: "error", errorSummary: "Tool call failed.", durationMs: result.durationMs };
+      }));
+      expect(rows[0]!.id).not.toBe(rows[1]!.id);
+      const published = events.replay(0, events.oldestCursor());
+      expect(published.events.filter(({ type, aggregateId }) => type === "tool.updated" && aggregateId === sent.threadId).map(({ payload }) => payload))
+        .toEqual(rows.map(({ id: messageId, threadId, toolCall }) => ({ messageId, threadId, toolCall })));
+      new DurableTranscript(threads, bots, events, sent.threadId, sender, sent.turnId, { ...view, entries: [] }, db).update(view);
+      expect(threads.listMessages(sent.threadId).filter(({ kind }) => kind === "tool")).toEqual(rows);
+      expect(events.replay(0, events.oldestCursor())).toEqual(published);
+      expect(db.query("SELECT id FROM bot_mail_deliveries").all()).toEqual([]);
+    } finally { await watch.stop(); }
+  });
+});
+
 test("send_bot_message distinguishes reused call IDs across tool tasks and deduplicates the same task on replay", async () => {
   let firstTarget = "";
   let secondTarget = "";
@@ -1171,7 +1308,7 @@ test("send_bot_message distinguishes reused call IDs across tool tasks and dedup
     () => fauxAssistantMessage(fauxToolCall("send_bot_message", { targetBotId: secondTarget, text: "Second message" }, { id: "shared-call" }), { stopReason: "toolUse" }),
     fauxAssistantMessage("Finished"),
   ]);
-  await withMailDaemon(fake.provider, async (h) => {
+  await withMailDaemon(fake.provider, async (h, harness) => {
     const sender = await makeBot(h, "Sender");
     firstTarget = await makeBot(h, "First recipient");
     secondTarget = await makeBot(h, "Second recipient");
@@ -1195,5 +1332,23 @@ test("send_bot_message distinguishes reused call IDs across tool tasks and dedup
       expect(first.details).toEqual({ deliveryId: deliveries[index]!.id, queued: true });
       expect(replayed).toEqual(first);
     }
+    const { db, threads, bots, events } = h.svc;
+    const binding = db.query<{ conversation_id: ConversationId }, [string]>(
+      "SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?",
+    ).get(sent.threadId)!;
+    const conversation = (await harness.conversation(binding.conversation_id, BACKGROUND_CONTEXT))!;
+    const watch = await conversation.watch(BACKGROUND_CONTEXT);
+    try {
+      const view = { ...watch.value, docs: {} };
+      const rows = threads.listMessages(sent.threadId).filter(({ kind }) => kind === "tool");
+      expect(rows).toMatchObject(Array.from({ length: 2 }, () => ({
+        toolCall: { id: "shared-call", name: "send_bot_message", status: "completed" },
+      })));
+      expect(rows[0]!.id).not.toBe(rows[1]!.id);
+      const published = events.replay(0, events.oldestCursor());
+      new DurableTranscript(threads, bots, events, sent.threadId, sender, sent.turnId, { ...view, entries: [] }).update(view);
+      expect(threads.listMessages(sent.threadId).filter(({ kind }) => kind === "tool")).toEqual(rows);
+      expect(events.replay(0, events.oldestCursor())).toEqual(published);
+    } finally { await watch.stop(); }
   }, (first, replayed) => { replays.push({ first, replayed }); });
 });

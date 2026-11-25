@@ -58,18 +58,16 @@ describe("local dispatch once per tool call", () => {
     await sidecar.allowOnce(first.jobId);
     await waitThreadIdle(h, sent.threadId);
     if (durable) {
-      // Task 11 projects the tool record into the Service transcript. Assert the committed pi result here.
       expect(await durableSuiteToolResults(h.svc.db, sent.threadId)).toMatchObject([{
         role: "toolResult", toolName: "local", isError: false,
         content: [{ type: "text", text: expect.stringContaining("once") }],
         details: { deviceId: DEVICE_A, exitCode: 0 },
       }]);
-    } else {
-      const transcript = await messages(h, sent.threadId);
-      expect(transcript.some((message) => (
-        message.kind === "tool" && message.toolCall?.name === "local" && message.toolCall.status === "completed"
-      ))).toBeTrue();
     }
+    const transcript = await messages(h, sent.threadId);
+    expect(transcript.filter(({ kind }) => kind === "tool")).toMatchObject([{
+      toolCall: { name: "local", status: "completed" },
+    }]);
     expect(sidecar.jobs().map((job) => job.command)).toEqual(["echo once"]);
     expect(sidecar.executed).toEqual(["echo once"]);
   });

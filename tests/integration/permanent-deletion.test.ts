@@ -213,7 +213,7 @@ describe("local Bot deletion", () => {
     const managed = await stageAttachment(h, botId, "managed bytes", "managed.txt", draftToken);
     const staged = await stageAttachment(h, botId, "staged bytes", "staged.txt", draftToken);
     const sent = await api<{ threadId: string; messageId: string; turnId: string }>(h, "POST", `/api/threads/${computerTurn.threadId}/messages`, {
-      text: "attachment-echo",
+      text: process.env.OMARCHY_TEST_DURABLE === "1" ? "say: managed attachment" : "attachment-echo",
       attachmentIds: [managed.id],
       attachmentDraftToken: draftToken,
     });

@@ -129,8 +129,10 @@ async function durableAcknowledgement(h: Harness, threadId: string): Promise<str
 }
 
 async function expectDurableMailResult(h: Harness, threadId: string, outcome: { deliveryId: string } | { error: string }) {
-  // Task 11 owns the Service kind:"tool" projection. Check the committed pi ToolResultEntry here.
   const entries = await durableSuiteToolResultEntries(h.svc.db, threadId);
+  expect((await messages(h, threadId)).filter(({ kind }) => kind === "tool")).toMatchObject([{
+    author: { kind: "bot" }, toolCall: { name: "send_bot_message", status: "error" in outcome ? "error" : "completed" },
+  }]);
   const result = "error" in outcome
     ? { isError: true }
     : { isError: false, details: { deliveryId: outcome.deliveryId, queued: true } };
@@ -636,13 +638,13 @@ describe("durable Bot mailbox", () => {
       `).all(sourceConversation.threadId)).toEqual([
         { request_id: sourceConversation.turnId }, { request_id: sourceMailTurn.turnId },
       ]);
-      // Service tool records wait on Task 11. Check the pi result and the visible reply order.
       expect(await durableSuiteToolResults(h.svc.db, mailboxThread.id)).toMatchObject([{
         toolName: "read", isError: false, content: [{ type: "text", text: expect.stringContaining("Target workspace fixture") }],
       }]);
-      expect(targetTranscript.filter(({ kind }) => kind === "text" || kind === "thinking" || kind === "response")).toEqual([
+      expect(targetTranscript).toEqual([
         expect.objectContaining({ author: { kind: "system" }, kind: "text", text: body, peerMail: { deliveryId, sourceBotId, sourceName: "Source coordinator" } }),
         expect.objectContaining({ author: { kind: "bot" }, kind: "thinking", text: "Review the isolated peer mail.", thinking: expect.objectContaining({ state: "completed" }) }),
+        expect.objectContaining({ author: { kind: "bot" }, kind: "tool", toolCall: expect.objectContaining({ name: "read", status: "completed" }) }),
         expect.objectContaining({ author: { kind: "bot" }, kind: "response", text: "Peer mail handled.", response: expect.objectContaining({ state: "completed" }) }),
       ]);
       const unrelatedAfter = await api<ThreadDto>(h, "GET", `/api/threads/${unrelatedTarget.threadId}`);
