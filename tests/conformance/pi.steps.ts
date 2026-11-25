@@ -158,7 +158,7 @@ test.skipIf(process.env.OMARCHY_BOT_PI_CONFORMANCE_STEP !== "browser")("pi confo
   mkdirSync(directory, { recursive: true });
   writeFileSync(path.join(directory, `pi-${probe.agentVersion}.json`), JSON.stringify({ ok: true, image: "provider-unsupported" }));
   expect((await daemon.svc.agents.recheck("pi")).status).toBe("ready");
-  const bot = daemon.svc.bots.create({ name: "Pi Browser Conformance", agentId: "pi", instructions: "Follow the requested browser conformance tool calls exactly." });
+  const bot = daemon.svc.bots.create({ name: "Pi Browser Conformance", instructions: "Follow the requested browser conformance tool calls exactly." });
   await browserConformance(bot.id);
 }, 210_000);
 
@@ -181,7 +181,6 @@ describe("pi conformance (11 steps, real model)", () => {
       expect((await daemon.svc.agents.recheck("pi")).status).toBe("ready");
       conformanceBot = daemon.svc.bots.create({
         name: "Pi Conformance",
-        agentId: "pi",
         instructions: "When explicitly asked for computer conformance, follow the requested computer tool calls exactly.",
       });
 

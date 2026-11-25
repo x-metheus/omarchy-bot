@@ -11,17 +11,13 @@ import { apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon, wai
 
 const settingsPath = "/api/settings/allowed-folders";
 
-async function withDaemon(run: (h: Harness, client: ApiClient, root: string) => Promise<void>) {
+async function withDaemon(run: (h: Harness, client: ApiClient, root: string) => Promise<void>, { seedDurableProvider = true } = {}) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "allowed-folders-")));
   try {
-    const durableSuite = process.env.OMARCHY_TEST_DURABLE;
-    delete process.env.OMARCHY_TEST_DURABLE;
     const h = await startDaemon(path.join(root, "home"), {
       dataDir: path.join(root, "data"),
       stateDir: path.join(root, "state"),
-    }).finally(() => {
-      if (durableSuite === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-      else process.env.OMARCHY_TEST_DURABLE = durableSuite;
+      seedDurableProvider,
     });
     try {
       await run(h, new ApiClient({ baseUrl: h.baseUrl, deviceToken: h.token }), root);
@@ -90,7 +86,6 @@ test("adding and removing a folder affects file access on the next Turn", async 
       apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }],
     });
     setSetting(h.svc.db, DEFAULT_MODEL_SETTING, "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const folder = path.join(root, "extra");
     file = path.join(folder, "fixture.txt");
     const contents = "Read from the Settings fixture.";
@@ -125,5 +120,5 @@ test("adding and removing a folder affects file access on the next Turn", async 
     expect(h.svc.threads.turnRow(removed.turnId)?.status).toBe("completed");
     expect(await messages(h, threadId)).toContainEqual(expect.objectContaining({ kind: "response", text: `The user denied access to ${file}.` }));
     expect((await client.allowedFolders()).folders).toEqual([]);
-  }));
+  }, { seedDurableProvider: false }));
 }, 20000);

@@ -117,14 +117,26 @@ if(args.includes("enable")||args.includes("start")){
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   env.OMARCHY_BOT_PORT = String(reservation.port);
   reservation.stop(true);
-  // The existing scripted worker and fake Screen adapter run real Turns without a model or graphical session.
+  // The installed daemon runs its own process, so it installs its scripted provider before booting.
   const daemon = `import ${JSON.stringify(path.join(import.meta.dir, "helpers/headless-keychain.ts"))};
 import {main} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/bootstrap/main.ts"))};
 import {FakeBotScreenRuntimeAdapter} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts"))};
+import {installDurableSuiteProvider} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/modules/runtime/harness-test-support.ts"))};
+import {setSetting} from ${JSON.stringify(path.join(projectRoot, "apps/daemon/src/persistence/settings.ts"))};
 process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
-const daemon=await main({useHostApplicationUnits:false,botScreenAdapter:new FakeBotScreenRuntimeAdapter(),botScreenRuntimeDir:process.env.HOME+"/r"});
+process.env.PI_CODING_AGENT_DIR = process.env.HOME + "/.pi/agent";
+const restoreProvider = installDurableSuiteProvider();
+const daemon = await main({useHostApplicationUnits:false,botScreenAdapter:new FakeBotScreenRuntimeAdapter(),botScreenRuntimeDir:process.env.HOME+"/r"});
+if (!daemon.svc.credentials.getForRuntime("fake")) {
+  await daemon.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+}
+setSetting(daemon.svc.db, "default_model", "fake/fake-model");
 process.removeAllListeners("SIGINT");
-process.once("SIGINT",async()=>{await daemon.stop();process.exit(0)});
+process.once("SIGINT", async () => {
+  await daemon.stop();
+  restoreProvider();
+  process.exit(0);
+});
 `;
   const files: Record<string, string> = {
     "scripts/serve.sh": readFileSync(path.join(projectRoot, "scripts/serve.sh"), "utf8"),
@@ -173,7 +185,7 @@ process.once("SIGINT",async()=>{await daemon.stop();process.exit(0)});
     if (!response.ok) throw new Error(`${route}: ${response.status} ${await response.text()}`);
     return response.json() as Promise<T>;
   }
-  // The worker probe and Turn events arrive from real subprocesses, outside fake JS time.
+  // Agent readiness and Turn status come from the installed Service process.
   async function until(condition: () => Promise<boolean>) {
     for (let attempt = 0; attempt < 250; attempt++) {
       if (await condition()) return;

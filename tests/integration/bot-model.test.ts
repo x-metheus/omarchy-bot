@@ -10,11 +10,7 @@ import { api, apiStatus, messages, sendToBot, sendToThread, startDaemon, waitThr
 
 async function withDaemon(run: (h: Harness, client: ApiClient) => Promise<void>): Promise<void> {
   // Use this file's two-model fake instead of the suite-wide single-model fixture.
-  const durableSuite = process.env.OMARCHY_TEST_DURABLE;
-  if (durableSuite === "1") delete process.env.OMARCHY_TEST_DURABLE;
-  const h = await startDaemon().finally(() => {
-    if (durableSuite === "1") process.env.OMARCHY_TEST_DURABLE = durableSuite;
-  });
+  const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     await run(h, new ApiClient({ baseUrl: h.baseUrl, deviceToken: h.token }));
   } finally {
@@ -73,7 +69,6 @@ test("durable Turns select the Bot override and return to the Service model afte
       models: [{ id: "fake-model" }, { id: "default-model" }],
     });
     setSetting(h.svc.db, DEFAULT_MODEL_SETTING, "fake/default-model");
-    setSetting(h.svc.db, "runtime", "durable");
     const bot = await client.createBot({ name: "Model selection", instructions: "", agentId: "pi" });
 
     async function expectCompletedWithModel(turn: { threadId: string; turnId: string }, model: string) {

@@ -173,10 +173,7 @@ test("recovery finds an admitted submission whose association was lost", async (
   } finally { if (child) await stop(child); rmSync(home, { recursive: true, force: true }); }
 }, 60000);
 
-test.each([
-  ["placed", "durable"],
-  ["done", "worker"],
-] as const)("hard restart recovers a %s peer-mail input before Service bookkeeping with runtime set to %s", async (submissionState, nextRuntime) => {
+test.each(["placed", "done"] as const)("hard restart recovers a %s peer-mail input before Service bookkeeping", async (submissionState) => {
   const home = setup(); let child: Child | undefined;
   try {
     const first = await boot(home, 0, false, { OMARCHY_TEST_PEER_MAIL_HOLD: submissionState }); child = first.child;
@@ -201,11 +198,7 @@ test.each([
     await stop(child); child = undefined;
     expect(first.child.signalCode).toBe("SIGKILL");
 
-    const settings = new Database(path.join(home, "db.sqlite"));
-    try { settings.query("UPDATE service_settings SET value = ? WHERE key = 'runtime'").run(nextRuntime); }
-    finally { settings.close(); }
     const second = await boot(home, 0); child = second.child;
-    expect(query<{ value: string }>(home, "SELECT value FROM service_settings WHERE key = 'runtime'")).toEqual({ value: nextRuntime });
     expect(await terminal(home, turnId)).toMatchObject({ status: "completed" });
     expect(query<{ n: number }>(home, "SELECT count(*) AS n FROM bot_mail_deliveries")).toEqual({ n: 1 });
     expect(query<Delivery>(home, "SELECT id, thread_id, target_turn_id, state FROM bot_mail_deliveries")).toEqual({ ...claimed, state: "delivered" });

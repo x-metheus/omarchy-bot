@@ -4,28 +4,25 @@ import { abortDurableSuiteGeneration, durableSuiteProviderCallCount } from "../.
 import { apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon, waitThreadIdle } from "./harness.ts";
 
 test("durable steer boundary stays open until a steer is accepted", async () => {
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  process.env.OMARCHY_TEST_DURABLE = "1";
   const h = await startDaemon();
   try {
+    expect(h.svc.credentials.getForRuntime("fake")?.models?.map(({ id }) => id)).toEqual(["fake-model"]);
+    const callsBeforeTurn = durableSuiteProviderCallCount();
     const bot = await makeBot(h);
     const sent = await sendToBot(h, bot, "steer-echo");
     await Bun.sleep(1500);
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("working");
+    expect(durableSuiteProviderCallCount()).toBeGreaterThan(callsBeforeTurn);
     expect((await sendToThread(h, sent.threadId, "change direction")).action).toBe("steered");
     await waitThreadIdle(h, sent.threadId);
     expect((await messages(h, sent.threadId)).some((message) => message.kind === "response" && message.text === "steered: change direction")).toBeTrue();
   } finally {
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
-    if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-    else process.env.OMARCHY_TEST_DURABLE = previous;
   }
 }, 20000);
 
 test("durable hang rejects steering and can be aborted", async () => {
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  process.env.OMARCHY_TEST_DURABLE = "1";
   const h = await startDaemon();
   try {
     const sent = await sendToBot(h, await makeBot(h), "hang");
@@ -37,14 +34,10 @@ test("durable hang rejects steering and can be aborted", async () => {
   } finally {
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
-    if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-    else process.env.OMARCHY_TEST_DURABLE = previous;
   }
 }, 20000);
 
 test("ordered transcript waits for steering and resumes with the text and thinking sequence", async () => {
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  process.env.OMARCHY_TEST_DURABLE = "1";
   const h = await startDaemon();
   try {
     const sent = await sendToBot(h, await makeBot(h), "ordered-transcript");
@@ -66,14 +59,10 @@ test("ordered transcript waits for steering and resumes with the text and thinki
   } finally {
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
-    if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-    else process.env.OMARCHY_TEST_DURABLE = previous;
   }
 }, 30000);
 
 test("durable partial failures settle the turn and remove unfinished output", async () => {
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  process.env.OMARCHY_TEST_DURABLE = "1";
   const h = await startDaemon();
   try {
     const bot = await makeBot(h);
@@ -87,15 +76,11 @@ test("durable partial failures settle the turn and remove unfinished output", as
   } finally {
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
-    if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-    else process.env.OMARCHY_TEST_DURABLE = previous;
   }
 }, 20000);
 
 
 test("durable daemon scripts settle with worker-compatible output", async () => {
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  process.env.OMARCHY_TEST_DURABLE = "1";
   const h = await startDaemon();
   try {
     const bot = await makeBot(h);
@@ -125,15 +110,11 @@ test("durable daemon scripts settle with worker-compatible output", async () => 
   } finally {
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
-    if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-    else process.env.OMARCHY_TEST_DURABLE = previous;
   }
 }, 30000);
 
 
 test("aborting only the generation signal settles a hanging turn", async () => {
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  process.env.OMARCHY_TEST_DURABLE = "1";
   const h = await startDaemon();
   try {
     const sent = await sendToBot(h, await makeBot(h), "hang");
@@ -148,7 +129,5 @@ test("aborting only the generation signal settles a hanging turn", async () => {
   } finally {
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
-    if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-    else process.env.OMARCHY_TEST_DURABLE = previous;
   }
 }, 15000);

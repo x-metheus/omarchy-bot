@@ -10,7 +10,6 @@ import type { ThreadsService } from "../threads/threads.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { TurnService } from "../turns/turns.ts";
 import type { BotRuntime } from "../runtime/runtime.ts";
-import { getSetting } from "../../persistence/settings.ts";
 
 interface DeliveryRow {
   id: string;
@@ -20,8 +19,6 @@ interface DeliveryRow {
 
 interface DispatchRow {
   id: string;
-  source_bot_id: string | null;
-  source_name: string;
   target_bot_id: string;
   thread_id: string;
   agent_id: AgentId;
@@ -33,7 +30,7 @@ interface DeliveryIdRow {
 }
 
 const MAX_CONCURRENT_DISPATCHES = 4;
-const WORKER_ACCEPTANCE_FAILURE = "Target Agent could not accept this message.";
+const PEER_MAIL_ACCEPTANCE_FAILURE = "Target Agent could not accept this message.";
 const RESTART_ACCEPTANCE_FAILURE =
   "Delivery acceptance could not be confirmed after daemon restart.";
 
@@ -284,7 +281,6 @@ export class MailboxService {
     const queued = this.#dispatchRow(deliveryId);
     if (queued === undefined || !this.agents.isReady(queued.agent_id)) return;
 
-    const durable = getSetting(this.db, "runtime") === "durable";
     const turnId = `turn_${randomUUID().replace(/-/g, "")}`;
     const now = new Date().toISOString();
     const claim = this.db.transaction(() => {
@@ -307,14 +303,13 @@ export class MailboxService {
       this.db.query(
         `UPDATE bot_mail_deliveries SET target_turn_id = ?, updated_at = ? WHERE id = ?`,
       ).run(turnId, now, queued.id);
-      if (!durable) return queued;
       return this.db.query<{ source_bot_id: string | null; source_name: string }, [string]>(
         "SELECT source_bot_id, source_name FROM bot_mail_deliveries WHERE id = ?",
       ).get(queued.id);
     });
-    const claimed = durable ? await this.runtime.writeService(() => {
+    const claimed = await this.runtime.writeService(() => {
       if (!this.#stopping && this.agents.isReady(queued.agent_id)) return claim();
-    }) : claim();
+    });
     if (!claimed) return;
 
     try {
@@ -322,30 +317,19 @@ export class MailboxService {
         turnId,
         threadId: queued.thread_id,
         botId: queued.target_bot_id,
-        agentId: queued.agent_id,
         sourceName: claimed.source_name,
         ...(claimed.source_bot_id === null ? {} : { sourceBotId: claimed.source_bot_id }),
         text: queued.text,
         deliveryId: queued.id,
-        durable,
-        acceptanceFailureReason: WORKER_ACCEPTANCE_FAILURE,
+        acceptanceFailureReason: PEER_MAIL_ACCEPTANCE_FAILURE,
         markDelivered: () => this.#markDelivered(queued.id, turnId),
       });
-      if (!durable) {
-        this.db.query(
-          `UPDATE bot_mail_deliveries
-           SET state = 'delivered', failure_reason = NULL, updated_at = ?
-           WHERE id = ? AND state = 'dispatching' AND target_turn_id = ?`,
-        ).run(new Date().toISOString(), queued.id, turnId);
-      }
     } catch {
-      const fail = () => this.db.query(
+      await this.runtime.writeService(() => this.db.query(
         `UPDATE bot_mail_deliveries
          SET state = 'failed', failure_reason = ?, updated_at = ?
          WHERE id = ? AND state = 'dispatching' AND target_turn_id = ?`,
-      ).run(WORKER_ACCEPTANCE_FAILURE, new Date().toISOString(), queued.id, turnId);
-      if (durable) await this.runtime.writeService(fail);
-      else fail();
+      ).run(PEER_MAIL_ACCEPTANCE_FAILURE, new Date().toISOString(), queued.id, turnId));
     }
   }
 
@@ -359,8 +343,6 @@ export class MailboxService {
   #dispatchRow(deliveryId: string): DispatchRow | undefined {
     const row = this.db.query(
       `SELECT deliveries.id,
-              deliveries.source_bot_id,
-              deliveries.source_name,
               deliveries.target_bot_id,
               deliveries.thread_id,
               bots.agent_id,

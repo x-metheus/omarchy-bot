@@ -579,7 +579,7 @@ test.skipIf(process.platform === "win32")("bash keeps an out-of-band Bot secret 
   try {
     for (const migration of MIGRATIONS) applyMigration(db, migration);
     const eventLog = new EventLog(db);
-    const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {}, async onAgentToolFrame() { return undefined; } }, { agents: "" });
+    const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {} }, { agents: "" });
     const agents = new AgentsRegistry(db, eventLog, { conformanceDir: "", workersAgentsDir: "" }, supervisor);
     const threads = new ThreadsService(db, eventLog, agents);
     const bots = new BotsService(db, eventLog, agents, threads);

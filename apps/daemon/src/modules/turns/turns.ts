@@ -1,78 +1,21 @@
 
 import { DurableRunAborted, type BotRuntime } from "../runtime/runtime.ts";
-import { getSetting } from "../../persistence/settings.ts";
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import {
-  isAgentToolCallEvent,
-  toolCallSummaryFromEvent,
-  SEND_BOT_MESSAGE_SCHEMA,
-  LOCAL_SCHEMA,
-  COMPUTER_TOOL_SCHEMA,
-  AGENT_COMPUTER_TOOL,
-  AGENT_BROWSER_TOOL,
-  BROWSER_TOOL_SCHEMA,
-  type AgentBrowserToolOutput,
-  AGENT_LOCAL_TOOL,
-  type AgentBotMessageToolOutput,
-  createToolChannelDaemon,
-  type ToolChannelDaemon,
-  type ToolChannelTool,
-  type ToolChannelContext,
-  type ToolChannelFrame,
-  type AgentComputerToolOutput,
-  type AgentEvent,
-  type WorkerUserMessage,
-  type AgentPluginToolOutput,
-  type AgentLocalToolOutput,
-} from "@omarchy-bot/agent-contract";
 import type { SendResultDto, TurnDto } from "@omarchy-bot/protocol";
-import type { AgentId, BrowserActionName, ComputerActionName, SurfaceId, TurnStatus } from "@omarchy-bot/domain";
+import type { TurnStatus } from "@omarchy-bot/domain";
 import { canTransitionTurn, isTerminalTurn } from "@omarchy-bot/domain";
 import type { ThreadsService } from "../threads/threads.ts";
-import type { AgentsRegistry } from "../agents/registry.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
 import type { AttachmentsService } from "../attachments/attachments.ts";
-import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "../bots/bots.ts";
-import type { ComputerBroker } from "../computer/broker.ts";
-import type { MailboxService } from "../mailbox/mailbox.ts";
 import { ensurePrivateFolder, resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
-import type { PluginsService, PluginLease } from "../plugins/plugins.ts";
-import type { SidecarBroker } from "../devices/sidecarBroker.ts";
-
-interface TurnContext {
-  turnId: string;
-  threadId: string;
-  botId: string;
-  agentId: AgentId;
-  deviceId?: string;
-  workerSessionId: string;
-  surfaceId: SurfaceId;
-  /** Static tools plus this Turn's leased plugin tools; one channel for every reverse tool call. */
-  toolChannel: ToolChannelDaemon;
-  pluginLease?: PluginLease;
-  closeSession(): void;
-  turnTimeout: ReturnType<typeof setTimeout>;
-  /** Present only when cancellation came from the explicit abort path. */
-  abortReason?: string;
-  /** A timeout remains a failed Turn even when native abort reports cancellation. */
-  timeoutFailureReason?: string;
-}
 
 interface TerminalTurnWaiter {
   resolve: (turn: TurnDto) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
-
-/** Tools every Turn offers its Agent; plugin tools are appended from the Turn's lease snapshot. */
-const STATIC_TOOLS: readonly ToolChannelTool[] = [
-  { name: "send_bot_message", schema: SEND_BOT_MESSAGE_SCHEMA },
-  { name: AGENT_LOCAL_TOOL.name, schema: LOCAL_SCHEMA },
-  { name: AGENT_COMPUTER_TOOL.name, schema: COMPUTER_TOOL_SCHEMA },
-  { name: AGENT_BROWSER_TOOL.name, schema: BROWSER_TOOL_SCHEMA },
-];
 
 /** Local title from the first user message — no extra Agent call. */
 export function deriveTitle(text: string): string {
@@ -84,21 +27,8 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function agentEventFamily(event: AgentEvent): string {
-  return event.type === "native" ? "native" : event.type.split(".", 1)[0]!;
-}
-
-/**
- * Owns the turn lifecycle: send (atomic thread+message+turn when the thread
- * is new), steer (mid-turn redirect), and the worker event routing that ends
- * turns. Completion only arrives via terminal worker events, timeout or abort
- * — fail closed.
- */
+/** Owns Turn admission, steering, recovery, and terminal status. */
 export class TurnService {
-  #turns = new Map<string, TurnContext>(); // workerSessionId -> ctx
-  #mailbox: MailboxService | undefined;
-  #computer: ComputerBroker | undefined;
-  #turnStarts = new Map<string, Promise<TurnContext>>();
   #durableTurns = new Set<string>();
   #durableStarts = new Map<string, Promise<void>>();
   #recovery: { registered: Promise<void>; settled: Promise<void> } | undefined;
@@ -108,23 +38,17 @@ export class TurnService {
   #suspended = new Set<string>();
   #durableAbortReasons = new Map<string, string>();
   #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
-  #timeoutQueues = new Map<AgentId, Promise<void>>();
   #stopping = false;
   #restartReason: string | undefined;
-  #reportedRuntimeSetting = false;
 
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
     private readonly threads: ThreadsService,
-    private readonly agents: AgentsRegistry,
     private readonly bots: BotsService,
     private readonly attachments: AttachmentsService,
-    private readonly supervisor: Supervisor,
     private readonly cfg: { turnTimeoutMs: number; sharedWorkspaceDir: string },
-    private readonly plugins: PluginsService,
-    private readonly devices: SidecarBroker,
-    private readonly runtime?: BotRuntime,
+    private readonly runtime: BotRuntime,
   ) {}
 
   async shutdown(options: { reason?: "daemon restart" } = {}): Promise<void> {
@@ -135,20 +59,17 @@ export class TurnService {
     // crash and uses none of its restarts. Its run settles only after that close, so shutdown does not wait for it.
     for (const turnId of this.#durableTurns) {
       const row = this.threads.turnRow(turnId);
-      if (row && this.runtime?.approvals?.hasPending(row.thread_id, row.bot_id)) this.#suspended.add(turnId);
+      if (row && this.runtime.approvals?.hasPending(row.thread_id, row.bot_id)) this.#suspended.add(turnId);
     }
     const running = (turnId: string) => !this.#suspended.has(turnId);
-    await Promise.allSettled([...this.#durableTurns].filter(running).map((turnId) => this.runtime?.abortTurn(turnId)));
+    await Promise.allSettled([...this.#durableTurns].filter(running).map((turnId) => this.runtime.abortTurn(turnId)));
     if (this.#suspended.size === 0) await this.#recovery?.settled;
     else await Promise.allSettled([...this.#recoveredSettled].filter(([turnId]) => running(turnId)).map(([, settled]) => settled));
     await Promise.allSettled([...this.#durableStarts].filter(([turnId]) => running(turnId)).map(([, start]) => start));
-    await Promise.allSettled(this.#turnStarts.values());
-    for (const ctx of this.#turns.values()) clearTimeout(ctx.turnTimeout);
-    await Promise.all(this.#timeoutQueues.values());
   }
 
   recoverTurns(): void {
-    if (!this.runtime || this.#recovery) return;
+    if (this.#recovery) return;
     this.#recovery = this.runtime.recoverTurns({
       db: this.db, threads: this.threads, bots: this.bots, events: this.events,
       registered: (turnId) => {
@@ -160,7 +81,7 @@ export class TurnService {
         this.#settleRecovered.delete(turnId);
         this.#recoveredSettled.delete(turnId);
         if (outcome.status === "completed") {
-          this.#setTurnStatus(turnId, "completed", undefined, true);
+          this.#setTurnStatus(turnId, "completed");
         } else {
           const threadId = this.threads.turnRow(turnId)?.thread_id;
           const reason = outcome.status === "failed" ? outcome.reason : this.#durableAbortReasons.get(turnId) ?? "aborted";
@@ -177,7 +98,7 @@ export class TurnService {
     return r ? this.threads.turnToDto(r) : undefined;
   }
 
-  #setTurnStatus(turnId: string, next: TurnStatus, reason?: string, durable = false): void {
+  #setTurnStatus(turnId: string, next: TurnStatus, reason?: string): void {
     const t = this.threads.turnRow(turnId);
     if (!t) return;
     const from = t.status as TurnStatus;
@@ -194,8 +115,7 @@ export class TurnService {
       botId: t.bot_id,
       ...(reason !== undefined ? { reason } : {}),
     });
-    if (durable) this.#recordDurableActivity(t.bot_id, t.thread_id, turnId);
-    else this.bots.recordActivityStatus(t.bot_id, t.thread_id, turnId);
+    this.#recordDurableActivity(t.bot_id, t.thread_id, turnId);
     if (finished) {
       const terminal = this.#turnDto(turnId);
       const waiters = this.#terminalWaiters.get(turnId);
@@ -226,32 +146,14 @@ export class TurnService {
     attachmentDraftToken?: string,
     opts: { cwd?: string; deviceId?: string; whenBusy?: "steer" | "followUp" } = {},
   ): Promise<SendResultDto> {
-    const runtimeSetting = getSetting(this.db, "runtime");
-    const durable = runtimeSetting === "durable";
-    if (runtimeSetting !== null && runtimeSetting !== "worker" && !durable && !this.#reportedRuntimeSetting) {
-      this.#reportedRuntimeSetting = true;
-      console.warn("Unrecognized runtime setting; using worker");
-    }
     if (this.#stopping) throw new HttpError(503, "Daemon is stopping; new work cannot start");
-    const bot = this.db.query(`SELECT * FROM bots WHERE id = ?`).get(botId) as { id: string; agent_id: string; instructions: string } | undefined;
+    const bot = this.db.query<{ instructions: string }, [string]>(`SELECT instructions FROM bots WHERE id = ?`).get(botId);
     if (!bot) throw new HttpError(404, `unknown bot ${botId}`);
     if (
       this.db.query(`SELECT bot_id FROM bot_deletions WHERE bot_id = ? AND state = 'cleaning'`).get(botId) !== null
     ) {
       throw new HttpError(409, "bot deletion is in progress; new work cannot start");
     }
-    const agentId = bot.agent_id as AgentId;
-    let capabilities: ReturnType<AgentsRegistry["capabilityInventory"]>;
-    if (!durable) {
-      if (this.#timeoutQueues.has(agentId)) {
-        throw new HttpError(409, `agent '${agentId}' is stopping a timed-out session; the bot cannot chat right now`);
-      }
-      capabilities = this.agents.capabilityInventory(agentId);
-      if (!this.agents.isReady(agentId) || capabilities === undefined) {
-        throw new HttpError(409, `agent '${agentId}' is not ready; the bot cannot chat right now`);
-      }
-    }
-
     // Active turn on the thread -> steer instead of a new turn.
     let durableFollowUp = false;
     const existingThreadId = threadId ?? undefined;
@@ -260,33 +162,20 @@ export class TurnService {
       if (!thread || thread.botId !== botId) throw new HttpError(404, `unknown thread ${existingThreadId} for bot ${botId}`);
       const active = this.threads.activeTurn(existingThreadId);
       if (active !== undefined) {
-        if (durable && opts.whenBusy === "followUp") {
+        if (opts.whenBusy === "followUp") {
           if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while a durable turn is active");
           durableFollowUp = true;
-        } else if (durable) {
-          if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while steering an active turn");
-          const activeId = await this.runtime?.activeTurn(existingThreadId);
-          const current = activeId === undefined ? active : this.#turnDto(activeId) ?? active;
-          return this.#steerDurable(current, text);
         } else {
           if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while steering an active turn");
-          return this.#steer(active, text, agentId);
+          const activeId = await this.runtime.activeTurn(existingThreadId);
+          const current = activeId === undefined ? active : this.#turnDto(activeId) ?? active;
+          return this.#steerDurable(current, text);
         }
-      }
-      if (
-        !durable && this.threads.getNativeSession(existingThreadId) !== undefined
-        && !capabilities!.nativeThreadActions.includes("resume")
-      ) {
-        throw new HttpError(409, `session resume is not supported by ${agentId}`);
       }
     }
 
     const turnId = `turn_${randomUUID().replace(/-/g, "")}`;
-    const result: {
-      threadId: string;
-      messageId: string;
-      workerAttachments: NonNullable<WorkerUserMessage["attachments"]>;
-    } = this.db.transaction(() => {
+    const result = this.db.transaction(() => {
       let tid = existingThreadId;
       let title = "New conversation";
       if (tid === undefined) {
@@ -303,82 +192,64 @@ export class TurnService {
         }
       }
       this.threads.insertTurnRow({ id: turnId, threadId: tid, botId, nativeSessionId: this.threads.getNativeSession(tid) ?? "" });
-      const workerAttachments = this.attachments.promoteForMessage({
+      const attachments = this.attachments.promoteForMessage({
         attachmentIds,
         botId,
         threadId: tid,
         messageId: userMsg.id,
         draftToken: attachmentDraftToken,
       });
-      return { threadId: tid, messageId: userMsg.id, workerAttachments };
+      return { threadId: tid, messageId: userMsg.id, attachments };
     })();
 
     this.events.append("thread", result.threadId, "thread.created", { botId, threadId: result.threadId, turnId });
     const userMsgDto = this.threads.getMessage(result.messageId)!;
     this.events.append("thread", result.threadId, "message.appended", userMsgDto);
     this.events.append("turn", turnId, "turn.created", { turnId, threadId: result.threadId, botId });
-    if (durable) this.#recordDurableActivity(botId, result.threadId, turnId);
-    else this.bots.recordActivityStatus(botId, result.threadId, turnId);
+    this.#recordDurableActivity(botId, result.threadId, turnId);
     this.bots.recordUserMessage(botId, result.threadId);
     const sent: SendResultDto = { threadId: result.threadId, messageId: result.messageId, turnId, action: "sent" };
     let privateDir: string;
     try {
       privateDir = ensurePrivateFolder(botId, this.cfg.sharedWorkspaceDir);
     } catch (error) {
-      this.#setTurnStatus(turnId, "failed", errorMessage(error), durable);
+      this.#setTurnStatus(turnId, "failed", errorMessage(error));
       if (durableFollowUp) throw new HttpError(409, `follow-up unavailable: ${errorMessage(error)}`);
       return sent;
     }
-    if (durable) {
-      const admission = this.#startDurableTurn(turnId, result.threadId, (runtime, admitted, working) => {
-        resolveWorkCwd(this.threads.getThread(result.threadId)!.cwd);
-        return runtime.startTurn({
-          db: this.db, threads: this.threads, bots: this.bots, events: this.events,
-          threadId: result.threadId, botId, turnId, text, instructions: bot.instructions,
-          attachments: result.workerAttachments, workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, admitted, working,
-          ...(opts.deviceId === undefined ? {} : { deviceId: opts.deviceId }),
-          ...(durableFollowUp ? { whenBusy: "followUp" } : {}),
-        });
+    const admission = this.#startDurableTurn(turnId, result.threadId, (admitted, working) => {
+      resolveWorkCwd(this.threads.getThread(result.threadId)!.cwd);
+      return this.runtime.startTurn({
+        db: this.db, threads: this.threads, bots: this.bots, events: this.events,
+        threadId: result.threadId, botId, turnId, text, instructions: bot.instructions,
+        attachments: result.attachments, workspaceDir: this.cfg.sharedWorkspaceDir, privateDir, admitted, working,
+        ...(opts.deviceId === undefined ? {} : { deviceId: opts.deviceId }),
+        ...(durableFollowUp ? { whenBusy: "followUp" } : {}),
       });
-      if (durableFollowUp) {
-        try { await admission; } catch (error) { throw new HttpError(409, `follow-up unavailable: ${errorMessage(error)}`); }
-      }
-      return sent;
+    });
+    if (durableFollowUp) {
+      try { await admission; } catch (error) { throw new HttpError(409, `follow-up unavailable: ${errorMessage(error)}`); }
     }
-    const start = this.#startTurn(turnId, result.threadId, botId, agentId, text, result.workerAttachments, opts.deviceId === undefined ? {} : { deviceId: opts.deviceId });
-    this.#turnStarts.set(turnId, start);
-    void start
-      .catch((err: unknown) => {
-        const row = this.threads.turnRow(turnId);
-        if (!row || isTerminalTurn(row.status as TurnStatus)) return;
-        const reason = errorMessage(err);
-        this.#setTurnStatus(turnId, "failed", reason);
-      })
-      .finally(() => {
-        if (this.#turnStarts.get(turnId) === start) this.#turnStarts.delete(turnId);
-      });
     return sent;
   }
 
   #startDurableTurn(
     turnId: string,
     threadId: string,
-    start: (runtime: BotRuntime, admitted: () => void, working: () => void) => Promise<void>,
+    start: (admitted: () => void, working: () => void) => Promise<void>,
     acceptanceFailureReason?: string,
   ): Promise<void> {
     this.#durableTurns.add(turnId);
     const admission = Promise.withResolvers<void>();
     void admission.promise.catch(() => {});
     let accepted = false;
-    const runtime = this.runtime;
     const tracked = (async () => {
       try {
-        if (!runtime) throw new Error("Durable runtime unavailable");
-        await start(runtime, () => {
+        await start(() => {
           accepted = true;
           admission.resolve();
-        }, () => this.#setTurnStatus(turnId, "working", undefined, true));
-        await runtime.writeService(() => this.#setTurnStatus(turnId, "completed", undefined, true));
+        }, () => this.#setTurnStatus(turnId, "working"));
+        await this.runtime.writeService(() => this.#setTurnStatus(turnId, "completed"));
       } catch (error) {
         admission.reject(error);
         const settle = () => {
@@ -391,8 +262,7 @@ export class TurnService {
             this.#finishInterruptedDurableTurn(turnId, threadId, aborted ? "cancelled" : "failed", reason);
           }
         };
-        if (runtime) await runtime.writeService(settle);
-        else settle();
+        await this.runtime.writeService(settle);
       }
     })().finally(() => {
       this.#durableTurns.delete(turnId);
@@ -408,217 +278,29 @@ export class TurnService {
     turnId: string;
     threadId: string;
     botId: string;
-    agentId: AgentId;
     sourceName: string;
     sourceBotId?: string;
     text: string;
     deliveryId: string;
-    durable: boolean;
     acceptanceFailureReason: string;
     markDelivered(): void;
   }): Promise<void> {
     const { turnId, threadId, botId } = input;
     const author = `Message from Bot ${input.sourceName}${input.sourceBotId === undefined ? "" : ` (${input.sourceBotId})`}`;
-    if (input.durable) {
-      return this.#startDurableTurn(turnId, threadId, (runtime, admitted, working) => runtime.startPeerMailTurn({
-        db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId, botId, turnId,
-        peerMail: { author, text: input.text, deliveryId: input.deliveryId },
-        workspaceDir: this.cfg.sharedWorkspaceDir, working, admitted,
-        admissionTimeoutMs: this.cfg.turnTimeoutMs, markDelivered: input.markDelivered,
-        announce: () => {
-          if (this.#stopping) throw new HttpError(503, "Daemon is stopping; new work cannot start");
-          this.events.append("turn", turnId, "turn.created", { turnId, threadId, botId });
-          this.#recordDurableActivity(botId, threadId, turnId);
-          const privateDir = ensurePrivateFolder(botId, this.cfg.sharedWorkspaceDir);
-          resolveWorkCwd(this.threads.getThread(threadId)!.cwd);
-          return privateDir;
-        },
-      }), input.acceptanceFailureReason);
-    }
-    if (this.#stopping) throw new HttpError(503, "Daemon is stopping; new work cannot start");
-    this.events.append("turn", input.turnId, "turn.created", {
-      turnId: input.turnId,
-      threadId: input.threadId,
-      botId: input.botId,
-    });
-    this.bots.recordActivityStatus(input.botId, input.threadId, input.turnId);
-    const start = (async () => {
-      ensurePrivateFolder(input.botId, this.cfg.sharedWorkspaceDir);
-      return this.#startTurn(
-        input.turnId,
-        input.threadId,
-        input.botId,
-        input.agentId,
-        `${author}:\n\n${input.text}`,
-        [],
-        {
-          freshSession: true,
-          awaitAcceptance: true,
-          acceptanceFailureReason: input.acceptanceFailureReason,
-        },
-      );
-    })();
-    this.#turnStarts.set(input.turnId, start);
-    try {
-      await start;
-    } catch (err) {
-      console.error(
-        `peer-mail Turn ${input.turnId} failed before worker acceptance`,
-        err,
-      );
-      const row = this.threads.turnRow(input.turnId);
-      if (row !== undefined && !isTerminalTurn(row.status as TurnStatus)) {
-        this.#setTurnStatus(input.turnId, "failed", input.acceptanceFailureReason);
-      }
-      throw err;
-    } finally {
-      if (this.#turnStarts.get(input.turnId) === start) {
-        this.#turnStarts.delete(input.turnId);
-      }
-    }
-  }
-
-  async #startTurn(
-    turnId: string,
-    threadId: string,
-    botId: string,
-    agentId: AgentId,
-    text: string,
-    attachments: NonNullable<WorkerUserMessage["attachments"]>,
-    startOptions: {
-      freshSession?: boolean;
-      awaitAcceptance?: boolean;
-      acceptanceFailureReason?: string;
-      deviceId?: string;
-    } = {},
-  ): Promise<TurnContext> {
-    const botRow = this.db.query(`SELECT instructions FROM bots WHERE id = ?`).get(botId) as { instructions: string } | undefined;
-    const thread = this.threads.getThread(threadId)!;
-    const pluginLease = this.agents.capabilityInventory(agentId)?.plugins ? await this.plugins.acquire() : undefined;
-    let leaseTransferred = false;
-    try {
-    const worker = await this.supervisor.agentWorker(agentId);
-    const nativeSessionId = startOptions.freshSession
-      ? undefined
-      : this.threads.getNativeSession(threadId);
-    const device = startOptions.deviceId === undefined ? undefined : this.devices.get(startOptions.deviceId);
-    const options = {
-      cwd: resolveWorkCwd(thread.cwd), instructions: botRow?.instructions ?? "",
-      ...(pluginLease ? { plugins: pluginLease.snapshot } : {}),
-      ...(device ? { local: { os: device.os, shell: device.shell } } : {}),
-    };
-    if (
-      nativeSessionId !== undefined
-      && !this.agents.capabilityInventory(agentId)?.nativeThreadActions.includes("resume")
-    ) {
-      throw new HttpError(409, `session resume is not supported by ${agentId}`);
-    }
-    const opened = nativeSessionId === undefined
-      ? await worker.request({ type: "session.open", botId, threadId, options }, 30_000)
-      : await worker.request({ type: "session.resume", botId, threadId, nativeSessionId, options }, 30_000);
-
-    this.threads.setNativeSession(threadId, opened.nativeSessionId);
-    const surface = this.db
-      .query(`SELECT surface_id FROM bot_surfaces WHERE bot_id = ?`)
-      .get(botId) as { surface_id: SurfaceId } | null;
-    if (surface === null) throw new Error(`Bot ${botId} has no Computer Surface`);
-    this.db.query(`UPDATE turns SET worker_session_id = ?, native_session_id = ? WHERE id = ?`).run(opened.sessionId, opened.nativeSessionId, turnId);
-
-    const turnTimeout = setTimeout(() => {
-      const active = this.#turns.get(opened.sessionId);
-      if (active !== undefined) this.#queueTimeout(active);
-    }, this.cfg.turnTimeoutMs);
-    turnTimeout.unref?.();
-
-    const tools = [
-      ...STATIC_TOOLS,
-      ...(pluginLease?.snapshot.tools ?? []).map((tool) => ({ name: tool.name, schema: tool.inputSchema })),
-    ];
-    const ctx: TurnContext = {
-      turnId,
-      threadId,
-      botId,
-      agentId,
-      ...(startOptions.deviceId !== undefined ? { deviceId: startOptions.deviceId } : {}),
-      workerSessionId: opened.sessionId,
-      surfaceId: surface.surface_id,
-      toolChannel: createToolChannelDaemon({
-        tools,
-        execute: (params, context, signal, name) => {
-          if (name === "send_bot_message") return this.#sendBotMessage(agentId, context, params);
-          if (name === AGENT_LOCAL_TOOL.name) return this.#runLocal(agentId, context, params, signal);
-          if (name === AGENT_COMPUTER_TOOL.name) return this.#runComputer(agentId, context, params, signal);
-          if (name === AGENT_BROWSER_TOOL.name) return this.#runBrowser(agentId, context, params, signal);
-          return this.#callPlugin(agentId, context, params, signal, name);
-        },
-      }),
-      ...(pluginLease ? { pluginLease } : {}),
-      closeSession: () => {
-        if (worker.alive) void worker.request({ type: "session.close", sessionId: opened.sessionId }, 5_000).catch(() => {
-          this.events.append("agent", agentId, "agent.error", { agentId, message: "Could not close an idle native session", retryable: false });
-        });
+    return this.#startDurableTurn(turnId, threadId, (admitted, working) => this.runtime.startPeerMailTurn({
+      db: this.db, threads: this.threads, bots: this.bots, events: this.events, threadId, botId, turnId,
+      peerMail: { author, text: input.text, deliveryId: input.deliveryId },
+      workspaceDir: this.cfg.sharedWorkspaceDir, working, admitted,
+      admissionTimeoutMs: this.cfg.turnTimeoutMs, markDelivered: input.markDelivered,
+      announce: () => {
+        if (this.#stopping) throw new HttpError(503, "Daemon is stopping; new work cannot start");
+        this.events.append("turn", turnId, "turn.created", { turnId, threadId, botId });
+        this.#recordDurableActivity(botId, threadId, turnId);
+        const privateDir = ensurePrivateFolder(botId, this.cfg.sharedWorkspaceDir);
+        resolveWorkCwd(this.threads.getThread(threadId)!.cwd);
+        return privateDir;
       },
-      turnTimeout,
-    };
-    this.#turns.set(opened.sessionId, ctx);
-    leaseTransferred = true;
-    this.#setTurnStatus(turnId, "working");
-
-    // Worker acceptance is separate from terminal Turn output. Conversational
-    // starts remain steerable as soon as the session opens; peer mail awaits
-    // only message.send acceptance so its durable delivery boundary is exact.
-    const message: WorkerUserMessage = {
-      text,
-      ...(attachments.length > 0 ? { attachments } : {}),
-    };
-    const acceptance = worker.request({
-      type: "message.send",
-      sessionId: opened.sessionId,
-      turnId,
-      message,
-      computer: {
-        botId,
-        turnId,
-        workerSessionId: opened.sessionId,
-        surfaceId: surface.surface_id,
-      },
-      botMessage: {
-        botId,
-        turnId,
-        workerSessionId: opened.sessionId,
-      },
-      ...(pluginLease ? { plugins: { botId, turnId, workerSessionId: opened.sessionId } } : {}),
-      ...(this.devices.list().length > 0
-        ? { local: { botId, turnId, workerSessionId: opened.sessionId } }
-        : {}),
-    }, 60_000);
-    const failSend = (err: unknown): void => {
-      if (this.#turns.get(opened.sessionId) !== ctx) return;
-      this.#routeTurnEvent(ctx, {
-        type: "error",
-        sessionId: opened.sessionId,
-        message: errorMessage(err),
-        retryable: false,
-      });
-    };
-    if (startOptions.awaitAcceptance) {
-      try {
-        await acceptance;
-      } catch (err) {
-        this.#finishTurn(
-          ctx,
-          "failed",
-          startOptions.acceptanceFailureReason ?? errorMessage(err),
-        );
-        throw err;
-      }
-    } else {
-      void acceptance.catch(failSend);
-    }
-    return ctx;
-    } finally {
-      if (!leaseTransferred) pluginLease?.release();
-    }
+    }), input.acceptanceFailureReason);
   }
 
   async #steerDurable(turn: TurnDto, text: string): Promise<SendResultDto> {
@@ -627,7 +309,6 @@ export class TurnService {
     });
     this.bots.recordUserMessage(turn.botId, turn.threadId);
     try {
-      if (!this.runtime) throw new Error("Durable runtime unavailable");
       await this.runtime.steer(turn.id, text, userMsg.id);
       this.db.query(`UPDATE turns SET steer_count = steer_count + 1 WHERE id = ?`).run(turn.id);
       this.events.append("turn", turn.id, "turn.steered", { turnId: turn.id, threadId: turn.threadId, messageId: userMsg.id });
@@ -639,449 +320,11 @@ export class TurnService {
     return { threadId: turn.threadId, messageId: userMsg.id, turnId: turn.id, action: "steered" };
   }
 
-  async #steer(turn: TurnDto, text: string, agentId: AgentId): Promise<SendResultDto> {
-    if (!this.agents.capabilityInventory(agentId)?.steering) {
-      throw new HttpError(409, `steering is not supported by ${agentId}`);
-    }
-    // Supported redirects appear immediately, even while the initial worker
-    // session is still opening.
-    const userMsg = this.threads.appendMessage(turn.threadId, {
-      author: { kind: "user" }, kind: "text", text, payload: { turnId: turn.id },
-    });
-    this.bots.recordUserMessage(turn.botId, turn.threadId);
-    try {
-      let ctx = [...this.#turns.values()].find((candidate) => candidate.turnId === turn.id);
-      if (!ctx) {
-        const starting = this.#turnStarts.get(turn.id);
-        if (!starting) throw new Error("active turn has no worker session");
-        ctx = await starting;
-      }
-      const current = this.threads.turnRow(turn.id);
-      if (!current || isTerminalTurn(current.status as TurnStatus) || this.#turns.get(ctx.workerSessionId) !== ctx) {
-        throw new Error("turn is no longer active");
-      }
-      if (!this.agents.capabilityInventory(ctx.agentId)?.steering) {
-        throw new Error(`steering is no longer supported by ${ctx.agentId}`);
-      }
-      const worker = await this.supervisor.agentWorker(ctx.agentId);
-      await worker.request({ type: "message.steer", sessionId: ctx.workerSessionId, text }, 30_000);
-      this.db.query(`UPDATE turns SET steer_count = steer_count + 1 WHERE id = ?`).run(turn.id);
-      this.events.append("turn", turn.id, "turn.steered", {
-        turnId: turn.id,
-        threadId: turn.threadId,
-        messageId: userMsg.id,
-      });
-    } catch (err) {
-      // A rejected native steer is transcript-visible but never changes,
-      // aborts, or replaces the original turn.
-      const reason = errorMessage(err);
-      this.#emitSystemNote(turn.threadId, `steer unavailable: ${reason}`);
-      throw new HttpError(409, `steer unavailable: ${reason}`);
-    }
-    return { threadId: turn.threadId, messageId: userMsg.id, turnId: turn.id, action: "steered" };
-  }
-
-  onAgentWorkerCrash(agentId: AgentId, error: Error): void {
-    for (const context of [...this.#turns.values()]) {
-      if (context.agentId !== agentId) continue;
-      this.#routeTurnEvent(context, {
-        type: "error",
-        sessionId: context.workerSessionId,
-        message: error.message,
-        retryable: false,
-      });
-    }
-  }
-
-  /** Routes a worker tool frame to the Turn channel that owns the requested tool. */
-  onAgentToolFrame(
-    agentId: AgentId,
-    frame: ToolChannelFrame,
-    mailbox: MailboxService,
-    computer: ComputerBroker,
-  ): Promise<ToolChannelFrame | undefined> {
-    this.#mailbox = mailbox;
-    this.#computer = computer;
-    if (frame.type === "tool.cancel") {
-      // A cancel carries no turn identity, so only the sending Agent's turns may answer it.
-      for (const turn of this.#turns.values()) {
-        if (turn.agentId !== agentId) continue;
-        void turn.toolChannel.receive(frame);
-      }
-      return Promise.resolve(undefined);
-    }
-    if (frame.type !== "tool.request") return Promise.resolve(undefined);
-    const turn = this.#turns.get(frame.context.workerSessionId);
-    if (turn === undefined || turn.agentId !== agentId) {
-      return Promise.resolve({ type: "tool.result", requestId: frame.requestId, ok: false, error: `${frame.name} tool context is stale or mismatched` });
-    }
-    return turn.toolChannel.receive(frame);
-  }
-
-  /** Dispatch one Turn-bound computer action to this Bot's own Computer Surface. */
-  async #runComputer(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal): Promise<AgentComputerToolOutput> {
-    const computer = this.#computer;
-    const active = this.#turns.get(context.workerSessionId);
-    if (
-      computer === undefined
-      || active === undefined
-      || active.agentId !== agentId
-      || active.botId !== context.botId
-      || active.turnId !== context.turnId
-      || active.workerSessionId !== context.workerSessionId
-      || (context.surfaceId !== undefined && context.surfaceId !== active.surfaceId)
-    ) {
-      throw new Error("computer tool context is stale or mismatched");
-    }
-    const owner = computer.resolveOwner(context.botId, active.surfaceId);
-    if (owner === undefined) {
-      throw new Error("computer tool context has a mismatched Computer Surface");
-    }
-    const action = params as { action: ComputerActionName; args?: Record<string, unknown> };
-    return computer.agentToolAct(owner, context.turnId, context.toolCallId, { name: action.action, args: action.args ?? {} }, signal);
-  }
-
-  /** Dispatch one Turn-bound browser action to this Bot's own Computer Surface. */
-  async #runBrowser(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal): Promise<AgentBrowserToolOutput> {
-    const computer = this.#computer;
-    const active = this.#turns.get(context.workerSessionId);
-    if (
-      computer === undefined
-      || active === undefined
-      || active.agentId !== agentId
-      || active.botId !== context.botId
-      || active.turnId !== context.turnId
-      || active.workerSessionId !== context.workerSessionId
-      || (context.surfaceId !== undefined && context.surfaceId !== active.surfaceId)
-    ) {
-      throw new Error("browser tool context is stale or mismatched");
-    }
-    const owner = computer.resolveOwner(context.botId, active.surfaceId);
-    if (owner === undefined) {
-      throw new Error("browser tool context has a mismatched Computer Surface");
-    }
-    const action = params as { action: BrowserActionName; args?: Record<string, unknown> };
-    return computer.agentBrowserAct(owner, context.turnId, context.toolCallId, { name: action.action, args: action.args ?? {} }, signal);
-  }
-
-  /** Dispatch one Turn-bound local job; ownership and This Device come from the active Turn. */
-  async #runLocal(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal): Promise<AgentLocalToolOutput> {
-    const active = this.#turns.get(context.workerSessionId);
-    if (
-      active === undefined
-      || active.agentId !== agentId
-      || active.botId !== context.botId
-      || active.turnId !== context.turnId
-      || active.workerSessionId !== context.workerSessionId
-    ) {
-      throw new Error("local tool context is stale or mismatched");
-    }
-    return this.devices.execute(
-      params as Parameters<SidecarBroker["execute"]>[0],
-      {
-        botId: active.botId,
-        turnId: active.turnId,
-        ...(active.deviceId !== undefined ? { deviceId: active.deviceId } : {}),
-      },
-      signal,
-    );
-  }
-
-  async #sendBotMessage(agentId: AgentId, context: ToolChannelContext, params: unknown): Promise<AgentBotMessageToolOutput> {
-    const mailbox = this.#mailbox;
-    const active = this.#turns.get(context.workerSessionId);
-    if (mailbox === undefined || active === undefined || active.agentId !== agentId || active.botId !== context.botId || active.turnId !== context.turnId) {
-      throw new Error("Bot message tool context is stale or mismatched");
-    }
-    if (!this.agents.capabilityInventory(agentId)?.botMail) throw new Error(`Bot mail is not supported by ${agentId}`);
-    const message = params as { targetBotId: string; text: string };
-    return mailbox.enqueue(
-      { botId: active.botId, turnId: active.turnId, toolCallId: context.toolCallId },
-      message.targetBotId,
-      message.text,
-    );
-  }
-
-
-  /** Runs one plugin tool of the lease this Turn holds; the channel owns schema and dispatch checks. */
-  async #callPlugin(agentId: AgentId, context: ToolChannelContext, params: unknown, signal: AbortSignal, name: string): Promise<AgentPluginToolOutput> {
-    const active = this.#turns.get(context.workerSessionId);
-    if (
-      active === undefined
-      || active.pluginLease === undefined
-      || active.agentId !== agentId
-      || active.botId !== context.botId
-      || active.turnId !== context.turnId
-      || active.workerSessionId !== context.workerSessionId
-    ) {
-      throw new Error("Plugin tool context is stale or mismatched");
-    }
-    return active.pluginLease.call(name, params as Record<string, unknown>, signal);
-  }
-
-  /** Central agent-event router: worker events become ordered transcript records and Turn transitions. */
-  onAgentEvent(agentId: AgentId, event: AgentEvent): void {
-    const family = agentEventFamily(event);
-    const inventory = this.agents.capabilityInventory(agentId);
-    if (inventory === undefined) {
-      this.events.append("agent", agentId, "agent.event_rejected", {
-        agentId,
-        family,
-        eventType: event.type,
-        reason: "event was not emitted by the exact ready agent capability inventory",
-      });
-      return;
-    }
-    if (family === "tool" && !isAgentToolCallEvent(event)) {
-      this.events.append("agent", agentId, "agent.event_rejected", {
-        agentId,
-        family,
-        eventType: event.type,
-        reason: "Tool Call event was not a validated safe summary",
-      });
-      return;
-    }
-    if (
-      family === "thinking" &&
-      (!inventory.thinking.supported ||
-        (event.type === "thinking.delta" && !inventory.thinking.streaming))
-    ) {
-      this.events.append("agent", agentId, "agent.event_rejected", {
-        agentId,
-        family,
-        eventType: event.type,
-        reason: "Thinking event was not declared by the ready agent capability inventory",
-      });
-      return;
-    }
-    if (
-      event.type === "native" &&
-      (
-        event.agentId !== agentId ||
-        typeof event.capability !== "string" ||
-        event.capability.length === 0 ||
-        (
-          event.sensitivity !== "public" &&
-          event.sensitivity !== "diagnostic" &&
-          event.sensitivity !== "secret"
-        ) ||
-        !inventory.nativeEventFamilies.includes(event.capability)
-      )
-    ) {
-      this.events.append("agent", agentId, "agent.event_rejected", {
-        agentId,
-        family,
-        eventType: event.type,
-        capability: event.capability,
-        sensitivity: event.sensitivity,
-        reason: "Native Event capability was not declared by the exact ready agent inventory",
-      });
-      return;
-    }
-    const sessionId = event.sessionId;
-    if (event.type !== "error" || sessionId !== undefined) {
-      const ctx = sessionId !== undefined ? this.#turns.get(sessionId) : undefined;
-      if (ctx) return this.#routeTurnEvent(ctx, event);
-    }
-    if (event.type === "error") this.events.append("agent", agentId, "agent.error", { agentId, message: event.message, retryable: event.retryable });
-  }
-
-  #routeTurnEvent(ctx: TurnContext, event: AgentEvent): void {
-    switch (event.type) {
-      case "response.start": {
-        if (
-          event.blockId.length === 0 ||
-          !Number.isFinite(Date.parse(event.startedAt)) ||
-          this.threads.hasResponseBlock(event.blockId)
-        ) break;
-        this.threads.appendMessage(ctx.threadId, {
-          author: { kind: "bot" },
-          kind: "response",
-          text: "",
-          turnId: ctx.turnId,
-          response: {
-            blockId: event.blockId,
-            state: "streaming",
-            startedAt: event.startedAt,
-          },
-        });
-        break;
-      }
-      case "response.delta": {
-        if (event.text.length === 0) break;
-        const response = this.threads.appendResponseDelta(
-          ctx.threadId,
-          ctx.turnId,
-          event.blockId,
-          event.text,
-        );
-        if (response !== undefined) {
-          this.events.append("thread", ctx.threadId, "response.updated", response);
-        }
-        break;
-      }
-      case "response.end": {
-        if (!Number.isFinite(Date.parse(event.completedAt))) break;
-        const response = this.threads.completeResponse(
-          ctx.threadId,
-          ctx.turnId,
-          event.blockId,
-          event.completedAt,
-        );
-        if (response !== undefined) {
-          this.events.append("thread", ctx.threadId, "response.updated", response);
-          if (response.text?.trim()) {
-            this.bots.recordResponse(ctx.botId, ctx.threadId, response.text.trim());
-          }
-        }
-        break;
-      }
-      case "thinking.start": {
-        if (
-          event.blockId.length === 0 ||
-          !Number.isFinite(Date.parse(event.startedAt)) ||
-          this.threads.hasThinkingBlock(event.blockId)
-        ) break;
-        this.threads.appendMessage(ctx.threadId, {
-          author: { kind: "bot" },
-          kind: "thinking",
-          text: "",
-          turnId: ctx.turnId,
-          thinking: {
-            blockId: event.blockId,
-            state: "streaming",
-            startedAt: event.startedAt,
-          },
-        });
-        break;
-      }
-      case "thinking.delta": {
-        if (event.text.length === 0) break;
-        const thinking = this.threads.appendThinkingDelta(
-          ctx.threadId,
-          ctx.turnId,
-          event.blockId,
-          event.text,
-        );
-        if (thinking !== undefined) {
-          this.events.append("thread", ctx.threadId, "thinking.updated", thinking);
-        }
-        break;
-      }
-      case "thinking.end": {
-        if (!Number.isFinite(Date.parse(event.completedAt))) break;
-        const thinking = this.threads.completeThinking(
-          ctx.threadId,
-          ctx.turnId,
-          event.blockId,
-          event.completedAt,
-        );
-        if (thinking !== undefined) {
-          this.events.append("thread", ctx.threadId, "thinking.updated", thinking);
-        }
-        break;
-      }
-      case "tool.started": {
-        if (!isAgentToolCallEvent(event) || this.threads.hasToolCall(ctx.threadId, event.id)) break;
-        const toolCall = toolCallSummaryFromEvent(event);
-        this.threads.appendMessage(ctx.threadId, {
-          author: { kind: "bot" },
-          kind: "tool",
-          turnId: ctx.turnId,
-          toolCall,
-        });
-        // A request is accepted only for the tool this call started as.
-        ctx.toolChannel.start(event.id, event.name);
-        break;
-      }
-      case "tool.updated":
-      case "tool.completed": {
-        if (!isAgentToolCallEvent(event)) break;
-        const toolCall = toolCallSummaryFromEvent(event);
-        const updated = this.threads.updateToolCall(ctx.threadId, toolCall);
-        if (updated !== undefined) {
-          this.events.append("thread", ctx.threadId, "tool.updated", {
-            threadId: ctx.threadId,
-            messageId: updated.id,
-            toolCall: updated.toolCall,
-          });
-        }
-        break;
-      }
-      case "turn.completed": {
-        this.#finishTurn(ctx, "completed");
-        break;
-      }
-      case "turn.cancelled": {
-        if (ctx.timeoutFailureReason !== undefined) {
-          this.#finishTurn(ctx, "failed", ctx.timeoutFailureReason);
-        } else {
-          this.#finishTurn(ctx, "cancelled", ctx.abortReason);
-        }
-        break;
-      }
-      case "error": {
-        this.#finishTurn(ctx, "failed", event.message);
-        break;
-      }
-      case "native": {
-        const transcriptPayload = {
-          capability: event.capability,
-          sensitivity: event.sensitivity,
-          ...(event.sensitivity === "public" ? { payload: event.payload } : { redacted: true }),
-        };
-        this.threads.appendMessage(ctx.threadId, {
-          author: { kind: "bot" },
-          kind: "event",
-          payload: transcriptPayload,
-        });
-        this.events.append("turn", ctx.turnId, "agent.native", {
-          threadId: ctx.threadId,
-          botId: ctx.botId,
-          ...transcriptPayload,
-        });
-        break;
-      }
-    }
-  }
-
-
-  #finishTurn(ctx: TurnContext, outcome: "completed" | "cancelled" | "failed", reason?: string): void {
-    if (this.#turns.get(ctx.workerSessionId) !== ctx) return;
-    clearTimeout(ctx.turnTimeout);
-    this.#turns.delete(ctx.workerSessionId);
-    ctx.pluginLease?.release();
-    // Every finished Turn — completed, cancelled, failed, or crashed worker —
-    // stops accepting tool calls.
-    ctx.toolChannel.close();
-    ctx.closeSession();
-    this.#removeIncompleteAgentBlocks(ctx.threadId, ctx.turnId);
-    const interruptedToolCalls = this.threads.finalizeIncompleteToolCalls(ctx.turnId);
-    for (const message of interruptedToolCalls) {
-      this.events.append("thread", ctx.threadId, "tool.updated", {
-        threadId: ctx.threadId,
-        messageId: message.id,
-        toolCall: message.toolCall,
-      });
-    }
-
-
-
-    if (outcome === "cancelled") {
-      this.#emitSystemNote(
-        ctx.threadId,
-        reason === undefined ? "turn cancelled" : `turn cancelled: ${reason}`,
-      );
-    }
-
-    this.#setTurnStatus(ctx.turnId, outcome, reason);
-  }
-
   #finishInterruptedDurableTurn(turnId: string, threadId: string | undefined, status: "failed" | "cancelled", reason: string): void {
     if (this.#suspended.has(turnId)) return;
     if (threadId !== undefined) this.#removeIncompleteAgentBlocks(threadId, turnId);
     const restartReason = status === "cancelled" && !this.#durableAbortReasons.has(turnId) ? this.#restartReason : undefined;
-    this.#setTurnStatus(turnId, restartReason === undefined ? status : "failed", restartReason ?? reason, true);
+    this.#setTurnStatus(turnId, restartReason === undefined ? status : "failed", restartReason ?? reason);
   }
 
   #removeIncompleteAgentBlocks(threadId: string, turnId: string): void {
@@ -1094,52 +337,9 @@ export class TurnService {
     this.threads.appendMessage(threadId, { author: { kind: "system" }, kind: "text", text });
   }
 
-  #queueTimeout(ctx: TurnContext): void {
-    const previous = this.#timeoutQueues.get(ctx.agentId) ?? Promise.resolve();
-    const queued = previous
-      .catch(() => {
-        // A prior timeout still must not prevent this expired turn from settling.
-      })
-      .then(() => this.#timeoutTurn(ctx))
-      .finally(() => {
-        if (this.#timeoutQueues.get(ctx.agentId) === queued) {
-          this.#timeoutQueues.delete(ctx.agentId);
-        }
-      });
-    this.#timeoutQueues.set(ctx.agentId, queued);
-  }
-
-  async #timeoutTurn(ctx: TurnContext): Promise<void> {
-    if (this.#turns.get(ctx.workerSessionId) !== ctx) return;
-    const reason = `timed out after ${Math.round(this.cfg.turnTimeoutMs / 1000)}s`;
-    let cancellationConfirmed = false;
-    try {
-      if (this.agents.capabilityInventory(ctx.agentId)?.abort) {
-        ctx.timeoutFailureReason = reason;
-        const worker = await this.supervisor.agentWorker(ctx.agentId);
-        await worker.request({ type: "turn.abort", sessionId: ctx.workerSessionId }, 30_000);
-        await this.waitForTerminal(ctx.turnId, 5_000);
-        cancellationConfirmed = true;
-      }
-    } catch {
-      // A failed or unconfirmed native abort falls through to worker quarantine.
-    }
-    if (cancellationConfirmed) return;
-
-    await this.supervisor.stopAgentWorker(ctx.agentId);
-    this.agents.markOffline(ctx.agentId, `worker stopped after ${reason}`);
-    for (const active of [...this.#turns.values()]) {
-      if (active.agentId !== ctx.agentId) continue;
-      const failureReason =
-        active === ctx ? reason : `agent worker stopped after another turn ${reason}`;
-      this.#finishTurn(active, "failed", failureReason);
-    }
-  }
-
-
   /**
    * Resolve only after the persisted turn is terminal. Bot lifecycle services
-   * use this barrier so a Bot cannot disappear while its native Agent is still working.
+   * use this barrier so a Bot cannot disappear while its Turn is still working.
    */
   waitForTerminal(turnId: string, timeoutMs = 30_000): Promise<TurnDto> {
     const current = this.#turnDto(turnId);
@@ -1164,38 +364,13 @@ export class TurnService {
   /** Internal cancellation for lifecycle services and timeout recovery. */
   async abortTurn(turnId: string, reason: string): Promise<void> {
     const t = this.threads.turnRow(turnId);
-    if (!t || isTerminalTurn(t.status as TurnStatus)) return;
-    if (this.#durableTurns.has(turnId) && this.runtime) {
-      this.#durableAbortReasons.set(turnId, reason);
-      try { await this.runtime.abortTurn(turnId); }
-      catch (error) { this.#durableAbortReasons.delete(turnId); throw new HttpError(409, `turn abort failed: ${errorMessage(error)}`); }
-      return;
+    if (!t || isTerminalTurn(t.status as TurnStatus) || !this.#durableTurns.has(turnId)) return;
+    this.#durableAbortReasons.set(turnId, reason);
+    try {
+      await this.runtime.abortTurn(turnId);
+    } catch (error) {
+      this.#durableAbortReasons.delete(turnId);
+      throw new HttpError(409, `turn abort failed: ${errorMessage(error)}`);
     }
-    const bot = this.db.query(`SELECT agent_id FROM bots WHERE id = ?`).get(t.bot_id) as { agent_id: AgentId } | undefined;
-    const agentId = bot?.agent_id;
-    if (agentId === undefined || !this.agents.capabilityInventory(agentId)?.abort) {
-      throw new HttpError(409, `turn abort is not supported by ${agentId ?? "the turn's agent"}`);
-    }
-    let ctx = [...this.#turns.values()].find((candidate) => candidate.turnId === turnId);
-    if (!ctx) {
-      const starting = this.#turnStarts.get(turnId);
-      if (starting) ctx = await starting.catch(() => undefined);
-    }
-    if (ctx) {
-      if (!this.agents.capabilityInventory(ctx.agentId)?.abort) {
-        throw new HttpError(409, `turn abort is not supported by ${ctx.agentId}`);
-      }
-      ctx.abortReason = reason;
-      try {
-        const worker = await this.supervisor.agentWorker(ctx.agentId);
-        await worker.request({ type: "turn.abort", sessionId: ctx.workerSessionId }, 30_000);
-      } catch (error) {
-        throw new HttpError(409, `turn abort failed: ${errorMessage(error)}`);
-      }
-      return;
-    }
-    this.#setTurnStatus(turnId, "cancelled", reason);
-    this.#emitSystemNote(t.thread_id, `turn cancelled: ${reason}`);
   }
 }
-

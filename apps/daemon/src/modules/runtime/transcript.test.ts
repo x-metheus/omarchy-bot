@@ -29,7 +29,7 @@ const tool = () => fauxToolCall("check", { privateInput: "never projected" }, { 
 function transcriptStore(db: Database) {
   for (const migration of MIGRATIONS) applyMigration(db, migration);
   const events = new EventLog(db);
-  const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {}, async onAgentToolFrame() { return undefined; } }, { agents: "" });
+  const supervisor = new Supervisor({ onAgentEvent() {}, onWorkerCrash() {} }, { agents: "" });
   const agents = new AgentsRegistry(db, events, { conformanceDir: "", workersAgentsDir: "" }, supervisor);
   const threads = new ThreadsService(db, events, agents);
   const bots = new BotsService(db, events, agents, threads);

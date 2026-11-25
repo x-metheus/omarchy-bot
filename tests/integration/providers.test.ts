@@ -44,10 +44,8 @@ async function providerRequest<T>(h: Harness, method: string, path: string, stat
 
 function withDaemon(run: (h: Harness, client: ApiClient) => Promise<void>) {
   return async () => {
-    const h = await startDaemon();
+    const h = await startDaemon(undefined, { seedDurableProvider: false });
     try {
-      // The durable suite harness seeds a "fake" provider; these tests assert the provider store's exact contents.
-      if (process.env.OMARCHY_TEST_DURABLE === "1" && h.svc.credentials.has("fake")) await h.svc.credentials.remove("fake");
       await run(h, new ApiClient({ baseUrl: h.baseUrl, deviceToken: h.token }));
     } finally {
       await h.stop();
@@ -269,7 +267,6 @@ for (const [body, providerId, modelId, reply] of [
       expect(created.id).toBe(providerId);
       expect(created.models.some(({ id }) => id === modelId)).toBeTrue();
       setSetting(h.svc.db, DEFAULT_MODEL_SETTING, `${created.id}/${modelId}`);
-      setSetting(h.svc.db, "runtime", "durable");
       const botId = await makeBot(h, "Provider API Bot");
       const sent = await sendToBot(h, botId, "Use the Settings provider.");
       await waitThreadIdle(h, sent.threadId);

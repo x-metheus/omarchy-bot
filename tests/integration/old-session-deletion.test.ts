@@ -10,9 +10,9 @@ import { apiStatus, makeBot, messages, sendToThread, startDaemon, type Harness }
 const fixture = join(import.meta.dir, "fixtures/old-session-file.jsonl");
 const oldTime = new Date("2026-01-01T00:00:00.000Z");
 
-async function withDaemon(check: (h: Harness, botId: string) => Promise<void>) {
+async function withDaemon(check: (h: Harness, botId: string) => Promise<void>, { seedDurableProvider = true } = {}) {
   const home = await fs.mkdtemp(join(await fs.realpath(tmpdir()), "old-session-deletion-"));
-  const h = await startDaemon(home);
+  const h = await startDaemon(home, { seedDurableProvider });
   try {
     await check(h, await makeBot(h, "Old session deletion"));
   } finally {
@@ -62,7 +62,6 @@ test("the first durable Turn leaves the old Pi session intact until Bot deletion
       models: [{ id: "fake-model", reasoning: true }],
     });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
-    setSetting(h.svc.db, "runtime", "durable");
 
     const directory = await fs.mkdtemp(join(h.home, "old-sessions-"));
     const recorded = join(directory, "recorded.jsonl");
@@ -93,7 +92,7 @@ test("the first durable Turn leaves the old Pi session intact until Bot deletion
     expect(await readSession(otherBotSession)).toEqual(otherBotBefore);
     expect(h.svc.threads.getNativeSession(otherThreadId)).toBe(otherBotSession);
     expect(await readSession(unrelated)).toEqual(unrelatedBefore);
-  }));
+  }, { seedDurableProvider: false }));
 });
 
 test("Bot deletion silently skips a missing old session file", () => withDaemon(async (h, botId) => {

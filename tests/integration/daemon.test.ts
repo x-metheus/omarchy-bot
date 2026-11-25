@@ -121,10 +121,10 @@ describe("integration: agents API", () => {
 });
 
 describe("integration: bots API", () => {
-  test("rejects bot creation for a non-ready agent with guidance", async () => {
+  test("creates bots with pi when given a different recognized agent", async () => {
     const res = await apiStatus(h, "POST", "/api/bots", { name: "Nope", instructions: "", agentId: "claude" });
-    expect(res.status).toBe(400);
-    expect(typeof (res.body as { error?: string }).error).toBe("string");
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ agentId: "pi" });
   });
 
   test("rejects bot creation for an unknown agent", async () => {

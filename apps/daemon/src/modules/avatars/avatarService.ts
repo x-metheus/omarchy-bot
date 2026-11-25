@@ -183,10 +183,7 @@ export class AvatarService {
     }
   }
 
-  /**
-   * Main's Supervisor event hook must offer Agent events here before the Turn
-   * service. Returns true when this isolated profile operation consumed it.
-   */
+  /** Returns true when an avatar recipe operation consumed the Agent event. */
   onAgentEvent(agentId: AgentId, event: AgentEvent): boolean {
     const sessionId = "sessionId" in event ? event.sessionId : undefined;
     if (sessionId === undefined) return false;

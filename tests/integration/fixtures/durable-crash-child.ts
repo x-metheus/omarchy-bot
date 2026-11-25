@@ -16,7 +16,6 @@ if (!credentials.getForRuntime("fake")) await credentials.add({ id: "fake", name
 const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
 const daemon = await main({ useHostApplicationUnits: false, botScreenAdapter: new FakeBotScreenRuntimeAdapter(), botScreenRuntimeDir: path.join(home, "r") });
 if (getSetting(daemon.svc.db, "default_model") === null) setSetting(daemon.svc.db, "default_model", "fake/fake-model");
-if (getSetting(daemon.svc.db, "runtime") === null) setSetting(daemon.svc.db, "runtime", "durable");
 console.log(JSON.stringify({ event: "ready", port: daemon.port, pid: process.pid }));
 process.removeAllListeners("SIGTERM");
 process.on("SIGTERM", () => { void daemon.disconnectForRestart().then(() => process.exit(0)); });

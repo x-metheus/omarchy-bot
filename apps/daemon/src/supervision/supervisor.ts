@@ -1,19 +1,11 @@
 import path from "node:path";
-import {
-  stderr,
-  type ToolChannelFrame,
-  type AgentEvent,
-} from "@omarchy-bot/agent-contract";
+import { stderr, type AgentEvent } from "@omarchy-bot/agent-contract";
 import type { AgentId } from "@omarchy-bot/domain";
 import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
 
 export interface SupervisorHooks {
   onAgentEvent: (agentId: AgentId, event: AgentEvent) => void;
   onWorkerCrash: (agentId: AgentId, error: Error) => void;
-  onAgentToolFrame: (
-    agentId: AgentId,
-    frame: ToolChannelFrame,
-  ) => Promise<ToolChannelFrame | undefined>;
 }
 
 
@@ -45,7 +37,6 @@ export class Supervisor {
       script: path.join(this.workerDirs.agents, agentId, "src", "worker.ts"),
       env: this.#agentEnvironment,
       onEvent: (e) => this.hooks.onAgentEvent(agentId, e),
-      onToolFrame: (frame) => this.hooks.onAgentToolFrame(agentId, frame),
       onExit: (code) => {
         this.hooks.onWorkerCrash(
           agentId,

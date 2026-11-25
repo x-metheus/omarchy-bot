@@ -17,8 +17,6 @@ async function withDurableDaemon(
   { beforeDiscovery, ...options }: NonNullable<Parameters<typeof startOAuthMcpServer>[0]> & { beforeDiscovery?: () => Promise<void> } = {},
 ): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-oauth-durable-"));
-  const previous = process.env.OMARCHY_TEST_DURABLE;
-  process.env.OMARCHY_TEST_DURABLE = "1";
   const fetch = globalThis.fetch;
   const publisherFetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -32,7 +30,6 @@ async function withDurableDaemon(
   let fixture: OAuthFixture | undefined;
   try {
     fixture = await startOAuthMcpServer({ toolName: "reflect", toolText, ...options });
-    // The switch installs the fake model provider and sets runtime=durable in the test database.
     h = await startDaemon(root);
     h.svc.plugins.configure(publisher);
     const connection = await api<McpConnectionDto>(h, "POST", "/api/plugins/mcp", {
@@ -44,8 +41,6 @@ async function withDurableDaemon(
       await h?.stop();
     } finally {
       publisherFetch.mockRestore();
-      if (previous === undefined) delete process.env.OMARCHY_TEST_DURABLE;
-      else process.env.OMARCHY_TEST_DURABLE = previous;
       await Promise.all([
         fixture?.close(),
         rm(root, { recursive: true, force: true }),

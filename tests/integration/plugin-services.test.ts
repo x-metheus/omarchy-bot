@@ -1,4 +1,4 @@
-import { afterEach, expect, setSystemTime, test } from "bun:test";
+import { afterEach, expect, setSystemTime, spyOn, test } from "bun:test";
 import { createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -7,7 +7,7 @@ import { PLUGIN_PROVIDERS } from "../../packages/protocol/src/pluginProviders.ts
 import type { InstalledSkillDto, PluginAccountDto, PluginStateDto, SkillCommandDto } from "../../packages/protocol/src/plugins.ts";
 import type { EventEnvelope } from "../../packages/protocol/src/events.ts";
 import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
-import { deleteSetting } from "../../apps/daemon/src/persistence/settings.ts";
+import type { BotRuntime } from "../../apps/daemon/src/modules/runtime/runtime.ts";
 import { startOAuthMcpServer } from "../../apps/daemon/src/modules/runtime/testing/oauthMcpServer.ts";
 import { api, apiStatus, authedFetch, startDaemon, type Harness } from "./helpers/harness.ts";
 
@@ -16,6 +16,7 @@ const driveScope = "https://www.googleapis.com/auth/drive.readonly";
 const gmailScope = "https://www.googleapis.com/auth/gmail.readonly";
 const originalFetch = globalThis.fetch;
 const originalServices = PLUGIN_PROVIDERS.google.services;
+const originalIntercom = PLUGIN_PROVIDERS.intercom.services;
 let harness: Harness | undefined;
 const googleClientId = "fixture-google-client";
 const publisherEnv = {
@@ -32,6 +33,7 @@ afterEach(async () => {
   } finally {
     harness = undefined;
     PLUGIN_PROVIDERS.google.services = originalServices;
+    PLUGIN_PROVIDERS.intercom.services = originalIntercom;
     globalThis.fetch = originalFetch;
     for (const [key, value] of Object.entries(publisherEnv)) {
       if (value === undefined) delete process.env[key];
@@ -65,7 +67,7 @@ async function startServices({ intercomMcpUrl }: { intercomMcpUrl?: string } = {
     return { ...service, mcpUrl: `${publisher}/mcp/${service.id}` };
   });
   if (intercomMcpUrl !== undefined) {
-    PLUGIN_PROVIDERS.intercom.services = PLUGIN_PROVIDERS.intercom.services.map((service) => ({ ...service, mcpUrl: intercomMcpUrl }));
+    PLUGIN_PROVIDERS.intercom.services = originalIntercom.map((service) => ({ ...service, mcpUrl: intercomMcpUrl }));
   }
 
   process.env.PLUGIN_CLOUD_URL = publisher;
@@ -280,233 +282,252 @@ test("an abandoned publisher reconnect expires without a callback and refuses la
   expect((await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "google", accountId: account.id })).status).toBe(200);
 }, 10_000);
 
+const mcpAuthorizePath = (id: string) => `/api/plugins/mcp/${id}/authorize`;
+const intercomAuthorization = { providerId: "intercom", serviceId: "intercom" };
+
+function botRuntime(h: Harness): BotRuntime {
+  return (h.svc.turns as unknown as { runtime: BotRuntime }).runtime;
+}
+
+async function addConsentConnection(h: Harness, url: string) {
+  return api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "custom-consent", enabled: true, transport: { type: "http", url } });
+}
+
+async function startConsent(h: Harness, connection?: { id: string }, accountId?: string): Promise<string> {
+  const authorization = await apiStatus(h, "POST", connection ? mcpAuthorizePath(connection.id) : "/api/plugins/authorize",
+    connection ? {} : { ...intercomAuthorization, ...(accountId ? { accountId } : {}) });
+  expect(authorization.status).toBe(200);
+  const { authorizationUrl, url } = authorization.body as { authorizationUrl?: string; url?: string };
+  const browserUrl = connection ? authorizationUrl : url;
+  expect(browserUrl).toEqual(expect.any(String));
+  return browserUrl!;
+}
+
+async function consentRedirect(browserUrl: string): Promise<URL> {
+  const consent = await fetch(browserUrl, { redirect: "manual" });
+  expect(consent.status).toBe(302);
+  return new URL(consent.headers.get("location")!);
+}
+
+async function intercomAccount(h: Harness) {
+  return (await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts.find(entry => entry.providerId === "intercom");
+}
+
 test.each(["provider", "standalone"])("native %s consent completes over the event stream without checking by hand", async (kind) => {
-  const originalIntercom = PLUGIN_PROVIDERS.intercom.services;
-  const fixture = process.env.OMARCHY_TEST_DURABLE === "1" ? await startOAuthMcpServer() : undefined;
+  const fixture = await startOAuthMcpServer();
   try {
-    const { h } = await startServices(fixture ? { intercomMcpUrl: fixture.url } : undefined);
-    if (!fixture) await writeFile(path.join(h.home, "conformance", "pi-fake-pi-1.json"), JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: { authorizationUrl: "https://native.example/consent", notify: "completed" } }));
-    const connection = kind === "standalone" ? await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "custom-consent", enabled: true, transport: { type: "http", url: fixture?.url ?? "https://native.example/mcp" } }) : undefined;
+    const { h } = await startServices({ intercomMcpUrl: fixture.url });
+    const connection = kind === "standalone" ? await addConsentConnection(h, fixture.url) : undefined;
     const receive = await authorizationEvent(h, "plugin.authorization_completed");
-    const authorization = await apiStatus(h, "POST", connection ? `/api/plugins/mcp/${connection.id}/authorize` : "/api/plugins/authorize", connection ? {} : { providerId: "intercom", serviceId: "intercom" });
-    expect(authorization.status).toBe(200);
-    if (fixture) {
-      const { authorizationUrl, url } = authorization.body as { authorizationUrl?: string; url?: string };
-      const browserUrl = connection ? authorizationUrl : url;
-      expect(browserUrl).toEqual(expect.any(String));
-      expect((await fetch(browserUrl!, { redirect: "follow" })).status).toBe(200);
-    }
+    const browserUrl = await startConsent(h, connection);
+    expect((await fetch(browserUrl, { redirect: "follow" })).status).toBe(200);
     const event = await receive();
     const state = await api<PluginStateDto>(h, "GET", "/api/plugins");
     const account = state.accounts.find(entry => entry.providerId === "intercom");
     expect(event).toMatchObject({ aggregateId: account?.id ?? connection!.id, payload: { mcpId: account?.nativeConnectionId ?? connection!.id, status: "completed", ...(account ? { providerId: "intercom", accountId: account.id } : {}) } });
     expect(account?.status ?? state.mcp.find(entry => entry.id === connection!.id)?.status).toBe("connected");
   } finally {
-    PLUGIN_PROVIDERS.intercom.services = originalIntercom;
-    await fixture?.close();
+    await fixture.close();
   }
 }, 10_000);
 
-test.each(["provider", "standalone"])("native %s failure and abandoned consent expire with one outcome and allow retry", async (kind) => {
-  const { h } = await startServices();
-  // This case exercises fake-worker authorization outcomes through the worker protocol.
-  deleteSetting(h.svc.db, "runtime");
-  const control = path.join(h.home, "conformance", "pi-fake-pi-1.json");
-  const configure = (authorization: Record<string, unknown>) => writeFile(control, JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: authorization }));
-  const connection = kind === "standalone" ? await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "custom-consent", enabled: true, transport: { type: "http", url: "https://native.example/mcp" } }) : undefined;
-  await configure({ authorizationUrl: "https://native.example/consent", notify: "failed" });
-  const failed = await authorizationEvent(h, "plugin.authorization_failed");
-  await api(h, "POST", connection ? `/api/plugins/mcp/${connection.id}/authorize` : "/api/plugins/authorize", connection ? {} : { providerId: "intercom", serviceId: "intercom" });
-  const account = (await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts.find(entry => entry.providerId === "intercom");
-  const id = connection?.id ?? account!.nativeConnectionId!;
-  expect(await failed()).toMatchObject({ aggregateId: account?.id ?? id, payload: { mcpId: id, status: "failed", reason: "auth_failed", ...(account ? { providerId: "intercom", accountId: account.id } : {}) } });
-  await configure({ authorizationUrl: "https://native.example/consent" });
-  const expired = await authorizationEvent(h, "plugin.authorization_failed");
-  await api(h, "POST", `/api/plugins/mcp/${id}/authorize`, {});
-  setSystemTime(Date.now() + 16 * 60_000);
-  try { expect(await expired()).toMatchObject({ payload: { mcpId: id, status: "failed", reason: "expired" } }); }
-  finally { setSystemTime(); }
-  expect((await apiStatus(h, "POST", `/api/plugins/mcp/${id}/authorize`, { redirectUrl: "https://native.example/callback?code=late" })).status).toBe(400);
-  // A late old attempt must not finish a new consent attempt.
-  await configure({ authorizationUrl: "https://native.example/retry", staleNotify: true });
-  expect((await apiStatus(h, "POST", `/api/plugins/mcp/${id}/authorize`, {})).status).toBe(200);
-  const retried = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  expect(retried.accounts.find(entry => entry.id === account?.id)?.status ?? retried.mcp.find(entry => entry.id === id)?.status).not.toBe("connected");
-  await configure({ authenticated: true });
-  const completed = await authorizationEvent(h, "plugin.authorization_completed");
-  expect((await apiStatus(h, "POST", `/api/plugins/mcp/${id}/authorize`, { redirectUrl: "https://native.example/callback?code=retry" })).status).toBe(200);
-  expect(await completed()).toMatchObject({ payload: { mcpId: id, status: "completed" } });
+test.each(["provider", "standalone"])("native %s failure and abandoned consent each publish one outcome and allow retry", async (kind) => {
+  const fixture = await startOAuthMcpServer();
+  try {
+    const { h } = await startServices({ intercomMcpUrl: fixture.url });
+    const connection = kind === "standalone" ? await addConsentConnection(h, fixture.url) : undefined;
+    const failed = await authorizationEvent(h, "plugin.authorization_failed");
+    const denied = await consentRedirect(await startConsent(h, connection));
+    denied.searchParams.delete("code");
+    denied.searchParams.set("error", "access_denied");
+    expect((await fetch(denied)).status).toBe(400);
+    const account = await intercomAccount(h);
+    const id = connection?.id ?? account!.nativeConnectionId!;
+    expect(await failed()).toMatchObject({ aggregateId: account?.id ?? id, payload: { mcpId: id, status: "failed", reason: "auth_failed", ...(account ? { providerId: "intercom", accountId: account.id } : {}) } });
+
+    const control = spyOn(botRuntime(h), "mcpControl");
+    try {
+      const expired = await authorizationEvent(h, "plugin.authorization_failed");
+      const late = await consentRedirect(await startConsent(h, { id }));
+      const expiredAttempt = control.mock.calls.findLast(([input]) => input.action === "auth-start")![0];
+      expect(expiredAttempt).toMatchObject({ server: expect.any(String), authorizationId: expect.any(String) });
+      setSystemTime(Date.now() + 16 * 60_000);
+      try { expect(await expired()).toMatchObject({ payload: { mcpId: id, status: "failed", reason: "expired" } }); }
+      finally { setSystemTime(); }
+      expect((await apiStatus(h, "POST", mcpAuthorizePath(id), { redirectUrl: late.href })).status).toBe(400);
+
+      const retry = await consentRedirect(await startConsent(h, { id }));
+      const retryAttempt = control.mock.calls.findLast(([input]) => input.action === "auth-start")![0];
+      expect(retryAttempt).toMatchObject({ server: expiredAttempt.server, authorizationId: expect.any(String) });
+      expect(retryAttempt.authorizationId).not.toBe(expiredAttempt.authorizationId);
+      expect(await fetch(late).then(response => response.ok, () => false)).toBe(false);
+      expect(fixture.counts.token).toBe(0);
+
+      const beforeStale = await authorizationHistory(h);
+      const callsBeforeStale = control.mock.calls.length;
+      h.svc.plugins.handleNativeAuthorization({ server: expiredAttempt.server, authorizationId: expiredAttempt.authorizationId, status: "completed" });
+      expect(control).toHaveBeenCalledTimes(callsBeforeStale);
+      expect(await authorizationHistory(h)).toEqual(beforeStale);
+      const retried = await api<PluginStateDto>(h, "GET", "/api/plugins");
+      if (account) expect(retried.accounts.find(entry => entry.id === account.id)?.status).toBe("reauthorize");
+      else expect(retried.mcp.find(entry => entry.id === id)?.status).toBe("not-connected");
+
+      const completed = await authorizationEvent(h, "plugin.authorization_completed");
+      expect(await apiStatus(h, "POST", mcpAuthorizePath(id), { redirectUrl: retry.href })).toEqual({ status: 200, body: { authenticated: true } });
+      expect(await completed()).toMatchObject({ payload: { mcpId: id, status: "completed" } });
+      expect(fixture.counts.token).toBe(1);
+      expect((await authorizationHistory(h)).map(event => event.type)).toEqual([
+        "plugin.authorization_failed", "plugin.authorization_failed", "plugin.authorization_completed",
+      ]);
+    } finally { control.mockRestore(); }
+  } finally {
+    await fixture.close();
+  }
 }, 15_000);
 
-test("real native MCP callbacks report completion and cancellation, and expiry refuses browser and manual callbacks", async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), "native-oauth-service-"));
-  const workerDir = path.join(home, "workers/pi/src");
-  await mkdir(workerDir, { recursive: true });
-  const bin = path.join(home, "bin");
-  await mkdir(bin);
-  await writeFile(path.join(bin, "xdg-open"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-  await writeFile(path.join(workerDir, "worker.ts"), `
-import os from "node:os";
-import { mock, setSystemTime } from "bun:test";
-import { writeFileSync } from "node:fs";
-const home = process.env.HOME!;
-const userInfo = os.userInfo;
-const privateUserInfo = () => ({ ...userInfo(), homedir: home });
-mock.module("node:os", () => ({ ...os, userInfo: privateUserInfo, default: { ...os, userInfo: privateUserInfo } }));
-process.env.PATH = home + "/bin:" + process.env.PATH;
-process.env.PI_CODING_AGENT_DIR = home + "/.pi/agent";
-// The adapter honors memory, sizelimited, unavailable, and keyrevoked here. A path falls through to the real keyring.
-process.env.PI_MCP_ADAPTER_TEST_AUTH_STORE = "memory";
-const stdoutWrite = process.stdout.write.bind(process.stdout);
-let holdStatus = false;
-const heldStatus = [];
-let observedStatus = Promise.withResolvers();
-process.stdout.write = (chunk, ...args) => {
-  if (holdStatus && String(chunk).includes('"capability":"mcp.authorization"') && String(chunk).includes('"status":"completed"')) { heldStatus.push(chunk); observedStatus.resolve(); return true; }
-  return stdoutWrite(chunk, ...args);
-};
-// Advance only adapter consent timeouts; worker heartbeat and HTTP keep real time.
-const originalTimeout = globalThis.setTimeout;
-const consentTimers = new Map();
-globalThis.setTimeout = (callback, delay, ...args) => {
-  const timer = originalTimeout(callback, delay, ...args);
-  if (delay === 5 * 60_000) consentTimers.set(timer, () => callback(...args));
-  return timer;
-};
-const clock = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
-  const value = await request.json();
-  if (value?.holdStatus) { holdStatus = true; observedStatus = Promise.withResolvers(); }
-  else if (value?.releaseStatus) { holdStatus = false; for (const chunk of heldStatus.splice(0)) stdoutWrite(chunk); }
-  else if (value?.waitStatus) {
-    const deadline = Promise.withResolvers();
-    const timeout = originalTimeout(() => deadline.reject(new Error("Native completion status was not emitted")), 5000);
-    try { await Promise.race([observedStatus.promise, deadline.promise]); }
-    finally { clearTimeout(timeout); }
-  }
-  else if (value && typeof value === "object") {
-    for (const [timer, callback] of consentTimers) { clearTimeout(timer); callback(); }
-    consentTimers.clear();
-  } else setSystemTime(value);
-  return new Response("ok");
-} });
-writeFileSync(home + "/clock-port", String(clock.port));
-// Load the real worker only after installing process-private keychain and clock boundaries.
-await import(${JSON.stringify(path.resolve("workers/pi/src/worker.ts"))});
-`);
-  const originalIntercom = PLUGIN_PROVIDERS.intercom.services;
-  let exchanges = 0;
+test("native MCP callbacks report completion and cancellation, and expiry refuses browser and manual callbacks", async () => {
+  const tokenExchange = () => ({ started: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() });
+  let exchange: ReturnType<typeof tokenExchange> | undefined;
+  const fixture = await startOAuthMcpServer({ async beforeTokenResponse() {
+    exchange?.started.resolve();
+    await exchange?.release.promise;
+  } });
   let unrelatedConnections = 0;
-  const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
-    const url = new URL(request.url);
-    if (url.pathname === "/unrelated") { unrelatedConnections++; return new Response(null, { status: 503 }); }
-    if (url.pathname.startsWith("/.well-known/oauth-protected-resource")) return Response.json({ resource: `${url.origin}/mcp`, authorization_servers: [url.origin] });
-    if (url.pathname === "/.well-known/oauth-authorization-server") return Response.json({ issuer: url.origin, authorization_endpoint: `${url.origin}/authorize`, token_endpoint: `${url.origin}/token`, registration_endpoint: `${url.origin}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] });
-    if (url.pathname === "/register") return Response.json({ ...await request.json(), client_id: "native-fixture", token_endpoint_auth_method: "none" }, { status: 201 });
-    if (url.pathname === "/token") { exchanges++; return Response.json({ access_token: "native-fixture-token", token_type: "Bearer", expires_in: 3600 }); }
-    if (request.headers.get("authorization") !== "Bearer native-fixture-token") return new Response(null, { status: 401, headers: { "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource/mcp"` } });
-    if (request.method !== "POST") return new Response(null, { status: 405 });
-    const rpc = await request.json() as { id?: number; method: string };
-    if (rpc.id === undefined) return new Response(null, { status: 202 });
-    return Response.json({ jsonrpc: "2.0", id: rpc.id, result: rpc.method === "initialize" ? { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "consent", version: "1" } } : { tools: [] } });
+  const unrelated = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+    unrelatedConnections++;
+    return new Response(null, { status: 503 });
   } });
   try {
-    PLUGIN_PROVIDERS.intercom.services = originalIntercom.map(service => ({ ...service, mcpUrl: `http://127.0.0.1:${provider.port}/mcp` }));
-    globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
-      if (new URL(input instanceof Request ? input.url : String(input)).origin === "https://native-catalog.invalid") return Response.json([]);
-      return originalFetch(input, init);
-    }, { preconnect: originalFetch.preconnect });
-    const h = harness = await startDaemon(home, { workersDir: path.join(home, "workers"), waitForAgentReady: false });
-    // This case exercises the worker's callback listener and subprocess clock.
-    deleteSetting(h.svc.db, "runtime");
-    await apiStatus(h, "PUT", "/api/plugins/settings", { cloudUrl: "https://native-catalog.invalid" });
-    const connection = await api<{ id: string }>(h, "POST", "/api/plugins/mcp", { name: "real-consent", enabled: true, transport: { type: "http", url: `http://127.0.0.1:${provider.port}/mcp` } });
-    const plugin = path.join(home, "unrelated-plugin");
-    await mkdir(path.join(plugin, "skills/kept"), { recursive: true });
-    await writeFile(path.join(plugin, "skills/kept/SKILL.md"), "---\nname: kept\ndescription: Preserve plugin Skill discovery\n---\nKeep this skill.\n");
-    await writeFile(path.join(plugin, ".mcp.json"), JSON.stringify({ mcpServers: { unrelated: { url: `http://127.0.0.1:${provider.port}/unrelated`, lifecycle: "eager" } } }));
-    await mkdir(path.join(home, ".omarchy-bot/workspace/.pi"), { recursive: true });
-    await writeFile(path.join(home, ".omarchy-bot/workspace/.pi/mcp.json"), JSON.stringify({ claudePlugins: [{ path: plugin, mcp: true, skills: true }] }));
+    const { h } = await startServices({ intercomMcpUrl: fixture.url });
+    const standalone = await addConsentConnection(h, fixture.url);
+    await api(h, "POST", "/api/plugins/mcp", { name: "unrelated", enabled: true, transport: { type: "http", url: unrelated.url.href } });
+    const keptSkill = path.join(h.svc.cfg.sharedWorkspaceDir, ".agents/skills/kept");
+    await companion(keptSkill, "kept", 1);
+    const beforeConsent = await api<PluginStateDto>(h, "GET", "/api/plugins");
+    const skill = beforeConsent.skills.find(({ name }) => name === "kept");
+    expect(skill).toMatchObject({ name: "kept", enabled: true });
     for (const kind of ["standalone", "provider"]) {
-      const start = async (accountId?: string) => {
-        const response = await api<{ authorizationUrl?: string; url?: string }>(h, "POST", kind === "standalone" ? `/api/plugins/mcp/${connection.id}/authorize` : "/api/plugins/authorize", kind === "standalone" ? {} : { providerId: "intercom", serviceId: "intercom", ...(accountId ? { accountId } : {}) });
-        const url = new URL(response.authorizationUrl ?? response.url!);
-        const callback = new URL(url.searchParams.get("redirect_uri")!);
-        callback.searchParams.set("state", url.searchParams.get("state")!);
-        return callback;
-      };
+      const connection = kind === "standalone" ? standalone : undefined;
       const failed = await authorizationEvent(h, "plugin.authorization_failed");
-      const cancelled = await start();
+      const cancelled = await consentRedirect(await startConsent(h, connection));
+      cancelled.searchParams.delete("code");
       cancelled.searchParams.set("error", "access_denied");
-      expect(await (await fetch(cancelled)).text()).toContain("access_denied");
+      const cancelledResponse = await fetch(cancelled);
+      expect(cancelledResponse.status).toBe(400);
+      expect(await cancelledResponse.text()).toContain("Sign-in did not complete.");
       expect(await failed()).toMatchObject({ payload: { status: "failed", reason: "auth_failed" } });
-      const account = (await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts.find(entry => entry.providerId === "intercom");
+      const account = await intercomAccount(h);
       expect(unrelatedConnections).toBe(0);
-      const id = kind === "standalone" ? connection.id : account!.nativeConnectionId!;
+      const id = connection?.id ?? account!.nativeConnectionId!;
       for (const redirectUrl of ["http://localhost/callback?code=bad", "http://localhost/callback?code=bad&state=wrong"]) {
         const beforeManual = (await authorizationHistory(h)).length;
         const manualFailed = await authorizationEvent(h, "plugin.authorization_failed");
-        const invalid = await start(account?.id);
-        const beforeInvalid = exchanges;
-        expect((await api<{ error?: string }>(h, "POST", `/api/plugins/mcp/${id}/authorize`, { redirectUrl })).error).toBe("auth_complete_failed");
-        expect(await manualFailed()).toMatchObject({ payload: { status: "failed", reason: "auth_complete_failed" } });
-        invalid.searchParams.set("code", "must-not-exchange");
-        expect(await fetch(invalid).then(response => response.status !== 200, () => true)).toBe(true);
-        expect(exchanges).toBe(beforeInvalid);
+        const invalid = await consentRedirect(await startConsent(h, connection, account?.id));
+        const beforeInvalid = fixture.counts.token;
+        expect((await api<{ error?: string }>(h, "POST", mcpAuthorizePath(id), { redirectUrl })).error).toBe("auth_failed");
+        expect(await manualFailed()).toMatchObject({ payload: { status: "failed", reason: "auth_failed" } });
+        expect(await fetch(invalid).then(response => response.ok, () => false)).toBe(false);
+        expect(fixture.counts.token).toBe(beforeInvalid);
         expect((await authorizationHistory(h)).slice(beforeManual).map(event => event.type)).toEqual(["plugin.authorization_failed"]);
       }
-      const clock = `http://127.0.0.1:${await readFile(path.join(home, "clock-port"), "utf8")}`;
+
       const timedOut = await authorizationEvent(h, "plugin.authorization_failed");
-      await start(account?.id);
-      expect((await fetch(clock, { method: "POST", body: JSON.stringify({ advance: 5 * 60_000 + 1000 }) })).ok).toBe(true);
-      try { expect(await timedOut()).toMatchObject({ payload: { status: "failed", reason: "expired" } }); }
-      finally { await fetch(clock, { method: "POST", body: "null" }); }
+      const runtime = botRuntime(h);
+      const control = runtime.mcpControl.bind(runtime);
+      const consentClock = spyOn(runtime, "mcpControl").mockImplementation((input) =>
+        control(input.action === "auth-start" ? { ...input, expiresAt: Date.now() + 1_000 } : input));
+      try {
+        await startConsent(h, connection, account?.id);
+        expect(await timedOut()).toMatchObject({ payload: { status: "failed", reason: "expired" } });
+      } finally { consentClock.mockRestore(); }
+
       const expired = await authorizationEvent(h, "plugin.authorization_failed");
-      const late = await start(account?.id);
-      const future = Date.now() + 16 * 60_000;
-      expect((await fetch(clock, { method: "POST", body: JSON.stringify(future) })).ok).toBe(true);
-      setSystemTime(future);
+      const late = await consentRedirect(await startConsent(h, connection, account?.id));
+      setSystemTime(Date.now() + 16 * 60_000);
       try { expect(await expired()).toMatchObject({ payload: { status: "failed", reason: "expired" } }); }
-      finally { setSystemTime(); await fetch(clock, { method: "POST", body: "null" }); }
-      const beforeLate = exchanges;
-      late.searchParams.set("code", "late-code");
-      expect(await fetch(late).then(response => response.status !== 200, () => true)).toBe(true);
-      expect(exchanges).toBe(beforeLate);
-      expect((await apiStatus(h, "POST", `/api/plugins/mcp/${kind === "standalone" ? connection.id : account!.nativeConnectionId}/authorize`, { redirectUrl: late.href })).status).toBe(400);
+      finally { setSystemTime(); }
+      const beforeLate = fixture.counts.token;
+      expect(await fetch(late).then(response => response.ok, () => false)).toBe(false);
+      expect(fixture.counts.token).toBe(beforeLate);
+      expect((await apiStatus(h, "POST", mcpAuthorizePath(id), { redirectUrl: late.href })).status).toBe(400);
+
       const completed = await authorizationEvent(h, "plugin.authorization_completed");
       const beforeSuccess = (await authorizationHistory(h)).length;
-      expect((await fetch(clock, { method: "POST", body: JSON.stringify({ holdStatus: true }) })).ok).toBe(true);
-      const success = await start(account?.id);
+      exchange = tokenExchange();
+      const success = await consentRedirect(await startConsent(h, connection, account?.id));
       expect((await api<{ status: string }>(h, "POST", `/api/plugins/mcp/${id}/check`, {})).status).toBe("needs-auth");
-      success.searchParams.set("code", "valid-code");
       expect((await fetch(success)).status).toBe(200);
-      expect((await fetch(clock, { method: "POST", body: JSON.stringify({ waitStatus: true }) })).ok).toBe(true);
-      expect((await api<{ authenticated?: boolean; error?: string }>(h, "POST", `/api/plugins/mcp/${id}/authorize`, { redirectUrl: success.href })).error).toBeUndefined();
-      await fetch(clock, { method: "POST", body: JSON.stringify({ releaseStatus: true }) });
-      expect(await completed()).toMatchObject({ payload: { status: "completed", mcpId: kind === "standalone" ? connection.id : account!.nativeConnectionId } });
-      expect(exchanges).toBe(beforeLate + 1);
+      await exchange.started.promise;
+      const enteredManualCompletion = Promise.withResolvers<void>();
+      const manualControl = spyOn(runtime, "mcpControl").mockImplementation((input) => {
+        const result = control(input);
+        if (input.action === "auth-complete") enteredManualCompletion.resolve();
+        return result;
+      });
+      try {
+        const manual = apiStatus(h, "POST", mcpAuthorizePath(id), { redirectUrl: success.href });
+        await enteredManualCompletion.promise;
+        exchange.release.resolve();
+        expect(await manual).toEqual({ status: 200, body: { authenticated: true } });
+      } finally {
+        manualControl.mockRestore();
+      }
+      expect(await completed()).toMatchObject({ payload: { status: "completed", mcpId: id } });
+      expect(fixture.counts.token).toBe(beforeLate + 1);
       expect((await authorizationHistory(h)).slice(beforeSuccess).map(event => event.type)).toEqual(["plugin.authorization_completed"]);
     }
+    expect(unrelatedConnections).toBe(0);
+    const afterConsent = await api<PluginStateDto>(h, "GET", "/api/plugins");
+    expect(afterConsent.skills.find(({ name }) => name === "kept")).toEqual(skill);
   } finally {
-    PLUGIN_PROVIDERS.intercom.services = originalIntercom;
-    await provider.stop(true);
+    exchange?.release.resolve();
+    await Promise.all([fixture.close(), unrelated.stop(true)]);
   }
-}, 90_000);
+}, 40_000);
 
 test.each(["authenticated", "pending", "error"])("native authorization without a browser URL preserves %s state and retry", async (outcome) => {
-  const { h } = await startServices();
-  // This case exercises fake-worker authorization results through the worker protocol.
-  deleteSetting(h.svc.db, "runtime");
-  const control = path.join(h.home, "conformance", "pi-fake-pi-1.json");
-  await writeFile(control, JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: outcome === "error" ? { error: "Provider consent failed" } : { authenticated: outcome === "authenticated" } }));
-  const response = await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "intercom", serviceId: "intercom" });
-  expect(response.status).toBe(outcome === "error" ? 502 : 200);
-  if (outcome !== "error") expect(response.body).toEqual({});
-  const account = (await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts.find(entry => entry.providerId === "intercom")!;
-  expect(account.status).toBe(outcome === "authenticated" ? "connected" : "reauthorize");
-  if (outcome === "error") expect(account.error).toContain("Provider consent failed");
-  await writeFile(control, JSON.stringify({ ok: true, image: "verified", fakeMcpAuthorization: { authenticated: true } }));
-  expect((await apiStatus(h, "POST", "/api/plugins/authorize", { providerId: "intercom", accountId: account.id, serviceId: "intercom" })).status).toBe(200);
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).accounts.find(entry => entry.id === account.id)?.status).toBe("connected");
+  const fixture = await startOAuthMcpServer();
+  try {
+    const { h } = await startServices({ intercomMcpUrl: fixture.url });
+    if (outcome === "authenticated") {
+      const completed = await authorizationEvent(h, "plugin.authorization_completed");
+      expect((await fetch(await startConsent(h))).status).toBe(200);
+      await completed();
+    }
+    const existingAccount = await intercomAccount(h);
+    const runtime = botRuntime(h);
+    const control = runtime.mcpControl.bind(runtime);
+    // Exercise the plugin service's handling of browserless responses at the runtime control boundary.
+    let delegatedAuthStart: ReturnType<BotRuntime["mcpControl"]> | undefined;
+    const browserless = spyOn(runtime, "mcpControl").mockImplementation((input) => {
+      if (input.action !== "auth-start") return control(input);
+      if (outcome === "authenticated") {
+        delegatedAuthStart = control(input);
+        return delegatedAuthStart;
+      }
+      return Promise.resolve({ servers: runtime.mcpStatus(), result: outcome === "error" ? { error: "Provider consent failed" } : { authenticated: false } });
+    });
+    try {
+      const response = await apiStatus(h, "POST", "/api/plugins/authorize", { ...intercomAuthorization, ...(existingAccount ? { accountId: existingAccount.id } : {}) });
+      expect(response.status).toBe(outcome === "error" ? 502 : 200);
+      if (outcome !== "error") expect(response.body).toEqual({});
+      if (outcome === "authenticated") expect(await delegatedAuthStart).toMatchObject({ result: { authenticated: true } });
+    } finally { browserless.mockRestore(); }
+    const account = (await intercomAccount(h))!;
+    expect(account.status).toBe(outcome === "authenticated" ? "connected" : "reauthorize");
+    if (outcome === "error") expect(account.error).toContain("Provider consent failed");
+    const retry = await apiStatus(h, "POST", "/api/plugins/authorize", { ...intercomAuthorization, accountId: account.id });
+    expect(retry.status).toBe(200);
+    if (outcome !== "authenticated") {
+      const completed = await authorizationEvent(h, "plugin.authorization_completed");
+      expect((await fetch((retry.body as { url: string }).url)).status).toBe(200);
+      await completed();
+    }
+    const retried = await api<PluginStateDto>(h, "GET", "/api/plugins");
+    expect(retried.accounts.find(entry => entry.id === account.id)?.status).toBe("connected");
+  } finally {
+    await fixture.close();
+  }
 }, 40_000);
 
 async function usable(h: Harness, state: PluginStateDto, name: string, result: number): Promise<InstalledSkillDto> {

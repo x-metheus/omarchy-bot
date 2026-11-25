@@ -149,6 +149,8 @@ test.describe("direct local Bot deletion", () => {
     });
     const threadId = new URL(page.url()).searchParams.get("thread")!;
     const draftKey = `draft:v1:${botId}:${threadId}`;
+    // Wait for the fetched Thread to bind before its draft restore can clear newly typed text.
+    await page.getByTestId("working-avatar").waitFor();
     await composerInput(page).fill("draft remains when active deletion is cancelled");
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), draftKey)).not.toBeNull();
     const botRow = page.getByTestId(`sidebar-bot-${botId}`);

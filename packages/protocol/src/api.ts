@@ -565,7 +565,7 @@ export type ScreenProjectionPreviewFrameHeaderDto = z.infer<typeof ScreenProject
 export const CreateBotBody = z.object({
   name: z.string().trim().min(1).max(80),
   instructions: z.string().max(8000).default(""),
-  agentId: z.enum(AGENT_IDS),
+  agentId: z.enum(AGENT_IDS).optional(),
   maxTurns: z.number().int().min(1).nullable().optional(),
 });
 export type CreateBotBodyDto = z.infer<typeof CreateBotBody>;

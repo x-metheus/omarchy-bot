@@ -202,12 +202,11 @@ async function withMailDaemon(
   };
   let daemon: Awaited<ReturnType<typeof startDaemon>> | undefined;
   try {
-    daemon = await startDaemon(undefined, botScreenAdapter ? { botScreenAdapter } : {});
-    if (process.env.OMARCHY_TEST_DURABLE !== "1") {
+    daemon = await startDaemon(undefined, { seedDurableProvider: false, ...(botScreenAdapter ? { botScreenAdapter } : {}) });
+    if (!daemon.svc.credentials.getForRuntime("fake")) {
       await daemon.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
-      setSetting(daemon.svc.db, "default_model", "fake/fake-model");
-      setSetting(daemon.svc.db, "runtime", "durable");
     }
+    setSetting(daemon.svc.db, "default_model", "fake/fake-model");
     if (!harness) throw new Error("Expected the daemon's durable Harness");
     await run(daemon, harness);
   } finally {

@@ -17,7 +17,7 @@ import type { DurableMailReplayObserver } from "../../../apps/daemon/src/modules
 export function workerOnly(reason: string, options?: { timeout?: number }) {
   if (reason.trim() === "") throw new Error("workerOnly requires a reason");
   return (name: string, fn: () => void | Promise<void>) =>
-    test.skipIf(process.env.OMARCHY_TEST_DURABLE === "1")(`${name} (Task 20: ${reason})`, fn, options?.timeout);
+    test.skip(`${name} (Task 20: ${reason})`, fn, options?.timeout);
 }
 
 export interface Harness {
@@ -41,6 +41,7 @@ export interface HarnessOptions {
   botComputerAssetSupply?: BotComputerAssetSupply;
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
+  /** Use false when the test configures its own providers and models. */
   seedDurableProvider?: boolean;
   dataDir?: string;
   stateDir?: string;
@@ -141,10 +142,10 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
 
   try {
     // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
-    const durableSuite = process.env.OMARCHY_TEST_DURABLE === "1";
-    restoreRuntime = durableSuite
-      ? (await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts")).installDurableSuiteProvider(options.onDurableMailReplay)
-      : undefined;
+    if (options.seedDurableProvider !== false) {
+      const { installDurableSuiteProvider } = await import("../../../apps/daemon/src/modules/runtime/harness-test-support.ts");
+      restoreRuntime = installDurableSuiteProvider(options.onDurableMailReplay);
+    }
     const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
     const daemon = options.useProductionBotScreen
       ? await main({
@@ -173,13 +174,10 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
         try { await disconnectForRestart(); } finally { restoreFixtures(); }
       },
     };
-    if (durableSuite) {
+    if (options.seedDurableProvider !== false) {
       const { setSetting } = await import("../../../apps/daemon/src/persistence/settings.ts");
-      if (options.seedDurableProvider !== false) {
-        if (!svc.credentials.getForRuntime("fake")) await svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
-        setSetting(svc.db, "default_model", "fake/fake-model");
-      }
-      setSetting(svc.db, "runtime", "durable");
+      if (!svc.credentials.getForRuntime("fake")) await svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
+      setSetting(svc.db, "default_model", "fake/fake-model");
     }
     base.token = await pairForToken(base.baseUrl, state);
     if (options.waitForAgentReady !== false) {
