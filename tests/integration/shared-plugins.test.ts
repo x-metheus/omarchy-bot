@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { NativeSkills } from "../../apps/daemon/src/modules/plugins/nativeSkills.ts";
+import { PluginsService } from "../../apps/daemon/src/modules/plugins/plugins.ts";
 import type { InstalledSkillDto, McpConnectionDto, PluginStateDto, SkillCommandDto } from "../../packages/protocol/src/plugins.ts";
 import { api, authedFetch, apiStatus, startDaemon, type Harness } from "./helpers/harness.ts";
 
@@ -103,6 +104,234 @@ test("NativeSkills ignores legacy Skills roots and leaves their live and danglin
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Services inventory skips a workspace SKILL.md symlink into the user's Pi home", async () => {
+  const h = await startPlugins();
+  const skillDirectory = path.join(h.svc.cfg.sharedWorkspaceDir, ".agents", "skills", "linked-skill");
+  const skillFile = path.join(skillDirectory, "SKILL.md");
+  const sentinel = path.join(h.home, ".pi", "agent", "SKILL.md");
+  const document = "---\nname: pi-home-sentinel\ndescription: Private Pi Skill\n---\n";
+  await mkdir(skillDirectory, { recursive: true });
+  await mkdir(path.dirname(sentinel), { recursive: true });
+  await writeFile(sentinel, document);
+  await symlink(sentinel, skillFile);
+  // Age access time so a read is visible on relatime filesystems.
+  await utimes(sentinel, 946684800, 946771200);
+  const before = await lstat(sentinel, { bigint: true });
+
+  const { skills, nativeSkills } = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect(skills).toContainEqual(expect.objectContaining({ name: "skill-creator" }));
+  expect([...skills, ...nativeSkills].some((skill) => skill.path === skillFile || skill.name === "pi-home-sentinel")).toBe(false);
+  expect((await lstat(sentinel, { bigint: true })).atimeNs).toBe(before.atimeNs);
+  expect(await readFile(sentinel, "utf8")).toBe(document);
+});
+
+test.each([
+  { link: "workspace/.agents", workspacePath: "workspace" },
+  { link: "workspace/.agents/skills", workspacePath: "workspace" },
+  { link: "workspace-parent", workspacePath: "workspace-parent/workspace" },
+])("NativeSkills refuses to install through a symlink at $link", async ({ link, workspacePath }) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  try {
+    const workspace = path.join(home, workspacePath);
+    const privateDir = path.join(home, "plugins");
+    const piDirectory = path.join(home, ".pi");
+    const sentinel = path.join(piDirectory, "settings.json");
+    const document = '{"theme":"dark"}\n';
+    const source = path.join(home, "source");
+    const name = "install-check";
+    const description = "Verify the install destination";
+    const parent = path.join(home, link);
+    await mkdir(path.dirname(parent), { recursive: true });
+    await mkdir(piDirectory);
+    await writeFile(sentinel, document);
+    await symlink(piDirectory, parent, "dir");
+    await mkdir(source);
+    await writeFile(path.join(source, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
+    const skills = new NativeSkills(workspace, privateDir);
+    const before = await lstat(piDirectory, { bigint: true });
+    const privateBefore = await lstat(privateDir, { bigint: true });
+
+    expect(() => skills.install({ id: name, name, description, source, sourceType: "local", installUrl: source }, {
+      directory: source, revision: "fixture",
+    })).toThrow(`Skill destination cannot use a symlink: ${parent}`);
+    expect((await lstat(piDirectory, { bigint: true })).mtimeNs).toBe(before.mtimeNs);
+    expect((await lstat(privateDir, { bigint: true })).mtimeNs).toBe(privateBefore.mtimeNs);
+    expect(await readdir(piDirectory)).toEqual(["settings.json"]);
+    expect(await readdir(privateDir)).toEqual([]);
+    expect(await readFile(sentinel, "utf8")).toBe(document);
+    expect(await readlink(parent)).toBe(piDirectory);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test.each(["NativeSkills", "PluginsService"])("%s refuses a symlink at plugins-parent before creating private state", async (component) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  let service: PluginsService | undefined;
+  try {
+    const workspace = path.join(home, "workspace");
+    const parent = path.join(home, "plugins-parent");
+    const privateDir = path.join(parent, "plugins");
+    const piDirectory = path.join(home, ".pi");
+    const sentinel = path.join(piDirectory, "settings.json");
+    const document = '{"theme":"dark"}\n';
+    await mkdir(piDirectory);
+    await writeFile(sentinel, document);
+    await symlink(piDirectory, parent, "dir");
+    const before = await lstat(piDirectory, { bigint: true });
+    const entriesBefore = await readdir(piDirectory);
+
+    expect(() => {
+      if (component === "NativeSkills") new NativeSkills(workspace, privateDir);
+      else service = new PluginsService(privateDir, workspace, () => ({ skills: [] }));
+    }).toThrow(`Skill destination cannot use a symlink: ${parent}`);
+    expect((await lstat(piDirectory, { bigint: true })).mtimeNs).toBe(before.mtimeNs);
+    expect(await readdir(piDirectory)).toEqual(entriesBefore);
+    await expect(lstat(path.join(piDirectory, "plugins"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(sentinel, "utf8")).toBe(document);
+    expect(await readlink(parent)).toBe(piDirectory);
+  } finally {
+    await service?.shutdown();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("NativeSkills checks every bundle destination before staging or writing the registry", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  try {
+    const workspace = path.join(home, "workspace");
+    const privateDir = path.join(home, "plugins");
+    const skills = new NativeSkills(workspace, privateDir);
+    const localDirectory = path.join(skills.root, "local-skill");
+    const externalDirectory = path.join(home, "external");
+    const redirect = path.join(skills.root, "second-skill");
+    await mkdir(localDirectory, { recursive: true });
+    await writeFile(path.join(localDirectory, "SKILL.md"), "---\nname: local-skill\ndescription: Discovered locally\n---\n");
+    await mkdir(externalDirectory);
+    await symlink(externalDirectory, redirect, "dir");
+    const installations = await Promise.all(["first-skill", "second-skill"].map(async (name) => {
+      const directory = path.join(home, name);
+      const description = "A bundle Skill";
+      await mkdir(directory);
+      await writeFile(path.join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
+      return {
+        catalog: { id: name, name, description, source: directory, sourceType: "local" as const, installUrl: directory },
+        materialized: { directory, revision: "fixture" },
+      };
+    }));
+    const privateBefore = await lstat(privateDir, { bigint: true });
+
+    expect(() => skills.installBundle(installations)).toThrow(`Skill destination cannot use a symlink: ${redirect}`);
+    expect((await lstat(privateDir, { bigint: true })).mtimeNs).toBe(privateBefore.mtimeNs);
+    expect(await readdir(privateDir)).toEqual([]);
+    expect((await readdir(skills.root)).sort()).toEqual(["local-skill", "second-skill"]);
+    expect(await readlink(redirect)).toBe(externalDirectory);
+    expect(await readdir(externalDirectory)).toEqual([]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test.each(["list", "install"])("NativeSkills %s preserves the registry entry for an escaping SKILL.md", async (operation) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  try {
+    const workspace = path.join(home, "workspace");
+    const privateDir = path.join(home, "plugins");
+    const registryFile = path.join(privateDir, "native-skills.json");
+    const source = path.join(home, "source");
+    const id = "example/identity-check";
+    const name = "identity-check";
+    const description = "Keep the installed Skill identity";
+    const document = `---\nname: ${name}\ndescription: ${description}\n---\n`;
+    const sentinel = path.join(home, ".pi", "agent", "SKILL.md");
+    const skills = new NativeSkills(workspace, privateDir);
+    await mkdir(source);
+    await writeFile(path.join(source, "SKILL.md"), document);
+    const catalog = { id, name, description, source, sourceType: "local" as const, installUrl: source };
+    const installed = skills.install(catalog, { directory: source, revision: "fixture" });
+    expect(installed).toMatchObject({ id, origin: "installed", updateStatus: "current" });
+    const skillFile = path.join(workspace, ".agents", "skills", name, "SKILL.md");
+    expect(installed.path).toBe(skillFile);
+    const registryBefore = await readFile(registryFile, "utf8");
+    const [originalEntry] = JSON.parse(registryBefore).entries;
+    expect(originalEntry).toMatchObject({ id, origin: "installed", revision: "fixture" });
+    expect(typeof originalEntry.baseline).toBe("string");
+
+    await mkdir(path.dirname(sentinel), { recursive: true });
+    await writeFile(sentinel, "---\nname: private-pi-skill\ndescription: Private Pi Skill\n---\n");
+    const savedDocument = `${skillFile}.saved`;
+    await rename(skillFile, savedDocument);
+    await symlink(sentinel, skillFile);
+
+    if (operation === "install") {
+      const other = "other-skill";
+      await writeFile(path.join(source, "SKILL.md"), `---\nname: ${other}\ndescription: Another Skill\n---\n`);
+      expect(skills.install({ id: other, name: other, description: "Another Skill", source, sourceType: "local", installUrl: source }, {
+        directory: source, revision: "fixture",
+      })).toMatchObject({ id: other, origin: "installed" });
+    }
+    expect(skills.list().filter((skill) => skill.path === skillFile || skill.id === id || skill.name === "private-pi-skill")).toEqual([]);
+    const registryWhileHidden = await readFile(registryFile, "utf8");
+    expect(JSON.parse(registryWhileHidden).entries).toContainEqual(originalEntry);
+    if (operation === "list") {
+      expect(registryWhileHidden).toBe(registryBefore);
+      expect(() => skills.install(catalog, { directory: source, revision: "fixture" })).toThrow("Installed Skill document is unavailable");
+      expect(await readFile(registryFile, "utf8")).toBe(registryBefore);
+    }
+
+    await rename(savedDocument, skillFile);
+    expect(skills.list().find((skill) => skill.path === skillFile)).toMatchObject({ id, origin: "installed", updateStatus: "current" });
+    expect(JSON.parse(await readFile(registryFile, "utf8")).entries).toContainEqual(originalEntry);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("public Skill reinstall preserves the registry when an installed document escapes the workspace", async () => {
+  const h = await startPlugins();
+  const name = "identity-check";
+  const description = "Keep the installed Skill identity";
+  const source = "skill-fixture.invalid";
+  const id = `${source}/${name}`;
+  const document = `---\nname: ${name}\ndescription: ${description}\n---\n`;
+  const catalogFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.hostname === "plugin-catalog.invalid" && url.pathname === "/api/plugins/catalog/detail/normalised" && url.searchParams.get("id") === id) {
+      return Response.json({ id, source, slug: name, content: document });
+    }
+    if (url.hostname === source && url.pathname === "/.well-known/agent-skills/index.json") {
+      return Response.json({ skills: [{ name, files: ["SKILL.md"] }] });
+    }
+    if (url.hostname === source && url.pathname === `/.well-known/agent-skills/${name}/SKILL.md`) return new Response(document);
+    return catalogFetch(input, init);
+  }, { preconnect: catalogFetch.preconnect });
+
+  const installed = await api<InstalledSkillDto>(h, "POST", "/api/plugins/skills", { id });
+  expect(installed).toMatchObject({ id, origin: "installed", updateStatus: "current" });
+  const skillFile = path.join(h.svc.cfg.sharedWorkspaceDir, ".agents", "skills", name, "SKILL.md");
+  expect(installed.path).toBe(skillFile);
+  const registryFile = path.join(h.svc.cfg.dataDir, "plugins", "native-skills.json");
+  const registryBefore = await readFile(registryFile);
+  const outsideDocument = path.join(h.home, "outside-SKILL.md");
+  await writeFile(outsideDocument, "---\nname: outside-skill\ndescription: Outside the workspace\n---\n");
+  const savedDocument = `${skillFile}.saved`;
+  await rename(skillFile, savedDocument);
+  await symlink(outsideDocument, skillFile);
+
+  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.some((skill) => skill.id === id)).toBe(false);
+  expect(await apiStatus(h, "POST", "/api/plugins/skills", { id })).toEqual({
+    status: 409, body: { error: "Installed Skill document is unavailable; its registry entry was preserved" },
+  });
+  expect(await readFile(registryFile)).toEqual(registryBefore);
+
+  await rename(savedDocument, skillFile);
+  const restored = (await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.find((skill) => skill.path === skillFile);
+  expect(restored).toMatchObject({ id, origin: "installed", updateStatus: "current" });
+  expect(restored?.error).toBeUndefined();
+  expect(await readFile(registryFile)).toEqual(registryBefore);
 });
 
 test.each([".pi", ".claude"])("NativeSkills reconciles disabled %s Skill destinations", async (legacyFolder) => {

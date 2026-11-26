@@ -17,7 +17,7 @@ import { AUTHORIZATION_TTL_MS, Grant, ProviderAccounts, type PluginAuthorization
 import { toolOperation } from "./pluginDispatch.ts";
 import { SkillInstalls } from "./skillInstall.ts";
 import { ServiceBundles } from "./serviceBundles.ts";
-import { NativeSkills } from "./nativeSkills.ts";
+import { assertUnlinkedDestination, NativeSkills } from "./nativeSkills.ts";
 import { NativeMcpStore } from "./nativeMcp.ts";
 import { McpPackages } from "./mcpPackages.ts";
 
@@ -78,9 +78,10 @@ export class PluginsService {
   constructor(private readonly rootDir: string, private readonly cwd: string, private readonly nativeResources: () => NativePluginResources,
     private readonly nativeControl?: (input: NativeMcpControlInput) => Promise<NativeMcpControlResult>,
     private readonly serviceOrigin?: () => string, private readonly authorizationEvent?: (event: PluginAuthorizationEvent) => void) {
-    mkdirSync(rootDir, { recursive: true, mode: 0o700 });
-    if (!lstatSync(rootDir).isDirectory() || lstatSync(rootDir).isSymbolicLink()) throw new Error("Plugin state directory must be a private real directory");
-    chmodSync(rootDir, 0o700);
+    const directory = assertUnlinkedDestination(rootDir);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (!lstatSync(directory).isDirectory()) throw new Error("Plugin state directory must be a private real directory");
+    chmodSync(directory, 0o700);
     this.skills = new NativeSkills(cwd, rootDir);
     this.skillInstalls = new SkillInstalls({
       rootDir, skills: this.skills,

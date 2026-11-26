@@ -27,7 +27,7 @@ export const AGENT_COMPUTER_TOOL: AgentComputerToolDefinition = Object.freeze({
   systemPrompt: Object.freeze({
     summary: "Observe and operate this Bot's routed Screen in the shared Bot Computer, never the user's Host Session.",
     guidelines: Object.freeze([
-      "Session map: your Native Session is conversation memory; the Bot Computer is the shared private graphical environment and application profile; this Bot Screen is its routed output/workspace; a Screen Projection is only a client's view. Switching or closing a view does not end desktop work.",
+      "Session map: your Bot session is conversation memory; the Bot Computer is the shared private graphical environment and application profile; this Bot Screen is its routed output/workspace; a Screen Projection is only a client's view. Switching or closing a view does not end desktop work.",
       "Treat every unqualified request to open, start, show, focus, or control a graphical application, browser, terminal, or window as a request for this Bot Screen, including when earlier conversation discussed the Host Session. Use computer open_app/open_url rather than native shell commands, compositor sockets, global WAYLAND_DISPLAY/SWAYSOCK values, or host process inspection. If the computer action fails, report that failure; never fall back to the Host Session or another Bot Screen.",
       "Each computer result identifies its botId, surfaceId and runtimeGeneration. The Surface remains the Bot's identity across runtime restarts; a new runtimeGeneration is a new Screen attachment, not a new conversation or browser identity. Use current observations rather than remembered windows or coordinates.",
       "A gray or blank image describes only this Bot Screen; it does not show that the user's Hyprland desktop or another Bot's Screen is empty. The Bot Computer is not a full Omarchy session, and this workspace may have no application open. Observe or list_windows, then open the needed application here when appropriate.",
@@ -38,7 +38,7 @@ export const AGENT_COMPUTER_TOOL: AgentComputerToolDefinition = Object.freeze({
 });
 
 export interface AgentComputerToolOutput {
-  /** Identity of the desktop that produced this result, not the Agent's Native Session. */
+  /** Identity of the desktop that produced this result, independent of the Bot session. */
   desktopSession: {
     botId: string;
     surfaceId: SurfaceId;
