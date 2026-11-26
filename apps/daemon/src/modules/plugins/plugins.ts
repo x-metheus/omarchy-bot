@@ -246,25 +246,34 @@ export class PluginsService {
       ...(cloud.error ? { cloudError: cloud.error } : {}), ...(nativeError ? { nativeError } : {}) };
   }
 
+  #reconcileMcpRuntime(): void {
+    // Reading runtime status retires connections whose configuration has changed.
+    void this.nativeControl?.({ action: "status" }).catch(() => undefined);
+  }
+
   async saveMcp(id: string | null, input: z.input<typeof SaveMcpBody>, signal?: AbortSignal): Promise<McpConnectionDto> {
     const result = await this.packages.save(id, input, signal);
     this.#persist(true);
+    if (id !== null) this.#reconcileMcpRuntime();
     return result;
   }
 
   async updateMcp(id: string, signal?: AbortSignal): Promise<McpConnectionDto> {
     const result = await this.packages.update(id, signal);
     this.#persist(true);
+    this.#reconcileMcpRuntime();
     return result;
   }
 
   enableMcp(id: string, enabled: boolean): void {
     this.mcp.enable(id, enabled);
     this.#persist(true);
+    if (!enabled) this.#reconcileMcpRuntime();
   }
   removeMcp(id: string): void {
     this.packages.remove(id);
     this.#persist(true);
+    this.#reconcileMcpRuntime();
   }
 
 
