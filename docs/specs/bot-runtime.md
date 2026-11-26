@@ -346,7 +346,7 @@ export interface BotRuntime {
 - **Private folders:** creation, rename, refusal from another Bot, and removal on Bot Deletion.
 - **Secrets:** a value is filled in at run time and replaced in the result; another Bot cannot list or use it; it never appears in entries, Messages, or logs; the fallback file and its warning; fallback values move into the keychain once it is available.
 - **Deleting conversations:** Bot Deletion and a memory reset leave no rows for the conversation in any `pi_` table.
-- **Real scenarios:** rerun the computer and browser scenarios, and a small set of everyday tasks before and after.
+- **Real scenarios:** run the computer and browser scenarios and a small set of everyday tasks on the Bot runtime. Nothing is compared with the removed worker.
 - **Boundary:** `bun run lint:boundaries` fails on a pi-durable import outside the runtime module.
 
 ## Boundaries
@@ -419,6 +419,8 @@ The prototype is in `prototypes/bot-runtime/` on branch `proto/bot-runtime`, wit
   - the keychain is reached through Bun's built-in `Bun.secrets` (no new dependency), with a start-up check and a marker so a keychain outage fails closed, and Bun is pinned exactly to 1.4.5
   - the secret limits say plainly that the keychain does not stop a Bot's own shell
   - no migration of earlier data before the app is public: the old session migration, `~/.pi` import, token import, credential-file move, and workspace cleanup are removed
+- **2026-11-26:**
+  - the real scenarios run on the Bot runtime only, with no before-and-after comparison against the removed worker
 
 ## Open questions
 

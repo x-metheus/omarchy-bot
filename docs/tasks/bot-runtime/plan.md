@@ -19,6 +19,7 @@ Replace the Pi agent worker (`workers/pi`, `pi-coding-agent` 0.84.4, and the age
 ## Architecture decisions
 
 - **Cut over behind a switch.** The new runtime is built next to the worker path, and selected by a Service setting (`runtime: "worker" | "durable"`, default `worker`) until the cutover task. Each task then leaves the app working, and the old path can be compared with the new until it is removed.
+  - **Retired 2026-11-26.** Running both paths side by side is a migration technique, and the app has no users to migrate before it is public. The cost showed up in Task 20: the old worker had stayed wired into Bot mail, the Thinking and attachment settings, the Services panel, avatar generation, Skill Creator, and MCP clean-up, so removing it meant unhooking six features first. From here on, code is replaced in place. Nothing compares against a "before" that no longer exists.
 - **TurnService keeps its public API.** Routes, mailbox, and clients keep calling `TurnService`. Inside, it calls either the worker path or `BotRuntime`. The cutover task removes the worker branch.
 - **Tools call Service modules directly.** In-process extensions call `ComputerBroker`, `SidecarBroker`, `PluginsService`, and `MailboxService` without the tool channel. The computer worker and sidecar protocols stay.
 - **One approval flow.** It reuses the `approvals` table with a forward migration, and pauses tools as durable tool tasks as the spec describes.
@@ -101,7 +102,7 @@ Mailbox, attachments, and every failure caused by tools not yet built in process
 - [x] Every tool in the spec's tools table works with the switch on
 - [x] Settings can add an OpenAI-compatible provider and a built-in `pi-ai` provider, and each completes a Turn
 
-### Phase 5: Migration and cutover
+### Phase 5: Cutover and removal
 - [x] ~~Task 18: Old session migration on a Thread's first Turn~~ (removed 2026-11-25: no migration before public release)
 - [x] Task 19: Cutover and deletion
 - [ ] Task 20: Remove the Pi worker, agent protocol, and Agent UI
@@ -131,5 +132,5 @@ After Task 3, Tasks 4–6, 7, 11, 12, 13, 15, and 18 touch separate files and ca
 
 ## Open questions
 
-- Is a temporary Service setting the right switch, or should the cutover happen in one step on a branch?
+- ~~Is a temporary Service setting the right switch, or should the cutover happen in one step on a branch?~~ Answered 2026-11-26: one step. Without users to migrate, the switch only added work (see Architecture decisions).
 - Should the Settings providers screen (Task 16) and the approval UI (Task 10) follow a design pass first? Both are new screens.

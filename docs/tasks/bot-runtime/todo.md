@@ -826,14 +826,14 @@ Host note: earlier in the task, `bun test apps/daemon` intermittently failed wit
 
 ## Task 21: Real scenarios, end-to-end tests, and docs
 
-**Description:** Rerun the real computer and browser scenarios and a small set of everyday tasks before and after. Update `README.md`, `docs/README.md`, and `docs/development.md` for the new runtime and commands.
+**Description:** Run the real computer and browser scenarios and a small set of everyday tasks on the Bot runtime. There is no "before" run: the worker is gone, and nothing is compared with it. Update `README.md`, `docs/README.md`, and `docs/development.md` for the new runtime and commands.
 
 **Acceptance criteria:**
-- [ ] The real scenarios pass, and before-and-after results are recorded
+- [ ] The real scenarios pass on the Bot runtime, and the results are recorded
 - [ ] Docs describe the runtime, Settings providers, and the "not a sandbox" wording
 - [ ] Every success criterion in the spec is met
 
-**Verification:** `bun run build`, `bun test`, `bun run test:e2e`, the real scenarios.
+**Verification:** the real scenarios, `bun run build`, and the tests for changed files. The full `bun test` and `bun run test:e2e` run once on main after the merge.
 
 **Dependencies:** Task 20
 
