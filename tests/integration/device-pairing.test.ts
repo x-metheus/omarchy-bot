@@ -142,8 +142,8 @@ describe("cross-origin Service boundary", () => {
   test("makes app responses readable while preserving token authentication and errors", async () => {
     for (const origin of appOrigins) {
       const requests: Array<[string, RequestInit, number]> = [
-        ["/api/agents", {}, 401],
-        ["/api/agents", { headers: bearer(h.token) }, 200],
+        ["/api/bots", {}, 401],
+        ["/api/bots", { headers: bearer(h.token) }, 200],
         ["/api/bots", { method: "POST", headers: { ...bearer(h.token), "content-type": "application/json" }, body: "{" }, 400],
       ];
       for (const [path, init, status] of requests) {
@@ -161,13 +161,13 @@ describe("cross-origin Service boundary", () => {
   test("does not grant CORS to foreign, opaque, or malformed origins", async () => {
     for (const origin of ["https://evil.example", "null", "not an origin", "tauri://localhost/", "http://tauri.localhost/path", "http://localhost:7322", "constructor"]) {
       for (const method of ["OPTIONS", "GET"]) {
-        const res = await fetch(`${h.baseUrl}/api/agents`, { method, headers: { origin } });
+        const res = await fetch(`${h.baseUrl}/api/bots`, { method, headers: { origin } });
         expect(res.status).toBe(method === "OPTIONS" ? 204 : 401);
         expect([...res.headers.keys()].filter(key => key.startsWith("access-control-allow-"))).toEqual([]);
         expect(res.headers.get("vary")?.toLowerCase().split(/,\s*/)).toContain("origin");
       }
     }
-    const noOrigin = await fetch(`${h.baseUrl}/api/agents`);
+    const noOrigin = await fetch(`${h.baseUrl}/api/bots`);
     expect(noOrigin.status).toBe(401);
     expect(noOrigin.headers.get("access-control-allow-origin")).toBeNull();
     expect(noOrigin.headers.get("vary")?.toLowerCase().split(/,\s*/)).toContain("origin");
@@ -186,9 +186,9 @@ describe("cross-origin Service boundary", () => {
     try {
       for (const origin of ["http://localhost", "http://localhost:7322", "http://127.0.0.1:49876", "http://[::1]:3000"]) {
         for (const method of ["OPTIONS", "GET"]) {
-          const production = await fetch(`${h.baseUrl}/api/agents`, { method, headers: { origin } });
+          const production = await fetch(`${h.baseUrl}/api/bots`, { method, headers: { origin } });
           expect(production.headers.get("access-control-allow-origin")).toBeNull();
-          const response = await fetch(`${dev.baseUrl}/api/agents`, { method, headers: { origin } });
+          const response = await fetch(`${dev.baseUrl}/api/bots`, { method, headers: { origin } });
           expect(response.status).toBe(method === "OPTIONS" ? 204 : 401);
           expect(response.headers.get("access-control-allow-origin")).toBe(origin);
           expect(response.headers.get("access-control-allow-credentials")).toBeNull();
@@ -200,7 +200,7 @@ describe("cross-origin Service boundary", () => {
       }
       for (const origin of ["null", "https://localhost:7322", "http://localhost.evil:7322", "http://127.1:7322", "http://127.0.0.2:7322", "http://2130706433:7322", "http://user@localhost:7322", "http://localhost:7322/", "http://localhost:7322/path", "http://localhost:7322?query", "http://localhost:7322#fragment", "http://localhost:99999", "http://localhost:", "http://localhost\\evil"]) {
         for (const method of ["OPTIONS", "GET"]) {
-          const response = await fetch(`${dev.baseUrl}/api/agents`, { method, headers: { origin } });
+          const response = await fetch(`${dev.baseUrl}/api/bots`, { method, headers: { origin } });
           expect([...response.headers.keys()].filter(key => key.startsWith("access-control-allow-"))).toEqual([]);
         }
         expect(await upgradeStatus("/api/events", origin, dev.token, dev)).toBe(403);
@@ -267,11 +267,10 @@ describe("cross-origin Service boundary", () => {
 describe("unpaired callers", () => {
   test("receive 401 on every route family and socket", async () => {
     const requests: Array<[string, string, unknown?]> = [
-      ["GET", "/api/agents"],
       ["GET", "/api/bots"],
       ["GET", "/api/devices"],
       ["GET", "/api/devices/paired"],
-      ["POST", "/api/bots", { name: "Sneaky Bot", agentId: "pi" }],
+      ["POST", "/api/bots", { name: "Sneaky Bot" }],
       ["GET", "/api/plugins"],
       ["GET", "/api/not-a-route"],
     ];
@@ -332,7 +331,7 @@ describe("pairing exchange", () => {
     expect(device.id).toMatch(/^paired_[0-9a-f]{16}$/);
 
     expect((await exchange(issued.code)).status).toBe(401);
-    expect(await fetch(`${h.baseUrl}/api/agents`, { headers: bearer(token) })).toMatchObject({ status: 200 });
+    expect(await fetch(`${h.baseUrl}/api/bots`, { headers: bearer(token) })).toMatchObject({ status: 200 });
   });
 
   test("keeps the name issued with the code when the exchange omits one", async () => {
@@ -361,15 +360,15 @@ describe("pairing exchange", () => {
 describe("paired device tokens", () => {
   test("authenticate by header and by query, header winning", async () => {
     const { token } = await pair();
-    const byHeader = await fetch(`${h.baseUrl}/api/agents`, { headers: bearer(token) });
+    const byHeader = await fetch(`${h.baseUrl}/api/bots`, { headers: bearer(token) });
     expect(byHeader.status).toBe(200);
-    const byQuery = await fetch(`${h.baseUrl}/api/agents?access_token=${token}`);
+    const byQuery = await fetch(`${h.baseUrl}/api/bots?access_token=${token}`);
     expect(byQuery.status).toBe(200);
-    const wrongHeader = await fetch(`${h.baseUrl}/api/agents?access_token=${token}`, {
+    const wrongHeader = await fetch(`${h.baseUrl}/api/bots?access_token=${token}`, {
       headers: bearer("0".repeat(64)),
     });
     expect(wrongHeader.status).toBe(401);
-    const malformed = await fetch(`${h.baseUrl}/api/agents`, { headers: { authorization: `Bearer  ${token}` } });
+    const malformed = await fetch(`${h.baseUrl}/api/bots`, { headers: { authorization: `Bearer  ${token}` } });
     expect(malformed.status).toBe(401);
   });
 
@@ -410,14 +409,14 @@ describe("paired device tokens", () => {
     const closed = Promise.withResolvers<number>();
     socket.addEventListener("close", (event) => closed.resolve(event.code), { once: true });
 
-    expect(await fetch(`${h.baseUrl}/api/agents`, { headers: bearer(token) })).toMatchObject({ status: 200 });
+    expect(await fetch(`${h.baseUrl}/api/bots`, { headers: bearer(token) })).toMatchObject({ status: 200 });
     const revoked = await fetch(`${h.baseUrl}/api/devices/paired/${device.id}/revoke`, {
       method: "POST",
       headers: bearer(token),
     });
     expect(revoked.status).toBe(204);
     expect(await closed.promise).toBe(1008);
-    expect((await fetch(`${h.baseUrl}/api/agents`, { headers: bearer(token) })).status).toBe(401);
+    expect((await fetch(`${h.baseUrl}/api/bots`, { headers: bearer(token) })).status).toBe(401);
 
     // Idempotent from another paired device: the row is already revoked, sockets gone.
     const { token: otherToken } = await pair("Revoker Device");

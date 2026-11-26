@@ -257,7 +257,7 @@ test("a durable Turn completes with a stored provider", () => withFakeRuntimePro
     expect((await createRuntimeModels(h.svc.credentials).getAuth("fake"))?.auth.apiKey).toBe(apiKey);
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     const botId = await makeBot(h, "Stored provider");
-    h.svc.agents.markOffline("pi", "Agent unavailable during durable Turn");
+    h.svc.db.query("UPDATE agents SET status = 'offline' WHERE id = 'pi'").run();
     const sent = await sendToBot(h, botId, "Use the stored provider");
     await waitThreadIdle(h, sent.threadId);
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
@@ -830,7 +830,7 @@ test("configured conversation uses the Service limit for unset and null Bots and
   const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "Default limit");
-    const custom = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Custom limit", agentId: "pi", maxTurns: 3 });
+    const custom = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Custom limit", maxTurns: 3 });
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     async function limit(threadId: string): Promise<number | undefined> {
@@ -900,7 +900,7 @@ test("the model request contains the app prompt, Shared Workspace Skills, and Lo
       // Boot seeds a starter Skill. Use only the explicit workspace fixtures in this request.
       rmSync(path.join(workspace, ".agents/skills"), { recursive: true, force: true });
       [workspaceSkill, ...legacyWorkspaceSkills].forEach(writeSkill);
-      const { id: botId } = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Prompt Bot", agentId: "pi", instructions: "Keep track of releases." });
+      const { id: botId } = await api<{ id: string }>(h, "POST", "/api/bots", { name: "Prompt Bot", instructions: "Keep track of releases." });
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
       const extraFolder = path.join(home, "extra-files");

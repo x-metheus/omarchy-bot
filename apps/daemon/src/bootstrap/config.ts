@@ -29,7 +29,6 @@ export interface Config extends PlatformPaths {
   botScreenSwayRuntimeSupplyDir: string;
   botComputerFontSupplyDir: string;
   botComputerBrowserPackDir: string;
-  conformanceDir: string;
   statusPath: string;
   /** HTTP listener address; remote listeners require TLS or a declared proxy. */
   host: string;
@@ -103,7 +102,6 @@ export function loadConfig(): Config {
     botScreenSwayRuntimeSupplyDir: path.join(dataDir, "runtime", "current", "sway"),
     botComputerFontSupplyDir: path.join(dataDir, "runtime", "current", "fonts"),
     botComputerBrowserPackDir: path.join(dataDir, "runtime", "browser"),
-    conformanceDir: path.join(dataDir, "conformance"),
     statusPath: path.join(stateDir, "status.json"),
     host,
     ...(tlsCert ? { tlsCert } : {}),
@@ -124,6 +122,5 @@ export function loadConfig(): Config {
   mkdirSync(cfg.attachmentsDir, { recursive: true });
   mkdirSync(cfg.avatarsDir, { recursive: true });
   mkdirSync(cfg.botScreenProfileDir, { recursive: true });
-  mkdirSync(cfg.conformanceDir, { recursive: true });
   return cfg;
 }

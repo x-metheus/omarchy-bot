@@ -141,11 +141,11 @@ test("HTTPS and WSS preserve the paired-device gate", async () => {
   expect(body.ok).toBe(true);
   expect(typeof body.version).toBe("string");
   expect(body.protocol).toBe(1);
-  expect((await request("/api/agents")).status).toBe(401);
+  expect((await request("/api/bots")).status).toBe(401);
   const secret = readFileSync(path.join(process.env.OMARCHY_BOT_STATE!, "pairing-host-secret"), "utf8").trim();
   const issued = await request("/api/pairing/codes", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${secret}` }, body: JSON.stringify({ name: "TLS browser" }) }).then(r => r.json());
   const paired = await request("/api/pairing/exchange", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: issued.code, name: "TLS browser" }) }).then(r => r.json());
-  expect((await request("/api/agents", { headers: { authorization: `Bearer ${paired.token}` } })).status).toBe(200);
+  expect((await request("/api/bots", { headers: { authorization: `Bearer ${paired.token}` } })).status).toBe(200);
   for (const scheme of ["http", "https"]) {
     const response = await request("/api/plugins/authorize", {
       method: "POST",

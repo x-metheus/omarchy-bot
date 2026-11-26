@@ -544,18 +544,11 @@ describe("route streaming payloads", () => {
     expect(harness.cached("thread-1")).toEqual(cached);
   });
 
-  test("keeps removed, native, and appended events on invalidation", () => {
+  test("invalidates the transcript when Response or Thinking records are removed", () => {
     const harness = createHarness({ threadId: "thread-1", messages: [responseMessage("I am")] });
     const envelopes = [
       threadEvent("response.removed", { threadId: "thread-1", turnId: "turn-1", count: 1 }),
       threadEvent("thinking.removed", { threadId: "thread-1", turnId: "turn-1", count: 1 }),
-      threadEvent("agent.native", {
-        threadId: "thread-1",
-        botId: "bot-1",
-        capability: "agent-native",
-        sensitivity: "public",
-        payload: { type: "diagnostic" },
-      }),
     ];
 
     for (const envelope of envelopes) {
@@ -567,6 +560,14 @@ describe("route streaming payloads", () => {
       envelopes.map(() => ({ tag: "messages", threadId: "thread-1" })),
     );
     expect(harness.cached("thread-1")?.map((message) => message.text)).toEqual(["I am"]);
+  });
+
+  test("invalidates Thread and Bot queries when a Thread title changes", () => {
+    const harness = createHarness();
+
+    route(threadEvent("thread.updated", { title: "Renamed Thread" }), harness.invalidate, harness.applyUpdate);
+
+    expect(harness.invalidations).toEqual([{ tag: "threads" }, { tag: "bots" }]);
   });
 
   test("keeps message.appended on invalidation", () => {

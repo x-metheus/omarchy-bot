@@ -188,7 +188,7 @@ process.once("SIGINT", async () => {
     }
     throw new Error("scripted Turn condition did not arrive");
   }
-  const bot = await api<{ id: string }>("/api/bots", { name: "Surviving Turn", agentId: "pi" });
+  const bot = await api<{ id: string }>("/api/bots", { name: "Surviving Turn" });
   const sent = await api<{ threadId: string; turnId: string }>(`/api/bots/${bot.id}/messages`, { text: "steer-echo" });
   const threadRoute = `/api/threads/${sent.threadId}`;
   await until(async () => (await api<{ activeTurn?: { id: string; status: string } }>(threadRoute)).activeTurn?.status === "working");

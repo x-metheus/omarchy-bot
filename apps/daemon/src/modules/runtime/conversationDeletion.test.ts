@@ -135,8 +135,7 @@ test.each(["shared database", "split databases"] as const)("runtime startup swee
     using db = openDb({ ...paths, dbPath: servicePath } as Config);
     using separateDurableDb = servicePath === paths.dbPath ? undefined : new Database(paths.dbPath);
     const durableDb = separateDurableDb ?? db;
-    db.exec(`INSERT INTO agents (id, display_name, updated_at) VALUES ('pi', 'Pi', '');
-      INSERT INTO bots (id, name, agent_id, created_at, updated_at) VALUES ('bot', 'Bot', 'pi', '', '');
+    db.exec(`INSERT INTO bots (id, name, agent_id, created_at, updated_at) VALUES ('bot', 'Bot', 'pi', '', '');
       INSERT INTO threads (id, bot_id, title, created_at, updated_at) VALUES ('mapped-thread', 'bot', 'Mapped', '', '');`);
     const storage = await openNodeSqliteStorage(paths.dbPath, { prefix: "pi_" });
     const harness = await Harness.open(storage, { registry: createRegistry(), models }, context);

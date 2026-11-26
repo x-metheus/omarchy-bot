@@ -63,7 +63,7 @@ async function pairedPost(port: number, home: string) {
 }
 async function send(port: number, home: string, text: string): Promise<{ turnId: string; threadId: string }> {
   const post = await pairedPost(port, home);
-  const bot = await post<{ id: string }>("/api/bots", { name: "Crash test", agentId: "pi" });
+  const bot = await post<{ id: string }>("/api/bots", { name: "Crash test" });
   return post(`/api/bots/${bot.id}/messages`, { text });
 }
 function query<T>(home: string, sql: string, ...args: string[]): T | null {
@@ -175,8 +175,8 @@ test.each(["placed", "done"] as const)("hard restart recovers a %s peer-mail inp
   try {
     const first = await boot(home, 0, false, { OMARCHY_TEST_PEER_MAIL_HOLD: submissionState }); child = first.child;
     const post = await pairedPost(first.port, home);
-    const source = await post<{ id: string }>("/api/bots", { name: "Restart sender", agentId: "pi" });
-    const target = await post<{ id: string }>("/api/bots", { name: "Restart recipient", agentId: "pi" });
+    const source = await post<{ id: string }>("/api/bots", { name: "Restart sender" });
+    const target = await post<{ id: string }>("/api/bots", { name: "Restart recipient" });
     const sent = await post<{ turnId: string }>(`/api/bots/${source.id}/messages`, { text: `send-peer-mail:${target.id}` });
     expect(await terminal(home, sent.turnId)).toMatchObject({ status: "completed" });
 
@@ -245,8 +245,8 @@ test.each([
   try {
     const first = await boot(home, 0, false, { OMARCHY_TEST_PEER_MAIL_HOLD: "queued" }); child = first.child;
     const post = await pairedPost(first.port, home);
-    const source = await post<{ id: string }>("/api/bots", { name: "Sender", agentId: "pi" });
-    const target = await post<{ id: string }>("/api/bots", { name: "Recipient", agentId: "pi" });
+    const source = await post<{ id: string }>("/api/bots", { name: "Sender" });
+    const target = await post<{ id: string }>("/api/bots", { name: "Recipient" });
     const persistedModelId = "uncatalogued-peer-mail";
     const nextModel = "fake/fake-model";
     const setTargetModel = (model: string) => {
@@ -315,8 +315,8 @@ test("startup projects and settles two concurrent peer-mail Turns during SQLite 
   try {
     const first = await boot(home, 0, false, { OMARCHY_TEST_PEER_MAIL_HOLD: "placed" }); child = first.child;
     const post = await pairedPost(first.port, home);
-    const source = await post<{ id: string }>("/api/bots", { name: "Sender", agentId: "pi" });
-    const targets = await Promise.all(["First recipient", "Second recipient"].map((name) => post<{ id: string }>("/api/bots", { name, agentId: "pi" })));
+    const source = await post<{ id: string }>("/api/bots", { name: "Sender" });
+    const targets = await Promise.all(["First recipient", "Second recipient"].map((name) => post<{ id: string }>("/api/bots", { name })));
     const deliveries: { id: string; thread_id: string; target_turn_id: string }[] = [];
     for (const target of targets) {
       const sent = await post<{ turnId: string }>(`/api/bots/${source.id}/messages`, { text: `send-peer-mail:${target.id}` });

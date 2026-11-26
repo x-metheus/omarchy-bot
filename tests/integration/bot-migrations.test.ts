@@ -270,7 +270,7 @@ describe("integration: deployed schema convergence", () => {
            WHERE surface_id = 'surf_11111111111111111111111111111111'`,
         ).get(),
       ).toBeNull();
-      expect(secondDaemon.svc.db.query(`SELECT id FROM agents WHERE id = 'pi'`).get()).toEqual({ id: "pi" });
+      expect(secondDaemon.svc.db.query(`SELECT id, status FROM agents WHERE id = 'pi'`).get()).toEqual({ id: "pi", status: "ready" });
     } finally {
       await firstDaemon?.stop();
       await secondDaemon?.stop();

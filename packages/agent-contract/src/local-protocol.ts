@@ -11,17 +11,6 @@ export interface LocalDeviceIdentity {
 export const LOCAL_ACTIONS = ["run", "search", "read", "write", "transfer"] as const;
 export type LocalActionName = (typeof LOCAL_ACTIONS)[number];
 
-/** Daemon-authored binding installed for one active Agent turn when a Sidecar is online. */
-export interface AgentLocalTurnContext {
-  botId: string;
-  turnId: string;
-  workerSessionId: string;
-}
-
-export interface AgentLocalToolContext extends AgentLocalTurnContext {
-  toolCallId: string;
-}
-
 export interface AgentLocalToolOutput {
   deviceId: string;
   hostname: string;

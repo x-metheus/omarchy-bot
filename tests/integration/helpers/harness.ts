@@ -226,7 +226,7 @@ export async function apiStatus(h: Harness, method: string, p: string, body?: un
 
 /** Create a Bot and return its id. */
 export async function makeBot(h: Harness, name = "Test Bot", instructions = ""): Promise<string> {
-  const bot = await api<{ id: string }>(h, "POST", "/api/bots", { name, instructions, agentId: "pi" });
+  const bot = await api<{ id: string }>(h, "POST", "/api/bots", { name, instructions });
   return bot.id;
 }
 

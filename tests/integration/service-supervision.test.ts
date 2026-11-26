@@ -360,7 +360,6 @@ describe("Service supervision with a user manager present", () => {
     const bot = await request<{ id: string; surfaceId: SurfaceId }>("POST", "/api/bots", {
       name: "Managed Screen",
       instructions: "",
-      agentId: "pi",
     });
     const surface = { botId: bot.id, surfaceId: bot.surfaceId };
     const statePath = `/api/computer/state?botId=${encodeURIComponent(bot.id)}&surfaceId=${encodeURIComponent(bot.surfaceId)}`;

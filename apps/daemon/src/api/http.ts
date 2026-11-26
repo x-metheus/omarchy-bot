@@ -4,7 +4,6 @@ import { z } from "zod";
 import type { Config } from "../bootstrap/config.ts";
 import { hostIdentity } from "../bootstrap/hostIdentity.ts";
 import type { EventLog } from "../modules/events/eventLog.ts";
-import type { AgentsRegistry } from "../modules/agents/registry.ts";
 import type { BotsService } from "../modules/bots/bots.ts";
 import type { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import type { ThreadsService } from "../modules/threads/threads.ts";
@@ -45,7 +44,6 @@ import type { PairingService } from "../modules/pairing/pairing.ts";
 import { isIPv4 } from "node:net";
 import { AllowedFolderBody, type AllowedFoldersDto, CreateBotBody, PatchBotBody, SendMessageBody, PROTOCOL_VERSION } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
-import { AGENT_IDS, type AgentId } from "@omarchy-bot/domain";
 import daemonPackage from "../../package.json" with { type: "json" };
 
 /** Service version reported by the health probe; the daemon manifest is the single source. */
@@ -55,7 +53,6 @@ export interface DaemonServices {
   cfg: Config;
   db: Database;
   events: EventLog;
-  agents: AgentsRegistry;
   bots: BotsService;
   botDeletions: BotDeletionService;
   threads: ThreadsService;
@@ -316,14 +313,6 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     const pluginResponse = await handlePluginRequest(req, svc.plugins, pathname, publicOrigin(svc.cfg, server.requestIP(req)?.address, req.headers, url));
     if (pluginResponse !== undefined) return pluginResponse;
 
-    if (pathname === "/api/agents" && req.method === "GET") return json(svc.agents.list());
-    const agentRecheck = pathname.match(/^\/api\/agents\/([\w-]+)\/recheck$/);
-    if (agentRecheck && req.method === "POST") {
-      const agentId = agentRecheck[1] as AgentId;
-      if (!AGENT_IDS.includes(agentId)) return notFound(`unknown agent ${agentId}`);
-      return json(await svc.agents.recheck(agentId));
-    }
-
     if (pathname === "/api/bots" && req.method === "GET") return json(svc.bots.list());
     if (pathname === "/api/bots" && req.method === "POST") {
       const body = await parseBody(req, CreateBotBody);
@@ -335,13 +324,8 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     const botGet = m(/^\/api\/bots\/([\w-]+)$/);
     if (botGet && req.method === "GET") return json(svc.bots.getView(botGet[1]!));
     if (botGet && req.method === "PATCH") {
-      const raw = (await req.json().catch(() => {
-        throw new HttpError(400, "invalid JSON body");
-      })) as Record<string, unknown>;
-      if ("agentId" in raw && raw.agentId !== undefined) return json({ error: "agent cannot change" }, 400);
-      const body = PatchBotBody.safeParse(raw);
-      if (!body.success) throw new HttpError(400, body.error.issues[0]?.message ?? "invalid body");
-      return json(svc.bots.patch(botGet[1]!, body.data));
+      const body = await parseBody(req, PatchBotBody);
+      return json(svc.bots.patch(botGet[1]!, body));
     }
     const deletionResponse = await handleBotDeletionRequest(req, svc.botDeletions, pathname);
     if (deletionResponse) return deletionResponse;

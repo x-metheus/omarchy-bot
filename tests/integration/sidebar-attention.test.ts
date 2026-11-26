@@ -186,41 +186,28 @@ describe("binary Bot Activity", () => {
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
   });
 
-  test("keeps Agent Readiness separate from Bot activity and allows creation while offline", async () => {
+  test("ignores the legacy readiness column during Bot creation and activity", async () => {
     const botId = await makeBot(h, "Readiness Bot");
-    for (const { id } of h.svc.agents.list()) {
-      h.svc.agents.markOffline(id, "credentials expired");
-    }
+    const updateLegacyStatus = h.svc.db.query("UPDATE agents SET status = ? WHERE id = 'pi'");
+    updateLegacyStatus.run("offline");
 
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
     const created = await apiStatus(h, "POST", "/api/bots", {
       name: "Created while offline",
-      agentId: "pi",
     });
     expect(created.status).toBe(201);
-    expect(created.body).toMatchObject({ name: "Created while offline", agentId: "pi" });
+    expect(created.body).toMatchObject({ name: "Created while offline" });
+    expect(h.svc.db.query("SELECT agent_id FROM bots WHERE name = ?").get("Created while offline")).toEqual({ agent_id: "pi" });
 
-    await h.svc.agents.recheck("pi");
+    updateLegacyStatus.run("missing");
     const active = await sendToBot(h, botId, "hang");
-    h.svc.agents.markOffline("pi", "runtime disconnected");
+    updateLegacyStatus.run("offline");
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
 
-    await h.svc.agents.recheck("pi");
+    updateLegacyStatus.run("missing");
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
     await h.svc.turns.abortTurn(active.turnId, "cleanup");
     await h.svc.turns.waitForTerminal(active.turnId);
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
-  });
-
-  test("creates Bots with an omitted or non-ready legacy Agent ID", async () => {
-    expect(h.svc.agents.isReady("codex")).toBeFalse();
-
-    const withoutAgent = await apiStatus(h, "POST", "/api/bots", { name: "No Agent ID" });
-    const withLegacyAgent = await apiStatus(h, "POST", "/api/bots", { name: "Legacy Agent ID", agentId: "codex" });
-
-    expect(withoutAgent.status).toBe(201);
-    expect(withoutAgent.body).toMatchObject({ name: "No Agent ID", agentId: "pi" });
-    expect(withLegacyAgent.status).toBe(201);
-    expect(withLegacyAgent.body).toMatchObject({ name: "Legacy Agent ID", agentId: "pi" });
   });
 });

@@ -46,7 +46,7 @@ async function staged(h: Harness, id: string, draftToken: string): Promise<{ sta
   };
 }
 
-test("stages and sends text up to 64 KiB with Pi offline", () => {
+test("stages and sends text up to 64 KiB with a legacy offline status", () => {
   const inputs: unknown[] = [];
   const capture: FakeReply = ({ messages }) => {
     inputs.push(messages.filter((message) => message.role === "user").map((message) => message.content));
@@ -61,8 +61,7 @@ test("stages and sends text up to 64 KiB with Pi offline", () => {
       });
       setSetting(h.svc.db, DEFAULT_MODEL_SETTING, "fake/fake-model");
       const botId = await makeBot(h, "Attachment Bot");
-      h.svc.agents.markOffline("pi", "worker unavailable in test");
-      expect(h.svc.agents.isReady("pi")).toBeFalse();
+      h.svc.db.query("UPDATE agents SET status = 'offline' WHERE id = 'pi'").run();
       const text = "é".repeat(MAX_TEXT_ATTACHMENT_BYTES / 2);
       const accepted = await stage(h, botId, new Blob([text]), "within-limit.txt");
       expect(accepted.status).toBe(201);

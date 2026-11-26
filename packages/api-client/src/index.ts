@@ -10,7 +10,6 @@ import type {
   SkillCommandDto,
 } from "@omarchy-bot/protocol";
 import type {
-  AgentDto,
   AllowedFolderBody,
   AllowedFoldersDto,
   ApprovalAnswerBodyDto,
@@ -202,17 +201,9 @@ export class ApiClient {
     return this.req("/api/settings/allowed-folders", { method: "DELETE", body: JSON.stringify({ folder } satisfies AllowedFolderBody) });
   }
 
-  // ----- agents -----
-  listAgents(): Promise<AgentDto[]> {
-    return this.req("/api/agents");
-  }
-
   /** Online Local Sidecar roster. Does not start or supervise a Sidecar. */
   listDevices(): Promise<DeviceDto[]> {
     return this.req("/api/devices");
-  }
-  recheckAgent(id: AgentDto["id"]): Promise<AgentDto> {
-    return this.req(`/api/agents/${id}/recheck`, { method: "POST" });
   }
 
   // ----- global plugins -----

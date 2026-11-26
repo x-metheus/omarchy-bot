@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import type { AgentId, SurfaceId } from "@omarchy-bot/domain";
+import type { SurfaceId } from "@omarchy-bot/domain";
 import {
   AVATAR_RENDERER_ID,
   AVATAR_STYLE_IDS,
@@ -12,15 +12,13 @@ import {
   type BotUpdatedEventPayload,
   type PatchBotBodyDto,
 } from "@omarchy-bot/protocol";
+import { BOT_AGENT_ID_PLACEHOLDER } from "../../persistence/db.ts";
 import type { EventLog } from "../events/eventLog.ts";
 import type { ThreadsService } from "../threads/threads.ts";
 
-// Internal placeholder for bots.agent_id until Task 20 removes Agent identity.
-const BOT_AGENT_ID_PLACEHOLDER = "pi";
-
 interface BotRow {
   surface_id: string;
-  id: string; name: string; instructions: string; agent_id: string; model: string | null;
+  id: string; name: string; instructions: string; model: string | null;
   avatar_kind: string; avatar_recipe: string; avatar_file: string | null;
   pinned: number;
   show_tool_calls: number; show_thinking: number; max_turns: number | null;
@@ -44,11 +42,7 @@ export class HttpError extends Error {
   }
 }
 
-/**
- * User-created Bots. Each Bot references exactly one Agent; the reference is
- * immutable (ADR 0002). Binary activity is derived from all of the Bot's
- * nonterminal Turns and never from Agent Readiness.
- */
+/** User-created Bots. Activity is derived from the Bot's nonterminal Turns. */
 export class BotsService {
   constructor(
     private readonly db: Database,
@@ -94,7 +88,7 @@ export class BotsService {
         ? { kind: "upload", url: `/api/bots/${r.id}/avatar` }
         : { kind: r.avatar_kind === "recipe" ? "recipe" : "generated", recipe: JSON.parse(r.avatar_recipe || defaultAvatarRecipe(r.id)) };
     return {
-      id: r.id, surfaceId: r.surface_id as SurfaceId, name: r.name, instructions: r.instructions, agentId: r.agent_id as AgentId,
+      id: r.id, surfaceId: r.surface_id as SurfaceId, name: r.name, instructions: r.instructions,
       model: r.model,
       avatar,
       pinned: Boolean(r.pinned),
@@ -144,10 +138,8 @@ export class BotsService {
     return this.#toView(r);
   }
 
-  /** Agent reference is fixed: any attempt to change it is a 400. */
-  patch(id: string, body: PatchBotBodyDto & { agentId?: unknown }): BotDto {
+  patch(id: string, body: PatchBotBodyDto): BotDto {
     if (!this.#row(id)) throw new HttpError(404, `unknown bot ${id}`);
-    if (body.agentId !== undefined) throw new HttpError(400, "agent cannot change");
     this.db.query(`
       UPDATE bots
       SET name = COALESCE(?, name),

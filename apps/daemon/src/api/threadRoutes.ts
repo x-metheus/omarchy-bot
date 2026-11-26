@@ -1,5 +1,5 @@
 import { PatchThreadBody } from "@omarchy-bot/protocol";
-import { ThreadTitleConflict, type ThreadsService } from "../modules/threads/threads.ts";
+import type { ThreadsService } from "../modules/threads/threads.ts";
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -34,13 +34,8 @@ export async function handleThreadFeatureRequest(
   const parsed = PatchThreadBody.safeParse(await readJson(req));
   if (!parsed.success) return json({ error: "invalid request body" }, 400);
 
-  try {
-    const updated = await threads.updateTitle(thread[1]!, parsed.data.title);
-    return updated === undefined
-      ? json({ error: `unknown thread ${thread[1]!}` }, 404)
-      : json(updated);
-  } catch (error) {
-    if (error instanceof ThreadTitleConflict) return json({ error: error.message }, error.status);
-    throw error;
-  }
+  const updated = threads.updateTitle(thread[1]!, parsed.data.title);
+  return updated === undefined
+    ? json({ error: `unknown thread ${thread[1]!}` }, 404)
+    : json(updated);
 }

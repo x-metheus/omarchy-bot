@@ -5,6 +5,9 @@ import { AVATAR_RENDERER_ID, DEFAULT_AVATAR_STYLE_ID } from "@omarchy-bot/protoc
 import { isToolCallSummary, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY, type ToolCallSummary } from "@omarchy-bot/domain";
 import type { Config } from "../bootstrap/config.ts";
 
+/** Storage identity for new Bots under the existing bots.agent_id foreign key. */
+export const BOT_AGENT_ID_PLACEHOLDER = "pi";
+
 type MigrationConfig = Pick<Config, "artifactsDir">;
 
 export type Migration = { name: string } & (
@@ -1091,6 +1094,8 @@ export function openDb(cfg: Config): Database {
   } else {
     db.exec("PRAGMA foreign_keys = ON");
   }
+  db.query(`INSERT INTO agents (id, display_name, updated_at) VALUES (?, 'Pi', ?) ON CONFLICT(id) DO NOTHING`)
+    .run(BOT_AGENT_ID_PLACEHOLDER, new Date().toISOString());
   return db;
 }
 /** Clean up interrupted work and preserve Turns with durable state for BotRuntime recovery. */
@@ -1113,5 +1118,4 @@ export function recoverOnStartup(db: Database): void {
         AND EXISTS (SELECT 1 FROM pi_thread_conversations c WHERE c.thread_id = turns.thread_id AND c.bot_id = turns.bot_id))`).run(now);
   db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE state='cleaning'`)
     .run(JSON.stringify([{ stage: "database", resource: "daemon", message: "daemon restarted during permanent deletion" }]), now);
-  db.query(`UPDATE agents SET status='offline', reason='daemon restarted during check', updated_at=? WHERE status='checking'`).run(now);
 }

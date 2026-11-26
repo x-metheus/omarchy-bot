@@ -88,11 +88,6 @@ export interface AgentPluginSnapshot {
   diagnostics: string[];
 }
 
-export interface AgentPluginTurnContext {
-  botId: string;
-  turnId: string;
-  workerSessionId: string;
-}
 export interface AgentPluginToolOutput {
   content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[];
   isError?: boolean;

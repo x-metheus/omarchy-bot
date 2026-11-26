@@ -121,9 +121,8 @@ describe("integration: ordered Thinking blocks", () => {
     });
   });
 
-  test("keeps Thinking available while Pi is offline and projects only emitted records", async () => {
-    h.svc.agents.markOffline("pi", "worker unavailable in test");
-    expect(h.svc.agents.isReady("pi")).toBeFalse();
+  test("keeps Thinking available with a legacy offline status and projects only emitted records", async () => {
+    h.svc.db.query("UPDATE agents SET status = 'offline' WHERE id = 'pi'").run();
     const botId = await makeBot(h, "Thinking Settings Bot");
     expect(await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).toMatchObject({
       thinkingAvailability: "supported",
@@ -146,7 +145,6 @@ describe("integration: ordered Thinking blocks", () => {
     const home = h.home;
     await h.disconnectForRestart();
     h = await startDaemon(home);
-    expect(h.svc.agents.capabilityInventory("pi")).toBeUndefined();
 
     expect(await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).toMatchObject({
       thinkingAvailability: "supported",

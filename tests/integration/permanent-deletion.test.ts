@@ -118,7 +118,8 @@ describe("local Bot deletion", () => {
     ).toEqual([{ type: "bot.deleted" }]);
 
     const sibling = await api<BotViewDto>(h, "GET", `/api/bots/${siblingId}`);
-    expect(sibling.agentId).toBe("pi");
+    expect(sibling.id).toBe(siblingId);
+    expect(h.svc.db.query("SELECT agent_id FROM bots WHERE id = ?").get(siblingId)).toEqual({ agent_id: "pi" });
     const siblingTurn = await sendToBot(h, siblingId, "say: sibling still works");
     await waitThreadIdle(h, siblingTurn.threadId);
   });

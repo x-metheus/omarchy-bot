@@ -2,7 +2,6 @@ import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
 import { ThreadsService } from "../modules/threads/threads.ts";
-import { AgentsRegistry } from "../modules/agents/registry.ts";
 import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
@@ -208,8 +207,7 @@ export async function main(options: MainOptions = {}): Promise<{
     computer,
   });
 
-  const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir });
-  const threads: ThreadsService = new ThreadsService(db, events, agents);
+  const threads = new ThreadsService(db, events);
   const bots = new BotsService(db, events, threads);
   const attachments = new AttachmentsService(db, cfg.attachmentsDir);
   attachments.gcStaged();
@@ -257,7 +255,6 @@ export async function main(options: MainOptions = {}): Promise<{
     },
   );
 
-  agents.init();
   options.onMailboxDispatchControls?.({
     pauseDispatch: mailbox.pauseDispatch.bind(mailbox),
     resumeDispatch: mailbox.resumeDispatch.bind(mailbox),
@@ -272,7 +269,6 @@ export async function main(options: MainOptions = {}): Promise<{
     cfg,
     db,
     events,
-    agents,
     bots,
     botDeletions,
     threads,
@@ -292,7 +288,6 @@ export async function main(options: MainOptions = {}): Promise<{
   const writeStatus = (): void => {
     writeStatusAtomic(cfg.statusPath, {
       ts: new Date().toISOString(),
-      agents: agents.list().map((a) => ({ id: a.id, status: a.status })),
       computer: computer.states(),
     });
   };

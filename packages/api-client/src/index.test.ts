@@ -47,7 +47,7 @@ describe("ApiClient Service address", () => {
     } as unknown as typeof WebSocket;
     try {
       expect(client.baseUrl).toBe("http://127.0.0.1:7321");
-      await client.listAgents();
+      await client.listBots();
       await client.uploadAvatar("bot-1", new Blob(["avatar"]));
       await client.stageAttachment("bot-1", "a7126bac-a201-413f-a212-5f495aba0cda", new File(["attachment"], "file.txt"));
       expect(client.avatarUrl("bot-1")).toBe("http://127.0.0.1:7321/api/bots/bot-1/avatar?access_token=paired-token");
@@ -57,7 +57,7 @@ describe("ApiClient Service address", () => {
 
       serviceUrl = "https://service.example///";
       expect(client.baseUrl).toBe("https://service.example");
-      await client.listAgents();
+      await client.listBots();
       await client.uploadAvatar("bot-1", new Blob(["avatar"]));
       await client.stageAttachment("bot-1", "a7126bac-a201-413f-a212-5f495aba0cda", new File(["attachment"], "file.txt"));
       expect(client.avatarUrl("bot-1")).toBe("https://service.example/api/bots/bot-1/avatar?access_token=paired-token");
@@ -68,10 +68,10 @@ describe("ApiClient Service address", () => {
       globalThis.WebSocket = originalWebSocket;
     }
     expect(requests).toEqual([
-      "http://127.0.0.1:7321/api/agents",
+      "http://127.0.0.1:7321/api/bots",
       "http://127.0.0.1:7321/api/bots/bot-1/avatar/upload",
       "http://127.0.0.1:7321/api/attachments/stage",
-      "https://service.example/api/agents",
+      "https://service.example/api/bots",
       "https://service.example/api/bots/bot-1/avatar/upload",
       "https://service.example/api/attachments/stage",
     ]);
@@ -94,7 +94,7 @@ describe("ApiClient Paired Device token", () => {
       deviceToken: () => "a".repeat(64),
     });
 
-    await client.listAgents();
+    await client.listBots();
 
     expect(requests[0]?.headers.get("authorization")).toBe(`Bearer ${"a".repeat(64)}`);
     expect(client.avatarUrl("bot-1")).toBe(`http://127.0.0.1:7321/api/bots/bot-1/avatar?access_token=${"a".repeat(64)}`);
@@ -124,7 +124,7 @@ test("every HTTP fetch path reports a revoked device while preserving the 401 er
     fetch: Object.assign(async () => new Response('{"error":"unauthorized"}', { status: 401 }), { preconnect: fetch.preconnect }),
   });
   for (const request of [
-    () => client.listAgents(),
+    () => client.listBots(),
     () => client.uploadAvatar("bot-1", new Blob(["avatar"])),
     () => client.stageAttachment("bot-1", "a7126bac-a201-413f-a212-5f495aba0cda", new File(["attachment"], "file.txt")),
   ]) {
@@ -146,7 +146,7 @@ test("delayed 401 responses from replaced credentials leave the new connection p
         onUnauthorized: () => { unauthorized++; },
         fetch: Object.assign(() => pending.promise, { preconnect: fetch.preconnect }),
       });
-      const oldRequest = method === "json" ? client.listAgents()
+      const oldRequest = method === "json" ? client.listBots()
         : method === "avatar" ? client.uploadAvatar("bot-1", new Blob(["avatar"]))
         : method === "attachment" ? client.stageAttachment("bot-1", "a7126bac-a201-413f-a212-5f495aba0cda", new File(["attachment"], "file.txt"))
         : client.fetchResponse("https://old.example/api/computer/projection?access_token=old-token");

@@ -21,8 +21,8 @@ async function withDaemon(run: (h: Harness, client: ApiClient) => Promise<void>)
 }
 
 test("Bot model PATCH validates, persists, emits, and clears the override for only the target Bot", () => withDaemon(async (h, client) => {
-  const bot = await client.createBot({ name: "Bot with model override", instructions: "", agentId: "pi" });
-  const other = await client.createBot({ name: "Other Bot", instructions: "", agentId: "pi" });
+  const bot = await client.createBot({ name: "Bot with model override", instructions: "" });
+  const other = await client.createBot({ name: "Other Bot", instructions: "" });
   const botPath = `/api/bots/${bot.id}`;
   const otherModel = "unconfigured/org/other-model";
   expect(BotDto.parse(bot).model).toBeNull();
@@ -69,7 +69,7 @@ test("durable Turns select the Bot override and return to the Service model afte
       models: [{ id: "fake-model" }, { id: "default-model" }],
     });
     setSetting(h.svc.db, DEFAULT_MODEL_SETTING, "fake/default-model");
-    const bot = await client.createBot({ name: "Model selection", instructions: "", agentId: "pi" });
+    const bot = await client.createBot({ name: "Model selection", instructions: "" });
 
     async function expectCompletedWithModel(turn: { threadId: string; turnId: string }, model: string) {
       await waitThreadIdle(h, turn.threadId);

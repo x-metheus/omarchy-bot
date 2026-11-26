@@ -62,7 +62,7 @@ test("a six-level workspace Skill appears once in Services and slash commands", 
 
   const deep = await api<PluginStateDto>(h, "GET", "/api/plugins");
   expect([...deep.skills, ...deep.nativeSkills].filter((skill) => skill.name === name)).toEqual([
-    expect.objectContaining({ name, description, path: path.join(directory, "SKILL.md"), readOnly: true }),
+    { name, description, path: path.join(directory, "SKILL.md"), readOnly: true },
   ]);
   const command: SkillCommandDto = { name, description, command: `/skill:${name}`, source: "native" };
   expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).filter((skill) => skill.name === name)).toEqual([command]);

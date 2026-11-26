@@ -201,11 +201,10 @@ describe("durable Bot mailbox", () => {
     h = undefined;
   });
 
-  test("enqueue dispatches Bot mail to a target Turn when no Agent adapter is installed", async () => {
+  test("enqueue dispatches Bot mail to a target Turn", async () => {
     h = await startMailboxDaemon();
     const sourceBotId = await makeBot(h, "Agentless source");
     const targetBotId = await makeBot(h, "Agentless target");
-    expect(h.svc.agents.get("pi")?.status).toBe("missing");
 
     const body = "deliver without an Agent";
     const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:${body}`);
@@ -218,7 +217,6 @@ describe("durable Bot mailbox", () => {
     const author = `Message from Bot Agentless source (${sourceBotId})`;
     expect(notice.data).toEqual({ author, text: body, deliveryId });
     expect(notice.model).toMatchObject([{ role: "user", content: `${author}: ${body}` }]);
-    expect(h.svc.agents.get("pi")?.status).toBe("missing");
   });
 
   // Checking replay persistence requires two real daemon boots against the same on-disk state.
@@ -381,11 +379,10 @@ describe("durable Bot mailbox", () => {
     }]);
   });
 
-  test("uses the active Turn for mail authorization without an Agent capability inventory", async () => {
+  test("uses the active Turn for mail authorization", async () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Capability-bound source");
     const targetBotId = await makeBot(h, "Capability-bound target");
-    expect(h.svc.agents.capabilityInventory("pi")).toBeUndefined();
 
     const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:durable authority`);
     const deliveryId = await durableAcknowledgement(h, source.threadId);
@@ -446,8 +443,9 @@ describe("durable Bot mailbox", () => {
     const sourceBot = await api<BotDto>(h, "GET", `/api/bots/${sourceBotId}`);
     const targetBot = await api<BotDto>(h, "GET", `/api/bots/${targetBotId}`);
     const sourceSecret = "SOURCE-THREAD-SECRET";
-    expect(sourceBot.agentId).toBe("pi");
-    expect(targetBot.agentId).toBe(sourceBot.agentId);
+    expect(h.svc.db.query("SELECT agent_id FROM bots WHERE id IN (?, ?)").all(sourceBot.id, targetBot.id)).toEqual([
+      { agent_id: "pi" }, { agent_id: "pi" },
+    ]);
     expect(targetBot.id).not.toBe(sourceBot.id);
 
     const sourceConversation = await sendToBot(h, sourceBotId, `say: ${sourceSecret}`);

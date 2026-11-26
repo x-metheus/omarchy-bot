@@ -46,65 +46,35 @@ async function until(fn: () => Promise<boolean>, timeoutMs = 10_000): Promise<vo
   }
 }
 
-describe("integration: agents API", () => {
-  test("lists all nine agents with version/status/reason/guidance fields", async () => {
-    const agents = await api<{ id: string; displayName: string; version: string; status: string; reason?: string; guidance?: string }[]>(h, "GET", "/api/agents");
-    expect(agents.length).toBe(9);
-    const ids = agents.map((a) => a.id);
-    for (const expected of ["pi", "omp", "codex", "claude", "grok", "opencode", "gemini", "copilot", "crush"]) {
-      expect(ids).toContain(expected);
-    }
-    for (const agent of agents) {
-      expect(agent.displayName).toBeString();
-      expect(agent.version).toBeString();
-      expect(agent.status).toBe("missing");
-      expect(agent.reason).toBeString();
-      expect(agent.guidance).toBeString();
-    }
-  });
-
-  test("rechecking an Agent clears historical readiness", async () => {
-    h.svc.db.query("UPDATE agents SET status = 'ready' WHERE id = 'pi'").run();
-    const agent = await api<{ status: string; capabilities?: unknown }>(h, "POST", "/api/agents/pi/recheck");
-    expect(agent.status).toBe("missing");
-    expect(agent.capabilities).toBeUndefined();
-    expect(h.svc.agents.status("pi")).toBe("missing");
-  });
-});
-
 describe("integration: bots API", () => {
-  test("creates bots with pi when given a different recognized agent", async () => {
-    const res = await apiStatus(h, "POST", "/api/bots", { name: "Nope", instructions: "", agentId: "claude" });
-    expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({ agentId: "pi" });
-  });
-
-  test("rejects bot creation for an unknown agent", async () => {
-    const res = await apiStatus(h, "POST", "/api/bots", { name: "Nope", instructions: "", agentId: "nonsense" });
-    expect(res.status).toBe(400);
+  test("creates a Bot using the identity seeded on a fresh database", async () => {
+    expect(h.svc.db.query("SELECT id FROM agents ORDER BY id").all()).toEqual([{ id: "pi" }]);
+    const { status, body } = await apiStatus(h, "POST", "/api/bots", { name: "Seeded Bot" });
+    expect(status).toBe(201);
+    expect(body).toMatchObject({ name: "Seeded Bot" });
+    expect(body).not.toHaveProperty("agentId");
+    const { id } = body as { id: string };
+    expect(id).toBeString();
+    expect(h.svc.db.query("SELECT agent_id FROM bots WHERE id = ?").get(id)).toEqual({ agent_id: "pi" });
+    expect(h.svc.db.query("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
+    expect(h.svc.db.query("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
   test("rejects empty names", async () => {
-    const res = await apiStatus(h, "POST", "/api/bots", { name: "   ", instructions: "", agentId: "pi" });
+    const res = await apiStatus(h, "POST", "/api/bots", { name: "   ", instructions: "" });
     expect(res.status).toBe(400);
   });
 
-  test("two bots on one agent get independent ids", async () => {
-    const a = await api<{ id: string; name: string; agentId: string; avatar: { kind: string } }>(h, "POST", "/api/bots", { name: "Alpha", instructions: "alpha job", agentId: "pi" });
-    const b = await api<{ id: string; name: string; agentId: string }>(h, "POST", "/api/bots", { name: "Beta", instructions: "beta job", agentId: "pi" });
+  test("two Bots have independent ids and share the stored identity", async () => {
+    const a = await api<{ id: string; name: string; avatar: { kind: string } }>(h, "POST", "/api/bots", { name: "Alpha", instructions: "alpha job" });
+    const b = await api<{ id: string; name: string }>(h, "POST", "/api/bots", { name: "Beta", instructions: "beta job" });
     expect(a.id).not.toBe(b.id);
     expect(a.id.startsWith("bot_")).toBeTrue();
     expect(b.id.startsWith("bot_")).toBeTrue();
-    expect(a.agentId).toBe("pi");
-    expect(b.agentId).toBe("pi");
+    expect(h.svc.db.query("SELECT agent_id FROM bots WHERE id IN (?, ?)").all(a.id, b.id)).toEqual([
+      { agent_id: "pi" }, { agent_id: "pi" },
+    ]);
     expect(a.avatar.kind).toBe("generated");
-  });
-
-  test("PATCH cannot change agentId", async () => {
-    const botId = await makeBot(h, "Patched");
-    const res = await apiStatus(h, "PATCH", `/api/bots/${botId}`, { agentId: "claude" });
-    expect(res.status).toBe(400);
-    expect((res.body as { error?: string }).error).toContain("agent");
   });
 
   test("PATCH updates name and instructions", async () => {
@@ -227,14 +197,5 @@ describe("integration: threads API", () => {
     const filtered = await api<{ id: string }[]>(h, "GET", `/api/bots/${botId}/threads?q=apple`);
     expect(filtered.length).toBe(1);
     expect(filtered[0]!.id).toBe(one.threadId);
-  });
-
-  test("thread rename is rejected with a 409 naming the agent", async () => {
-    const botId = await makeBot(h, "Renamer");
-    const sent = await sendToBot(h, botId, "say: rename me");
-    await waitThreadIdle(h, sent.threadId);
-    const res = await apiStatus(h, "PATCH", `/api/threads/${sent.threadId}`, { title: "Nope" });
-    expect(res.status).toBe(409);
-    expect((res.body as { error?: string }).error).toContain("pi");
   });
 });

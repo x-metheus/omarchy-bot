@@ -86,7 +86,7 @@ containerTest("archive image serves paired Bots and offline Bot Screens and reta
     expect(exchanged.status).toBe(201);
     const paired = await exchanged.json() as { token: string; device: { id: string } };
     token = paired.token;
-    const bot = await api<{ id: string; surfaceId: string }>("/api/bots", { name: "Container Bot", agentId: "pi" });
+    const bot = await api<{ id: string; surfaceId: string }>("/api/bots", { name: "Container Bot" });
     let threadId: string | undefined;
     async function turn(text: string): Promise<MessageDto[]> {
       const previousIds = new Set((threadId ? await api<MessageDto[]>(`/api/threads/${threadId}/messages`) : []).map((message) => message.id));

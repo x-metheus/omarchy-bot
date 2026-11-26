@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ThreadDto } from "../../packages/protocol/src/index.ts";
-import { ThreadTitleConflict } from "../../apps/daemon/src/modules/threads/threads.ts";
 import {
   clearDraftsByBot,
   draftStorageKey,
@@ -89,27 +88,23 @@ describe("thread history", () => {
     expect(noMatches).toEqual([]);
   });
 
-  test("returns a typed conflict for pi rename support and leaves the derived title unchanged", async () => {
-    const botId = await makeBot(h, "Rename Truth Bot");
-    const sent = await sendToBot(h, botId, "Keep this title");
+  test("renames a Thread through the API and persists the title", async () => {
+    const botId = await makeBot(h, "Rename Bot");
+    const sent = await sendToBot(h, botId, "Original title");
     await waitThreadIdle(h, sent.threadId);
 
-    let conflict: unknown;
-    try {
-      await h.svc.threads.updateTitle(sent.threadId, "Pretend rename");
-    } catch (error) {
-      conflict = error;
-    }
-    expect(conflict).toBeInstanceOf(ThreadTitleConflict);
-    expect((conflict as ThreadTitleConflict).agentId).toBe("pi");
-    expect((conflict as ThreadTitleConflict).status).toBe(409);
+    const url = `/api/threads/${sent.threadId}`;
+    expect((await api<ThreadDto>(h, "GET", url)).title).toBe("Original title");
+    expect(await apiStatus(h, "PATCH", url, { title: "   " })).toMatchObject({ status: 400 });
+    expect(await apiStatus(h, "PATCH", "/api/threads/unknown", { title: "Renamed thread" })).toMatchObject({ status: 404 });
 
-    const response = await apiStatus(h, "PATCH", `/api/threads/${sent.threadId}`, { title: "Pretend rename" });
-    expect(response.status).toBe(409);
-    expect(response.body).toEqual({ error: "rename not supported by pi" });
-
-    const thread = await api<ThreadDto>(h, "GET", `/api/threads/${sent.threadId}`);
-    expect(thread.title).toBe("Keep this title");
+    const renamed = await api<ThreadDto>(h, "PATCH", url, { title: "  Renamed thread  " });
+    expect(renamed).toMatchObject({ id: sent.threadId, botId, title: "Renamed thread" });
+    expect(await api<ThreadDto>(h, "GET", url)).toEqual(renamed);
+    expect(await api<ThreadDto[]>(h, "GET", `/api/bots/${botId}/threads?q=renamed`)).toEqual([renamed]);
+    const updates = h.svc.events.replay(0, h.svc.events.oldestCursor()).events
+      .filter((event) => event.aggregateId === sent.threadId && event.type === "thread.updated");
+    expect(updates).toEqual([expect.objectContaining({ payload: { title: "Renamed thread" } })]);
   });
 });
 

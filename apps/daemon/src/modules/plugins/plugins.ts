@@ -242,7 +242,7 @@ export class PluginsService {
     return { revision: this.#state.revision, cloudUrl: this.#cloudUrl(), providers: cloud.providers,
       accounts: this.#state.accounts.map((account) => this.#accountDto(account)), mcp: [...mcp, ...this.#state.mcp.map((connection) => ({ ...this.#mcpDto(connection), enabled: false, readOnly: true }))],
       skills: [...skills, ...this.#state.skills.map((skill) => ({ ...this.#skillDto(skill), enabled: false, readOnly: true }))],
-      nativeSkills: native.skills.filter((skill) => !workspaceSkills.has(skill.path)).map((skill) => ({ ...skill, agentId: "pi", readOnly: true })),
+      nativeSkills: native.skills.filter((skill) => !workspaceSkills.has(skill.path)).map((skill) => ({ ...skill, readOnly: true })),
       ...(cloud.error ? { cloudError: cloud.error } : {}), ...(nativeError ? { nativeError } : {}) };
   }
 

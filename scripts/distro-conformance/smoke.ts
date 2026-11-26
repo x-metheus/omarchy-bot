@@ -48,7 +48,7 @@ export async function exerciseService(base: string, state: string, realBrowser =
     assert(response.ok, `${route}: HTTP ${response.status}: ${response.ok ? "" : await response.text()}`);
     return response;
   };
-  const bot = await (await request("/api/bots", { name: "Distribution smoke", instructions: "", agentId: "pi" })).json() as { id: string; surfaceId: string };
+  const bot = await (await request("/api/bots", { name: "Distribution smoke", instructions: "" })).json() as { id: string; surfaceId: string };
   const query = new URLSearchParams({ botId: bot.id, surfaceId: bot.surfaceId });
   const tool = async (directive: string): Promise<string> => {
     const turn = await (await request(`/api/bots/${bot.id}/messages`, { text: `computer:${directive}` })).json() as { threadId: string; turnId: string };
