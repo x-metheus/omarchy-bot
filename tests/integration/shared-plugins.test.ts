@@ -130,7 +130,6 @@ test("Services inventory skips a workspace SKILL.md symlink into the user's Pi h
 test.each([
   { link: "workspace/.agents", workspacePath: "workspace" },
   { link: "workspace/.agents/skills", workspacePath: "workspace" },
-  { link: "workspace-parent", workspacePath: "workspace-parent/workspace" },
 ])("NativeSkills refuses to install through a symlink at $link", async ({ link, workspacePath }) => {
   const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
   try {
@@ -167,13 +166,13 @@ test.each([
   }
 });
 
-test.each(["NativeSkills", "PluginsService"])("%s refuses a symlink at plugins-parent before creating private state", async (component) => {
+test.each(["NativeSkills", "PluginsService"])("%s refuses a symlinked plugins folder before creating private state", async (component) => {
   const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
   let service: PluginsService | undefined;
   try {
     const workspace = path.join(home, "workspace");
-    const parent = path.join(home, "plugins-parent");
-    const privateDir = path.join(parent, "plugins");
+    const privateDir = path.join(home, "plugins");
+    const parent = privateDir;
     const piDirectory = path.join(home, ".pi");
     const sentinel = path.join(piDirectory, "settings.json");
     const document = '{"theme":"dark"}\n';
@@ -189,9 +188,39 @@ test.each(["NativeSkills", "PluginsService"])("%s refuses a symlink at plugins-p
     }).toThrow(`Skill destination cannot use a symlink: ${parent}`);
     expect((await lstat(piDirectory, { bigint: true })).mtimeNs).toBe(before.mtimeNs);
     expect(await readdir(piDirectory)).toEqual(entriesBefore);
-    await expect(lstat(path.join(piDirectory, "plugins"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(path.join(piDirectory, "disabled-skills"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readFile(sentinel, "utf8")).toBe(document);
     expect(await readlink(parent)).toBe(piDirectory);
+  } finally {
+    await service?.shutdown();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Skills work when the data folder and workspace sit behind a symlinked parent", async () => {
+  // A symlink above the Service's own folders is the user's setup, such as /home -> /var/home on Fedora Atomic.
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  let service: PluginsService | undefined;
+  try {
+    const real = path.join(home, "var-home");
+    const linked = path.join(home, "home");
+    await mkdir(real);
+    await symlink(real, linked, "dir");
+    const workspace = path.join(linked, "workspace");
+    const privateDir = path.join(linked, "data", "plugins");
+    const source = path.join(home, "source");
+    const name = "linked-home";
+    const description = "Install under a symlinked home";
+    await mkdir(source);
+    await writeFile(path.join(source, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
+
+    service = new PluginsService(privateDir, workspace, () => ({ skills: [] }));
+    service.skills.install({ id: name, name, description, source, sourceType: "local", installUrl: source }, {
+      directory: source, revision: "fixture",
+    });
+
+    expect(service.skills.list().map((skill) => skill.name)).toContain(name);
+    expect(await readFile(path.join(real, "workspace", ".agents", "skills", name, "SKILL.md"), "utf8")).toContain(description);
   } finally {
     await service?.shutdown();
     await rm(home, { recursive: true, force: true });

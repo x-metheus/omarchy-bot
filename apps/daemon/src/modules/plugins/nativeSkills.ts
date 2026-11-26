@@ -44,12 +44,20 @@ function legacySkillRoots(workspace: string): string[] {
   return [".pi", ".claude"].map((client) => path.join(workspace, client, "skills"));
 }
 
-export function assertUnlinkedDestination(directory: string): string {
+/**
+ * Refuse a destination that passes through a symlink below `base`. `base` is one of the Service's configured folders
+ * (the data folder or the Shared Workspace), so symlinks at or above it are the user's setup, such as /home -> /var/home.
+ */
+export function assertUnlinkedDestination(directory: string, base: string): string {
   const absolute = path.resolve(directory);
-  // Validate each parent before resolving its children, including the configured data directory.
-  let current = path.parse(absolute).root;
-  let canonicalParent = realpathSync(current);
-  for (const component of path.relative(current, absolute).split(path.sep).filter(Boolean)) {
+  const trusted = path.resolve(base);
+  const relative = path.relative(trusted, absolute);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) throw new HttpError(409, `Skill destination is outside ${trusted}`);
+  let current = trusted;
+  let canonicalParent: string;
+  // Nothing below a folder that does not exist yet can be a symlink.
+  try { canonicalParent = realpathSync(trusted); } catch { return absolute; }
+  for (const component of relative.split(path.sep).filter(Boolean)) {
     current = path.join(current, component);
     const stat = lstatSync(current, { throwIfNoEntry: false });
     if (!stat) break;
@@ -78,7 +86,7 @@ export class NativeSkills {
     this.#disabled = path.join(privateDir, "disabled-skills");
     this.#file = path.join(privateDir, "native-skills.json");
     this.#transactionFile = path.join(privateDir, "native-skills-transaction.json");
-    mkdirSync(assertUnlinkedDestination(privateDir), { recursive: true, mode: 0o700 });
+    mkdirSync(assertUnlinkedDestination(privateDir, path.dirname(privateDir)), { recursive: true, mode: 0o700 });
     this.#registry = existsSync(this.#file) ? Registry.parse(JSON.parse(readFileSync(this.#file, "utf8"))) : { version: 1, entries: [], defaultsInitialized: false };
     try { this.#recover(); }
     catch { this.#recoveryError = `Interrupted Skill update requires attention. Current files and recovery copies were retained; inspect ${this.#transactionFile}.`; }
@@ -100,7 +108,7 @@ export class NativeSkills {
     if (!existsSync(this.#transactionFile)) return;
     const transaction = Transaction.parse(JSON.parse(readFileSync(this.#transactionFile, "utf8")));
     if (path.dirname(transaction.root) !== this.privateDir || !/^\.skill-transaction-[0-9a-f-]{36}$/.test(path.basename(transaction.root))) throw new Error("Invalid Skill recovery location");
-    assertUnlinkedDestination(transaction.root);
+    assertUnlinkedDestination(transaction.root, path.dirname(this.privateDir));
     for (const [index, item] of transaction.entries.entries()) {
       if (item.stage !== path.join(transaction.root, `stage-${index}`) || item.backup !== path.join(transaction.root, `previous-${index}`)) throw new Error("Invalid Skill recovery location");
       this.#assertDestination(item.next.directory);
@@ -139,8 +147,9 @@ export class NativeSkills {
 
   #assertDestination(directory: string): void {
     const absolute = path.resolve(directory);
-    if (!inside(this.root, absolute) && !inside(this.#disabled, absolute)) throw new HttpError(409, "Skill destination is outside the managed workspace");
-    assertUnlinkedDestination(absolute);
+    if (inside(this.root, absolute)) assertUnlinkedDestination(absolute, this.workspace);
+    else if (inside(this.#disabled, absolute)) assertUnlinkedDestination(absolute, path.dirname(this.privateDir));
+    else throw new HttpError(409, "Skill destination is outside the managed workspace");
   }
 
   #directories(): { directory: string; root: string }[] {
@@ -306,8 +315,8 @@ export class NativeSkills {
   installBundle(installations: readonly Installation[]): InstalledSkillDto[] {
     if (!installations.length) return [];
     const root = path.join(this.privateDir, `.skill-transaction-${randomUUID()}`);
-    assertUnlinkedDestination(root);
-    assertUnlinkedDestination(this.root);
+    assertUnlinkedDestination(root, path.dirname(this.privateDir));
+    assertUnlinkedDestination(this.root, this.workspace);
     this.#recover();
     const { results, registry } = this.#scan();
     const ids = new Set<string>(), destinations = new Set<string>();

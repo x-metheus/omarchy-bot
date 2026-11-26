@@ -78,7 +78,7 @@ export class PluginsService {
   constructor(private readonly rootDir: string, private readonly cwd: string, private readonly nativeResources: () => NativePluginResources,
     private readonly nativeControl?: (input: NativeMcpControlInput) => Promise<NativeMcpControlResult>,
     private readonly serviceOrigin?: () => string, private readonly authorizationEvent?: (event: PluginAuthorizationEvent) => void) {
-    const directory = assertUnlinkedDestination(rootDir);
+    const directory = assertUnlinkedDestination(rootDir, path.dirname(rootDir));
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (!lstatSync(directory).isDirectory()) throw new Error("Plugin state directory must be a private real directory");
     chmodSync(directory, 0o700);
