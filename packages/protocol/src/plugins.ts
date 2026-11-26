@@ -142,7 +142,6 @@ export interface NativeSkillDto {
   name: string;
   description: string;
   path: string;
-  agentId: string;
   readOnly: true;
 }
 export interface PluginStateDto {

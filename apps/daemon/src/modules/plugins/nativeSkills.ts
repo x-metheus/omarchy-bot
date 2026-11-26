@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { constants, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { ResourceFingerprint } from "./resourceFingerprint.ts";
@@ -36,8 +36,30 @@ function inside(root: string, target: string): boolean {
   }
 }
 
+function insideSkillRoot(root: string, target: string): boolean {
+  return inside(root, target) && target.split(path.sep).every((part) => part !== ".pi" && part !== ".claude");
+}
+
 function legacySkillRoots(workspace: string): string[] {
   return [".pi", ".claude"].map((client) => path.join(workspace, client, "skills"));
+}
+
+export function assertUnlinkedDestination(directory: string): string {
+  const absolute = path.resolve(directory);
+  // Validate each parent before resolving its children, including the configured data directory.
+  let current = path.parse(absolute).root;
+  let canonicalParent = realpathSync(current);
+  for (const component of path.relative(current, absolute).split(path.sep).filter(Boolean)) {
+    current = path.join(current, component);
+    const stat = lstatSync(current, { throwIfNoEntry: false });
+    if (!stat) break;
+    if (stat.isSymbolicLink()) throw new HttpError(409, `Skill destination cannot use a symlink: ${current}`);
+    if (!stat.isDirectory() && current !== absolute) throw new HttpError(409, `Skill destination parent must be a directory: ${current}`);
+    const canonical = realpathSync(current);
+    if (path.dirname(canonical) !== canonicalParent) throw new HttpError(409, `Skill destination escaped its parent directory: ${current}`);
+    canonicalParent = canonical;
+  }
+  return absolute;
 }
 
 /** Native files are authoritative; this registry retains origin and update baselines only. */
@@ -56,7 +78,7 @@ export class NativeSkills {
     this.#disabled = path.join(privateDir, "disabled-skills");
     this.#file = path.join(privateDir, "native-skills.json");
     this.#transactionFile = path.join(privateDir, "native-skills-transaction.json");
-    mkdirSync(privateDir, { recursive: true, mode: 0o700 });
+    mkdirSync(assertUnlinkedDestination(privateDir), { recursive: true, mode: 0o700 });
     this.#registry = existsSync(this.#file) ? Registry.parse(JSON.parse(readFileSync(this.#file, "utf8"))) : { version: 1, entries: [], defaultsInitialized: false };
     try { this.#recover(); }
     catch { this.#recoveryError = `Interrupted Skill update requires attention. Current files and recovery copies were retained; inspect ${this.#transactionFile}.`; }
@@ -78,9 +100,11 @@ export class NativeSkills {
     if (!existsSync(this.#transactionFile)) return;
     const transaction = Transaction.parse(JSON.parse(readFileSync(this.#transactionFile, "utf8")));
     if (path.dirname(transaction.root) !== this.privateDir || !/^\.skill-transaction-[0-9a-f-]{36}$/.test(path.basename(transaction.root))) throw new Error("Invalid Skill recovery location");
+    assertUnlinkedDestination(transaction.root);
     for (const [index, item] of transaction.entries.entries()) {
-      if (item.stage !== path.join(transaction.root, `stage-${index}`) || item.backup !== path.join(transaction.root, `previous-${index}`)
-        || !this.#owned(item.next.directory) || (item.previous && !this.#owned(item.previous.directory))) throw new Error("Invalid Skill recovery destination");
+      if (item.stage !== path.join(transaction.root, `stage-${index}`) || item.backup !== path.join(transaction.root, `previous-${index}`)) throw new Error("Invalid Skill recovery location");
+      this.#assertDestination(item.next.directory);
+      if (item.previous) this.#assertDestination(item.previous.directory);
       if (transaction.committed) {
         if (item.previous && existsSync(item.backup) && this.#fingerprint.digest(item.backup) !== item.previousDigest) throw new Error("Previous Skill was edited during update; recovery copies were retained");
       } else if (!existsSync(item.stage)) {
@@ -113,30 +137,46 @@ export class NativeSkills {
     return roots.some((root) => inside(path.resolve(root), real));
   }
 
-  #directories(): string[] {
-    const directories: string[] = [];
+  #assertDestination(directory: string): void {
+    const absolute = path.resolve(directory);
+    if (!inside(this.root, absolute) && !inside(this.#disabled, absolute)) throw new HttpError(409, "Skill destination is outside the managed workspace");
+    assertUnlinkedDestination(absolute);
+  }
+
+  #directories(): { directory: string; root: string }[] {
+    const directories: { directory: string; root: string }[] = [];
     const seen = new Set<string>();
-    const legacyRoots = legacySkillRoots(existsSync(this.workspace) ? realpathSync(this.workspace) : path.resolve(this.workspace));
     let visited = 0;
-    const scan = (directory: string, depth: number): void => {
-      if (!existsSync(directory) || depth > 5 || ++visited > 2000) return;
+    const scan = (directory: string, root: string, depth: number): void => {
+      if (depth > 5 || visited >= 2000) return;
       let canonical: string;
       try {
         canonical = realpathSync(directory);
-        if (depth === 0 && !lstatSync(canonical).isDirectory()) return;
+        if (canonical !== root && !insideSkillRoot(root, canonical)) return;
+        if (!lstatSync(canonical).isDirectory()) return;
       } catch { return; }
-      if (seen.has(canonical) || legacyRoots.some((root) => canonical === root || inside(root, canonical))) return;
+      visited++;
+      if (seen.has(canonical)) return;
       seen.add(canonical);
-      if (existsSync(path.join(directory, "SKILL.md"))) { directories.push(this.#owned(canonical) ? canonical : directory); return; }
-      for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const skillFile = path.join(canonical, "SKILL.md");
+      const document = lstatSync(skillFile, { throwIfNoEntry: false });
+      if (document) {
+        directories.push({ directory: this.#owned(canonical) ? canonical : directory, root });
+        if (!document.isSymbolicLink() || existsSync(skillFile)) return;
+      }
+      for (const entry of readdirSync(canonical, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
         if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
         if (entry.isDirectory() || entry.isSymbolicLink()) {
-          const child = path.join(directory, entry.name);
-          try { if (lstatSync(realpathSync(child)).isDirectory()) scan(child, depth + 1); } catch { /* A disappearing native entry is reconciled on the next read. */ }
+          try { scan(path.join(directory, entry.name), root, depth + 1); } catch { /* A disappearing native entry is reconciled on the next read. */ }
         }
       }
     };
-    for (const directory of [this.root, this.#disabled]) scan(directory, 0);
+    for (const [base, directory] of [[this.workspace, this.root], [this.privateDir, this.#disabled]] as const) {
+      let canonicalBase: string;
+      try { canonicalBase = realpathSync(base); } catch { continue; }
+      const root = path.join(canonicalBase, path.relative(base, directory));
+      if (insideSkillRoot(canonicalBase, root)) scan(directory, root, 0);
+    }
     return directories;
   }
 
@@ -183,16 +223,23 @@ export class NativeSkills {
     return reconciled;
   }
 
-  list(): InstalledSkillDto[] {
+  #scan() {
     const results: InstalledSkillDto[] = [];
     const directories = this.#directories();
     this.errors = this.#recoveryError ? [this.#recoveryError] : [];
     const reconciled = this.#reconcileLegacyDestinations();
-    let changed = reconciled.size > 0;
-    const byPath = new Map(this.#registry.entries.map((entry) => [entry.directory, reconciled.get(entry) ?? entry]));
+    let changed = false;
+    const byPath = new Map(this.#registry.entries.map((entry) => [entry.directory, entry]));
     const retained: Entry[] = [];
-    for (const directory of directories) {
-      const stored = byPath.get(directory);
+    for (const { directory, root } of directories) {
+      const original = byPath.get(directory);
+      let document: string | undefined;
+      try { document = realpathSync(path.join(directory, "SKILL.md")); } catch { /* An unresolvable document is omitted. */ }
+      if (!document || !insideSkillRoot(root, document)) {
+        if (original) retained.push(original);
+        continue;
+      }
+      const stored = original && (reconciled.get(original) ?? original);
       const enabled = !inside(this.#disabled, directory);
       const readOnly = !this.#owned(directory);
       const now = new Date().toISOString();
@@ -201,7 +248,7 @@ export class NativeSkills {
       let digest = stored?.baseline ?? "";
       let error: string | undefined;
       try {
-        metadata = skillFrontmatter(readFileSync(path.join(directory, "SKILL.md"), "utf8"));
+        metadata = skillFrontmatter(readFileSync(document, { encoding: "utf8", flag: constants.O_RDONLY | constants.O_NOFOLLOW }));
         digest = this.#fingerprint.digest(directory);
       } catch (failure) { error = failure instanceof Error ? failure.message : String(failure); }
       const entry: Entry = stored ?? {
@@ -228,12 +275,16 @@ export class NativeSkills {
       if (!readOnly) {
         const updated = { ...entry, ...metadata, enabled };
         retained.push(updated);
-        if (!stored || stored.name !== metadata.name || stored.description !== metadata.description || stored.enabled !== enabled) changed = true;
+        if (!stored || stored !== original || stored.name !== metadata.name || stored.description !== metadata.description || stored.enabled !== enabled) changed = true;
       }
     }
     if (retained.length !== this.#registry.entries.length) changed = true;
-    if (changed) {
-      const registry = { ...this.#registry, entries: retained };
+    return { results, registry: changed ? { ...this.#registry, entries: retained } : this.#registry };
+  }
+
+  list(): InstalledSkillDto[] {
+    const { results, registry } = this.#scan();
+    if (registry !== this.#registry) {
       this.#persist(registry);
       this.#registry = registry;
     }
@@ -241,8 +292,8 @@ export class NativeSkills {
   }
 
   #entry(id: string): Entry {
-    this.list();
-    const entry = this.#registry.entries.find((item) => item.id === id);
+    const listed = this.list().some((item) => item.id === id && !item.readOnly);
+    const entry = listed && this.#registry.entries.find((item) => item.id === id);
     if (!entry) throw new HttpError(404, "Shared Skill not found or its source is read-only");
     if (!this.#owned(entry.directory) || !this.#owned(entry.activeDirectory)) throw new HttpError(409, "Skill source is outside the managed workspace");
     return entry;
@@ -254,37 +305,49 @@ export class NativeSkills {
 
   installBundle(installations: readonly Installation[]): InstalledSkillDto[] {
     if (!installations.length) return [];
-    this.#recover();
-    this.list();
     const root = path.join(this.privateDir, `.skill-transaction-${randomUUID()}`);
-    mkdirSync(root, { mode: 0o700 });
-    const prepared: z.infer<typeof Transaction>["entries"] = [];
+    assertUnlinkedDestination(root);
+    assertUnlinkedDestination(this.root);
+    this.#recover();
+    const { results, registry } = this.#scan();
     const ids = new Set<string>(), destinations = new Set<string>();
+    // Validate the complete bundle before writing staging files or persisting the scan.
+    const plans = installations.map(({ catalog, materialized, options = {} }) => {
+      const previous = registry.entries.find((entry) => entry.id === catalog.id);
+      if (previous && !results.some((entry) => entry.id === previous.id && !entry.readOnly)) throw new HttpError(409, "Installed Skill document is unavailable; its registry entry was preserved");
+      const metadata = skillFrontmatter(readFileSync(path.join(materialized.directory, "SKILL.md"), "utf8"));
+      if (!metadata.name || metadata.name.length > 120 || /[/\\\0]/.test(metadata.name) || metadata.name === "." || metadata.name === ".." || metadata.name.startsWith(".")) throw new HttpError(400, "Skill name cannot be used as a native directory");
+      const activeDirectory = previous?.activeDirectory ?? path.join(this.root, metadata.name);
+      const enabled = options.enabled ?? previous?.enabled ?? true;
+      const directory = enabled ? activeDirectory : path.join(this.#disabled, createHash("sha256").update(catalog.id).digest("hex"));
+      this.#assertDestination(activeDirectory);
+      if (directory !== activeDirectory) this.#assertDestination(directory);
+      if (previous && previous.directory !== directory) this.#assertDestination(previous.directory);
+      if (ids.has(catalog.id) || destinations.has(directory)) throw new HttpError(409, "The bundle contains conflicting Skill destinations");
+      ids.add(catalog.id); destinations.add(directory);
+      if (existsSync(directory) && (!previous || previous.directory !== directory)) throw new HttpError(409, "A native Skill already occupies this destination; it was not overwritten");
+      return { catalog, materialized, options, previous, metadata, activeDirectory, enabled, directory };
+    });
+    for (const { previous, materialized } of plans) {
+      if (previous && previous.directory !== materialized.directory && (!previous.baselineVerified || this.#fingerprint.digest(previous.directory) !== previous.baseline)) {
+        previous.availableRevision = materialized.revision;
+        previous.lastCheckedAt = new Date().toISOString();
+        this.#persist(registry);
+        this.#registry = registry;
+        throw new HttpError(409, "Local or unverified migrated Skill content is preserved. Review it before explicitly reinstalling.");
+      }
+    }
+    const prepared: z.infer<typeof Transaction>["entries"] = [];
     let journalWritten = false;
+    mkdirSync(root, { mode: 0o700 });
     try {
-      for (const [index, { catalog, materialized, options = {} }] of installations.entries()) {
-        const metadata = skillFrontmatter(readFileSync(path.join(materialized.directory, "SKILL.md"), "utf8"));
-        if (!metadata.name || metadata.name.length > 120 || /[/\\\0]/.test(metadata.name) || metadata.name === "." || metadata.name === ".." || metadata.name.startsWith(".")) throw new HttpError(400, "Skill name cannot be used as a native directory");
-        const previous = this.#registry.entries.find((entry) => entry.id === catalog.id);
+      for (const [index, { catalog, materialized, options, previous, metadata, activeDirectory, enabled, directory }] of plans.entries()) {
         const retained = previous?.directory === materialized.directory ? previous : undefined;
-        if (previous && !retained && (!previous.baselineVerified || this.#fingerprint.digest(previous.directory) !== previous.baseline)) {
-          previous.availableRevision = materialized.revision;
-          previous.lastCheckedAt = new Date().toISOString();
-          this.#persist();
-          throw new HttpError(409, "Local or unverified migrated Skill content is preserved. Review it before explicitly reinstalling.");
-        }
-        const activeDirectory = previous?.activeDirectory ?? path.join(this.root, metadata.name);
-        const enabled = options.enabled ?? previous?.enabled ?? true;
-        const directory = enabled ? activeDirectory : path.join(this.#disabled, createHash("sha256").update(catalog.id).digest("hex"));
-        if (!this.#owned(activeDirectory) || !this.#owned(directory)) throw new HttpError(409, "Skill destination is outside the managed workspace");
-        if (ids.has(catalog.id) || destinations.has(directory)) throw new HttpError(409, "The bundle contains conflicting Skill destinations");
-        ids.add(catalog.id); destinations.add(directory);
-        if (existsSync(directory) && (!previous || previous.directory !== directory)) throw new HttpError(409, "A native Skill already occupies this destination; it was not overwritten");
         const stage = path.join(root, `stage-${index}`);
         const backup = path.join(root, `previous-${index}`);
         cpSync(materialized.directory, stage, { recursive: true, dereference: false, errorOnExist: true });
         if (catalog.id === "official:openai:skill-creator") {
-          const dependencies = path.resolve(import.meta.dir, "../../../../../workers/pi/resources/python");
+          const dependencies = path.resolve(import.meta.dir, "../../../resources/python");
           const manifest = z.object({ files: z.record(z.object({ sha256: z.string().regex(/^[0-9a-f]{64}$/) })) }).parse(JSON.parse(readFileSync(path.join(dependencies, "pyyaml-source.json"), "utf8")));
           for (const [relative, file] of Object.entries(manifest.files)) {
             const source = path.resolve(dependencies, relative);
@@ -309,6 +372,8 @@ export class NativeSkills {
       }
       // Check the complete bundle again after staging, before replacing any member.
       for (const item of prepared) {
+        this.#assertDestination(item.next.directory);
+        if (item.previous) this.#assertDestination(item.previous.directory);
         if (item.previous && this.#fingerprint.digest(item.previous.directory) !== item.previousDigest) throw new HttpError(409, "Skill changed during update; local changes were retained");
         if (existsSync(item.next.directory) && item.previous?.directory !== item.next.directory) throw new HttpError(409, "A native Skill appeared during installation; it was retained");
       }
@@ -321,8 +386,9 @@ export class NativeSkills {
         renameSync(item.stage, item.next.directory);
         if (item.previous && this.#fingerprint.digest(item.backup) !== item.previousDigest) throw new HttpError(409, "Skill changed at replacement; local changes were retained");
       }
-      this.#registry.entries = [...this.#registry.entries.filter((entry) => !ids.has(entry.id)), ...prepared.map((item) => item.next)];
-      this.#persist();
+      const installedRegistry = { ...registry, entries: [...registry.entries.filter((entry) => !ids.has(entry.id)), ...prepared.map((item) => item.next)] };
+      this.#persist(installedRegistry);
+      this.#registry = installedRegistry;
       transaction.committed = true;
       this.#writeTransaction(transaction);
       try { this.#recover(); }
@@ -345,6 +411,7 @@ export class NativeSkills {
     if (entry.enabled === enabled) return;
     const target = enabled ? entry.activeDirectory : path.join(this.#disabled, createHash("sha256").update(id).digest("hex"));
     if (lstatSync(target, { throwIfNoEntry: false })) throw new HttpError(409, "Another Skill occupies the destination; nothing was overwritten");
+    this.#assertDestination(target);
     mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
     renameSync(entry.directory, target);
     entry.directory = target;
@@ -362,7 +429,7 @@ export class NativeSkills {
 
   markError(id: string, error: string): void {
     const entry = this.#registry.entries.find((item) => item.id === id);
-    if (!entry) return;
+    if (!entry || !this.#scan().results.some((item) => item.id === id && !item.readOnly)) return;
     entry.error = error;
     entry.lastCheckedAt = new Date().toISOString();
     this.#persist();

@@ -8,7 +8,7 @@ import { PluginsService } from "./plugins.ts";
 
 async function withPlugins<T>(use: (service: PluginsService, root: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(path.join(tmpdir(), "plugin-manage-"));
-  const service = new PluginsService(path.join(root, "plugins"), path.join(root, "workspace"), async () => ({ skills: [] }));
+  const service = new PluginsService(path.join(root, "plugins"), path.join(root, "workspace"), () => ({ skills: [] }));
   try { return await use(service, root); }
   finally {
     await service.shutdown();

@@ -9,7 +9,7 @@ const root = process.env.OMARCHY_BOT_INSTALL_SMOKE_DIR!;
 assert.ok(root, "Run through install-smoke.sh");
 const bin = join(root, "bin");
 mkdirSync(bin);
-const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, OMARCHY_BOT_HOME: join(root, "service with spaces"), OMARCHY_BOT_STATE: join(root, "state"), OMARCHY_BOT_PORT: "17438", OMARCHY_BOT_HOST: "127.0.0.1", OMARCHY_BOT_APP_IMAGE: "/artifact/app.AppImage", OMARCHY_BOT_OPEN: "true", OMARCHY_BOT_WORKERS_DIR: "/src/tests/integration/fake-workers" };
+const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, OMARCHY_BOT_HOME: join(root, "service with spaces"), OMARCHY_BOT_STATE: join(root, "state"), OMARCHY_BOT_PORT: "17438", OMARCHY_BOT_HOST: "127.0.0.1", OMARCHY_BOT_APP_IMAGE: "/artifact/app.AppImage", OMARCHY_BOT_OPEN: "true" };
 const layout = layoutFromEnv(env);
 const origin = "http://127.0.0.1:17438";
 const checks: string[] = [];

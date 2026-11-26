@@ -90,12 +90,10 @@ describe("contextual computer control", () => {
     const first = await api<{ id: string; surfaceId: string }>(h, "POST", "/api/bots", {
       name: "First screen",
       instructions: "",
-      agentId: "pi",
     });
     const second = await api<{ id: string; surfaceId: string }>(h, "POST", "/api/bots", {
       name: "Second screen",
       instructions: "",
-      agentId: "pi",
     });
 
     expect(first.surfaceId).toMatch(/^surf_[0-9a-f]{32}$/);
@@ -113,12 +111,10 @@ describe("contextual computer control", () => {
     const first = await api<{ id: string; surfaceId: string }>(h, "POST", "/api/bots", {
       name: "First owner",
       instructions: "",
-      agentId: "pi",
     });
     const second = await api<{ id: string; surfaceId: string }>(h, "POST", "/api/bots", {
       name: "Second owner",
       instructions: "",
-      agentId: "pi",
     });
 
     const response = await authedFetch(

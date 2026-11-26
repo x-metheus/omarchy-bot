@@ -1,6 +1,6 @@
 import { afterEach, expect, setSystemTime, spyOn, test } from "bun:test";
 import { createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PLUGIN_PROVIDERS } from "../../packages/protocol/src/pluginProviders.ts";
@@ -118,13 +118,14 @@ async function startServices({ intercomMcpUrl }: { intercomMcpUrl?: string } = {
   async function state(): Promise<PluginStateDto> {
     const result = await api<PluginStateDto>(h, "GET", "/api/plugins");
     const workspace = path.join(home, ".omarchy-bot", "workspace");
-    const shared = await Promise.all([".mcp.json", ".pi/mcp.json", ".codex/config.toml"].map(async (file) => {
-      try { return await readFile(path.join(workspace, file), "utf8"); }
-      catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return ""; throw error; }
-    }));
+    for (const retired of [".pi", ".codex"]) await expect(lstat(path.join(workspace, retired))).rejects.toMatchObject({ code: "ENOENT" });
+    const shared = await readFile(path.join(workspace, ".mcp.json"), "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
     for (const token of tokens.keys()) {
       expect(JSON.stringify(result)).not.toContain(token);
-      for (const configuration of shared) expect(configuration).not.toContain(token);
+      expect(shared).not.toContain(token);
     }
     return result;
   }
@@ -196,6 +197,83 @@ async function authorizationHistory(h: Harness): Promise<EventEnvelope[]> {
   };
   return result.promise;
 }
+
+async function requestPluginInventory(home: string, checkWhileRunning?: () => Promise<void>): Promise<void> {
+  const previousEnvironment = { ...process.env };
+  globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    if (url.protocol === "https:" && url.pathname === "/api/plugins/providers") return Response.json([]);
+    return originalFetch(input, init);
+  }, { preconnect: originalFetch.preconnect });
+  try {
+    const h = await startDaemon(home, { stateDir: path.join(home, "service-state"), seedDurableProvider: false });
+    try {
+      expect((await apiStatus(h, "GET", "/api/plugins")).status).toBe(200);
+      await checkWhileRunning?.();
+    } finally {
+      await h.stop();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const key of Object.keys(process.env)) if (!(key in previousEnvironment)) delete process.env[key];
+    Object.assign(process.env, previousEnvironment);
+  }
+}
+
+test("startup and the Services inventory leave the user's Pi home untouched", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "omarchy-bot-pi-home-"));
+  const piDir = path.join(home, ".pi");
+  const agentDir = path.join(piDir, "agent");
+  const skillsDir = path.join(agentDir, "skills");
+  const skillDir = path.join(skillsDir, "user-pi-skill");
+  const directories = [piDir, agentDir, skillsDir, skillDir];
+  const sentinels = [
+    [path.join(agentDir, "auth.json"), '{"openai":{"type":"api_key","key":"fixture-pi-user-key"}}\n', 0o600],
+    [path.join(agentDir, "settings.json"), '{"theme":"dark"}\n', 0o640],
+    [path.join(skillDir, "SKILL.md"), "---\nname: user-pi-skill\ndescription: User Pi Skill sentinel\n---\n", 0o644],
+  ] as const;
+  const entries = [...directories, ...sentinels.map(([file]) => file)];
+  const readMetadata = () => Promise.all(entries.map(async (entry) => {
+    const { mode, atimeNs, mtimeNs } = await lstat(entry, { bigint: true });
+    return { entry, mode, atimeNs, mtimeNs };
+  }));
+  const readContents = async () => ({
+    entries: await Promise.all(directories.map(async (directory) => (await readdir(directory)).sort())),
+    bytes: await Promise.all(sentinels.map(([file]) => readFile(file))),
+  });
+  try {
+    await mkdir(skillDir, { recursive: true });
+    for (const [file, contents, mode] of sentinels) {
+      await writeFile(file, contents);
+      await chmod(file, mode);
+    }
+    const contentsBefore = await readContents();
+    // Age access times after reading the baseline so a Service read is visible under relatime.
+    for (const entry of entries) await utimes(entry, 946684800, 946771200);
+    const metadataBefore = await readMetadata();
+
+    await requestPluginInventory(home);
+
+    // Check timestamps before the assertion reads can update access times.
+    expect(await readMetadata()).toEqual(metadataBefore);
+    expect(await readContents()).toEqual(contentsBefore);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("startup and the Services inventory do not create a Pi directory in a clean HOME", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "omarchy-bot-no-pi-home-"));
+  const expectNoPiDirectory = async () => {
+    await expect(lstat(path.join(home, ".pi"))).rejects.toMatchObject({ code: "ENOENT" });
+  };
+  try {
+    await requestPluginInventory(home, expectNoPiDirectory);
+    await expectNoPiDirectory();
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test("a Paired Device authorizes from a remote client origin with a Service callback and app return link", async () => {
   const { h, finishAuthorization, pendingAuthorization } = await startServices();

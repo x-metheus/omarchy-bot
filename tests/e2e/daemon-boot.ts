@@ -75,11 +75,6 @@ const MIGRATED_AVATAR_BOT_ID = "bot_00000000000000000000000000000001";
 const db = openDb(cfg);
 const now = new Date().toISOString();
 db.query(
-  `INSERT INTO agents (id, display_name, status, updated_at)
-   VALUES ('pi', 'Pi', 'ready', ?)
-   ON CONFLICT(id) DO NOTHING`,
-).run(now);
-db.query(
   `INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at)
    VALUES (?, 'Recovered Avatar Bot', '', 'pi', 'generated', ?, ?, ?)
    ON CONFLICT(id) DO NOTHING`,

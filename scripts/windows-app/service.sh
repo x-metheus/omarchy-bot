@@ -8,7 +8,6 @@ export XDG_CONFIG_HOME=$HOME/.config XDG_DATA_HOME=$HOME/.local/share XDG_CACHE_
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 export OMARCHY_BOT_SWAY_BUNDLE_DIR=/src/.lane/dist/sway
 export OMARCHY_BOT_FONT_DIR=/src/.lane/fonts OMARCHY_BOT_BROWSER_PACK_DIR=/src/.lane/browser
-export OMARCHY_BOT_WORKERS_DIR=/src/tests/integration/fake-workers
 export OMARCHY_BOT_HOST=127.0.0.1 OMARCHY_BOT_DEV=0 OMARCHY_BOT_SCREEN_PROFILE=720p
 cc /src/scripts/sway-runtime/conformance/x11-fixture.c -lX11 -o /src/.lane/windows-app/x11-fixture
 children=()
@@ -17,8 +16,7 @@ trap cleanup EXIT
 trap 'exit 0' TERM INT
 for port in 7431 7432; do
   dir=$private/service-$port
-  mkdir -p "$dir/data/conformance" "$dir/state"
-  printf '{"ok":true}\n' > "$dir/data/conformance/pi-fake-pi-1.json"
+  mkdir -p "$dir/state"
   printf '%s\n' "$WINDOWS_SMOKE_HOST_SECRET" > "$dir/state/pairing-host-secret"
   if [[ $port == 7432 ]]; then
     openssl req -x509 -newkey rsa:2048 -nodes -keyout "$private/untrusted.key" -out "$private/untrusted.pem" -days 1 -subj /CN=untrusted.invalid >/dev/null 2>&1

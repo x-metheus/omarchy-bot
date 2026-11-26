@@ -28,20 +28,17 @@ import { WorkspaceDrawer } from "./WorkspaceDrawer.tsx";
 export interface BotSettingsPanelProps {
   bot: BotViewDto;
   open: boolean;
-  agentDisplayName: string;
   returnFocusRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   onUpdated: (bot: BotDto) => void;
 }
 
-type BusyAction = "save" | "variation" | "upload" | "recipe";
+type BusyAction = "save" | "variation" | "upload";
 type ImmediateSetting = BotDisplaySetting | "model";
-type InvalidField = "name" | "avatarDescription";
 
 /** Right-side Bot Settings panel. Profile identity and Display preferences remain separate. */
 export function BotSettingsPanel({
   bot,
-  agentDisplayName,
   open,
   returnFocusRef,
   onClose,
@@ -50,13 +47,12 @@ export function BotSettingsPanel({
   const [current, setCurrent] = useState<BotDto>(bot);
   const [name, setName] = useState(bot.name);
   const [instructions, setInstructions] = useState(bot.instructions);
-  const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState<BusyAction | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   const [displayError, setDisplayError] = useState<string | undefined>(undefined);
   const [modelError, setModelError] = useState<string | undefined>(undefined);
   const [settingBusy, setSettingBusy] = useState<ImmediateSetting | undefined>(undefined);
-  const [invalidField, setInvalidField] = useState<InvalidField | undefined>(undefined);
+  const [invalidField, setInvalidField] = useState<"name" | undefined>(undefined);
   const fileInput = useRef<HTMLInputElement>(null);
   const latestBotRef = useRef<BotDto>(bot);
   const profileSnapshotRef = useRef<Pick<BotDto, "id" | "name" | "instructions"> | undefined>(undefined);
@@ -65,7 +61,6 @@ export function BotSettingsPanel({
   const panelBotIdRef = useRef<string | undefined>(undefined);
   const nameInput = useRef<HTMLInputElement>(null);
   const modelField = useRef<HTMLDivElement>(null);
-  const promptInput = useRef<HTMLTextAreaElement>(null);
   const queryClient = useQueryClient();
   const providers = useQuery({
     queryKey: ["providers", getShell().service.baseUrl()],
@@ -90,7 +85,6 @@ export function BotSettingsPanel({
     panelBotIdRef.current = bot.id;
     setCurrent(bot);
     if (!resetTransientState) return;
-    setPrompt("");
     setBusy(undefined);
     setError(undefined);
     setDisplayError(undefined);
@@ -259,28 +253,6 @@ export function BotSettingsPanel({
     [acceptUpdate, bot.id],
   );
 
-  const createRecipe = useCallback(async (): Promise<void> => {
-    const description = prompt.trim();
-    if (description.length === 0) {
-      setInvalidField("avatarDescription");
-      setError("Describe the avatar you want.");
-      promptInput.current?.focus();
-      return;
-    }
-    setBusy("recipe");
-    setInvalidField(undefined);
-    setError(undefined);
-    try {
-      acceptUpdate(await api.avatarRecipe(bot.id, { prompt: description }));
-      setPrompt("");
-    } catch (updateError) {
-      setError(apiErrorMessage(updateError, "The avatar description couldn’t be applied. Try again."));
-      promptInput.current?.focus();
-    } finally {
-      setBusy(undefined);
-    }
-  }, [acceptUpdate, bot.id, prompt]);
-
   const disabled = busy !== undefined || settingBusy === "model";
   const displayState = selectBotDisplayState({
     showToolCalls: current.showToolCalls,
@@ -359,11 +331,6 @@ export function BotSettingsPanel({
             width="100%"
             data-testid="profile-instructions"
           />
-          <VStack gap={0.5}>
-            <Text type="label-lg">Backing Agent</Text>
-            <Text>{agentDisplayName}</Text>
-            <Text color="secondary">Fixed for this bot.</Text>
-          </VStack>
           <VStack gap={1}>
             <Typeahead
               ref={modelField}
@@ -426,29 +393,6 @@ export function BotSettingsPanel({
                 data-testid="avatar-upload-input"
               />
             </HStack>
-            <TextArea
-              ref={promptInput}
-              label="Describe avatar"
-              value={prompt}
-              onChange={(value) => {
-                setPrompt(value);
-                if (invalidField === "avatarDescription" && value.trim().length > 0) setInvalidField(undefined);
-              }}
-              maxLength={2000}
-              placeholder="A focused coding teammate with a warm expression and blue accents"
-              {...(invalidField === "avatarDescription" ? { status: { type: "error" as const, message: "Describe the avatar you want." } } : {})}
-              width="100%"
-              data-testid="avatar-prompt"
-            />
-            <Button
-              label="Create from description"
-              variant="secondary"
-              type="button"
-              isLoading={busy === "recipe"}
-              isDisabled={disabled && busy !== "recipe"}
-              onClick={() => void createRecipe()}
-              data-testid="avatar-recipe-submit"
-            />
           </VStack>
 
           <VStack gap={3} data-testid="bot-display-settings">
@@ -460,7 +404,7 @@ export function BotSettingsPanel({
             </VStack>
             <Switch
               label="Show tool calls"
-              description="Show Agent tool work in every conversation for this Bot."
+              description="Show this Bot’s tool work in every conversation."
               value={displayState.showToolCalls}
               onChange={(value) => void updateDisplaySetting("showToolCalls", value)}
               isDisabled={settingBusy !== undefined}

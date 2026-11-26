@@ -7,7 +7,7 @@ let h: Harness;
 let hostHeaders: Record<string, string>;
 
 beforeAll(async () => {
-  h = await startDaemon(undefined, { waitForAgentReady: false });
+  h = await startDaemon();
   const secret = readFileSync(path.join(h.svc.cfg.stateDir, "pairing-host-secret"), "utf8").trim();
   hostHeaders = { authorization: `Bearer ${secret}` };
 }, 30_000);

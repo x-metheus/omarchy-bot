@@ -88,11 +88,6 @@ export interface AgentPluginSnapshot {
   diagnostics: string[];
 }
 
-export interface AgentPluginTurnContext {
-  botId: string;
-  turnId: string;
-  workerSessionId: string;
-}
 export interface AgentPluginToolOutput {
   content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[];
   isError?: boolean;
@@ -112,4 +107,12 @@ export interface NativeMcpControlResult {
 export interface NativePluginResources {
   skills: { name: string; description: string; path: string }[];
   mcp?: NativeMcpStatus[];
+}
+
+export interface NativeMcpControlInput {
+  action: "status" | "connect" | "auth-start" | "auth-complete" | "auth-cancel";
+  server?: string;
+  redirectUrl?: string;
+  authorizationId?: string;
+  expiresAt?: number;
 }

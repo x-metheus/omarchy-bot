@@ -36,7 +36,7 @@ function writeToken(token: string): void {
 }
 
 /**
- * Boot the real Service with the fake agent worker and isolated storage.
+ * Boot the real Service with isolated storage and a scripted model provider.
  * Playwright runs under Node, so the Service lives in a Bun child that imports
  * main() rather than shelling out to a packaged executable.
  */
@@ -45,12 +45,7 @@ export default async function globalSetup(): Promise<void> {
   const runDir = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-e2e-"));
   const dataDir = path.join(runDir, "data");
   const stateDir = path.join(runDir, "state");
-  const agentDir = path.join(runDir, "pi-agent");
-  const conformanceDir = path.join(dataDir, "conformance");
-  mkdirSync(conformanceDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });
-  mkdirSync(agentDir, { mode: 0o700 });
-  writeFileSync(path.join(conformanceDir, "pi-fake-pi-1.json"), JSON.stringify({ ok: true }));
 
   const port = new URL(SERVICE_ORIGIN).port || "80";
   const child = spawn("bun", [path.join(import.meta.dirname, "daemon-boot.ts")], {
@@ -58,12 +53,10 @@ export default async function globalSetup(): Promise<void> {
     env: {
       ...process.env,
       HOME: runDir,
-      PI_CODING_AGENT_DIR: agentDir,
       OMARCHY_BOT_HOME: dataDir,
       OMARCHY_BOT_STATE: stateDir,
       OMARCHY_BOT_PORT: port,
       OMARCHY_BOT_DEV: "1",
-      OMARCHY_BOT_WORKERS_DIR: path.join(repoRoot, "tests/integration/fake-workers"),
     },
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -101,32 +94,7 @@ export default async function globalSetup(): Promise<void> {
       await delay(150);
     }
 
-    const token = await pairForToken(origin, stateDir);
-    writeToken(token);
-
-    const deadline = Date.now() + 20_000;
-    for (;;) {
-      const response = await fetch(`${origin}/api/agents`, {
-        headers: { authorization: `Bearer ${token}` },
-      });
-      const agents: unknown = await response.json();
-      if (
-        Array.isArray(agents) &&
-        agents.some(
-          (agent) =>
-            agent !== null &&
-            typeof agent === "object" &&
-            "id" in agent &&
-            agent.id === "pi" &&
-            "status" in agent &&
-            agent.status === "ready",
-        )
-      ) {
-        break;
-      }
-      if (Date.now() > deadline) throw new Error("pi agent never became ready for e2e");
-      await delay(150);
-    }
+    writeToken(await pairForToken(origin, stateDir));
   } catch (error) {
     child.kill("SIGTERM");
     rmSync(runDir, { recursive: true, force: true });

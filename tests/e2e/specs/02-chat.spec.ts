@@ -1,12 +1,9 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
 import { expect, test, type Locator, type Page } from "../fixtures.ts";
 
 async function createBot(page: Page, name: string): Promise<string> {
   await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
   await page.getByRole("textbox", { name: "Name" }).fill(name);
   await page.getByRole("textbox", { name: "Job / Instructions" }).fill("E2E chat teammate");
-  await page.getByRole("radio", { name: /^Pi/ }).check();
   await page.getByRole("button", { name: "Create bot" }).click();
 
   await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
@@ -35,17 +32,6 @@ async function waitForPersistedThread(page: Page): Promise<string> {
   const threadId = new URL(page.url()).searchParams.get("thread");
   if (threadId === null || threadId === "blank") throw new Error("thread URL state was not persisted");
   return threadId;
-}
-
-function fakeProbeFile(): string {
-  const state = JSON.parse(
-    readFileSync(path.resolve(import.meta.dirname, "../.daemon.json"), "utf8"),
-  ) as { runDir: string };
-  return path.join(state.runDir, "data", "conformance", "pi-fake-pi-1.json");
-}
-
-function setFakeProbe(control: Record<string, unknown>): void {
-  writeFileSync(fakeProbeFile(), JSON.stringify({ ok: true, ...control }));
 }
 
 async function recordAnnouncements(page: Page, testId: string, storageKey: string): Promise<void> {
@@ -444,21 +430,6 @@ test.describe("chat through a bot", () => {
 
     await page.reload();
     await expect(page.getByTestId("thinking-message").getByRole("button")).toHaveAttribute("aria-expanded", "false");
-
-    setFakeProbe({ fakeCapabilities: { thinking: { supported: false, streaming: false } } });
-    try {
-      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
-      await page.reload();
-      await expect(page.getByTestId("thinking-message")).toBeVisible();
-      await page.getByRole("button", { name: "Open settings for Thinking Bot" }).click();
-      const settings = page.getByRole("complementary", { name: "Bot settings" });
-      await expect(settings.getByRole("switch", { name: "Show Thinking" })).toBeEnabled();
-      await expect(settings).toContainText("no longer provides Thinking");
-      await expect(settings).toContainText("retained Thinking remains available");
-    } finally {
-      setFakeProbe({});
-      await request.post("/api/agents/pi/recheck");
-    }
   });
 
   test("announces unseen start boundaries before terminal Tool Call and Thinking boundaries", async ({ page, request }) => {
@@ -632,7 +603,7 @@ test.describe("chat through a bot", () => {
     const transcriptRows = page.getByRole("log").locator(
       '[data-testid="user-message"], [data-testid="assistant-message"], [data-testid="thinking-message"], [data-testid="tool-call-message"]',
     );
-    await expect(transcriptRows).toHaveCount(10);
+    await expect(transcriptRows).toHaveCount(9);
     expect(await transcriptRows.evaluateAll((rows) =>
       rows.map((row) => ({
         testId: row.getAttribute("data-testid"),
@@ -650,16 +621,17 @@ test.describe("chat through a bot", () => {
       },
       { testId: "thinking-message", text: expect.stringContaining("Thinking complete") },
       { testId: "tool-call-message", text: expect.stringContaining("write") },
-      { testId: "assistant-message", text: "Final response after the second tool." },
-      { testId: "assistant-message", text: "Response after an unrendered Native Event boundary." },
+      {
+        testId: "assistant-message",
+        text: "Final response after the second tool.Response after an unrendered Native Event boundary.",
+      },
     ]);
 
     const responses = page.getByTestId("assistant-message");
-    await expect(responses).toHaveCount(4);
+    await expect(responses).toHaveCount(3);
     await expect(responses.nth(0)).toHaveAttribute("data-response-block-count", "1");
     await expect(responses.nth(1)).toHaveAttribute("data-response-block-count", "2");
-    await expect(responses.nth(2)).toHaveAttribute("data-response-block-count", "1");
-    await expect(responses.nth(3)).toHaveAttribute("data-response-block-count", "1");
+    await expect(responses.nth(2)).toHaveAttribute("data-response-block-count", "2");
     await expect(responses.nth(0).getByRole("heading", { name: "Release notes" })).toBeVisible();
     await expect(responses.nth(0).locator("table")).toBeVisible();
     await expect(responses.nth(0).locator("pre")).toContainText("const order");
@@ -672,7 +644,7 @@ test.describe("chat through a bot", () => {
     await expect(page.getByTestId("thinking-message").first().locator("strong")).toHaveText("Inspect");
 
     await page.reload();
-    await expect(transcriptRows).toHaveCount(10);
+    await expect(transcriptRows).toHaveCount(9);
     expect(await transcriptRows.evaluateAll((rows) =>
       rows.map((row) => row.getAttribute("data-testid"))
     )).toEqual([
@@ -685,9 +657,9 @@ test.describe("chat through a bot", () => {
       "thinking-message",
       "tool-call-message",
       "assistant-message",
-      "assistant-message",
     ]);
     await expect(responses.nth(1)).toHaveAttribute("data-response-block-count", "2");
+    await expect(responses.nth(2)).toHaveAttribute("data-response-block-count", "2");
     await expect(page.getByTestId("thinking-message").first().getByRole("button")).toHaveAttribute(
       "aria-expanded",
       "false",
@@ -699,7 +671,7 @@ test.describe("chat through a bot", () => {
     await settings.getByRole("switch", { name: "Show Thinking" }).click();
     await expect(page.getByTestId("tool-call-message")).toHaveCount(0);
     await expect(page.getByTestId("thinking-message")).toHaveCount(0);
-    await expect(page.getByTestId("assistant-message")).toHaveCount(4);
+    await expect(responses).toHaveCount(3);
     await page.getByRole("button", { name: "Close settings for Ordered Transcript Bot" }).click();
 
     const retained = await request.get(`/api/threads/${threadId}/messages`).then((response) => response.json()) as Array<{ kind: string }>;
@@ -714,14 +686,13 @@ test.describe("chat through a bot", () => {
       "thinking",
       "tool",
       "response",
-      "event",
       "response",
     ]);
 
     await page.reload();
     await expect(page.getByTestId("thinking-message")).toHaveCount(0);
     await expect(page.getByTestId("tool-call-message")).toHaveCount(0);
-    await expect(page.getByTestId("assistant-message")).toHaveCount(4);
+    await expect(responses).toHaveCount(3);
     await expect(page.getByRole("log").getByText("Response after an unrendered Native Event boundary.", { exact: true })).toBeVisible();
   });
 
@@ -750,7 +721,7 @@ test.describe("chat through a bot", () => {
       kind: string;
       author: { kind: string };
     }>;
-    expect(retained.map((message) => message.kind)).toEqual(["text", "thinking", "tool", "event"]);
+    expect(retained.map((message) => message.kind)).toEqual(["text", "thinking", "tool"]);
     expect(retained.some((message) => message.author.kind === "system")).toBe(false);
 
     await page.reload();
@@ -789,6 +760,7 @@ test.describe("chat through a bot", () => {
     const timeoutThreadId = await waitForPersistedThread(page);
     await expectCardAboveComposer(page);
     const timeoutCard = page.getByTestId("composer-error-card");
+    await expect(timeoutCard.getByText("Turn failed", { exact: true })).toBeVisible();
     await expect(timeoutCard).toContainText("timed out after 30s");
     await expect(timeoutCard.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(timeoutCard.getByRole("button", { name: "Close" })).toBeVisible();
@@ -796,19 +768,8 @@ test.describe("chat through a bot", () => {
     expect((await timeoutMessages.json()) as Array<{ author: { kind: string }; text?: string }>).not.toContainEqual(
       expect.objectContaining({ author: { kind: "system" }, text: expect.stringContaining("timed out after") }),
     );
-    setFakeProbe({ fakeProbe: "offline" });
-    try {
-      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
-      await expect(timeoutCard).toContainText("fake probe offline");
-      await timeoutCard.getByRole("button", { name: "Close" }).click();
-      await expect(timeoutCard).toContainText("Turn failed");
-      await expect(timeoutCard).toContainText("timed out after 30s");
-      await timeoutCard.getByRole("button", { name: "Close" }).click();
-      await expect(timeoutCard).toHaveCount(0);
-    } finally {
-      setFakeProbe({});
-      await request.post("/api/agents/pi/recheck");
-    }
+    await timeoutCard.getByRole("button", { name: "Close" }).click();
+    await expect(timeoutCard).toHaveCount(0);
 
     await page.getByRole("button", { name: "Open conversation history" }).click();
     await page.getByRole("button", { name: /fail-once/ }).click();
@@ -819,45 +780,6 @@ test.describe("chat through a bot", () => {
     await page.getByRole("button", { name: /timeout-failure/ }).click();
     await expect(page).toHaveURL(new RegExp(`thread=${timeoutThreadId}`));
     await expect(page.getByTestId("composer-error-card")).toHaveCount(0);
-  });
-
-  test("disables sending and shows readiness reason and recovery above the Composer", async ({ page, request }) => {
-    await page.goto("/");
-    await createBot(page, "Readiness Bot");
-    setFakeProbe({ fakeProbe: "offline" });
-    try {
-      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
-      await expectCardAboveComposer(page);
-      const card = page.getByTestId("composer-error-card");
-      await expect(card).toContainText("fake probe offline");
-      await expect(card).toContainText("Restart the daemon or check the worker logs.");
-      await expect(composerInput(page)).toHaveAttribute("aria-disabled", "true");
-      await expect(composerInput(page)).toHaveAttribute("contenteditable", "false");
-      await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeVisible();
-
-      await card.getByRole("button", { name: "Close" }).click();
-      await expect(card).toHaveCount(0);
-      await expect(composerInput(page)).toHaveAttribute("aria-disabled", "true");
-
-      setFakeProbe({});
-      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
-      await expect(composerInput(page)).not.toHaveAttribute("aria-disabled");
-      await expect(page.getByRole("combobox", { name: "Message input", exact: true })).toBeVisible();
-
-      setFakeProbe({ fakeProbe: "offline" });
-      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
-      await expectCardAboveComposer(page);
-      await expect(card).toContainText("fake probe offline");
-
-      setFakeProbe({});
-      await card.getByRole("button", { name: "Retry" }).click();
-      await expect(composerInput(page)).not.toHaveAttribute("aria-disabled");
-      await expect(composerInput(page)).toHaveAttribute("contenteditable", "true");
-      await expect(card).toHaveCount(0);
-    } finally {
-      setFakeProbe({});
-      await request.post("/api/agents/pi/recheck");
-    }
   });
 
   test("keeps the composer enabled for steering and has no global TopNav or Stop control", async ({ page }) => {

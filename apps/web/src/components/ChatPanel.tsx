@@ -32,7 +32,6 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { VisuallyHidden } from "@astryxdesign/core/VisuallyHidden";
 import { useContainerReveal } from "@astryxdesign/core/hooks";
 import type {
-  AgentDto,
   ApprovalAnswerBodyDto,
   ApprovalDto,
   AttachmentDto,
@@ -68,10 +67,6 @@ interface ChatPanelProps {
   onRetryApprovals: () => void;
   onAnswerApproval: (approval: ApprovalDto, answer: ApprovalAnswerBodyDto["answer"]) => void;
   historyTriggerRef: RefObject<HTMLButtonElement | null>;
-  isAgentReady: boolean;
-  supportsSteering: boolean;
-  agentReadiness?: AgentDto;
-  onRetryAgentReadiness?: () => Promise<void>;
   messagesLoading?: boolean;
   messagesError?: string;
   onRetryMessages?: () => void;
@@ -475,10 +470,6 @@ export function ChatPanel({
   onRetryApprovals,
   onAnswerApproval,
   historyTriggerRef,
-  isAgentReady,
-  supportsSteering,
-  agentReadiness,
-  onRetryAgentReadiness,
   messagesLoading = false,
   messagesError,
   onRetryMessages,
@@ -712,9 +703,7 @@ export function ChatPanel({
 
   const selectedThreadIsActive =
     thread?.latestTurn !== undefined && !isTerminalTurn(thread.latestTurn.status);
-  const activeTurnCannotSteer = thread?.activeTurn !== undefined && !supportsSteering;
-  const isAgentNotReady = !isAgentReady && agentReadiness?.status !== "checking";
-  const composerIsDisabled = bot === undefined || isAgentNotReady || activeTurnCannotSteer;
+  const composerIsDisabled = bot === undefined;
   const workingSelectionKey = bot !== undefined && thread !== undefined ? `${bot.id}:${thread.id}` : undefined;
   useEffect(() => {
     if (workingSelectionKey === undefined || bot === undefined) {
@@ -836,7 +825,7 @@ export function ChatPanel({
   const send = useCallback(
     async (): Promise<void> => {
       const trimmed = trimSendText(draft.text);
-      if (trimmed.length === 0 || bot === undefined || activeTurnCannotSteer) return;
+      if (trimmed.length === 0 || bot === undefined) return;
       const originThreadId = thread?.id;
       const attachmentIds = [...draft.stagedIds];
       const preservedDraft = { ...draft };
@@ -878,7 +867,7 @@ export function ChatPanel({
         }
       }
     },
-    [bot, thread, draft, onMessageSent, activeTurnCannotSteer],
+    [bot, thread, draft, onMessageSent],
   );
 
   const failedTurn = thread?.latestTurn?.status === "failed" ? thread.latestTurn : undefined;
@@ -889,7 +878,7 @@ export function ChatPanel({
     return message?.attachments?.length ? undefined : message?.text;
   }, [messages]);
   const retryFailedTurn = useCallback(async (): Promise<void> => {
-    if (thread === undefined || failedTurn === undefined || failedTurnMessage === undefined || !isAgentReady) return;
+    if (thread === undefined || failedTurn === undefined || failedTurnMessage === undefined) return;
     setSubmitError(undefined);
     try {
       const response = await api.sendMessage(thread.id, {
@@ -900,7 +889,7 @@ export function ChatPanel({
     } catch (error) {
       setSubmitError(apiErrorMessage(error, "Turn could not be retried."));
     }
-  }, [thread, failedTurn, failedTurnMessage, isAgentReady, onMessageSent]);
+  }, [thread, failedTurn, failedTurnMessage, onMessageSent]);
 
   const rows = useMemo(() => {
     const out: ReactNode[] = [];
@@ -983,29 +972,7 @@ export function ChatPanel({
     }
     return out;
   }, [bot?.showThinking, bot?.showToolCalls, grouped]);
-  useEffect(() => {
-    if (agentReadiness?.status !== "ready") return;
-    const readinessKeyPrefix = `agent:${agentReadiness.id}:`;
-    setDismissedErrorKeys((current) => {
-      const next = new Set([...current].filter((key) => !key.startsWith(readinessKeyPrefix)));
-      return next.size === current.size ? current : next;
-    });
-  }, [agentReadiness?.id, agentReadiness?.status]);
 
-
-  const readinessError: ContextualErrorCard | undefined =
-    agentReadiness !== undefined && agentReadiness.status !== "ready" && agentReadiness.status !== "checking"
-      ? {
-          key: `agent:${agentReadiness.id}:${agentReadiness.status}:${agentReadiness.reason ?? ""}:${agentReadiness.guidance ?? ""}`,
-          title: `${agentReadiness.displayName} isn’t ready`,
-          description: [...new Set(
-            [agentReadiness.reason, agentReadiness.guidance].filter(
-              (message): message is string => message !== undefined && message.trim().length > 0,
-            ),
-          )].join(" "),
-          ...(onRetryAgentReadiness !== undefined ? { retry: onRetryAgentReadiness } : {}),
-        }
-      : undefined;
   const submitErrorCard: ContextualErrorCard | undefined = submitError === undefined
     ? undefined
     : { key: `submit:${submitError}`, title: "Message wasn’t sent", description: submitError, retry: send };
@@ -1015,18 +982,16 @@ export function ChatPanel({
         key: `turn:${failedTurn.id}`,
         title: "Turn failed",
         description: failedTurn.reason ?? "The agent could not finish this turn.",
-        ...(failedTurnMessage !== undefined && isAgentReady ? { retry: retryFailedTurn } : {}),
+        ...(failedTurnMessage !== undefined ? { retry: retryFailedTurn } : {}),
       };
-  const visibleContextualError = [readinessError, submitErrorCard, turnErrorCard].find(
+  const visibleContextualError = [submitErrorCard, turnErrorCard].find(
     (error): error is ContextualErrorCard =>
       error !== undefined && !dismissedErrorKeys.has(error.key),
   );
 
   const composerStatus = restoringAttachments
     ? { type: "warning" as const, message: "Checking draft attachments…" }
-    : activeTurnCannotSteer
-      ? { type: "warning" as const, message: "This agent does not support steering an active turn." }
-      : undefined;
+    : undefined;
 
   const attachmentDrawer = (
     <AttachmentDrawer
@@ -1184,22 +1149,14 @@ export function ChatPanel({
               variant="ghost"
               size="md"
               isIconOnly
-              isDisabled={bot === undefined || isAgentNotReady || activeTurnCannotSteer}
+              isDisabled={composerIsDisabled}
               onClick={() => fileInputRef.current?.click()}
               data-testid="attachment-picker"
             />
           }
           density="compact"
           elevation="low"
-          placeholder={
-            bot === undefined
-              ? "Select or create a bot"
-              : isAgentNotReady
-                ? "This bot’s agent isn’t ready"
-                : activeTurnCannotSteer
-                  ? "Wait for this turn to finish"
-                  : "Message…"
-          }
+          placeholder={bot === undefined ? "Select or create a bot" : "Message…"}
           isDisabled={composerIsDisabled}
           data-testid="composer"
           {...(composerStatus !== undefined ? { status: composerStatus } : {})}

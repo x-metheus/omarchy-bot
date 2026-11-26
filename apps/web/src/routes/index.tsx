@@ -43,7 +43,6 @@ export const Route = createFileRoute("/")({
 
 type Tags = Record<QueryTag, string[]>;
 const QUERY_KEYS: Tags = {
-  agents: ["agents"],
   bots: ["bots"],
   threads: ["threads"],
   messages: ["messages"],
@@ -143,7 +142,6 @@ function HomeScreen(): JSX.Element {
     };
   }, []);
 
-  const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.listAgents(), refetchInterval: 30_000 });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api.listBots(), refetchInterval: 30_000 });
   botNamesRef.current = Object.fromEntries((bots.data ?? []).map((candidate) => [candidate.id, candidate.name]));
   const bot = useMemo(() => bots.data?.find((b) => b.id === selectedBotId), [bots.data, selectedBotId]);
@@ -281,13 +279,6 @@ function HomeScreen(): JSX.Element {
     [bot, selectedThreadId, navigate, invalidate],
   );
 
-  const selectedAgent = useMemo(
-    () => (bot === undefined ? undefined : agents.data?.find((candidate) => candidate.id === bot.agentId)),
-    [agents.data, bot],
-  );
-  const isAgentReady = selectedAgent?.status === "ready";
-  const supportsSteering = selectedAgent?.capabilities?.steering === true;
-
   const workspaceBanner: ReactNode =
     !isOnline ? (
       <Banner
@@ -326,23 +317,6 @@ function HomeScreen(): JSX.Element {
         description="Your composer will be ready while recent conversation history loads."
         container="section"
       />
-    ) : bot !== undefined && agents.error !== null ? (
-      <Banner
-        status="error"
-        title="Agent status could not be loaded"
-        description={apiErrorMessage(agents.error, "The selected bot’s agent status is unknown.")}
-        container="section"
-        endContent={
-          <Button label="Retry" variant="secondary" size="sm" onClick={() => void agents.refetch()} />
-        }
-      />
-    ) : bot !== undefined && agents.isPending ? (
-      <Banner
-        status="info"
-        title="Checking agent availability"
-        description="You can review this conversation while the agent connection is checked."
-        container="section"
-      />
     ) : undefined;
 
   let workspaceContent: ReactNode;
@@ -379,7 +353,7 @@ function HomeScreen(): JSX.Element {
         <EmptyState
           headingLevel={2}
           title="Create your first bot"
-          description="Give a teammate a name, a job, and an available agent to start a conversation."
+          description="Give a teammate a name and a job to start a conversation."
           icon={<Icon icon="info" size="lg" />}
           actions={
             <Button
@@ -436,15 +410,7 @@ function HomeScreen(): JSX.Element {
                 ? { messagesError: apiErrorMessage(messages.error, "Messages could not be loaded.") }
                 : {})}
               {...(thread !== undefined ? { onRetryMessages: () => void messages.refetch() } : {})}
-              {...(selectedAgent !== undefined ? { agentReadiness: selectedAgent } : {})}
-              onRetryAgentReadiness={async () => {
-                await api.recheckAgent(bot.agentId);
-                await agents.refetch();
-                invalidate("bots");
-              }}
               onMessageSent={onMessageSent}
-              isAgentReady={isAgentReady}
-              supportsSteering={supportsSteering}
             />
           </TranscriptAttention>
       </VStack>
@@ -602,7 +568,6 @@ function HomeScreen(): JSX.Element {
             <>
               <BotSettingsPanel
                 bot={bot}
-                agentDisplayName={selectedAgent?.displayName ?? bot.agentId}
                 open={botSettingsOpen}
                 returnFocusRef={botSettingsTriggerRef}
                 onClose={() => setRightRegion({ mode: "closed" })}
@@ -715,7 +680,7 @@ function HomeScreen(): JSX.Element {
           deleteError
           ?? `${currentPendingDeleteBot?.status === "active"
             ? `${currentPendingDeleteBot.name} has active work. Deleting it will stop all of this Bot’s current work. `
-            : ""}Deleting ${currentPendingDeleteBot?.name ?? "this Bot"} permanently removes its Omarchy Bot conversations, messages, managed attachments, uploaded avatar data, local drafts, its private folder, and its private secrets. Agent-owned Native Sessions may remain. This cannot be undone.`
+            : ""}Deleting ${currentPendingDeleteBot?.name ?? "this Bot"} permanently removes its Omarchy Bot conversations, messages, managed attachments, uploaded avatar data, local drafts, its private folder, and its private secrets. Some older Bot session files may remain. This cannot be undone.`
         }
         cancelLabel="Cancel"
         actionLabel={deleteError === undefined ? "Delete permanently" : "Try again"}

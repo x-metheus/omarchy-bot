@@ -4,8 +4,8 @@ import path from "node:path";
 import { WEB_ORIGIN } from "./fixtures.ts";
 
 /**
- * One Service (workers: 1) booted by globalSetup with fake workers and isolated
- * storage; Vite serves the web bundle from a separate origin.
+ * Global setup boots one Service with a scripted model provider and isolated
+ * storage. Vite serves the web bundle from a separate origin.
  */
 export default defineConfig({
   testDir: "./specs",

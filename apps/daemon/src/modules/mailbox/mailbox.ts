@@ -4,10 +4,9 @@ import type {
   AgentBotMessageToolContext,
   AgentBotMessageToolOutput,
 } from "@omarchy-bot/agent-contract";
-import { PEER_MAIL_TEXT_MAX_LENGTH, type AgentId } from "@omarchy-bot/domain";
+import { PEER_MAIL_TEXT_MAX_LENGTH } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
 import type { ThreadsService } from "../threads/threads.ts";
-import type { AgentsRegistry } from "../agents/registry.ts";
 import type { TurnService } from "../turns/turns.ts";
 import type { BotRuntime } from "../runtime/runtime.ts";
 
@@ -21,7 +20,6 @@ interface DispatchRow {
   id: string;
   target_bot_id: string;
   thread_id: string;
-  agent_id: AgentId;
   text: string;
 }
 
@@ -39,10 +37,7 @@ interface BotIdentityRow {
   name: string;
 }
 
-/**
- * Durable asynchronous Bot-mail queue. Dispatch is requested only by durable
- * enqueue, Agent readiness, or daemon reconciliation.
- */
+/** Durable asynchronous Bot-mail queue, scheduled by enqueue, startup, and failed target deletion. */
 export class MailboxService {
   readonly #pendingDeliveryIds: string[] = [];
   readonly #pending = new Set<string>();
@@ -51,22 +46,30 @@ export class MailboxService {
   #activeDispatches = 0;
   #nextPendingDelivery = 0;
   #drainScheduled = false;
-
+  #paused = false;
   #stopping = false;
+
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
     private readonly threads: ThreadsService,
-    private readonly agents: AgentsRegistry,
     private readonly turns: TurnService,
     private readonly runtime: Pick<BotRuntime, "recoverPeerMailAcceptance" | "writeService">,
-  ) {
-    this.agents.subscribe(({ agentId, to }) => {
-      if (to === "ready") this.#scheduleAgentDispatch(agentId);
-    });
+  ) {}
+
+  /** Hold pending deliveries in order while allowing active dispatches to finish. */
+  pauseDispatch(): void {
+    this.#paused = true;
   }
 
-  pauseDispatch(): void {
+  resumeDispatch(): void {
+    if (this.#stopping) return;
+    this.#paused = false;
+    this.#scheduleQueued();
+    this.#scheduleDrain();
+  }
+
+  stopDispatch(): void {
     this.#stopping = true;
   }
 
@@ -178,7 +181,7 @@ export class MailboxService {
     })();
   }
 
-  /** Reconcile remaining claims before startup probes can make Agents ready. */
+  /** Reconcile remaining claims before scheduling queued deliveries. */
   reconcileStartup(): void {
     const now = new Date().toISOString();
     this.db.transaction(() => {
@@ -205,32 +208,21 @@ export class MailboxService {
       ).run(RESTART_ACCEPTANCE_FAILURE, now);
     })();
 
-    this.#scheduleAllQueued();
+    this.#scheduleQueued();
   }
 
-  #scheduleAllQueued(): void {
-    const rows = this.db.query(
+  scheduleQueuedForBot(botId: string): void {
+    if (!this.#stopping) this.#scheduleQueued(botId);
+  }
+
+  #scheduleQueued(targetBotId?: string): void {
+    const query = this.db.query<DeliveryIdRow, [] | [string]>(
       `SELECT id FROM bot_mail_deliveries
        WHERE state = 'queued' AND target_turn_id IS NULL
+         ${targetBotId === undefined ? "" : "AND target_bot_id = ?"}
        ORDER BY created_at, id`,
-    ).all() as DeliveryIdRow[];
-    for (const row of rows) this.#scheduleDispatch(row.id);
-  }
-
-  #scheduleAgentDispatch(agentId: AgentId): void {
-    const rows = this.db.query(
-      `SELECT deliveries.id
-       FROM bot_mail_deliveries AS deliveries
-       JOIN bots ON bots.id = deliveries.target_bot_id
-       WHERE bots.agent_id = ?
-         AND deliveries.state = 'queued'
-         AND deliveries.target_turn_id IS NULL
-         AND NOT EXISTS (
-           SELECT 1 FROM bot_deletions
-           WHERE bot_id = deliveries.target_bot_id AND state = 'cleaning'
-         )
-       ORDER BY deliveries.created_at, deliveries.id`,
-    ).all(agentId) as DeliveryIdRow[];
+    );
+    const rows = targetBotId === undefined ? query.all() : query.all(targetBotId);
     for (const row of rows) this.#scheduleDispatch(row.id);
   }
 
@@ -242,6 +234,10 @@ export class MailboxService {
     if (this.#pending.has(deliveryId)) return;
     this.#pending.add(deliveryId);
     this.#pendingDeliveryIds.push(deliveryId);
+    this.#scheduleDrain();
+  }
+
+  #scheduleDrain(): void {
     if (this.#drainScheduled) return;
     this.#drainScheduled = true;
     queueMicrotask(() => {
@@ -251,7 +247,7 @@ export class MailboxService {
   }
 
   #drainDispatches(): void {
-    if (this.#stopping) return;
+    if (this.#paused || this.#stopping) return;
     while (
       this.#activeDispatches < MAX_CONCURRENT_DISPATCHES
       && this.#nextPendingDelivery < this.#pendingDeliveryIds.length
@@ -279,7 +275,7 @@ export class MailboxService {
 
   async #dispatch(deliveryId: string): Promise<void> {
     const queued = this.#dispatchRow(deliveryId);
-    if (queued === undefined || !this.agents.isReady(queued.agent_id)) return;
+    if (queued === undefined) return;
 
     const turnId = `turn_${randomUUID().replace(/-/g, "")}`;
     const now = new Date().toISOString();
@@ -308,7 +304,7 @@ export class MailboxService {
       ).get(queued.id);
     });
     const claimed = await this.runtime.writeService(() => {
-      if (!this.#stopping && this.agents.isReady(queued.agent_id)) return claim();
+      if (!this.#stopping) return claim();
     });
     if (!claimed) return;
 
@@ -345,7 +341,6 @@ export class MailboxService {
       `SELECT deliveries.id,
               deliveries.target_bot_id,
               deliveries.thread_id,
-              bots.agent_id,
               messages.text
        FROM bot_mail_deliveries AS deliveries
        JOIN bots ON bots.id = deliveries.target_bot_id

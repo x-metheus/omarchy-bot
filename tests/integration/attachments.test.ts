@@ -1,10 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { AttachmentDto, MessageDto } from "../../packages/protocol/src/index.ts";
+import { withFakeRuntimeProvider } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
+import { DEFAULT_MODEL_SETTING } from "../../apps/daemon/src/modules/runtime/models.ts";
+import { setSetting } from "../../apps/daemon/src/persistence/settings.ts";
+import type { AttachmentDto, MessageDto, ThreadDto } from "../../packages/protocol/src/index.ts";
+import { fauxAssistantMessage, type FakeReply } from "../../packages/testkit/src/fake-provider.ts";
 import { api, authedFetch, apiStatus, makeBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_BYTES = 64 * 1024;
 
 async function stage(
   h: Harness,
@@ -41,6 +46,63 @@ async function staged(h: Harness, id: string, draftToken: string): Promise<{ sta
   };
 }
 
+test("stages and sends text up to 64 KiB with a legacy offline status", () => {
+  const inputs: unknown[] = [];
+  const capture: FakeReply = ({ messages }) => {
+    inputs.push(messages.filter((message) => message.role === "user").map((message) => message.content));
+    return fauxAssistantMessage("received the attachment");
+  };
+  return withFakeRuntimeProvider([capture], {}, async () => {
+    const h = await startDaemon(undefined, { seedDurableProvider: false });
+    try {
+      await h.svc.credentials.add({
+        id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1",
+        apiKey: "fake-key", models: [{ id: "fake-model" }],
+      });
+      setSetting(h.svc.db, DEFAULT_MODEL_SETTING, "fake/fake-model");
+      const botId = await makeBot(h, "Attachment Bot");
+      h.svc.db.query("UPDATE agents SET status = 'offline' WHERE id = 'pi'").run();
+      const text = "é".repeat(MAX_TEXT_ATTACHMENT_BYTES / 2);
+      const accepted = await stage(h, botId, new Blob([text]), "within-limit.txt");
+      expect(accepted.status).toBe(201);
+      expect(accepted.body).toMatchObject({ mediaType: "text/plain", size: MAX_TEXT_ATTACHMENT_BYTES });
+
+      const rejected = await stage(h, botId, new Blob([text, "x"]), "too-large.txt");
+      expect(rejected.status).toBe(400);
+      expect(rejected.body).toEqual({ error: "Attachment media type text/plain exceeds the 64 KB limit (too-large.txt)" });
+
+      const attachment = accepted.body as AttachmentDto;
+      const prompt = "say: received the attachment";
+      const sent = await api<{ threadId: string; messageId: string; turnId: string }>(h, "POST", `/api/bots/${botId}/messages`, {
+        text: prompt,
+        attachmentIds: [attachment.id],
+        attachmentDraftToken: accepted.draftToken,
+      });
+      await waitThreadIdle(h, sent.threadId);
+      const thread = await api<ThreadDto>(h, "GET", `/api/threads/${sent.threadId}`);
+      expect(thread.latestTurn).toMatchObject({ id: sent.turnId, status: "completed" });
+      const attachmentInput = [
+        { type: "text", text: prompt },
+        { type: "text", text: `${attachment.id}|within-limit.txt|text/plain|${text}` },
+      ];
+      expect(inputs).toEqual([[attachmentInput]]);
+
+      const url = `/api/attachments/${attachment.id}`;
+      const messages = await api<MessageDto[]>(h, "GET", `/api/threads/${sent.threadId}/messages`);
+      expect(messages.find(({ id }) => id === sent.messageId)?.attachments).toEqual([
+        { ...attachment, kind: "managed", url },
+      ]);
+      const downloaded = await authedFetch(h, `${h.baseUrl}${url}`);
+      expect(downloaded.status).toBe(200);
+      expect(await downloaded.bytes()).toEqual(new TextEncoder().encode(text));
+    } finally {
+      await h.stop();
+      rmSync(h.home, { recursive: true, force: true });
+      rmSync(h.svc.cfg.stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("managed attachments", () => {
   let h: Harness;
   let botId: string;
@@ -67,8 +129,8 @@ describe("managed attachments", () => {
 
     const pngBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]);
     const image = await stage(h, botId, new Blob([pngBytes], { type: "application/octet-stream" }), "actual.png");
-    expect(image.status).toBe(201);
-    expect((image.body as AttachmentDto).mediaType).toBe("image/png");
+    expect(image.status).toBe(400);
+    expect(image.body).toEqual({ error: "Unsupported attachment media type image/png (actual.png)" });
 
     const spoofed = await stage(h, botId, new Blob([Uint8Array.from([0, 1, 2, 3])], { type: "image/png" }), "spoofed.png");
     expect(spoofed.status).toBe(400);
@@ -189,7 +251,7 @@ describe("managed attachments", () => {
     expect(await response.text()).toBe("original snapshot");
   });
 
-  test("rejects unsupported adapter media without consuming supported files in the draft", async () => {
+  test("rejects unsupported media without consuming supported files in the draft", async () => {
     const textUpload = await stage(h, botId, new Blob(["keep me"], { type: "text/plain" }), "keep.txt");
     const pdfUpload = await stage(
       h,
@@ -200,7 +262,7 @@ describe("managed attachments", () => {
     const textAttachment = textUpload.body as AttachmentDto;
 
     expect(pdfUpload.status).toBe(400);
-    expect(pdfUpload.body).toEqual({ error: "pi cannot consume attachment media type application/pdf (unsupported.pdf)" });
+    expect(pdfUpload.body).toEqual({ error: "Unsupported attachment media type application/pdf (unsupported.pdf)" });
     expect((await staged(h, textAttachment.id, textUpload.draftToken)).status).toBe(200);
 
     const sent = await api<{ threadId: string }>(h, "POST", `/api/bots/${botId}/messages`, {

@@ -1,7 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 interface MessageView {
   id: string;
@@ -64,24 +62,6 @@ async function abort(turnId: string): Promise<void> {
   await h.svc.turns.abortTurn(turnId, "test cleanup");
 }
 
-function setCapabilities(capabilities: Record<string, unknown>): void {
-  writeFileSync(
-    path.join(h.home, "conformance", "pi-fake-pi-1.json"),
-    JSON.stringify({ ok: true, image: "verified", fakeCapabilities: capabilities }),
-  );
-}
-
-function workerCommandCount(command: string): number {
-  try {
-    return readFileSync(path.join(h.home, "fake-worker-commands.log"), "utf8")
-      .split("\n")
-      .filter((entry) => entry === command)
-      .length;
-  } catch {
-    return 0;
-  }
-}
-
 describe("integration: native turn steering", () => {
   test("an active turn accepts steering and orders the redirected response after the user message", async () => {
     const botId = await makeBot(h, "Steering behavior");
@@ -137,48 +117,6 @@ describe("integration: native turn steering", () => {
 
     await abort(sent.turnId);
     await waitThreadIdle(h, sent.threadId);
-  });
-
-  workerOnly("removes worker-native steering capability rejection")("undeclared steering is rejected before persistence or worker dispatch", async () => {
-    setCapabilities({
-      steering: false,
-      abort: false,
-      nativeThreadActions: ["resume", "history", "close"],
-      nativeEventFamilies: [],
-    });
-    await h.svc.agents.recheck("pi");
-
-    let turnId: string | undefined;
-    let threadId: string | undefined;
-    try {
-      const botId = await makeBot(h, "Unsupported turn controls");
-      const sent = await sendToBot(h, botId, "hang");
-      turnId = sent.turnId;
-      threadId = sent.threadId;
-      await until(async () => (await messages(sent.threadId)).some((message) => message.kind === "response"));
-
-      const beforeMessages = await messages(sent.threadId);
-      const steerCommands = workerCommandCount("message.steer");
-
-      const steer = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "not persisted" });
-      expect(steer).toEqual({
-        status: 409,
-        body: { error: "steering is not supported by pi" },
-      });
-      expect(await messages(sent.threadId)).toEqual(beforeMessages);
-      expect(workerCommandCount("message.steer")).toBe(steerCommands);
-
-    } finally {
-      setCapabilities({
-        steering: true,
-        abort: true,
-        nativeThreadActions: ["resume", "history", "close"],
-        nativeEventFamilies: [],
-      });
-      await h.svc.agents.recheck("pi");
-      if (turnId !== undefined) await abort(turnId);
-      if (threadId !== undefined) await waitThreadIdle(h, threadId);
-    }
   });
 
   test("idle send starts a new turn, then active send steers the same worker and native session after a safe boundary", async () => {

@@ -531,7 +531,7 @@ test("durable MCP credential preparation rejects a workspace FIFO without blocki
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { PluginsService } from ${JSON.stringify(new URL("../../plugins/plugins.ts", import.meta.url).href)};
 import { createMcpExtension } from ${JSON.stringify(new URL("./mcp.ts", import.meta.url).href)};
-const plugins = new PluginsService(${JSON.stringify(privateDir)}, ${JSON.stringify(workspace)}, async () => ({ skills: [] }));
+const plugins = new PluginsService(${JSON.stringify(privateDir)}, ${JSON.stringify(workspace)}, () => ({ skills: [] }));
 const servers = () => plugins.mcp.effectiveServers();
 const mcp = createMcpExtension({ servers, async prepareServers() {
   await plugins.prepareServiceCredentials();
@@ -889,7 +889,7 @@ test.each([
       id: accountId, providerId: "github", label: "Fixture", identity: "github:fixture", status: "connected", enabledServices: ["github"], nativeManaged,
       grant: { generation: "fixture", accessToken: crypto.randomUUID(), refreshToken: crypto.randomUUID(), expiresAt: Date.now() - 10_000, scopes: [], cloudUrl: publisher },
     }] }));
-    plugins = new PluginsService(privateDir, root, async () => ({ skills: [] }));
+    plugins = new PluginsService(privateDir, root, () => ({ skills: [] }));
 
     expect(await plugins.prepareServiceCredentials()).toEqual({ failed: [accountId] });
     expectSafeEqual(fetchMock.mock.calls.map(([input]) => String(input)), [tokenEndpoint]);
@@ -932,7 +932,7 @@ test("MCP shutdown drains publisher credential preparation after a call is abort
       id: "fixture", providerId: "github", label: "Fixture", identity: "github:fixture", status: "connected", enabledServices: ["github"], nativeManaged: true,
       grant: { generation: "fixture", accessToken: staleToken, refreshToken: "fixture-refresh", expiresAt: Date.now() - 10_000, scopes: [], cloudUrl: publisher },
     }] }));
-    const servicePlugins = plugins = new PluginsService(privateDir, root, async () => ({ skills: [] }));
+    const servicePlugins = plugins = new PluginsService(privateDir, root, () => ({ skills: [] }));
     servicePlugins.mcp.putService(service, { url }, { accountId: "fixture", serviceId: "github" });
     servicePlugins.mcp.setServiceToken(service, url, staleToken);
     const servers = () => servicePlugins.mcp.effectiveServers();
@@ -1000,7 +1000,7 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("the MCP panel reports a shared deletion conflict while the durable runtime keeps another service callable", async () => {
+test("a retired Pi edit cannot restore a deleted shared MCP or block another service", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-shared-deletion-"));
   const shared = path.join(root, ".mcp.json");
   const pi = path.join(root, ".pi", "mcp.json");
@@ -1020,11 +1020,12 @@ await server.connect(new StdioServerTransport());
     expect(store.effectiveServers().servers.local).toBeDefined();
 
     await writeFile(shared, JSON.stringify({ mcpServers: { other: definition } }));
-    await writeFile(pi, JSON.stringify({ mcpServers: { local: { ...definition, env: { API_KEY: secret } } } }));
+    const retired = JSON.stringify({ mcpServers: { local: { ...definition, env: { API_KEY: secret } } } });
+    await writeFile(pi, retired);
     const effective = store.effectiveServers();
-    expect(store.list().find(({ name }) => name === "local")).toMatchObject({
-      status: "conflict", error: expect.stringMatching(/deletion conflicts/i),
-    });
+    expect(store.list().map(({ name }) => name)).toEqual(["other"]);
+    expect(store.errors).toEqual([]);
+    expect(await readFile(pi, "utf8")).toBe(retired);
     expect(effective.configurationError).toBeUndefined();
     expect(effective.servers.local).toBeUndefined();
 

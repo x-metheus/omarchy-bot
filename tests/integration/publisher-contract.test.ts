@@ -44,7 +44,7 @@ test("new daemons read the normalised catalog while the raw skills.sh route stay
     }
     return new Response(null, { status: 404 });
   }, { preconnect: originalFetch.preconnect });
-  const service = new PluginsService(root, root, async () => ({ skills: [] }));
+  const service = new PluginsService(root, root, () => ({ skills: [] }));
   try {
     service.configure(publisher);
     const raw = await handlePluginCloudRequest(new Request(`${publisher}/api/plugins/catalog?cursor=2&view=hot`));
@@ -86,7 +86,7 @@ test("one operation table names every manage_plugins action and its daemon path"
 
 test("manage_plugins publishes exactly the operation actions and provider ids", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "publisher-schema-"));
-  const service = new PluginsService(root, root, async () => ({ skills: [] }));
+  const service = new PluginsService(root, root, () => ({ skills: [] }));
   try {
     const lease = await service.acquire();
     try {
@@ -139,7 +139,7 @@ test("bundle enable remove and update mutate the account store", async () => {
   const bundles = new ServiceBundles({
     rootDir: root, mcp, skills, accounts: () => accounts, stopping: () => false, ready: async () => undefined,
     token: async () => { throw new Error("native bundle must not refresh a publisher token"); },
-    persist: (changed) => { persisted.push(changed ?? false); }, clearNative: () => undefined,
+    persist: (changed) => { persisted.push(changed ?? false); },
     removeUnused: async () => undefined,
     accountDto: (entry) => ({ id: entry.id, providerId: entry.providerId, label: entry.id, identity: entry.id, enabledServices: entry.enabledServices, grantedScopes: [], status: entry.status }),
   });

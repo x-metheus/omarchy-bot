@@ -12,15 +12,11 @@ import { api, apiStatus, makeBot, messages, sendToBot, sendToThread, startDaemon
 const parityScript = { input: "parity-stream", thinking: "T", response: "R" };
 const script = [{ segments: [{ type: "thinking" as const, text: parityScript.thinking }, { type: "text" as const, text: parityScript.response }] }];
 
-test("a durable Turn preserves the ordered transcript and events without Agent readiness", () => withFakeRuntimeProvider(script, {}, async () => {
+test("a durable Turn preserves the ordered transcript and events with a legacy offline status", () => withFakeRuntimeProvider(script, {}, async () => {
   const h = await startDaemon(undefined, { seedDurableProvider: false });
-  const ready = spyOn(h.svc.agents, "isReady");
-  const inventory = spyOn(h.svc.agents, "capabilityInventory");
   try {
     const botId = await makeBot(h, "Parity");
-    ready.mockReturnValue(false);
-    inventory.mockReturnValue(undefined);
-    expect(h.svc.agents.isReady("pi")).toBeFalse();
+    h.svc.db.query("UPDATE agents SET status = 'offline' WHERE id = 'pi'").run();
     await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
     setSetting(h.svc.db, "default_model", "fake/fake-model");
     const cursor = h.svc.events.replay(0, h.svc.events.oldestCursor()).events.at(-1)?.cursor ?? 0;
@@ -75,8 +71,6 @@ test("a durable Turn preserves the ordered transcript and events without Agent r
     ]);
     expect(h.svc.db.query<{ count: number }, []>("SELECT count(*) AS count FROM pi_thread_conversations").get()?.count).toBe(1);
   } finally {
-    ready.mockRestore();
-    inventory.mockRestore();
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
   }
@@ -333,11 +327,11 @@ test("durable turns configure the default tool-round limit", async () => {
     const h = await startDaemon(undefined, { seedDurableProvider: false });
     try {
       const botId = await makeBot(h, "Limited durable");
-      const created = await api<{ id: string; maxTurns: number | null }>(h, "POST", "/api/bots", { name: "Custom limit", agentId: "pi", maxTurns: 3 });
+      const created = await api<{ id: string; maxTurns: number | null }>(h, "POST", "/api/bots", { name: "Custom limit", maxTurns: 3 });
       expect(created.maxTurns).toBe(3);
       for (const value of [0, -1, 1.5, "2"]) {
         expect((await apiStatus(h, "PATCH", `/api/bots/${created.id}`, { maxTurns: value })).status).toBe(400);
-        expect((await apiStatus(h, "POST", "/api/bots", { name: "Invalid limit", agentId: "pi", maxTurns: value })).status).toBe(400);
+        expect((await apiStatus(h, "POST", "/api/bots", { name: "Invalid limit", maxTurns: value })).status).toBe(400);
       }
       await h.svc.credentials.add({ id: "fake", name: "Fake", protocol: "openai-compatible", baseUrl: "http://127.0.0.1", apiKey: "fake-key", models: [{ id: "fake-model", reasoning: true }] });
       setSetting(h.svc.db, "default_model", "fake/fake-model");
@@ -461,7 +455,7 @@ test.each(["worker", "unexpected"])("historical runtime setting %s leaves Turns 
   }
 });
 
-test("a durable turn streams and completes with an empty Agent registry", () => withFakeRuntimeProvider(script, {}, async () => {
+test("a durable turn streams and completes when the Bot storage identity row is unavailable", () => withFakeRuntimeProvider(script, {}, async () => {
   const h = await startDaemon(undefined, { seedDurableProvider: false });
   try {
     const botId = await makeBot(h, "No Agent");
@@ -470,7 +464,7 @@ test("a durable turn streams and completes with an empty Agent registry", () => 
     h.svc.db.exec("CREATE TEMP TABLE saved_agents AS SELECT * FROM agents");
     h.svc.db.exec("PRAGMA foreign_keys = OFF");
     h.svc.db.exec("DELETE FROM agents");
-    expect(h.svc.agents.list()).toEqual([]);
+    expect(h.svc.db.query("SELECT id FROM agents").all()).toEqual([]);
     const sent = await h.svc.turns.send(botId, null, parityScript.input);
     const turn = await h.svc.turns.waitForTerminal(sent.turnId);
     expect(turn.status).toBe("completed");

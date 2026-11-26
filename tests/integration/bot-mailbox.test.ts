@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -7,7 +8,7 @@ import {
   durableSuiteToolResultEntries,
   durableSuiteToolResults,
 } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
-import type { AttachmentDto, BotDto, BotViewDto, MessageDto, ThreadDto } from "../../packages/protocol/src/index.ts";
+import type { AttachmentDto, BotDto, BotViewDto, DeleteBotResultDto, MessageDto, ThreadDto } from "../../packages/protocol/src/index.ts";
 import {
   api,
   apiStatus,
@@ -17,8 +18,11 @@ import {
   sendToBot,
   sendToThread,
   startDaemon,
+  waitForMailboxStep,
+  waitForMailboxWriter,
   waitThreadIdle,
   type Harness,
+  type HarnessOptions,
 } from "./helpers/harness.ts";
 
 interface DeliveryStateRow {
@@ -27,21 +31,13 @@ interface DeliveryStateRow {
   failure_reason: string | null;
 }
 
-const PI_CONFORMANCE_FILE = "pi-fake-pi-1.json";
 const forgedIdentityError = 'Validation failed for tool "send_bot_message":\n  - botId: unknown field\n  - turnId: unknown field';
 
-function setPiProbeCapabilities(
-  h: Harness,
-  capabilities: { botMail: boolean },
-): void {
-  writeFileSync(
-    path.join(h.home, "conformance", PI_CONFORMANCE_FILE),
-    JSON.stringify({
-      ok: true,
-      image: "verified",
-      fakeCapabilities: capabilities,
-    }),
-  );
+function startMailboxDaemon(
+  home = mkdtempSync(path.join(tmpdir(), "mailbox-")),
+  options?: Pick<HarnessOptions, "onDurableMailReplay" | "pauseMailboxDispatchOnStartup" | "separateWorkspace">,
+): Promise<Harness> {
+  return startDaemon(home, { ...options, stateDir: `${home}-state` });
 }
 
 function deliveryRow(h: Harness, deliveryId: string): DeliveryStateRow {
@@ -150,26 +146,15 @@ function expectNoDurableDispatch(h: Harness, threadId: string, existingTurnId?: 
   expect(targetConversations(h, threadId)).toEqual([]);
 }
 
-async function makeReadyMailboxSource(h: Harness, name: string): Promise<string> {
-  writeFileSync(
-    path.join(h.home, "conformance", "omp-fake-omp-1.json"),
-    JSON.stringify({ ok: true, image: "verified" }),
-  );
-  await h.svc.agents.recheck("omp");
-  const bot = await api<BotDto>(h, "POST", "/api/bots", { name, instructions: "", agentId: "omp" });
-  return bot.id;
-}
-
-async function enqueueWhileAgentUnavailable(
+async function enqueueWhileDispatchPaused(
   h: Harness,
   sourceBotId: string,
   targetBotId: string,
   body: string,
 ): Promise<{ deliveryId: string; threadId: string }> {
-  // Hold dispatch by marking the target Agent unavailable.
-  h.svc.agents.markOffline("pi", "test target readiness interruption");
+  h.mailbox.pauseDispatch();
   const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:${body}`);
-  await waitThreadIdle(h, source.threadId);
+  await h.svc.turns.waitForTerminal(source.turnId);
   const deliveryId = acknowledgementDeliveryId(await messages(h, source.threadId));
   expect(deliveryRow(h, deliveryId)).toEqual({
     state: "queued",
@@ -185,6 +170,29 @@ async function enqueueWhileAgentUnavailable(
   return { deliveryId, threadId };
 }
 
+/** Hold the idle writer and observe the next mailbox claim entering its queue. */
+function holdMailboxClaim(h: Harness) {
+  const runtime = h.svc.turns["runtime"];
+  const writeService = runtime.writeService;
+  const releaseWriter = Promise.withResolvers<void>();
+  const submitted = Promise.withResolvers<{ finished: Promise<unknown> }>();
+  const held = writeService(() => releaseWriter.promise);
+  runtime.writeService = (write) => {
+    const finished = writeService(write);
+    runtime.writeService = writeService;
+    submitted.resolve({ finished });
+    return finished;
+  };
+  return {
+    waitForSubmission: () => waitForMailboxStep(submitted.promise, "a mailbox claim to enter the writer queue"),
+    async release() {
+      runtime.writeService = writeService;
+      releaseWriter.resolve();
+      await held;
+    },
+  };
+}
+
 describe("durable Bot mailbox", () => {
   let h: Harness | undefined;
 
@@ -193,9 +201,28 @@ describe("durable Bot mailbox", () => {
     h = undefined;
   });
 
-  test("a replayed Bot mail tool call returns the same acknowledgement and creates one visible target exchange", async () => {
+  test("enqueue dispatches Bot mail to a target Turn", async () => {
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Agentless source");
+    const targetBotId = await makeBot(h, "Agentless target");
+
+    const body = "deliver without an Agent";
+    const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:${body}`);
+    const deliveryId = await durableAcknowledgement(h, source.threadId);
+    const delivered = await waitForDeliveryState(h, deliveryId, "delivered");
+    const threads = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
+    expect(threads).toHaveLength(1);
+    await waitThreadIdle(h, threads[0]!.id);
+    const notice = await expectDurableDispatch(h, threads[0]!.id, delivered.target_turn_id, deliveryId);
+    const author = `Message from Bot Agentless source (${sourceBotId})`;
+    expect(notice.data).toEqual({ author, text: body, deliveryId });
+    expect(notice.model).toMatchObject([{ role: "user", content: `${author}: ${body}` }]);
+  });
+
+  // Checking replay persistence requires two real daemon boots against the same on-disk state.
+  test("enqueue wakes an idle dispatcher and a replayed Bot mail tool call creates one visible target exchange", async () => {
     const replays: Array<{ first: unknown; replayed: unknown }> = [];
-    h = await startDaemon(undefined, {
+    h = await startMailboxDaemon(undefined, {
       onDurableMailReplay: (first, replayed) => { replays.push({ first, replayed }); },
     });
     const sourceBotId = await makeBot(h, "Release coordinator");
@@ -203,6 +230,7 @@ describe("durable Bot mailbox", () => {
     const targetPrivateFolder = path.join(h.svc.cfg.sharedWorkspaceDir, "bots", targetBotId);
     expect(existsSync(targetPrivateFolder)).toBeFalse();
     const body = "Review the release checklist before handoff.";
+    expect(h.svc.db.query(`SELECT id FROM bot_mail_deliveries`).all()).toEqual([]);
 
     const source = await sendToBot(
       h,
@@ -307,7 +335,7 @@ describe("durable Bot mailbox", () => {
 
     const home = h.home;
     await h.disconnectForRestart();
-    h = await startDaemon(home);
+    h = await startMailboxDaemon(home);
 
     const durableThreads = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
     const durableMessages = await api<MessageDto[]>(
@@ -322,10 +350,10 @@ describe("durable Bot mailbox", () => {
     expect(durableTarget.unreadCount).toBe(1);
     expect(deliveryRow(h, deliveryId)).toEqual(delivered);
     await expectDurableDispatch(h, targetThreads[0]!.id, delivered.target_turn_id, deliveryId);
-  });
+  }, { timeout: 8_000 });
 
   test("rejects forged Bot or Turn identity in a mail tool call", async () => {
-    h = await startDaemon();
+    h = await startMailboxDaemon();
     const sourceBotId = await makeBot(h, "Bound source");
     const targetBotId = await makeBot(h, "Unmodified target");
 
@@ -351,14 +379,10 @@ describe("durable Bot mailbox", () => {
     }]);
   });
 
-  test("uses the active Turn for mail authorization when the Agent inventory disables Bot mail", async () => {
+  test("uses the active Turn for mail authorization", async () => {
     h = await startDaemon();
     const sourceBotId = await makeBot(h, "Capability-bound source");
     const targetBotId = await makeBot(h, "Capability-bound target");
-    expect(h.svc.agents.capabilityInventory("pi")?.botMail).toBeTrue();
-    setPiProbeCapabilities(h, { botMail: false });
-    await h.svc.agents.recheck("pi");
-    expect(h.svc.agents.capabilityInventory("pi")?.botMail).toBeFalse();
 
     const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:durable authority`);
     const deliveryId = await durableAcknowledgement(h, source.threadId);
@@ -375,7 +399,7 @@ describe("durable Bot mailbox", () => {
   });
 
   test("rejects self, missing, raw-path, and oversized addressing without delivery artifacts", async () => {
-    h = await startDaemon();
+    h = await startMailboxDaemon();
     const sourceBotId = await makeBot(h, "Validation source");
     const targetBotId = await makeBot(h, "Untouched validation target");
     const cases = [
@@ -412,15 +436,16 @@ describe("durable Bot mailbox", () => {
   }, 20_000);
 
   test("dispatches one accepted delivery through a fresh private target conversation without disturbing unrelated target work", async () => {
-    h = await startDaemon(undefined, { separateWorkspace: true });
+    h = await startMailboxDaemon(undefined, { separateWorkspace: true });
     const sourceBotId = await makeBot(h, "Source coordinator", "SOURCE-ONLY-INSTRUCTIONS");
     const targetInstructions = "TARGET-CURRENT-INSTRUCTIONS";
     const targetBotId = await makeBot(h, "Target reviewer", targetInstructions);
     const sourceBot = await api<BotDto>(h, "GET", `/api/bots/${sourceBotId}`);
     const targetBot = await api<BotDto>(h, "GET", `/api/bots/${targetBotId}`);
     const sourceSecret = "SOURCE-THREAD-SECRET";
-    expect(sourceBot.agentId).toBe("pi");
-    expect(targetBot.agentId).toBe(sourceBot.agentId);
+    expect(h.svc.db.query("SELECT agent_id FROM bots WHERE id IN (?, ?)").all(sourceBot.id, targetBot.id)).toEqual([
+      { agent_id: "pi" }, { agent_id: "pi" },
+    ]);
     expect(targetBot.id).not.toBe(sourceBot.id);
 
     const sourceConversation = await sendToBot(h, sourceBotId, `say: ${sourceSecret}`);
@@ -524,7 +549,7 @@ describe("durable Bot mailbox", () => {
   });
 
   test("a private-folder failure uses the same bounded reason for the target Turn and delivery", async () => {
-    h = await startDaemon();
+    h = await startMailboxDaemon();
     const sourceBotId = await makeBot(h, "Mail source");
     const targetBotId = await makeBot(h, "Mail target");
     const botsDir = path.join(h.svc.cfg.sharedWorkspaceDir, "bots");
@@ -546,7 +571,7 @@ describe("durable Bot mailbox", () => {
   });
 
   test("marks delivery on runtime admission while a later target failure remains only an ordinary failed target Turn", async () => {
-    h = await startDaemon();
+    h = await startMailboxDaemon();
     const sourceBotId = await makeBot(h, "Failure source");
     const targetBotId = await makeBot(h, "Failure target");
 
@@ -597,10 +622,10 @@ describe("durable Bot mailbox", () => {
   });
 
   test("direct target deletion cascades queued mail and its visible target-owned Thread", async () => {
-    h = await startDaemon();
-    const sourceBotId = await makeReadyMailboxSource(h, "Deletion cascade source");
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Deletion cascade source");
     const targetBotId = await makeBot(h, "Deletion cascade target");
-    const queued = await enqueueWhileAgentUnavailable(
+    const queued = await enqueueWhileDispatchPaused(
       h,
       sourceBotId,
       targetBotId,
@@ -627,7 +652,7 @@ describe("durable Bot mailbox", () => {
 
 
   test("rejects enqueue after direct target deletion begins without acknowledging hidden work", async () => {
-    h = await startDaemon();
+    h = await startMailboxDaemon();
     const sourceBotId = await makeBot(h, "Deletion race source");
     const targetBotId = await makeBot(h, "Deletion race target");
     const activeTarget = await sendToBot(h, targetBotId, "hang");
@@ -681,10 +706,10 @@ describe("durable Bot mailbox", () => {
   });
 
   test("a queued delivery cannot claim a target while its direct deletion claim exists", async () => {
-    h = await startDaemon();
-    const sourceBotId = await makeReadyMailboxSource(h, "Dispatch deletion source");
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Dispatch deletion source");
     const targetBotId = await makeBot(h, "Dispatch deletion target");
-    const queued = await enqueueWhileAgentUnavailable(
+    const queued = await enqueueWhileDispatchPaused(
       h,
       sourceBotId,
       targetBotId,
@@ -696,7 +721,8 @@ describe("durable Bot mailbox", () => {
        VALUES (?, 'cleaning', NULL, ?, ?)`,
     ).run(targetBotId, now, now);
 
-    await h.svc.agents.recheck("pi");
+    h.mailbox.resumeDispatch();
+    await waitForMailboxWriter(h);
     expect(deliveryRow(h, queued.deliveryId)).toEqual({
       state: "queued",
       target_turn_id: null,
@@ -713,12 +739,57 @@ describe("durable Bot mailbox", () => {
     ).toBeNull();
   });
 
-  test("keeps accepted mail visible while unavailable and dispatches it when Agent readiness returns", async () => {
-    h = await startDaemon();
-    const sourceBotId = await makeReadyMailboxSource(h, "Readiness source");
+  test("failed target deletion wakes the original queued delivery exactly once", async () => {
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Deletion failure source");
+    const targetBotId = await makeBot(h, "Deletion failure target");
+    const { botDeletions, db, events, screens } = h.svc;
+    const releaseCleanup = Promise.withResolvers<void>();
+    const destroy = screens.destroy;
+    screens.destroy = async () => {
+      await releaseCleanup.promise;
+      throw new Error("Target cleanup failed");
+    };
+    let deletion: Promise<DeleteBotResultDto> | undefined;
+    const unsubscribe = events.subscribe(({ type, payload }) => {
+      if (type === "thread.created" && payload && typeof payload === "object" && "deliveryId" in payload) {
+        // The accepted mail is durable, and its scheduled drain has yet to run.
+        deletion = botDeletions.delete(targetBotId);
+        return deletion;
+      }
+    });
+    try {
+      const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:deliver after failed cleanup`);
+      const deliveryId = await durableAcknowledgement(h, source.threadId);
+      const threads = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
+      expect(threads).toHaveLength(1);
+      const threadId = threads[0]!.id;
+      const deletionState = db.query("SELECT state FROM bot_deletions WHERE bot_id = ?");
+      await waitForMailboxWriter(h);
+      expect(deletionState.get(targetBotId)).toEqual({ state: "cleaning" });
+      expect(deliveryRow(h, deliveryId)).toEqual({ state: "queued", target_turn_id: null, failure_reason: null });
+      expectNoDurableDispatch(h, threadId);
+
+      releaseCleanup.resolve();
+      expect(await deletion).toMatchObject({ status: "failed", failures: [{ stage: "surface", message: "Target cleanup failed" }] });
+      expect(deletionState.get(targetBotId)).toEqual({ state: "failed" });
+      const delivered = await waitForDeliveryState(h, deliveryId, "delivered");
+      await waitThreadIdle(h, threadId);
+      await expectDurableDispatch(h, threadId, delivered.target_turn_id, deliveryId);
+    } finally {
+      unsubscribe();
+      releaseCleanup.resolve();
+      screens.destroy = destroy;
+      await deletion;
+    }
+  });
+
+  test("keeps accepted mail visible while dispatch is paused and delivers it on resume", async () => {
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Readiness source");
     const targetBotId = await makeBot(h, "Readiness target");
-    const body = "dispatch after readiness returns";
-    const queued = await enqueueWhileAgentUnavailable(h, sourceBotId, targetBotId, body);
+    const body = "dispatch after the queue resumes";
+    const queued = await enqueueWhileDispatchPaused(h, sourceBotId, targetBotId, body);
 
     expect(deliveryRow(h, queued.deliveryId)).toEqual({
       state: "queued",
@@ -739,7 +810,7 @@ describe("durable Bot mailbox", () => {
     });
     expectNoDurableDispatch(h, queued.threadId);
 
-    await h.svc.agents.recheck("pi");
+    h.mailbox.resumeDispatch();
     const delivered = await waitForDeliveryState(h, queued.deliveryId, "delivered");
     await waitThreadIdle(h, queued.threadId);
     expect(delivered.target_turn_id).not.toBeNull();
@@ -747,23 +818,16 @@ describe("durable Bot mailbox", () => {
   });
 
   test("dispatches queued peer mail on a Thread with a historical session and reuses its conversation for a user Turn", async () => {
-    h = await startDaemon();
+    h = await startMailboxDaemon();
     const sourceBotId = await makeBot(h, "Queued mail source");
     const targetBotId = await makeBot(h, "Queued mail target");
     const body = "mailbox-ordered-output";
     writeFileSync(path.join(h.svc.cfg.sharedWorkspaceDir, "mailbox-input"), "Target workspace fixture");
 
     // Hold dispatch while the source enqueues mail, then seed a historical target Turn.
-    const agents = h.svc.agents;
-    const isReady = agents.isReady.bind(agents);
-    const readiness = spyOn(agents, "isReady").mockImplementation((id) => id !== "pi" && isReady(id));
-    let deliveryId: string;
-    try {
-      const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:${body}`);
-      deliveryId = await durableAcknowledgement(h, source.threadId);
-    } finally {
-      readiness.mockRestore();
-    }
+    h.mailbox.pauseDispatch();
+    const source = await sendToBot(h, sourceBotId, `send_bot_message:${targetBotId}:${body}`);
+    const deliveryId = await durableAcknowledgement(h, source.threadId);
     expect(deliveryRow(h, deliveryId).state).toBe("queued");
     const [thread] = await api<ThreadDto[]>(h, "GET", `/api/bots/${targetBotId}/threads`);
     if (!thread) throw new Error("Expected a target mailbox Thread");
@@ -778,8 +842,7 @@ describe("durable Bot mailbox", () => {
     expect(h.svc.threads.getNativeSession(threadId)).toBe(nativeSessionId);
     expectNoDurableDispatch(h, threadId, historicalTurnId);
     expect(deliveryRow(h, deliveryId).state).toBe("queued");
-    agents.markOffline("pi", "trigger the queued delivery on readiness");
-    await agents.recheck("pi");
+    h.mailbox.resumeDispatch();
 
     const delivery = await waitForDeliveryState(h, deliveryId, "delivered");
     if (!delivery.target_turn_id) throw new Error("Expected a target Turn for the delivery");
@@ -798,11 +861,11 @@ describe("durable Bot mailbox", () => {
   });
 
   test("dispatches queued mail after source deletion without inventing a live source ID", async () => {
-    h = await startDaemon();
-    const sourceBotId = await makeReadyMailboxSource(h, "Deleted queue source");
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Deleted queue source");
     const targetBotId = await makeBot(h, "Deleted queue target");
     const body = "dispatch after source deletion";
-    const queued = await enqueueWhileAgentUnavailable(
+    const queued = await enqueueWhileDispatchPaused(
       h,
       sourceBotId,
       targetBotId,
@@ -817,7 +880,7 @@ describe("durable Bot mailbox", () => {
       sourceName: "Deleted queue source",
     });
 
-    await h.svc.agents.recheck("pi");
+    h.mailbox.resumeDispatch();
     const delivered = await waitForDeliveryState(h, queued.deliveryId, "delivered");
     await waitThreadIdle(h, queued.threadId);
     expect(delivered.target_turn_id).not.toBeNull();
@@ -827,41 +890,65 @@ describe("durable Bot mailbox", () => {
     expect(notice.model).toMatchObject([{ role: "user", content: `${author}: ${body}` }]);
   });
 
+  // Checking recovery across shutdown requires two real daemon boots against the same on-disk state.
   test("recovers an acknowledged delivery when the daemon restarts before queue claim", async () => {
-    h = await startDaemon();
-    const sourceBotId = await makeReadyMailboxSource(h, "Restart source");
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Restart source");
     const targetBotId = await makeBot(h, "Restart target");
-    const queued = await enqueueWhileAgentUnavailable(
+    const queued = await enqueueWhileDispatchPaused(
       h,
       sourceBotId,
       targetBotId,
       "survive restart before claim",
     );
-    const home = h.home;
-    const shutdownTurns = h.svc.turns.shutdown.bind(h.svc.turns);
-    h.svc.turns.shutdown = async () => {
-      await h!.svc.agents.recheck("pi");
-      expect(deliveryRow(h!, queued.deliveryId)).toEqual({
+    const daemon = h;
+    const home = daemon.home;
+    const claim = holdMailboxClaim(daemon);
+    const shutdownTurns = daemon.svc.turns.shutdown;
+    try {
+      daemon.mailbox.resumeDispatch();
+      const { finished } = await claim.waitForSubmission();
+      expect(deliveryRow(daemon, queued.deliveryId)).toEqual({
         state: "queued", target_turn_id: null, failure_reason: null,
       });
-      await shutdownTurns();
-    };
 
-    await h.disconnectForRestart();
-    h = await startDaemon(home);
+      async function observeShutdown() {
+        daemon.mailbox.resumeDispatch();
+        await claim.release();
+        await Promise.all([finished, waitForMailboxWriter(daemon)]);
+        return {
+          delivery: deliveryRow(daemon, queued.deliveryId),
+          turns: targetTurns(daemon, queued.threadId),
+        };
+      }
+      let atShutdown: ReturnType<typeof observeShutdown> | undefined;
+      daemon.svc.turns.shutdown = async (options) => {
+        atShutdown = observeShutdown();
+        // Complete daemon teardown before surfacing an observation failure.
+        await atShutdown.catch(() => {});
+        await shutdownTurns.call(daemon.svc.turns, options);
+      };
+      await daemon.disconnectForRestart();
+      const snapshot = await atShutdown;
+      expect(snapshot?.delivery).toEqual({ state: "queued", target_turn_id: null, failure_reason: null });
+      expect(snapshot?.turns).toEqual([]);
+    } finally {
+      daemon.svc.turns.shutdown = shutdownTurns;
+      await claim.release();
+    }
+    h = await startMailboxDaemon(home);
 
     const delivered = await waitForDeliveryState(h, queued.deliveryId, "delivered");
-    await waitThreadIdle(h, queued.threadId);
     expect(delivered.target_turn_id).not.toBeNull();
-    await waitThreadIdle(h, queued.threadId);
+    await h.svc.turns.waitForTerminal(delivered.target_turn_id!);
     await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
-  });
+  }, { timeout: 8_000 });
 
-  test("atomically claims once when startup and concurrent readiness triggers converge", async () => {
-    h = await startDaemon();
-    const sourceBotId = await makeReadyMailboxSource(h, "Concurrent source");
+  test("atomically claims once when startup and concurrent dispatch schedules converge", async () => {
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Concurrent source");
     const targetBotId = await makeBot(h, "Concurrent target");
-    const queued = await enqueueWhileAgentUnavailable(
+    const queued = await enqueueWhileDispatchPaused(
       h,
       sourceBotId,
       targetBotId,
@@ -870,26 +957,33 @@ describe("durable Bot mailbox", () => {
     const home = h.home;
 
     await h.disconnectForRestart();
-    h = await startDaemon(home, { waitForAgentReady: false });
-    await Promise.all([
-      h.svc.agents.recheck("pi"),
-      h.svc.agents.recheck("pi"),
-      h.svc.agents.recheck("pi"),
-    ]);
+    h = await startMailboxDaemon(home, { pauseMailboxDispatchOnStartup: true });
+    expect(deliveryRow(h, queued.deliveryId).state).toBe("queued");
+    const claim = holdMailboxClaim(h);
+    try {
+      h.mailbox.resumeDispatch();
+      await claim.waitForSubmission();
+      expect(deliveryRow(h, queued.deliveryId).state).toBe("queued");
+      h.mailbox.resumeDispatch();
+      h.mailbox.resumeDispatch();
+    } finally {
+      await claim.release();
+    }
 
     const delivered = await waitForDeliveryState(h, queued.deliveryId, "delivered");
-    await waitThreadIdle(h, queued.threadId);
+    if (delivered.target_turn_id === null) throw new Error("Expected a target Turn for the delivery");
+    await h.svc.turns.waitForTerminal(delivered.target_turn_id);
+    await waitForMailboxWriter(h);
     const turns = h.svc.db.query(`SELECT id FROM turns WHERE thread_id = ?`).all(queued.threadId);
     expect(turns).toEqual([{ id: delivered.target_turn_id }]);
-    await waitThreadIdle(h, queued.threadId);
     await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
   });
 
   test("startup resets an orphaned dispatch claim and dispatches it exactly once", async () => {
-    h = await startDaemon();
-    const sourceBotId = await makeReadyMailboxSource(h, "Orphan source");
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Orphan source");
     const targetBotId = await makeBot(h, "Orphan target");
-    const queued = await enqueueWhileAgentUnavailable(
+    const queued = await enqueueWhileDispatchPaused(
       h,
       sourceBotId,
       targetBotId,
@@ -901,19 +995,19 @@ describe("durable Bot mailbox", () => {
     const home = h.home;
 
     await h.disconnectForRestart();
-    h = await startDaemon(home);
+    h = await startMailboxDaemon(home);
 
     const delivered = await waitForDeliveryState(h, queued.deliveryId, "delivered");
     expect(delivered.target_turn_id).not.toBeNull();
-    await waitThreadIdle(h, queued.threadId);
+    await h.svc.turns.waitForTerminal(delivered.target_turn_id!);
     await expectDurableDispatch(h, queued.threadId, delivered.target_turn_id, queued.deliveryId);
   });
 
   test("startup fails an uncertain external dispatch without creating another target Turn", async () => {
-    h = await startDaemon();
-    const sourceBotId = await makeReadyMailboxSource(h, "Uncertain source");
+    h = await startMailboxDaemon();
+    const sourceBotId = await makeBot(h, "Uncertain source");
     const targetBotId = await makeBot(h, "Uncertain target");
-    const queued = await enqueueWhileAgentUnavailable(
+    const queued = await enqueueWhileDispatchPaused(
       h,
       sourceBotId,
       targetBotId,
@@ -934,7 +1028,7 @@ describe("durable Bot mailbox", () => {
     const home = h.home;
 
     await h.disconnectForRestart();
-    h = await startDaemon(home);
+    h = await startMailboxDaemon(home);
 
     expect(deliveryRow(h, queued.deliveryId)).toEqual({
       state: "failed",
@@ -954,7 +1048,7 @@ describe("durable Bot mailbox", () => {
   });
 
   test("runtime configuration rejection becomes one bounded visible failure without replay", async () => {
-    h = await startDaemon();
+    h = await startMailboxDaemon();
     const sourceBotId = await makeBot(h, "Rejected source");
     const targetBotId = await makeBot(h, "Rejected target");
     // Fail durable conversation configuration before any model input can be admitted.
@@ -979,7 +1073,9 @@ describe("durable Bot mailbox", () => {
     expect(failed.failure_reason).toBe("Target Agent could not accept this message.");
     expect(failed.failure_reason).not.toContain("fake worker secret");
 
-    await h.svc.agents.recheck("pi");
+    h.mailbox.pauseDispatch();
+    h.mailbox.resumeDispatch();
+    await waitForMailboxWriter(h);
     expect(
       h.svc.db.query(`SELECT id FROM turns WHERE thread_id = ?`).all(targetThreads[0]!.id),
     ).toEqual([{ id: failed.target_turn_id }]);

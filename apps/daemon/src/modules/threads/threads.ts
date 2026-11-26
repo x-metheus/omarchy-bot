@@ -1,12 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import type { AgentCapabilityInventory } from "@omarchy-bot/agent-contract";
 import {
   TOOL_CALL_INTERRUPTED_ERROR_SUMMARY,
   canTransitionToolCall,
   isStoredPeerMailPayload,
   isToolCallSummary,
-  type AgentId,
   type PeerMailMessage,
   type ToolCallSummary,
 } from "@omarchy-bot/domain";
@@ -124,46 +122,12 @@ interface TurnRow {
 
 
 const NONTERMINAL_TURN_SQL = "status NOT IN ('completed','cancelled','failed')";
-export interface NativeThreadTitleUpdater {
-  renameThread(input: {
-    agentId: string;
-    threadId: string;
-    title: string;
-    nativeSessionId?: string;
-  }): Promise<void>;
-}
-
-export interface NativeThreadCapabilitySource {
-  capabilityInventory(agentId: AgentId): AgentCapabilityInventory | undefined;
-}
-
-/**
- * Operations execute actions authorized by the probed Agent inventory. Their
- * presence alone never declares support.
- */
-export type NativeThreadOperationAdapters = Readonly<
-  Partial<Record<AgentId, NativeThreadTitleUpdater>>
->;
-
-const NO_NATIVE_THREAD_OPERATIONS: NativeThreadOperationAdapters = Object.freeze({});
-
-export class ThreadTitleConflict extends Error {
-  readonly status = 409;
-  readonly code = "THREAD_TITLE_RENAME_UNSUPPORTED";
-
-  constructor(readonly agentId: string) {
-    super(`rename not supported by ${agentId}`);
-    this.name = "ThreadTitleConflict";
-  }
-}
 
 /** Threads are created lazily on first send; the message index is the source of truth. */
 export class ThreadsService {
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
-    private readonly capabilities: NativeThreadCapabilitySource,
-    private readonly nativeOperations: NativeThreadOperationAdapters = NO_NATIVE_THREAD_OPERATIONS,
   ) {}
 
   #toThreadDto(row: ThreadRow): ThreadDto {
@@ -217,55 +181,20 @@ export class ThreadsService {
     return all.filter((thread) => thread.title.toLowerCase().includes(needle));
   }
 
-  hasRetainedThinkingForBot(botId: string): boolean {
-    const row = this.db.query(`
-      SELECT 1
-      FROM messages
-      JOIN threads ON threads.id = messages.thread_id
-      WHERE threads.bot_id = ? AND messages.kind = 'thinking'
-      LIMIT 1
-    `).get(botId);
-    return row !== null && row !== undefined;
-  }
-
-  /**
-   * Rename only through an Agent operation declared by the adapter inventory.
-   * The local title changes after the native operation succeeds, never before.
-   */
-  async updateTitle(id: string, title: string): Promise<ThreadDto | undefined> {
+  updateTitle(id: string, title: string): ThreadDto | undefined {
     const normalizedTitle = title.trim();
     if (normalizedTitle.length === 0 || normalizedTitle.length > 120) {
       throw new RangeError("title must contain 1 to 120 characters");
     }
 
-    const identity = this.db
-      .query(`
-        SELECT bots.agent_id, thread_sessions.native_session_id
-        FROM threads
-        JOIN bots ON bots.id = threads.bot_id
-        LEFT JOIN thread_sessions ON thread_sessions.thread_id = threads.id
-        WHERE threads.id = ?
-      `)
-      .get(id) as { agent_id: string; native_session_id: string | null } | undefined;
-    if (identity === undefined) return undefined;
-
-    const agentId = identity.agent_id as AgentId;
-    const inventory = this.capabilities.capabilityInventory(agentId);
-    if (!inventory?.nativeThreadActions.includes("rename")) throw new ThreadTitleConflict(agentId);
-    const updater = this.nativeOperations[agentId];
-    if (updater === undefined) throw new ThreadTitleConflict(agentId);
-
-    await updater.renameThread({
-      agentId,
-      threadId: id,
-      title: normalizedTitle,
-      ...(identity.native_session_id !== null ? { nativeSessionId: identity.native_session_id } : {}),
+    return this.events.transaction(() => {
+      const row = this.db.query<ThreadRow, [string, string, string]>(
+        `UPDATE threads SET title = ?, updated_at = ? WHERE id = ? RETURNING *`,
+      ).get(normalizedTitle, new Date().toISOString(), id);
+      if (row === null) return undefined;
+      this.events.append("thread", id, "thread.updated", { title: normalizedTitle });
+      return this.#toThreadDto(row);
     });
-
-    const now = new Date().toISOString();
-    this.db.query(`UPDATE threads SET title = ?, updated_at = ? WHERE id = ?`).run(normalizedTitle, now, id);
-    this.events.append("thread", id, "thread.updated", { title: normalizedTitle });
-    return this.getThread(id);
   }
 
   touch(id: string): void {

@@ -3,7 +3,6 @@ import { api } from "./api.ts";
 import { clearDraftsByBot } from "./drafts.ts";
 
 export type QueryTag =
-  | "agents"
   | "bots"
   | "threads"
   | "messages"
@@ -187,12 +186,6 @@ export function route(
       invalidate("plugin-commands");
       for (const listener of authorizationListeners) listener(envelope);
       return;
-    case "agent.status":
-    case "agent.error":
-    case "agent.worker_crash":
-      invalidate("agents");
-      invalidate("bots");
-      return;
     case "bot.created":
     case "bot.updated":
     case "bot.activity":
@@ -208,6 +201,7 @@ export function route(
       invalidate("bots");
       return;
     case "thread.created":
+    case "thread.updated":
       invalidate("threads");
       invalidate("bots");
       return;
@@ -243,9 +237,6 @@ export function route(
     }
     case "response.removed":
     case "thinking.removed":
-      invalidate("messages", threadIdOf(envelope));
-      return;
-    case "agent.native":
       invalidate("messages", threadIdOf(envelope));
       return;
     case "approval.requested":

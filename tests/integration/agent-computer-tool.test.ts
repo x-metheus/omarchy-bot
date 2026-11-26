@@ -6,8 +6,8 @@ import type { MessageDto } from "../../packages/protocol/src/index.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import { BotScreenInputRejectedError } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import { ScreenInputLease } from "../../apps/daemon/src/modules/computer/screenInputLease.ts";
-import { api, authedFetch, makeBot, sendToBot, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
-import { createComputerTool } from "../../workers/pi/src/computer-tool.ts";
+import { durableSuiteToolResults } from "../../apps/daemon/src/modules/runtime/harness-test-support.ts";
+import { api, authedFetch, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 import { until } from "./helpers/bot-screen-load-observe.ts";
 
 interface ComputerView {
@@ -73,7 +73,7 @@ async function messages(h: Harness, threadId: string): Promise<MessageDto[]> {
   return api<MessageDto[]>(h, "GET", `/api/threads/${threadId}/messages`);
 }
 
-describe("Bot-bound Pi computer tool", () => {
+describe("Bot-bound computer tool", () => {
   let h: Harness | undefined;
 
   afterEach(async () => {
@@ -81,45 +81,49 @@ describe("Bot-bound Pi computer tool", () => {
     h = undefined;
   });
 
-  test("Pi receives the actual desktop generation after a computer restart without changing conversation binding", async () => {
+  test("the model receives the actual desktop generation after a computer restart without changing conversation binding", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const harness = h;
     const botId = await makeBot(h, "Desktop identity Bot");
     const surfaceId = await botSurface(h, botId);
     const otherBotId = await makeBot(h, "Unobserved Bot");
     const otherSurfaceId = await botSurface(h, otherBotId);
     const owner = { botId, surfaceId };
-    const binding = { ...owner, turnId: "identity-turn", workerSessionId: "same-conversation" };
-    const broker = h.svc.computer;
-    const tool = createComputerTool(() => binding, {
-      request: (context, action, signal) =>
-        broker.agentToolAct(owner, context.turnId, context.toolCallId, action, signal ?? new AbortController().signal),
-    });
 
     expect(h.svc.screens.status(owner)).toEqual({ state: "stopped" });
-    const observe = async (toolCallId: string) => tool.execute(
-      toolCallId,
-      { action: "observe" },
-      undefined,
-      undefined,
-      undefined as never,
+    const sent = await sendToBot(h, botId, "computer:observe");
+    const { threadId } = sent;
+    const binding = h.svc.db.query<{ conversation_id: number }, [string]>(
+      "SELECT conversation_id FROM pi_thread_conversations WHERE thread_id = ?",
     );
-    const first = await observe("identity-1");
-    expect(first.details.desktopSession).toEqual({ ...owner, runtimeGeneration: 1 });
+    async function latestResult(turnId: string, expectedCount: number) {
+      await waitThreadIdle(harness, threadId);
+      expect(harness.svc.threads.turnRow(turnId)?.status).toBe("completed");
+      const results = (await durableSuiteToolResults(harness.svc.db, threadId))
+        .filter((entry) => entry.role === "toolResult" && entry.toolName === "computer");
+      expect(results).toHaveLength(expectedCount);
+      const result = results.at(-1);
+      if (result?.role !== "toolResult") throw new Error("Missing durable computer tool result");
+      expect(result.isError).toBeFalse();
+      return result;
+    }
+    async function runComputer(action: "observe" | "click", expectedCount: number) {
+      const { turnId } = await sendToThread(harness, threadId, `computer:${action}`);
+      return latestResult(turnId, expectedCount);
+    }
+    const first = await latestResult(sent.turnId, 1);
+    const initialBinding = binding.get(threadId);
+    expect(initialBinding?.conversation_id).toEqual(expect.any(Number));
+    expect(first.details).toHaveProperty("desktopSession", { ...owner, runtimeGeneration: 1 });
     const firstText = first.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
     expect(firstText).toContain(JSON.stringify({ ...owner, runtimeGeneration: 1 }));
     expect(firstText).not.toContain(otherSurfaceId);
     expect(first.content.some((item) => item.type === "image")).toBeTrue();
 
     // A real click on the first runtime proves the input authority of generation 1.
-    const firstClick = await tool.execute(
-      "identity-click-1",
-      { action: "click", args: { x: 3, y: 4 } },
-      undefined,
-      undefined,
-      undefined as never,
-    );
-    expect(firstClick.details.desktopSession).toEqual({ ...owner, runtimeGeneration: 1 });
+    const firstClick = await runComputer("click", 2);
+    expect(firstClick.details).toHaveProperty("desktopSession", { ...owner, runtimeGeneration: 1 });
     expect(adapter.inputEvents.filter((event) => event.runtimeGeneration === 1)).toHaveLength(3);
 
     // Only a new Bot Computer advances the generation the tool reports.
@@ -129,22 +133,16 @@ describe("Bot-bound Pi computer tool", () => {
       5_000,
       "failed Screen runtime was not cleaned",
     );
-    const second = await observe("identity-2");
-    expect(second.details.desktopSession).toEqual({ ...owner, runtimeGeneration: 2 });
+    const second = await runComputer("observe", 3);
+    expect(second.details).toHaveProperty("desktopSession", { ...owner, runtimeGeneration: 2 });
     const secondText = second.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
     expect(secondText).toContain(JSON.stringify({ ...owner, runtimeGeneration: 2 }));
     expect(secondText).not.toContain(otherSurfaceId);
     expect(second.content.some((item) => item.type === "image")).toBeTrue();
 
     // A real click on the replacement runtime must get its own input authority.
-    const secondClick = await tool.execute(
-      "identity-click-2",
-      { action: "click", args: { x: 3, y: 4 } },
-      undefined,
-      undefined,
-      undefined as never,
-    );
-    expect(secondClick.details.desktopSession).toEqual({ ...owner, runtimeGeneration: 2 });
+    const secondClick = await runComputer("click", 4);
+    expect(secondClick.details).toHaveProperty("desktopSession", { ...owner, runtimeGeneration: 2 });
     expect(adapter.inputEvents.filter((event) => event.runtimeGeneration === 1)).toHaveLength(3);
     expect(adapter.inputEvents.filter((event) => event.runtimeGeneration === 2)).toHaveLength(3);
     expect(adapter.inputEvents.map((event) => event.surfaceId)).toEqual([
@@ -156,6 +154,7 @@ describe("Bot-bound Pi computer tool", () => {
       surfaceId,
     ]);
 
+    expect(binding.get(threadId)).toEqual(initialBinding);
     expect(h.svc.screens.status({ botId: otherBotId, surfaceId: otherSurfaceId })).toEqual({ state: "stopped" });
   });
 
@@ -651,40 +650,6 @@ describe("Bot-bound Pi computer tool", () => {
     expect(adapter.inputEvents.map((record) => record.surfaceId)).toEqual([surfaceId, surfaceId, surfaceId]);
   });
 
-  // The in-process runtime has no ToolChannel. Task 20 removes this case with the worker.
-  workerOnly("requires a separate worker to exit during native steering")("Agent-worker loss during a held Takeover fails the turn and never reconstructs the waiter", async () => {
-    const adapter = new FakeBotScreenRuntimeAdapter();
-    h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const botId = await makeBot(h, "Restarted Takeover Bot");
-    const surfaceId = await botSurface(h, botId);
-    const owner = { botId, surfaceId };
-    adapter.blockInputs();
-
-    const sent = await sendToBot(h, botId, "computer:click:worker-restart");
-    await adapter.waitForInputAttempts(1);
-    const takeover = computerRequest(h, owner, "POST", "/api/computer/take-control");
-    expect(await Promise.race([
-      takeover.then(() => "takeover-settled" as const),
-      computerRequest(h, owner, "GET", "/api/computer/state").then(() => "state-readable" as const),
-    ])).toBe("state-readable");
-    adapter.releaseInputs();
-    expect((await takeover).body).toMatchObject({ takeover: "active" });
-
-    await expect(
-      h.svc.turns.send(botId, sent.threadId, "crash-agent"),
-    ).rejects.toThrow("steer unavailable");
-    await waitThreadIdle(h, sent.threadId);
-    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("failed");
-    expect(await waitForTakeover(h, owner, "unavailable")).toMatchObject({
-      takeover: "unavailable",
-    });
-    expect(adapter.inputEvents.map((record) => record.surfaceId)).toEqual([surfaceId, surfaceId, surfaceId]);
-    const transcript = await messages(h, sent.threadId);
-    expect(transcript.some((message) =>
-      message.author.kind === "system" && message.text?.includes("worker exited")
-    )).toBeTrue();
-  });
-
   test("daemon restart fails a held Takeover turn instead of pretending to resume it", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
@@ -727,54 +692,7 @@ describe("Bot-bound Pi computer tool", () => {
     });
   });
 
-  // The in-process runtime has no ToolChannel. Task 20 removes this case with the worker.
-  workerOnly("forges worker ToolChannel bindings", { timeout: 15_000 })("every stale or mismatched binding identity fails without touching either Screen", async () => {
-    const adapter = new FakeBotScreenRuntimeAdapter();
-    h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const firstBot = await makeBot(h, "Context owner Bot");
-    const secondBot = await makeBot(h, "Context other Bot");
-    const secondSurface = await botSurface(h, secondBot);
-    const runningHarness = h;
-
-    const turns = await Promise.all([
-      sendToBot(h, firstBot, `computer:observe:mismatch:${secondSurface}`),
-      sendToBot(h, firstBot, "computer:observe:stale"),
-      sendToBot(h, firstBot, "computer:observe:wrong-bot"),
-      sendToBot(h, firstBot, "computer:observe:wrong-session"),
-      sendToBot(h, firstBot, "computer:observe:missing-tool-call"),
-    ]);
-    await Promise.all(turns.map((turn) => waitThreadIdle(runningHarness, turn.threadId)));
-
-    expect(adapter.actionsStarted).toBe(0);
-    const reasons = [
-      "computer tool context is stale or mismatched",
-      "computer tool context is stale or mismatched",
-      "computer tool context is stale or mismatched",
-      "computer tool context is stale or mismatched",
-      "tool call has not started",
-    ];
-    for (const [index, turn] of turns.entries()) {
-      const row = h.svc.threads.turnRow(turn.turnId);
-      expect(row?.status).toBe("failed");
-      expect(row?.outcome_reason).toBe(reasons[index]);
-    }
-  });
-
-  // The in-process runtime has no ToolChannel. Task 20 removes this case with the worker.
-  workerOnly("requires a separate worker to exit during tool dispatch", { timeout: 15_000 })("Agent worker loss fails its active tool turn instead of reconstructing or rerouting it", async () => {
-    const adapter = new FakeBotScreenRuntimeAdapter();
-    h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const bot = await makeBot(h, "Crashed Agent worker Bot");
-
-    const sent = await sendToBot(h, bot, "computer:crash-agent");
-    await waitThreadIdle(h, sent.threadId);
-
-    expect(adapter.actionsStarted).toBe(0);
-    expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("failed");
-    expect(h.svc.threads.turnRow(sent.turnId)?.outcome_reason).toContain("worker exited");
-  });
-
-  test("assigned worker failure fails honestly and never reroutes", async () => {
+  test("assigned Screen capture failure fails the Turn", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const bot = await makeBot(h, "Failed tool Bot");

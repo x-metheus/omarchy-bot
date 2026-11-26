@@ -53,14 +53,6 @@ export function processesUnder(root: string): number[] {
   );
 }
 
-/** Every worker process the Service started for this isolated home. */
-export function workerProcesses(home: string): number[] {
-  return livePids().filter((pid) =>
-    processCmdline(pid).some((arg) => arg.endsWith("worker.ts"))
-    && processEnvironment(pid).includes(`OMARCHY_BOT_HOME=${home}`)
-  );
-}
-
 export async function waitFor<T>(
   probe: () => T | undefined | Promise<T | undefined>,
   timeoutMs: number,
@@ -289,29 +281,19 @@ export async function startManagedService(input: {
   state: string;
   manager: FakeManager;
   binEnv: Record<string, string>;
-  workersDir: string;
   runtimeRoot: string;
 }): Promise<ManagedService> {
-  const agentDir = path.join(input.home, "pi-agent");
-  mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   const environment: Record<string, string> = {
     ...(process.env as Record<string, string>),
     PATH: `${input.manager.binDir}:${process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`,
     ...input.binEnv,
     XDG_RUNTIME_DIR: input.manager.runtimeDir,
     HOME: input.home,
-    PI_CODING_AGENT_DIR: agentDir,
     OMARCHY_BOT_HOME: input.home,
     OMARCHY_BOT_STATE: input.state,
     OMARCHY_BOT_PORT: "0",
-    OMARCHY_BOT_WORKERS_DIR: input.workersDir,
     OMARCHY_BOT_SCREEN_RUNTIME_DIR: input.runtimeRoot,
   };
-  mkdirSync(path.join(input.home, "conformance"), { recursive: true });
-  writeFileSync(
-    path.join(input.home, "conformance", "pi-fake-pi-1.json"),
-    JSON.stringify({ ok: true, image: "verified" }),
-  );
   const proc = Bun.spawn([process.execPath, path.resolve(import.meta.dir, "../fixtures/service-supervision/boot.ts")], {
     env: environment,
     stdin: "ignore",

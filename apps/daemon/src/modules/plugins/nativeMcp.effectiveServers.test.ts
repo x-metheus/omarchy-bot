@@ -1,9 +1,8 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { nativeMcpConfigFile, nativeMcpEndpoint, nativeMcpSecretKey } from "@omarchy-bot/agent-contract/native-mcp-config";
-import { nativeMcpRevision } from "@omarchy-bot/agent-contract/native-mcp-revision";
 import { NativeMcpStore } from "./nativeMcp.ts";
 
 test("effectiveServers reads shared definitions and resolves private credentials for the runtime", () => {
@@ -36,7 +35,7 @@ test("effectiveServers reads shared definitions and resolves private credentials
     const { secrets, ...effective } = store.effectiveServers();
     expect([...secrets].sort()).toEqual(["!fixture-secret", "Bearer fixture-account-token", "fixture-account-token", "k"]);
     expect(effective).toEqual({
-      revision: nativeMcpRevision(workspace, file),
+      revision: expect.stringMatching(/^[a-f0-9]{64}$/),
       servers: {
         local: { disabled: false, transport: { type: "stdio", command: "fixture", args: ["initial"], env: { SETTING: "!fixture-secret", MODE: "type", API_KEY: "k" } } },
         remote: { disabled: false, transport: { type: "http", url: "https://remote.example/mcp", headers: { "X-Project": "example" } } },
@@ -55,27 +54,43 @@ test("effectiveServers reads shared definitions and resolves private credentials
   }
 });
 
-test("effectiveServers revision accepts durable connection status with an empty Pi config", () => {
+test("the Services panel accepts a durable revision and ignores retired config edits", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "bot-native-mcp-status-"));
   const workspace = path.join(root, "workspace");
   const privateDir = path.join(root, "private");
   try {
-    mkdirSync(path.join(workspace, ".pi"), { recursive: true });
-    mkdirSync(privateDir);
-    writeFileSync(path.join(workspace, ".mcp.json"), JSON.stringify({ mcpServers: {
-      remote: { url: "https://remote.example/mcp" },
-    } }));
-    writeFileSync(path.join(workspace, ".pi", "mcp.json"), "{}");
-    writeFileSync(nativeMcpConfigFile(privateDir), JSON.stringify({ version: 1, entries: {} }));
+    mkdirSync(workspace);
+    const shared = path.join(workspace, ".mcp.json");
     const store = new NativeMcpStore(workspace, privateDir);
-    store.reconcile();
+    store.save(null, { name: "remote", enabled: true, transport: { type: "http", url: "https://remote.example/mcp" } });
     expect(store.errors).toEqual([]);
-
     const { revision } = store.effectiveServers();
-    store.updateStatus([{ name: "remote", configurationRevision: revision, status: "connected", toolCount: 2, disabled: false }]);
-    expect(store.list()).toEqual([expect.objectContaining({
-      name: "remote", status: "connected", toolCount: 2, pendingReload: false,
-    })]);
+    const status = { name: "remote", configurationRevision: revision, status: "connected" as const, toolCount: 2, disabled: false };
+    store.updateStatus([status]);
+    const connected = [expect.objectContaining({ name: "remote", status: "connected", toolCount: 2, pendingReload: false })];
+    expect(store.list()).toEqual(connected);
+
+    mkdirSync(path.join(workspace, ".pi"), { recursive: true });
+    const retired = path.join(workspace, ".pi", "mcp.json");
+    for (const contents of ["{}", '{"mcpServers":{"remote":{"command":"retired"}}}']) {
+      writeFileSync(retired, contents);
+      expect(store.effectiveServers().revision).toBe(revision);
+      store.updateStatus([status]);
+      expect(store.list()).toEqual(connected);
+      expect(readFileSync(retired, "utf8")).toBe(contents);
+    }
+
+    const sharedBytes = readFileSync(shared, "utf8");
+    writeFileSync(shared, `${sharedBytes}\n`);
+    expect(store.effectiveServers().revision).not.toBe(revision);
+    expect(store.list()[0]).toMatchObject({ status: "unchecked", pendingReload: true });
+    writeFileSync(shared, sharedBytes);
+    expect(store.effectiveServers().revision).toBe(revision);
+
+    const privateFile = nativeMcpConfigFile(privateDir);
+    writeFileSync(privateFile, `${readFileSync(privateFile, "utf8")}\n`);
+    expect(store.effectiveServers().revision).not.toBe(revision);
+    expect(store.list()[0]).toMatchObject({ status: "unchecked", pendingReload: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -97,11 +112,13 @@ test("effectiveServers ignores workspace Pi and Codex definitions", () => {
     } }));
     writeFileSync(path.join(root, ".codex", "config.toml"), '[mcp_servers.codexOnly]\ncommand = "codex-fixture"\n');
 
-    const { servers, revision } = store.effectiveServers();
+    const { servers } = store.effectiveServers();
     expect(servers.piOnly).toBeUndefined();
     expect(servers.codexOnly).toBeUndefined();
     expect(servers.local).toEqual({ disabled: false, transport: { type: "stdio", command: "fixture", args: ["shared"] } });
-    expect(revision).toBe(nativeMcpRevision(root, nativeMcpConfigFile(privateDir)));
+    expect(store.list()).toEqual([expect.objectContaining({
+      name: "local", source: ".mcp.json", transport: { type: "stdio", command: "fixture", args: ["shared"], envKeys: [] },
+    })]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -119,9 +136,8 @@ test("effectiveServers projects the adapter OAuth marker and reconciliation reta
     const snapshot = store.effectiveServers();
     expect(snapshot.configurationError).toBeUndefined();
     expect(snapshot.servers.work).toEqual({ disabled: false, transport: { type: "http", url } });
-    expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.work.auth).toBe("oauth");
-    expect(Bun.TOML.parse(readFileSync(path.join(root, ".codex", "config.toml"), "utf8")))
-      .toMatchObject({ mcp_servers: { work: { url, enabled: true } } });
+    expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.work).toEqual({ url, auth: "oauth", disabled: false });
+    expect(existsSync(path.join(root, ".codex", "config.toml"))).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -135,18 +151,19 @@ test("effectiveServers retains service OAuth after reconciliation and drops it w
     const authServerMetadataUrl = "https://login.example/.well-known/openid-configuration";
     const config = path.join(root, ".mcp.json");
     const store = new NativeMcpStore(root, path.join(root, "private"));
-    store.putService("work", { url, auth: "oauth", oauth: { clientId: "work-client", redirectUri, authServerMetadataUrl, scope: "work.read" } },
-      { accountId: "work-account", serviceId: "work-service" });
+    const owner = { accountId: "work-account", serviceId: "work-service" };
+    const oauth = { clientId: "work-client", redirectUri, authServerMetadataUrl, scope: "work.read" };
+    store.putService("work", { url, auth: "oauth", oauth }, owner);
+    store.putService("work", { url }, owner);
     store.reconcile();
     expect(store.errors).toEqual([]);
-    expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.work.auth).toBe("oauth");
+    expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.work).toEqual({ url, auth: "oauth", oauth, disabled: false });
     expect(store.effectiveServers().servers.work?.transport).toEqual({
       type: "http", url, oauth: { clientId: "work-client", callbackUrl: redirectUri, callbackPort: 12798, authServerMetadataUrl, scope: "work.read" },
     });
 
     const moved = "https://new.work.example/mcp";
-    mkdirSync(path.join(root, ".pi"), { recursive: true });
-    writeFileSync(path.join(root, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { work: { url: moved } } }));
+    store.putService("work", { url: moved }, owner);
     store.reconcile();
     expect(store.errors).toEqual([]);
     expect(JSON.parse(readFileSync(config, "utf8")).mcpServers.work).toEqual({ url: moved, disabled: false });
@@ -329,14 +346,18 @@ test("effectiveServers omits a server deleted from the shared file", () => {
     const store = new NativeMcpStore(root, privateDir);
     store.save(null, { name: "removed", enabled: true, transport: { type: "stdio", command: "fixture" } });
     expect(store.effectiveServers().servers.removed).toBeDefined();
-    expect(Bun.TOML.parse(readFileSync(codex, "utf8"))).toMatchObject({ mcp_servers: { removed: { command: "fixture" } } });
+    expect(existsSync(codex)).toBe(false);
+    mkdirSync(path.dirname(codex));
+    const retired = '[mcp_servers.removed]\ncommand = "fixture"\n';
+    writeFileSync(codex, retired);
 
     writeFileSync(shared, '{ "mcpServers": {} }\n');
-    const files = [shared, codex, nativeMcpConfigFile(privateDir)];
+    const files = [shared, nativeMcpConfigFile(privateDir)];
     const before = files.map((file) => readFileSync(file, "utf8"));
     const effective = store.effectiveServers();
     expect(files.map((file) => readFileSync(file, "utf8"))).toEqual(before);
     expect(store.list()).toEqual([]);
+    expect(readFileSync(codex, "utf8")).toBe(retired);
     expect(effective.configurationError).toBeUndefined();
     expect(effective.servers).toEqual({});
   } finally {

@@ -1,24 +1,17 @@
-import { test } from "bun:test";
 import type { BotComputerAssetSupply } from "../../../apps/daemon/src/modules/computer/botComputerAssets.ts";
 /**
  * Daemon harness for integration tests: boots the real daemon in-process with
- * an isolated data dir, random port, and the scripted fake workers.
+ * an isolated data dir, random port, and the scripted durable provider.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
+import type { MailboxDispatchControls } from "../../../apps/daemon/src/bootstrap/main.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
 import type { DurableMailReplayObserver } from "../../../apps/daemon/src/modules/runtime/harness-test-support.ts";
-
-/** Mark worker-protocol tests for removal with the worker in Task 20. */
-export function workerOnly(reason: string, options?: { timeout?: number }) {
-  if (reason.trim() === "") throw new Error("workerOnly requires a reason");
-  return (name: string, fn: () => void | Promise<void>) =>
-    test.skip(`${name} (Task 20: ${reason})`, fn, options?.timeout);
-}
 
 export interface Harness {
   baseUrl: string;
@@ -27,8 +20,26 @@ export interface Harness {
   token: string;
   home: string;
   svc: DaemonServices;
+  mailbox: MailboxDispatchControls;
   stop: () => Promise<void>;
   disconnectForRestart: () => Promise<void>;
+}
+
+export async function waitForMailboxStep<T>(step: Promise<T>, description: string): Promise<T> {
+  const timeoutMs = 2_000;
+  const timeout = Promise.withResolvers<never>();
+  const timer = setTimeout(() => timeout.reject(new Error(`Timed out after ${timeoutMs}ms waiting for ${description}`)), timeoutMs);
+  try {
+    return await Promise.race([step, timeout.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Let the mailbox's scheduled drain submit its writes before entering the runtime writer. */
+export function waitForMailboxWriter(h: Harness): Promise<void> {
+  const barrier = Promise.resolve().then(() => h.svc.turns["runtime"].writeService(() => {}));
+  return waitForMailboxStep(barrier, "the mailbox writer barrier");
 }
 
 export interface HarnessOptions {
@@ -40,14 +51,12 @@ export interface HarnessOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
   botComputerAssetSupply?: BotComputerAssetSupply;
   botScreenCapacity?: number;
-  waitForAgentReady?: boolean;
   /** Use false when the test configures its own providers and models. */
   seedDurableProvider?: boolean;
   dataDir?: string;
   stateDir?: string;
-  /** Worker tree override; defaults to the shared fake workers. */
-  workersDir?: string;
   onDurableMailReplay?: DurableMailReplayObserver;
+  pauseMailboxDispatchOnStartup?: boolean;
   /** Keep the Shared Workspace outside the protected Service data directory. */
   separateWorkspace?: boolean;
 }
@@ -105,38 +114,24 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   const data = options.dataDir ?? home;
   const state = options.stateDir ?? path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const profile = options.separateWorkspace ? `${home}-profile` : home;
-  const agentDir = path.join(profile, ".pi", "agent");
   mkdirSync(home, { recursive: true });
   mkdirSync(state, { recursive: true });
   process.env.OMARCHY_BOT_STATE = state;
-  mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-  // Fake conformance record so the fake pi worker probes to `ready`.
-  const conf = path.join(data, "conformance");
-  mkdirSync(conf, { recursive: true });
-  writeFileSync(
-    path.join(conf, "pi-fake-pi-1.json"),
-    JSON.stringify({ ok: true, image: "verified" }),
-  );
 
   process.env.HOME = profile;
   process.env.OMARCHY_BOT_HOME = data;
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_TEST_DISABLE_KEYRING = "1";
-  process.env.OMARCHY_BOT_WORKERS_DIR = options.workersDir ?? path.resolve(import.meta.dir, "../fake-workers");
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
     options.botDeletionTerminalTimeoutMs ?? 30_000,
   );
 
-  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
   let base: Harness | undefined;
   let restoreRuntime: (() => void) | undefined;
   let restoredFixtures = false;
   const restoreFixtures = () => {
     if (restoredFixtures) return;
     restoredFixtures = true;
-    if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
     restoreRuntime?.();
   };
 
@@ -147,16 +142,23 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
       restoreRuntime = installDurableSuiteProvider(options.onDurableMailReplay);
     }
     const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
+    let mailbox!: MailboxDispatchControls;
+    const onMailboxDispatchControls = (controls: MailboxDispatchControls) => {
+      mailbox = controls;
+      if (options.pauseMailboxDispatchOnStartup) controls.pauseDispatch();
+    };
     const daemon = options.useProductionBotScreen
       ? await main({
           useHostApplicationUnits: options.useHostApplicationUnits === true,
           botScreenRuntimeDir: path.join(home, "r"),
+          onMailboxDispatchControls,
           ...(options.botComputerAssetSupply === undefined ? {} : { botComputerAssetSupply: options.botComputerAssetSupply }),
           ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
         })
       : await main({
           useHostApplicationUnits: options.useHostApplicationUnits === true,
           botScreenRuntimeDir: path.join(home, "r"),
+          onMailboxDispatchControls,
           botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
           botScreenCapacity: options.botScreenCapacity ?? 8,
         });
@@ -167,6 +169,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
       token: "",
       home,
       svc,
+      mailbox,
       stop: async () => {
         try { await stop(); } finally { restoreFixtures(); }
       },
@@ -180,17 +183,6 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
       setSetting(svc.db, "default_model", "fake/fake-model");
     }
     base.token = await pairForToken(base.baseUrl, state);
-    if (options.waitForAgentReady !== false) {
-      // Wait until the fake pi agent finishes its probe and reports ready.
-      const deadline = Date.now() + 20_000;
-      for (;;) {
-        const agents = (await fetch(`${base.baseUrl}/api/agents`, { headers: authHeaders(base) }).then((r) => r.json())) as { id: string; status: string }[];
-        const pi = agents.find((a) => a.id === "pi");
-        if (pi?.status === "ready") break;
-        if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
-        await Bun.sleep(150);
-      }
-    }
     return base;
   } catch (error) {
     if (base) await base.stop();
@@ -232,9 +224,9 @@ export async function apiStatus(h: Harness, method: string, p: string, body?: un
   return { status: res.status, body: bodyJson };
 }
 
-/** Create a Bot on the ready pi agent and return its id. */
+/** Create a Bot and return its id. */
 export async function makeBot(h: Harness, name = "Test Bot", instructions = ""): Promise<string> {
-  const bot = await api<{ id: string }>(h, "POST", "/api/bots", { name, instructions, agentId: "pi" });
+  const bot = await api<{ id: string }>(h, "POST", "/api/bots", { name, instructions });
   return bot.id;
 }
 

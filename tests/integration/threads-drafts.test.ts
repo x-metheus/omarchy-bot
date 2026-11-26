@@ -1,12 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
-import path from "node:path";
 import type { ThreadDto } from "../../packages/protocol/src/index.ts";
-import {
-  ThreadsService,
-  ThreadTitleConflict,
-  type NativeThreadTitleUpdater,
-} from "../../apps/daemon/src/modules/threads/threads.ts";
 import {
   clearDraftsByBot,
   draftStorageKey,
@@ -20,7 +13,6 @@ import {
   sendToBot,
   startDaemon,
   waitThreadIdle,
-  workerOnly,
   type Harness,
 } from "./helpers/harness.ts";
 
@@ -57,19 +49,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await h?.stop();
 });
-
-function setNativeThreadActions(actions: string[]): void {
-  writeFileSync(
-    path.join(h.home, "conformance", "pi-fake-pi-1.json"),
-    JSON.stringify({
-      ok: true,
-      image: "verified",
-      fakeCapabilities: {
-        nativeThreadActions: actions,
-      },
-    }),
-  );
-}
 
 describe("thread history", () => {
   test("keeps a blank conversation unpersisted until first send and derives its title locally", async () => {
@@ -109,87 +88,23 @@ describe("thread history", () => {
     expect(noMatches).toEqual([]);
   });
 
-  test("returns a typed conflict for pi rename support and leaves the derived title unchanged", async () => {
-    const botId = await makeBot(h, "Rename Truth Bot");
-    const sent = await sendToBot(h, botId, "Keep this title");
+  test("renames a Thread through the API and persists the title", async () => {
+    const botId = await makeBot(h, "Rename Bot");
+    const sent = await sendToBot(h, botId, "Original title");
     await waitThreadIdle(h, sent.threadId);
 
-    let conflict: unknown;
-    try {
-      await h.svc.threads.updateTitle(sent.threadId, "Pretend rename");
-    } catch (error) {
-      conflict = error;
-    }
-    expect(conflict).toBeInstanceOf(ThreadTitleConflict);
-    expect((conflict as ThreadTitleConflict).agentId).toBe("pi");
-    expect((conflict as ThreadTitleConflict).status).toBe(409);
+    const url = `/api/threads/${sent.threadId}`;
+    expect((await api<ThreadDto>(h, "GET", url)).title).toBe("Original title");
+    expect(await apiStatus(h, "PATCH", url, { title: "   " })).toMatchObject({ status: 400 });
+    expect(await apiStatus(h, "PATCH", "/api/threads/unknown", { title: "Renamed thread" })).toMatchObject({ status: 404 });
 
-    const response = await apiStatus(h, "PATCH", `/api/threads/${sent.threadId}`, { title: "Pretend rename" });
-    expect(response.status).toBe(409);
-    expect(response.body).toEqual({ error: "rename not supported by pi" });
-
-    const thread = await api<ThreadDto>(h, "GET", `/api/threads/${sent.threadId}`);
-    expect(thread.title).toBe("Keep this title");
-  });
-
-  workerOnly("removes the worker-native session ID passed to the rename adapter")("capability declarations authorize thread operations while adapters only execute them", async () => {
-    const botId = await makeBot(h, "Native Thread Policy Bot");
-    const sent = await sendToBot(h, botId, "Original native title");
-    await waitThreadIdle(h, sent.threadId);
-
-    const renames: Array<Parameters<NativeThreadTitleUpdater["renameThread"]>[0]> = [];
-    const operationService = new ThreadsService(h.svc.db, h.svc.events, h.svc.agents, {
-      pi: {
-        renameThread: async (input) => {
-          renames.push(input);
-        },
-      },
-    });
-
-    await expect(operationService.updateTitle(sent.threadId, "Adapter cannot declare support")).rejects.toBeInstanceOf(
-      ThreadTitleConflict,
-    );
-    expect(renames).toEqual([]);
-
-    setNativeThreadActions(["resume", "history", "close", "rename"]);
-    await h.svc.agents.recheck("pi");
-    try {
-      const renamed = await operationService.updateTitle(sent.threadId, "Declared native rename");
-      expect(renamed?.title).toBe("Declared native rename");
-      expect(renames).toHaveLength(1);
-      expect(renames[0]).toMatchObject({
-        agentId: "pi",
-        threadId: sent.threadId,
-        title: "Declared native rename",
-      });
-      expect(renames[0]?.nativeSessionId?.startsWith("fake://s")).toBeTrue();
-    } finally {
-      setNativeThreadActions(["resume", "history", "close"]);
-      await h.svc.agents.recheck("pi");
-    }
-  });
-
-  workerOnly("removes worker-native resume capability enforcement")("an undeclared native resume is rejected before another message is persisted", async () => {
-    const botId = await makeBot(h, "Resume Policy Bot");
-    const sent = await sendToBot(h, botId, "First native session");
-    await waitThreadIdle(h, sent.threadId);
-    const before = await api<Array<{ id: string }>>(h, "GET", `/api/threads/${sent.threadId}/messages`);
-
-    setNativeThreadActions(["history", "close"]);
-    await h.svc.agents.recheck("pi");
-    try {
-      const response = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, {
-        text: "must not persist",
-      });
-      expect(response).toEqual({
-        status: 409,
-        body: { error: "session resume is not supported by pi" },
-      });
-      expect(await api<Array<{ id: string }>>(h, "GET", `/api/threads/${sent.threadId}/messages`)).toEqual(before);
-    } finally {
-      setNativeThreadActions(["resume", "history", "close"]);
-      await h.svc.agents.recheck("pi");
-    }
+    const renamed = await api<ThreadDto>(h, "PATCH", url, { title: "  Renamed thread  " });
+    expect(renamed).toMatchObject({ id: sent.threadId, botId, title: "Renamed thread" });
+    expect(await api<ThreadDto>(h, "GET", url)).toEqual(renamed);
+    expect(await api<ThreadDto[]>(h, "GET", `/api/bots/${botId}/threads?q=renamed`)).toEqual([renamed]);
+    const updates = h.svc.events.replay(0, h.svc.events.oldestCursor()).events
+      .filter((event) => event.aggregateId === sent.threadId && event.type === "thread.updated");
+    expect(updates).toEqual([expect.objectContaining({ payload: { title: "Renamed thread" } })]);
   });
 });
 

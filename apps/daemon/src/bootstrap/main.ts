@@ -2,11 +2,11 @@ import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
 import { ThreadsService } from "../modules/threads/threads.ts";
-import { AgentsRegistry } from "../modules/agents/registry.ts";
 import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { openBotRuntime } from "../modules/runtime/runtime.ts";
+import { listWorkspaceSkills } from "../modules/runtime/extensions/skills.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker, type ComputerSurfaceOwner } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
@@ -21,7 +21,6 @@ import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { PluginsService } from "../modules/plugins/plugins.ts";
-import { Supervisor } from "../supervision/supervisor.ts";
 import { SidecarBroker } from "../modules/devices/sidecarBroker.ts";
 import { PairingService } from "../modules/pairing/pairing.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
@@ -36,6 +35,11 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
   renameSync(tmp, statusPath);
 }
 
+export interface MailboxDispatchControls {
+  pauseDispatch(): void;
+  resumeDispatch(): void;
+}
+
 export interface MainOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
   botComputerAssetSupply?: BotComputerAssetSupply;
@@ -44,6 +48,8 @@ export interface MainOptions {
   useHostApplicationUnits?: boolean;
   /** Test-only private runtime root; production uses the configured XDG runtime. */
   botScreenRuntimeDir?: string;
+  /** Give test fixtures dispatch controls before startup reconciliation schedules mail. */
+  onMailboxDispatchControls?: (controls: MailboxDispatchControls) => void;
 }
 
 export async function main(options: MainOptions = {}): Promise<{
@@ -63,26 +69,6 @@ export async function main(options: MainOptions = {}): Promise<{
   const sharedWorkspaceDir = prepareSharedWorkspace(cfg.sharedWorkspaceDir);
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
-  const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
-  const agentsDir = path.resolve(workersDir);
-  const supervisor: Supervisor = new Supervisor(
-    {
-      onAgentEvent: (agentId, event) => {
-        if (agentId === "pi" && event.type === "native" && event.capability === "mcp.authorization") {
-          plugins.handleNativeAuthorization(event.payload);
-          return;
-        }
-        avatars.onAgentEvent(agentId, event);
-      },
-      onWorkerCrash: (agentId, err) => {
-        events.append("agent", agentId, "agent.worker_crash", { agentId, message: err.message });
-        agents.markOffline(agentId, err.message);
-      },
-    },
-    {
-      agents: agentsDir,
-    },
-  );
   const browserSelectionNotice = ignoredBrowserSelectionNotice(process.env);
   if (browserSelectionNotice !== undefined) console.warn(browserSelectionNotice);
   const productionScreenAdapter = new SwayBotScreenRuntimeAdapter({
@@ -221,18 +207,18 @@ export async function main(options: MainOptions = {}): Promise<{
     computer,
   });
 
-  const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
-  const threads: ThreadsService = new ThreadsService(db, events, agents);
-  const bots = new BotsService(db, events, agents, threads);
-  const attachments = new AttachmentsService(db, cfg.attachmentsDir, agents);
+  const threads = new ThreadsService(db, events);
+  const bots = new BotsService(db, events, threads);
+  const attachments = new AttachmentsService(db, cfg.attachmentsDir);
   attachments.gcStaged();
-  const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
-  plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
-    const worker = await supervisor.agentWorker("pi");
-    const resources = await worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
+  const avatars = new AvatarService(bots, cfg.avatarsDir);
+  plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, () => {
     // Reconciliation can change the configuration revision before Services applies the status.
     plugins.mcp.reconcile();
-    return { ...resources, mcp: runtime.mcpStatus() };
+    const skills = listWorkspaceSkills(sharedWorkspaceDir).map((skill) => ({
+      ...skill, path: path.resolve(sharedWorkspaceDir, skill.path),
+    }));
+    return { skills, mcp: runtime.mcpStatus() };
   }, (input) => runtime.mcpControl(input), () => {
     const host = cfg.host.includes(":") && !cfg.host.startsWith("[") ? `[${cfg.host}]` : cfg.host;
     const origin = new URL(`${cfg.tlsCert ? "https" : "http"}://${host}:${http.port}`);
@@ -246,7 +232,7 @@ export async function main(options: MainOptions = {}): Promise<{
   const deviceLiveness = setInterval(() => devices.expire(), 5_000);
   deviceLiveness.unref?.();
   const turns = new TurnService(db, events, threads, bots, attachments, cfg, runtime);
-  const mailbox = new MailboxService(db, events, threads, agents, turns, runtime);
+  const mailbox = new MailboxService(db, events, threads, turns, runtime);
   runtime.bindServices({ mailbox, sidecars: devices, plugins });
   const recoveringMail = mailbox.recoverAcceptedMail();
   if (recoveringMail) await recoveringMail;
@@ -260,17 +246,21 @@ export async function main(options: MainOptions = {}): Promise<{
     threads,
     screens,
     cfg.sharedWorkspaceDir,
-    { secrets: runtime.secrets, runtime, terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs, projections },
+    {
+      secrets: runtime.secrets,
+      runtime,
+      terminalWaitTimeoutMs: cfg.botDeletionTerminalTimeoutMs,
+      projections,
+      onDeletionFailed: (botId) => mailbox.scheduleQueuedForBot(botId),
+    },
   );
 
-  agents.init();
+  options.onMailboxDispatchControls?.({
+    pauseDispatch: mailbox.pauseDispatch.bind(mailbox),
+    resumeDispatch: mailbox.resumeDispatch.bind(mailbox),
+  });
   mailbox.reconcileStartup();
   if (recoveringMail) turns.recoverTurns();
-
-  // Recheck every agent in the background: probe + conformance gate.
-  for (const a of agents.list()) {
-    void agents.recheck(a.id).catch(() => {});
-  }
 
   const svc: DaemonServices = {
     ...(runtime.approvals ? { approvals: runtime.approvals } : {}),
@@ -279,7 +269,6 @@ export async function main(options: MainOptions = {}): Promise<{
     cfg,
     db,
     events,
-    agents,
     bots,
     botDeletions,
     threads,
@@ -293,14 +282,12 @@ export async function main(options: MainOptions = {}): Promise<{
     devices,
     pairing,
     pairingHostSecret,
-    supervisor,
   };
   const http = startHttp(svc);
 
   const writeStatus = (): void => {
     writeStatusAtomic(cfg.statusPath, {
       ts: new Date().toISOString(),
-      agents: agents.list().map((a) => ({ id: a.id, status: a.status })),
       computer: computer.states(),
     });
   };
@@ -338,13 +325,12 @@ export async function main(options: MainOptions = {}): Promise<{
     clearInterval(statusTimer);
     clearInterval(deviceLiveness);
     devices.close();
-    mailbox.pauseDispatch();
+    mailbox.stopDispatch();
     await turns.shutdown().catch(reportStopFailure("turns"));
     await runtime.close().catch(reportStopFailure("runtime"));
     computer.shutdown();
     await projections.shutdown().catch(reportStopFailure("projections"));
     await screens.shutdown().catch(reportStopFailure("screens"));
-    await supervisor.stopAll().catch(reportStopFailure("workers"));
     await plugins.shutdown().catch(reportStopFailure("plugins"));
     http.stop();
     db.close();
@@ -358,13 +344,12 @@ export async function main(options: MainOptions = {}): Promise<{
     clearInterval(statusTimer);
     clearInterval(deviceLiveness);
     devices.close();
-    mailbox.pauseDispatch();
+    mailbox.stopDispatch();
     await turns.shutdown({ reason: "daemon restart" });
     await runtime.close();
     computer.shutdown();
     await projections.shutdown();
     screens.detach();
-    await supervisor.stopAll();
     await plugins.shutdown();
     http.stop();
     db.close();

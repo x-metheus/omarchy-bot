@@ -1,7 +1,8 @@
 import type { Database } from "bun:sqlite";
-import type { AgentBotMessageToolOutput, AgentCommand, NativeMcpControlResult, NativeMcpStatus, WorkerUserMessage } from "@omarchy-bot/agent-contract";
+import type { AgentBotMessageToolOutput, NativeMcpControlInput, NativeMcpControlResult, NativeMcpStatus, UserTurnMessage } from "@omarchy-bot/agent-contract";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { BotsService } from "../bots/bots.ts";
+import { isTextAttachmentMediaType } from "../attachments/attachments.ts";
 import type { EventLog } from "../events/eventLog.ts";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import type { ComputerBroker } from "../computer/broker.ts";
@@ -48,7 +49,6 @@ export class DurableRunAborted extends Error {
   constructor() { super("aborted"); }
 }
 
-type McpControlInput = Pick<Extract<AgentCommand, { type: "mcp.control" }>, "action" | "server" | "redirectUrl" | "authorizationId" | "expiresAt">;
 type McpAuthorizationOutcome = Omit<Parameters<NonNullable<McpOAuthManagerDeps["onComplete"]>>[0], "name"> & { server: string };
 
 export interface RuntimeServices {
@@ -72,7 +72,7 @@ interface DurableTurnStart {
   working(): void;
 }
 
-type UserTurnStart = DurableTurnStart & WorkerUserMessage & {
+type UserTurnStart = DurableTurnStart & UserTurnMessage & {
   instructions: string;
   privateDir: string;
   deviceId?: string;
@@ -148,7 +148,7 @@ export interface BotRuntime {
   steer(turnId: string, text: string, requestId: string): Promise<void>;
   abortTurn(turnId: string): Promise<void>;
   mcpStatus(): NativeMcpStatus[];
-  mcpControl(input: McpControlInput): Promise<NativeMcpControlResult>;
+  mcpControl(input: NativeMcpControlInput): Promise<NativeMcpControlResult>;
   close(): Promise<void>;
   /** Requests to use files outside the allowed folders; absent without Service storage and events. */
   readonly approvals?: ApprovalStore;
@@ -160,11 +160,11 @@ function failureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function contentWithManagedAttachments(text: string, attachments: NonNullable<WorkerUserMessage["attachments"]>): Promise<string | TextContent[]> {
+async function contentWithManagedAttachments(text: string, attachments: NonNullable<UserTurnMessage["attachments"]>): Promise<string | TextContent[]> {
   const blocks: TextContent[] = [{ type: "text", text }];
   for (const { id, name, mediaType, path } of attachments) {
     // Compaction currently serializes model content as text, including image data.
-    if (!mediaType.startsWith("text/") && mediaType !== "application/json") continue;
+    if (!isTextAttachmentMediaType(mediaType)) continue;
     let content: string;
     try {
       content = await Bun.file(path).text();

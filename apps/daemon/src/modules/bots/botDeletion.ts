@@ -64,6 +64,7 @@ export class BotDeletionService {
       runtime?: Pick<BotRuntime, "quiesceConversation" | "writeService">;
       terminalWaitTimeoutMs?: number;
       projections?: BotScreenProjectionCleanup;
+      onDeletionFailed?: (botId: string) => void;
     },
   ) {}
 
@@ -407,5 +408,6 @@ export class BotDeletionService {
   #recordFailure(botId: string, failures: readonly DeleteBotFailureDto[]): void {
     this.db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE bot_id = ?`)
       .run(JSON.stringify(failures), new Date().toISOString(), botId);
+    this.options.onDeletionFailed?.(botId);
   }
 }

@@ -1,44 +1,10 @@
 import { z } from "zod";
 import {
-  isAgentCapabilityInventory,
-  type AgentCapabilityInventory,
-} from "@omarchy-bot/agent-contract";
-import {
-  AGENT_IDS,
   TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH,
   isDeviceId,
   isSurfaceId,
   type SurfaceId,
 } from "@omarchy-bot/domain";
-
-// ----- Agents -----
-
-export const AgentStatusSchema = z.enum(["ready", "missing", "unconfigured", "incompatible", "checking", "offline"]);
-export type AgentStatusDto = z.infer<typeof AgentStatusSchema>;
-
-const AgentCapabilityInventoryDto = z.custom<AgentCapabilityInventory>(
-  isAgentCapabilityInventory,
-  "invalid agent capability inventory",
-);
-
-export const AgentDto = z.object({
-  id: z.enum(AGENT_IDS),
-  displayName: z.string(),
-  version: z.string(),
-  status: AgentStatusSchema,
-  reason: z.string().optional(),
-  /** Plain-language setup guidance shown when the Agent is not ready. */
-  guidance: z.string().optional(),
-  capabilities: AgentCapabilityInventoryDto.optional(),
-}).superRefine((agent, context) => {
-  if (agent.status === "ready" && agent.capabilities === undefined) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "ready agents must expose capabilities", path: ["capabilities"] });
-  }
-  if (agent.status !== "ready" && agent.capabilities !== undefined) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "non-ready agents cannot expose capabilities", path: ["capabilities"] });
-  }
-});
-export type AgentDto = z.infer<typeof AgentDto>;
 
 // ----- Avatars -----
 export const AVATAR_RENDERER_ID = "dicebear-core@10.7.0+styles@10.6.0" as const;
@@ -97,7 +63,6 @@ export const BotDto = z.object({
   surfaceId: SurfaceIdDto,
   name: z.string(),
   instructions: z.string(),
-  agentId: z.enum(AGENT_IDS),
   /** Null uses the Service default. */
   model: z.string().nullable(),
   avatar: AvatarDto,
@@ -134,7 +99,7 @@ export const BotViewDto = BotDto.extend({
   previewText: z.string().optional(),
   previewAt: z.string().optional(),
   lastActivityAt: z.string().optional(),
-  /** Derived from current Agent capability and retained Thinking across every Thread. */
+  /** Whether the Bot can display Thinking in the transcript. */
   thinkingAvailability: ThinkingAvailabilitySchema,
 });
 export type BotViewDto = z.infer<typeof BotViewDto>;
@@ -565,7 +530,6 @@ export type ScreenProjectionPreviewFrameHeaderDto = z.infer<typeof ScreenProject
 export const CreateBotBody = z.object({
   name: z.string().trim().min(1).max(80),
   instructions: z.string().max(8000).default(""),
-  agentId: z.enum(AGENT_IDS).optional(),
   maxTurns: z.number().int().min(1).nullable().optional(),
 });
 export type CreateBotBodyDto = z.infer<typeof CreateBotBody>;
@@ -613,9 +577,6 @@ export const DeleteBotResultDto = z.object({
   failures: z.array(DeleteBotFailureDto),
 }).strict();
 export type DeleteBotResultDto = z.infer<typeof DeleteBotResultDto>;
-
-export const AvatarRecipeBody = z.object({ prompt: z.string().trim().min(1).max(2000) });
-export type AvatarRecipeBodyDto = z.infer<typeof AvatarRecipeBody>;
 
 export const AttachmentDraftToken = z.string().max(128).uuid();
 export type AttachmentDraftTokenDto = z.infer<typeof AttachmentDraftToken>;

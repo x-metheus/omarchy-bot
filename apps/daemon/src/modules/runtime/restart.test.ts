@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -14,7 +14,12 @@ const fixture = path.join(root, "tests/integration/fixtures/durable-crash-child.
 
 type Child = ReturnType<typeof Bun.spawn>;
 async function boot(home: string, deadline: number, crashMode = false, extraEnv: Record<string, string> = {}): Promise<{ child: Child; port: number; events: string[]; stderr: () => string }> {
-  const child = Bun.spawn(["bun", fixture], { env: { ...process.env, HOME: home, OMARCHY_BOT_HOME: home, OMARCHY_BOT_STATE: path.join(home, "state"), OMARCHY_BOT_PORT: "0", OMARCHY_BOT_WORKERS_DIR: path.join(root, "tests/integration/fake-workers"), OMARCHY_TEST_SLEEP_AT: String(deadline), OMARCHY_TEST_CRASH_MODE: crashMode ? "1" : "0", ...extraEnv }, stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn(["bun", fixture], {
+    env: { ...process.env, HOME: home, OMARCHY_BOT_HOME: home, OMARCHY_BOT_STATE: path.join(home, "state"), OMARCHY_BOT_PORT: "0", OMARCHY_TEST_SLEEP_AT: String(deadline), OMARCHY_TEST_CRASH_MODE: crashMode ? "1" : "0", ...extraEnv },
+    stdout: "pipe",
+    stderr: "pipe",
+    ...(extraEnv.OMARCHY_TEST_PEER_MAIL_HOLD === "queued" ? { ipc() {} } : {}),
+  });
   const events: string[] = [];
   const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
   let ready!: (port: number) => void;
@@ -45,19 +50,11 @@ async function waitFor<T>(fn: () => T | undefined | Promise<T | undefined>, time
 }
 async function stop(child: Child): Promise<void> { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await child.exited; }
 function setup(): string {
-  const home = mkdtempSync(path.join(os.tmpdir(), "durable-restart-"));
-  mkdirSync(path.join(home, "conformance"));
-  writeFileSync(path.join(home, "conformance/pi-fake-pi-1.json"), JSON.stringify({ ok: true, image: "verified" }));
-  return home;
+  return mkdtempSync(path.join(os.tmpdir(), "durable-restart-"));
 }
 async function pairedPost(port: number, home: string) {
   const base = `http://127.0.0.1:${port}`;
   const token = await pairForToken(base, path.join(home, "state"));
-  await waitFor(async () => {
-    const response = await fetch(`${base}/api/agents`, { headers: { authorization: `Bearer ${token}` } });
-    const agents = await response.json() as { id: string; status: string }[];
-    return agents.some((agent) => agent.id === "pi" && agent.status === "ready") ? true : undefined;
-  }, 20000);
   return async function post<T>(url: string, body: unknown): Promise<T> {
     const response = await fetch(base + url, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-command-id": crypto.randomUUID() }, body: JSON.stringify(body) });
     if (!response.ok) throw new Error(`${url}: ${response.status} ${await response.text()}`);
@@ -66,7 +63,7 @@ async function pairedPost(port: number, home: string) {
 }
 async function send(port: number, home: string, text: string): Promise<{ turnId: string; threadId: string }> {
   const post = await pairedPost(port, home);
-  const bot = await post<{ id: string }>("/api/bots", { name: "Crash test", agentId: "pi" });
+  const bot = await post<{ id: string }>("/api/bots", { name: "Crash test" });
   return post(`/api/bots/${bot.id}/messages`, { text });
 }
 function query<T>(home: string, sql: string, ...args: string[]): T | null {
@@ -178,8 +175,8 @@ test.each(["placed", "done"] as const)("hard restart recovers a %s peer-mail inp
   try {
     const first = await boot(home, 0, false, { OMARCHY_TEST_PEER_MAIL_HOLD: submissionState }); child = first.child;
     const post = await pairedPost(first.port, home);
-    const source = await post<{ id: string }>("/api/bots", { name: "Restart sender", agentId: "pi" });
-    const target = await post<{ id: string }>("/api/bots", { name: "Restart recipient", agentId: "pi" });
+    const source = await post<{ id: string }>("/api/bots", { name: "Restart sender" });
+    const target = await post<{ id: string }>("/api/bots", { name: "Restart recipient" });
     const sent = await post<{ turnId: string }>(`/api/bots/${source.id}/messages`, { text: `send-peer-mail:${target.id}` });
     expect(await terminal(home, sent.turnId)).toMatchObject({ status: "completed" });
 
@@ -248,8 +245,8 @@ test.each([
   try {
     const first = await boot(home, 0, false, { OMARCHY_TEST_PEER_MAIL_HOLD: "queued" }); child = first.child;
     const post = await pairedPost(first.port, home);
-    const source = await post<{ id: string }>("/api/bots", { name: "Sender", agentId: "pi" });
-    const target = await post<{ id: string }>("/api/bots", { name: "Recipient", agentId: "pi" });
+    const source = await post<{ id: string }>("/api/bots", { name: "Sender" });
+    const target = await post<{ id: string }>("/api/bots", { name: "Recipient" });
     const persistedModelId = "uncatalogued-peer-mail";
     const nextModel = "fake/fake-model";
     const setTargetModel = (model: string) => {
@@ -258,16 +255,13 @@ test.each([
       finally { db.close(); }
     };
     setTargetModel(`fake/${persistedModelId}`);
-    const conformance = path.join(home, "conformance/pi-fake-pi-1.json");
-    const originalConformance = readFileSync(conformance);
-    writeFileSync(conformance, JSON.stringify({ ok: false }));
-    expect(await post("/api/agents/pi/recheck", {})).toMatchObject({ status: "incompatible" });
     const sent = await post<{ turnId: string }>(`/api/bots/${source.id}/messages`, { text: `send-peer-mail:${target.id}` });
     expect(await terminal(home, sent.turnId)).toMatchObject({ status: "completed" });
-    const delivery = query<{ id: string; thread_id: string; state: string }>(home, "SELECT id, thread_id, state FROM bot_mail_deliveries")!;
+    const delivery = query<{ id: string; thread_id: string; state: string; target_turn_id: string | null }>(home, "SELECT id, thread_id, state, target_turn_id FROM bot_mail_deliveries")!;
     expect(delivery.state).toBe("queued");
-    writeFileSync(conformance, originalConformance);
-    expect(await post("/api/agents/pi/recheck", {})).toMatchObject({ status: "ready" });
+    expect(delivery.target_turn_id).toBeNull();
+    expect(first.events).not.toContain("before-peer-mail-input");
+    child.send("resume-mailbox-dispatch");
     await waitFor(() => first.events.includes("before-peer-mail-input") ? true : undefined);
     const user = await post<{ turnId: string }>(`/api/threads/${delivery.thread_id}/messages`, { text: "Hold the target reply.", whenBusy: "followUp" });
     const queued = await waitFor(() => query<{ id: number; target_turn_id: string }>(home, `
@@ -321,8 +315,8 @@ test("startup projects and settles two concurrent peer-mail Turns during SQLite 
   try {
     const first = await boot(home, 0, false, { OMARCHY_TEST_PEER_MAIL_HOLD: "placed" }); child = first.child;
     const post = await pairedPost(first.port, home);
-    const source = await post<{ id: string }>("/api/bots", { name: "Sender", agentId: "pi" });
-    const targets = await Promise.all(["First recipient", "Second recipient"].map((name) => post<{ id: string }>("/api/bots", { name, agentId: "pi" })));
+    const source = await post<{ id: string }>("/api/bots", { name: "Sender" });
+    const targets = await Promise.all(["First recipient", "Second recipient"].map((name) => post<{ id: string }>("/api/bots", { name })));
     const deliveries: { id: string; thread_id: string; target_turn_id: string }[] = [];
     for (const target of targets) {
       const sent = await post<{ turnId: string }>(`/api/bots/${source.id}/messages`, { text: `send-peer-mail:${target.id}` });

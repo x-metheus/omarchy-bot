@@ -23,7 +23,7 @@ async function selectThread(page: Page, title: string): Promise<void> {
 
 test("shows approvals on their own Threads and handles keyboard and external answers", async ({ page, request }) => {
   const botName = "File Approval Bot";
-  const botResponse = await request.post("/api/bots", { data: { name: botName, agentId: "pi" } });
+  const botResponse = await request.post("/api/bots", { data: { name: botName } });
   expect(botResponse.status()).toBe(201);
   const { id: botId } = await botResponse.json() as BotDto;
   const firstTitle = "Quarterly report approval";

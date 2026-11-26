@@ -10,7 +10,6 @@ import {
   sendToBot,
   startDaemon,
   waitThreadIdle,
-  workerOnly,
   type Harness,
 } from "./helpers/harness.ts";
 
@@ -51,23 +50,6 @@ describe("integration: native Tool Call summaries", () => {
   afterEach(async () => {
     await h.stop();
     rmSync(h.home, { recursive: true, force: true });
-  });
-
-  workerOnly("fake worker's fixed 12 ms bash duration")("retains safe fields without native input, output, logs, or arbitrary JSON", async () => {
-    const botId = await makeBot(h, "Safe Tool Bot");
-    const sent = await sendToBot(h, botId, "tool please");
-    await waitThreadIdle(h, sent.threadId);
-
-    const tool = await waitForTool(h, sent.threadId, "completed");
-    expect(tool.toolCall).toEqual({
-      id: expect.any(String),
-      name: "bash",
-      status: "completed",
-      target: "echo fake",
-      durationMs: 12,
-    });
-    expect(tool.payload).toBeUndefined();
-    expect(JSON.stringify(tool)).not.toContain("fake output");
   });
 
   test("publishes only safe bash summary fields on completion and interruption", async () => {
@@ -130,13 +112,6 @@ describe("integration: native Tool Call summaries", () => {
     const sent = await sendToBot(h, botId, "tool-hang");
     await waitForTool(h, sent.threadId, "running");
     await h.svc.turns.abortTurn(sent.turnId, "test cancellation");
-    await waitThreadIdle(h, sent.threadId);
-    expectInterrupted(await waitForTool(h, sent.threadId, "error"));
-  });
-
-  workerOnly("fake worker tool-crash script exits the Agent subprocess")("finalizes a started call after Agent process loss", async () => {
-    const botId = await makeBot(h, "Lost Tool Bot");
-    const sent = await sendToBot(h, botId, "tool-crash");
     await waitThreadIdle(h, sent.threadId);
     expectInterrupted(await waitForTool(h, sent.threadId, "error"));
   });

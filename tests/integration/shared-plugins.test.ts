@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { NativeSkills } from "../../apps/daemon/src/modules/plugins/nativeSkills.ts";
+import { PluginsService } from "../../apps/daemon/src/modules/plugins/plugins.ts";
 import type { InstalledSkillDto, McpConnectionDto, PluginStateDto, SkillCommandDto } from "../../packages/protocol/src/plugins.ts";
 import { api, authedFetch, apiStatus, startDaemon, type Harness } from "./helpers/harness.ts";
 
@@ -15,10 +16,10 @@ afterEach(async () => {
   globalThis.fetch = originalFetch;
 });
 
-async function startPlugins(): Promise<Harness> {
+async function startPlugins(providers: () => Response | Promise<Response> = () => Response.json([])): Promise<Harness> {
   globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
-    if (url.hostname === "plugin-catalog.invalid") return Response.json([]);
+    if (url.hostname === "plugin-catalog.invalid") return url.pathname === "/api/plugins/providers" ? providers() : Response.json([]);
     return originalFetch(input, init);
   }, { preconnect: originalFetch.preconnect });
   const h = await startDaemon();
@@ -51,6 +52,31 @@ test("workspace Skill edits are discoverable and removal is not resurrected afte
   expect((await api<PluginStateDto>(harness, "GET", "/api/plugins")).skills.some((skill) => skill.name === "release-check")).toBe(false);
 });
 
+test("a six-level workspace Skill appears once in Services and slash commands", async () => {
+  const h = await startPlugins();
+  const root = path.join(h.svc.cfg.sharedWorkspaceDir, ".agents", "skills");
+  const directory = path.join(root, "a", "b", "c", "d", "e", "f");
+  const name = "nested-skill";
+  const description = "Discover a deeply nested workspace Skill";
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
+
+  const deep = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect([...deep.skills, ...deep.nativeSkills].filter((skill) => skill.name === name)).toEqual([
+    { name, description, path: path.join(directory, "SKILL.md"), readOnly: true },
+  ]);
+  const command: SkillCommandDto = { name, description, command: `/skill:${name}`, source: "native" };
+  expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).filter((skill) => skill.name === name)).toEqual([command]);
+
+  const managedDirectory = path.join(root, name);
+  await rename(directory, managedDirectory);
+  const managed = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect([...managed.skills, ...managed.nativeSkills].filter((skill) => skill.name === name)).toEqual([
+    expect.objectContaining({ name, description, path: path.join(managedDirectory, "SKILL.md"), enabled: true, readOnly: false }),
+  ]);
+  expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).filter((skill) => skill.name === name)).toEqual([command]);
+});
+
 test("NativeSkills ignores legacy Skills roots and leaves their live and dangling aliases in place", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
   try {
@@ -78,6 +104,234 @@ test("NativeSkills ignores legacy Skills roots and leaves their live and danglin
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Services inventory skips a workspace SKILL.md symlink into the user's Pi home", async () => {
+  const h = await startPlugins();
+  const skillDirectory = path.join(h.svc.cfg.sharedWorkspaceDir, ".agents", "skills", "linked-skill");
+  const skillFile = path.join(skillDirectory, "SKILL.md");
+  const sentinel = path.join(h.home, ".pi", "agent", "SKILL.md");
+  const document = "---\nname: pi-home-sentinel\ndescription: Private Pi Skill\n---\n";
+  await mkdir(skillDirectory, { recursive: true });
+  await mkdir(path.dirname(sentinel), { recursive: true });
+  await writeFile(sentinel, document);
+  await symlink(sentinel, skillFile);
+  // Age access time so a read is visible on relatime filesystems.
+  await utimes(sentinel, 946684800, 946771200);
+  const before = await lstat(sentinel, { bigint: true });
+
+  const { skills, nativeSkills } = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect(skills).toContainEqual(expect.objectContaining({ name: "skill-creator" }));
+  expect([...skills, ...nativeSkills].some((skill) => skill.path === skillFile || skill.name === "pi-home-sentinel")).toBe(false);
+  expect((await lstat(sentinel, { bigint: true })).atimeNs).toBe(before.atimeNs);
+  expect(await readFile(sentinel, "utf8")).toBe(document);
+});
+
+test.each([
+  { link: "workspace/.agents", workspacePath: "workspace" },
+  { link: "workspace/.agents/skills", workspacePath: "workspace" },
+  { link: "workspace-parent", workspacePath: "workspace-parent/workspace" },
+])("NativeSkills refuses to install through a symlink at $link", async ({ link, workspacePath }) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  try {
+    const workspace = path.join(home, workspacePath);
+    const privateDir = path.join(home, "plugins");
+    const piDirectory = path.join(home, ".pi");
+    const sentinel = path.join(piDirectory, "settings.json");
+    const document = '{"theme":"dark"}\n';
+    const source = path.join(home, "source");
+    const name = "install-check";
+    const description = "Verify the install destination";
+    const parent = path.join(home, link);
+    await mkdir(path.dirname(parent), { recursive: true });
+    await mkdir(piDirectory);
+    await writeFile(sentinel, document);
+    await symlink(piDirectory, parent, "dir");
+    await mkdir(source);
+    await writeFile(path.join(source, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
+    const skills = new NativeSkills(workspace, privateDir);
+    const before = await lstat(piDirectory, { bigint: true });
+    const privateBefore = await lstat(privateDir, { bigint: true });
+
+    expect(() => skills.install({ id: name, name, description, source, sourceType: "local", installUrl: source }, {
+      directory: source, revision: "fixture",
+    })).toThrow(`Skill destination cannot use a symlink: ${parent}`);
+    expect((await lstat(piDirectory, { bigint: true })).mtimeNs).toBe(before.mtimeNs);
+    expect((await lstat(privateDir, { bigint: true })).mtimeNs).toBe(privateBefore.mtimeNs);
+    expect(await readdir(piDirectory)).toEqual(["settings.json"]);
+    expect(await readdir(privateDir)).toEqual([]);
+    expect(await readFile(sentinel, "utf8")).toBe(document);
+    expect(await readlink(parent)).toBe(piDirectory);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test.each(["NativeSkills", "PluginsService"])("%s refuses a symlink at plugins-parent before creating private state", async (component) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  let service: PluginsService | undefined;
+  try {
+    const workspace = path.join(home, "workspace");
+    const parent = path.join(home, "plugins-parent");
+    const privateDir = path.join(parent, "plugins");
+    const piDirectory = path.join(home, ".pi");
+    const sentinel = path.join(piDirectory, "settings.json");
+    const document = '{"theme":"dark"}\n';
+    await mkdir(piDirectory);
+    await writeFile(sentinel, document);
+    await symlink(piDirectory, parent, "dir");
+    const before = await lstat(piDirectory, { bigint: true });
+    const entriesBefore = await readdir(piDirectory);
+
+    expect(() => {
+      if (component === "NativeSkills") new NativeSkills(workspace, privateDir);
+      else service = new PluginsService(privateDir, workspace, () => ({ skills: [] }));
+    }).toThrow(`Skill destination cannot use a symlink: ${parent}`);
+    expect((await lstat(piDirectory, { bigint: true })).mtimeNs).toBe(before.mtimeNs);
+    expect(await readdir(piDirectory)).toEqual(entriesBefore);
+    await expect(lstat(path.join(piDirectory, "plugins"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(sentinel, "utf8")).toBe(document);
+    expect(await readlink(parent)).toBe(piDirectory);
+  } finally {
+    await service?.shutdown();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("NativeSkills checks every bundle destination before staging or writing the registry", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  try {
+    const workspace = path.join(home, "workspace");
+    const privateDir = path.join(home, "plugins");
+    const skills = new NativeSkills(workspace, privateDir);
+    const localDirectory = path.join(skills.root, "local-skill");
+    const externalDirectory = path.join(home, "external");
+    const redirect = path.join(skills.root, "second-skill");
+    await mkdir(localDirectory, { recursive: true });
+    await writeFile(path.join(localDirectory, "SKILL.md"), "---\nname: local-skill\ndescription: Discovered locally\n---\n");
+    await mkdir(externalDirectory);
+    await symlink(externalDirectory, redirect, "dir");
+    const installations = await Promise.all(["first-skill", "second-skill"].map(async (name) => {
+      const directory = path.join(home, name);
+      const description = "A bundle Skill";
+      await mkdir(directory);
+      await writeFile(path.join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
+      return {
+        catalog: { id: name, name, description, source: directory, sourceType: "local" as const, installUrl: directory },
+        materialized: { directory, revision: "fixture" },
+      };
+    }));
+    const privateBefore = await lstat(privateDir, { bigint: true });
+
+    expect(() => skills.installBundle(installations)).toThrow(`Skill destination cannot use a symlink: ${redirect}`);
+    expect((await lstat(privateDir, { bigint: true })).mtimeNs).toBe(privateBefore.mtimeNs);
+    expect(await readdir(privateDir)).toEqual([]);
+    expect((await readdir(skills.root)).sort()).toEqual(["local-skill", "second-skill"]);
+    expect(await readlink(redirect)).toBe(externalDirectory);
+    expect(await readdir(externalDirectory)).toEqual([]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test.each(["list", "install"])("NativeSkills %s preserves the registry entry for an escaping SKILL.md", async (operation) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-skills-"));
+  try {
+    const workspace = path.join(home, "workspace");
+    const privateDir = path.join(home, "plugins");
+    const registryFile = path.join(privateDir, "native-skills.json");
+    const source = path.join(home, "source");
+    const id = "example/identity-check";
+    const name = "identity-check";
+    const description = "Keep the installed Skill identity";
+    const document = `---\nname: ${name}\ndescription: ${description}\n---\n`;
+    const sentinel = path.join(home, ".pi", "agent", "SKILL.md");
+    const skills = new NativeSkills(workspace, privateDir);
+    await mkdir(source);
+    await writeFile(path.join(source, "SKILL.md"), document);
+    const catalog = { id, name, description, source, sourceType: "local" as const, installUrl: source };
+    const installed = skills.install(catalog, { directory: source, revision: "fixture" });
+    expect(installed).toMatchObject({ id, origin: "installed", updateStatus: "current" });
+    const skillFile = path.join(workspace, ".agents", "skills", name, "SKILL.md");
+    expect(installed.path).toBe(skillFile);
+    const registryBefore = await readFile(registryFile, "utf8");
+    const [originalEntry] = JSON.parse(registryBefore).entries;
+    expect(originalEntry).toMatchObject({ id, origin: "installed", revision: "fixture" });
+    expect(typeof originalEntry.baseline).toBe("string");
+
+    await mkdir(path.dirname(sentinel), { recursive: true });
+    await writeFile(sentinel, "---\nname: private-pi-skill\ndescription: Private Pi Skill\n---\n");
+    const savedDocument = `${skillFile}.saved`;
+    await rename(skillFile, savedDocument);
+    await symlink(sentinel, skillFile);
+
+    if (operation === "install") {
+      const other = "other-skill";
+      await writeFile(path.join(source, "SKILL.md"), `---\nname: ${other}\ndescription: Another Skill\n---\n`);
+      expect(skills.install({ id: other, name: other, description: "Another Skill", source, sourceType: "local", installUrl: source }, {
+        directory: source, revision: "fixture",
+      })).toMatchObject({ id: other, origin: "installed" });
+    }
+    expect(skills.list().filter((skill) => skill.path === skillFile || skill.id === id || skill.name === "private-pi-skill")).toEqual([]);
+    const registryWhileHidden = await readFile(registryFile, "utf8");
+    expect(JSON.parse(registryWhileHidden).entries).toContainEqual(originalEntry);
+    if (operation === "list") {
+      expect(registryWhileHidden).toBe(registryBefore);
+      expect(() => skills.install(catalog, { directory: source, revision: "fixture" })).toThrow("Installed Skill document is unavailable");
+      expect(await readFile(registryFile, "utf8")).toBe(registryBefore);
+    }
+
+    await rename(savedDocument, skillFile);
+    expect(skills.list().find((skill) => skill.path === skillFile)).toMatchObject({ id, origin: "installed", updateStatus: "current" });
+    expect(JSON.parse(await readFile(registryFile, "utf8")).entries).toContainEqual(originalEntry);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("public Skill reinstall preserves the registry when an installed document escapes the workspace", async () => {
+  const h = await startPlugins();
+  const name = "identity-check";
+  const description = "Keep the installed Skill identity";
+  const source = "skill-fixture.invalid";
+  const id = `${source}/${name}`;
+  const document = `---\nname: ${name}\ndescription: ${description}\n---\n`;
+  const catalogFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.hostname === "plugin-catalog.invalid" && url.pathname === "/api/plugins/catalog/detail/normalised" && url.searchParams.get("id") === id) {
+      return Response.json({ id, source, slug: name, content: document });
+    }
+    if (url.hostname === source && url.pathname === "/.well-known/agent-skills/index.json") {
+      return Response.json({ skills: [{ name, files: ["SKILL.md"] }] });
+    }
+    if (url.hostname === source && url.pathname === `/.well-known/agent-skills/${name}/SKILL.md`) return new Response(document);
+    return catalogFetch(input, init);
+  }, { preconnect: catalogFetch.preconnect });
+
+  const installed = await api<InstalledSkillDto>(h, "POST", "/api/plugins/skills", { id });
+  expect(installed).toMatchObject({ id, origin: "installed", updateStatus: "current" });
+  const skillFile = path.join(h.svc.cfg.sharedWorkspaceDir, ".agents", "skills", name, "SKILL.md");
+  expect(installed.path).toBe(skillFile);
+  const registryFile = path.join(h.svc.cfg.dataDir, "plugins", "native-skills.json");
+  const registryBefore = await readFile(registryFile);
+  const outsideDocument = path.join(h.home, "outside-SKILL.md");
+  await writeFile(outsideDocument, "---\nname: outside-skill\ndescription: Outside the workspace\n---\n");
+  const savedDocument = `${skillFile}.saved`;
+  await rename(skillFile, savedDocument);
+  await symlink(outsideDocument, skillFile);
+
+  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.some((skill) => skill.id === id)).toBe(false);
+  expect(await apiStatus(h, "POST", "/api/plugins/skills", { id })).toEqual({
+    status: 409, body: { error: "Installed Skill document is unavailable; its registry entry was preserved" },
+  });
+  expect(await readFile(registryFile)).toEqual(registryBefore);
+
+  await rename(savedDocument, skillFile);
+  const restored = (await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.find((skill) => skill.path === skillFile);
+  expect(restored).toMatchObject({ id, origin: "installed", updateStatus: "current" });
+  expect(restored?.error).toBeUndefined();
+  expect(await readFile(registryFile)).toEqual(registryBefore);
 });
 
 test.each([".pi", ".claude"])("NativeSkills reconciles disabled %s Skill destinations", async (legacyFolder) => {
@@ -184,7 +438,7 @@ test("imported Skills preserve companion edits and external sources across updat
   const nativeDirectory = path.join(workspace, ".agents", "skills", installed.name);
   expect(await realpath(path.join(nativeDirectory, "SKILL.md"))).toBe(await realpath(installedPath));
   expect(await readFile(path.join(nativeDirectory, "scripts", "review.py"), "utf8")).toBe(originalScript);
-  await expect(lstat(path.join(workspace, ".claude", "skills"))).rejects.toMatchObject({ code: "ENOENT" });
+  for (const retired of [".pi", ".codex", ".claude"]) await expect(lstat(path.join(workspace, retired))).rejects.toMatchObject({ code: "ENOENT" });
   const skillRoute = `/api/plugins/skills/${encodeURIComponent(installed.id)}`;
   const command = `/skill:${installed.name}`;
   expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).filter((entry) => entry.command === command)).toHaveLength(1);
@@ -230,16 +484,17 @@ test("imported Skills preserve companion edits and external sources across updat
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.some((skill) => skill.id === installed.id)).toBe(false);
   expect((await api<SkillCommandDto[]>(h, "GET", "/api/plugins/commands")).some((entry) => entry.command === command)).toBe(false);
   await expect(lstat(nativeDirectory)).rejects.toMatchObject({ code: "ENOENT" });
-  await expect(lstat(path.join(workspace, ".claude", "skills"))).rejects.toMatchObject({ code: "ENOENT" });
+  for (const retired of [".pi", ".codex", ".claude"]) await expect(lstat(path.join(workspace, retired))).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readFile(path.join(source, "SKILL.md"), "utf8")).toBe(document);
   expect(await readFile(path.join(source, "scripts", "review.py"), "utf8")).toBe(upstreamScript);
 }, 20_000);
 
-test("MCP credentials stay private while native edits preserve client settings and conflicts require source resolution", async () => {
+test("Services saves preserve shared MCP settings and leave retired configs untouched", async () => {
   let h = await startPlugins();
   const workspace = path.join(h.home, ".omarchy-bot", "workspace");
   const sharedPath = path.join(workspace, ".mcp.json");
   const piPath = path.join(workspace, ".pi", "mcp.json");
+  const settingsPath = path.join(workspace, ".pi", "settings.json");
   const codexPath = path.join(workspace, ".codex", "config.toml");
   const envSecret = "integration-env-secret-never-project-9c6a";
   const headerSecret = "integration-header-secret-never-project-2a8f";
@@ -252,99 +507,92 @@ test("MCP credentials stay private while native edits preserve client settings a
     transport: { type: "http", url: "https://mcp.invalid/original", headers: { Authorization: headerSecret } },
   });
   const createdState = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  for (const secret of [envSecret, headerSecret]) {
-    expect(JSON.stringify([stdio, http, createdState])).not.toContain(secret);
-    for (const file of [sharedPath, codexPath]) expect(await readFile(file, "utf8")).not.toContain(secret);
-  }
+  for (const file of [piPath, settingsPath, codexPath]) await expect(lstat(file)).rejects.toMatchObject({ code: "ENOENT" });
+  expect((await lstat(sharedPath)).mode & 0o777).toBe(0o600);
+  const privatePath = path.join(h.svc.cfg.dataDir, "plugins", "native-mcp.json");
+  expect((await lstat(privatePath)).mode & 0o777).toBe(0o600);
   const shared = JSON.parse(await readFile(sharedPath, "utf8"));
+  expect(shared.mcpServers[stdio.name]).toEqual({ command: process.execPath, args: ["--version"], env: { DOCS_TOKEN: "${DOCS_TOKEN}" }, disabled: true });
+  expect(shared.mcpServers[http.name]).toEqual({ url: "https://mcp.invalid/original", headers: { Authorization: expect.stringMatching(/^\$\{OMARCHY_BOT_MCP_[A-F0-9]{24}\}$/) }, disabled: true });
+  const metadata = JSON.parse(await readFile(privatePath, "utf8"));
+  expect(Object.values(metadata.secrets)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ server: stdio.name, field: "DOCS_TOKEN", value: envSecret }),
+    expect.objectContaining({ server: http.name, field: "Authorization", value: headerSecret }),
+  ]));
+  for (const secret of [envSecret, headerSecret]) expect(JSON.stringify([stdio, http, createdState, shared])).not.toContain(secret);
+
   await mkdir(path.dirname(piPath), { recursive: true });
-  await writeFile(piPath, JSON.stringify({ mcpServers: { [http.name]: { ...shared.mcpServers[http.name], timeout: 43123 } } }));
-  const unrelatedCodex = 'model = "native-user-model"\n[projects."/tmp/example-project"]\ntrust_level = "untrusted"\n';
-  await writeFile(codexPath, `${unrelatedCodex}\n${await readFile(codexPath, "utf8")}`);
-  await api<PluginStateDto>(h, "GET", "/api/plugins");
+  await mkdir(path.dirname(codexPath), { recursive: true });
+  const retiredFiles = [
+    [piPath, JSON.stringify({ mcpServers: { [http.name]: { url: "https://mcp.invalid/pi-edit", timeout: 43123 } } })],
+    [settingsPath, '{ "packages": [], "theme": "native-user-theme" }\n'],
+    [codexPath, `model = "native-user-model"\n[mcp_servers.${JSON.stringify(http.name)}]\nurl = "https://mcp.invalid/codex-edit"\n`],
+  ] as const;
+  for (const [file, text] of retiredFiles) await writeFile(file, text, { mode: 0o640 });
+  const assertRetiredFilesUnchanged = async () => {
+    for (const [file, text] of retiredFiles) {
+      expect(await readFile(file, "utf8")).toBe(text);
+      expect((await lstat(file)).mode & 0o777).toBe(0o640);
+    }
+  };
 
-  const piEdit = JSON.parse(await readFile(piPath, "utf8"));
-  piEdit.mcpServers[http.name].url = "https://mcp.invalid/pi-edit";
-  await writeFile(piPath, JSON.stringify(piEdit));
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.find((entry) => entry.id === http.id)?.transport).toMatchObject({ url: "https://mcp.invalid/pi-edit" });
-  expect(Bun.TOML.parse(await readFile(codexPath, "utf8"))).toMatchObject({
-    model: "native-user-model", projects: { "/tmp/example-project": { trust_level: "untrusted" } },
-    mcp_servers: { [http.name]: { url: "https://mcp.invalid/pi-edit" } },
+  shared.unrelated = { keep: "native-user-setting" };
+  shared.mcpServers[http.name].timeout = 43123;
+  await writeFile(sharedPath, JSON.stringify(shared));
+  await chmod(sharedPath, 0o640);
+  const editedName = "renamed-http-docs";
+  const editedUrl = "https://mcp.invalid/shared-edit";
+  const editedState = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect(editedState.mcp.find((entry) => entry.id === http.id)).toMatchObject({ source: ".mcp.json", transport: { url: "https://mcp.invalid/original" } });
+  const edited = await api<McpConnectionDto>(h, "PUT", `/api/plugins/mcp/${encodeURIComponent(http.id)}`, {
+    name: editedName, enabled: true, transport: { type: "http", url: editedUrl },
   });
+  expect(edited).toMatchObject({ id: http.id, name: editedName, enabled: true, source: ".mcp.json", transport: { url: editedUrl, headerKeys: [] } });
+  expect((await apiStatus(h, "PATCH", `/api/plugins/mcp/${encodeURIComponent(http.id)}`, { enabled: false })).status).toBe(204);
+  const expectedShared = { unrelated: shared.unrelated, mcpServers: {
+    [stdio.name]: shared.mcpServers[stdio.name], [editedName]: { timeout: 43123, url: editedUrl, disabled: true },
+  } };
+  const sharedBytes = await readFile(sharedPath, "utf8");
+  const privateBytes = await readFile(privatePath, "utf8");
+  expect(JSON.parse(sharedBytes)).toEqual(expectedShared);
+  expect((await lstat(sharedPath)).mode & 0o777).toBe(0o640);
+  await assertRetiredFilesUnchanged();
 
-  await writeFile(codexPath, (await readFile(codexPath, "utf8")).replace("https://mcp.invalid/pi-edit", "https://mcp.invalid/codex-edit"));
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.find((entry) => entry.id === http.id)?.transport).toMatchObject({ url: "https://mcp.invalid/codex-edit" });
-  expect(JSON.parse(await readFile(piPath, "utf8")).mcpServers[http.name]).toMatchObject({ url: "https://mcp.invalid/codex-edit", timeout: 43123 });
-  expect(JSON.parse(await readFile(sharedPath, "utf8")).mcpServers[http.name].url).toBe("https://mcp.invalid/codex-edit");
-
-  const conflictingPi = JSON.parse(await readFile(piPath, "utf8"));
-  conflictingPi.mcpServers[http.name].url = "https://mcp.invalid/pi-conflict";
-  const piConflictText = JSON.stringify(conflictingPi);
-  const codexConflictText = (await readFile(codexPath, "utf8")).replace("https://mcp.invalid/codex-edit", "https://mcp.invalid/codex-conflict");
-  const sharedBeforeConflict = await readFile(sharedPath, "utf8");
-  await writeFile(piPath, piConflictText);
-  await writeFile(codexPath, codexConflictText);
-  const conflicted = (await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.find((entry) => entry.id === http.id);
-  expect(conflicted?.status).toBe("conflict");
-  expect(conflicted?.error).toEqual(expect.any(String));
-  expect(await readFile(piPath, "utf8")).toBe(piConflictText);
-  expect(await readFile(codexPath, "utf8")).toBe(codexConflictText);
-  expect(await readFile(sharedPath, "utf8")).toBe(sharedBeforeConflict);
   await h.stop();
   h = harness = await startDaemon(h.home);
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.find((entry) => entry.id === http.id)?.status).toBe("conflict");
-  expect(await readFile(piPath, "utf8")).toBe(piConflictText);
-  expect(await readFile(codexPath, "utf8")).toBe(codexConflictText);
+  const afterRestart = await api<PluginStateDto>(h, "GET", "/api/plugins");
+  expect(afterRestart.mcp.find((entry) => entry.id === http.id)).toMatchObject({ name: editedName, status: "disabled", transport: { url: editedUrl, headerKeys: [] } });
+  expect(await readFile(sharedPath, "utf8")).toBe(sharedBytes);
+  expect(await readFile(privatePath, "utf8")).toBe(privateBytes);
+  expect((await lstat(sharedPath)).mode & 0o777).toBe(0o640);
+  expect((await lstat(privatePath)).mode & 0o777).toBe(0o600);
+  await assertRetiredFilesUnchanged();
+  for (const secret of [envSecret, headerSecret]) expect(JSON.stringify([afterRestart, sharedBytes])).not.toContain(secret);
 
-  // The user selects Pi's endpoint by making both native sources agree.
-  await writeFile(codexPath, codexConflictText.replace("https://mcp.invalid/codex-conflict", "https://mcp.invalid/pi-conflict"));
-  const resolved = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  expect(resolved.mcp.find((entry) => entry.id === http.id)).toMatchObject({ status: "disabled", transport: { url: "https://mcp.invalid/pi-conflict" } });
-  expect(JSON.parse(await readFile(sharedPath, "utf8")).mcpServers[http.name].url).toBe("https://mcp.invalid/pi-conflict");
-  expect(JSON.parse(await readFile(piPath, "utf8")).mcpServers[http.name].timeout).toBe(43123);
-  expect(Bun.TOML.parse(await readFile(codexPath, "utf8"))).toMatchObject({
-    model: "native-user-model", projects: { "/tmp/example-project": { trust_level: "untrusted" } },
-  });
-  for (const secret of [envSecret, headerSecret]) {
-    expect(JSON.stringify(resolved)).not.toContain(secret);
-    for (const file of [sharedPath, piPath, codexPath]) expect(await readFile(file, "utf8")).not.toContain(secret);
-  }
-
-  // Delete the Pi/Claude definition and its overlay; Codex must not resurrect it.
-  const withoutHttp = JSON.parse(await readFile(sharedPath, "utf8"));
-  delete withoutHttp.mcpServers[http.name];
-  await writeFile(sharedPath, JSON.stringify(withoutHttp));
-  const withoutPiHttp = JSON.parse(await readFile(piPath, "utf8"));
-  delete withoutPiHttp.mcpServers[http.name];
-  await writeFile(piPath, JSON.stringify(withoutPiHttp));
+  await writeFile(sharedPath, JSON.stringify({ ...expectedShared, mcpServers: { [stdio.name]: shared.mcpServers[stdio.name] } }));
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.some((entry) => entry.id === http.id)).toBe(false);
   expect((await apiStatus(h, "DELETE", `/api/plugins/mcp/${encodeURIComponent(stdio.id)}`)).status).toBe(204);
   await h.stop();
   h = harness = await startDaemon(h.home);
-  const afterRestart = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  expect(afterRestart.mcp.some((entry) => entry.id === http.id || entry.id === stdio.id)).toBe(false);
-  for (const name of [http.name, stdio.name]) {
-    expect(JSON.parse(await readFile(sharedPath, "utf8")).mcpServers[name]).toBeUndefined();
-    expect(JSON.parse(await readFile(piPath, "utf8")).mcpServers[name]).toBeUndefined();
-    expect(Bun.TOML.parse(await readFile(codexPath, "utf8"))).not.toMatchObject({ mcp_servers: { [name]: expect.anything() } });
-  }
-  expect(Bun.TOML.parse(await readFile(codexPath, "utf8"))).toMatchObject({
-    model: "native-user-model", projects: { "/tmp/example-project": { trust_level: "untrusted" } },
-  });
+  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp).toEqual([]);
+  expect(JSON.parse(await readFile(sharedPath, "utf8"))).toEqual({ unrelated: expectedShared.unrelated, mcpServers: {} });
+  await assertRetiredFilesUnchanged();
 }, 20_000);
 
-test("native endpoint overrides do not inherit credentials from the replaced endpoint", async () => {
+test("editing a shared MCP endpoint does not carry its credentials to the new endpoint", async () => {
   const h = await startPlugins();
   const workspace = path.join(h.home, ".omarchy-bot", "workspace");
   const shared = path.join(workspace, ".mcp.json");
-  const overlay = path.join(workspace, ".pi", "mcp.json");
   await writeFile(shared, JSON.stringify({ mcpServers: { protected: { url: "https://original.invalid/mcp", headers: { Authorization: "Bearer ${SERVICE_TOKEN}" } } } }));
-  await api<PluginStateDto>(h, "GET", "/api/plugins");
-  await writeFile(overlay, JSON.stringify({ mcpServers: { protected: { url: "https://replacement.invalid/mcp" } } }));
   const state = await api<PluginStateDto>(h, "GET", "/api/plugins");
-  expect(state.mcp.find((entry) => entry.name === "protected")?.transport).toEqual({ type: "http", url: "https://replacement.invalid/mcp", headerKeys: [] });
+  const original = state.mcp.find((entry) => entry.name === "protected")!;
+  expect(original.transport).toEqual({ type: "http", url: "https://original.invalid/mcp", headerKeys: ["Authorization"] });
+  const edited = await api<McpConnectionDto>(h, "PUT", `/api/plugins/mcp/${encodeURIComponent(original.id)}`, {
+    name: original.name, enabled: true, transport: { type: "http", url: "https://replacement.invalid/mcp" },
+  });
+  expect(edited.transport).toEqual({ type: "http", url: "https://replacement.invalid/mcp", headerKeys: [] });
   expect(await readFile(shared, "utf8")).not.toContain("SERVICE_TOKEN");
-  expect(await readFile(path.join(workspace, ".codex", "config.toml"), "utf8")).not.toContain("SERVICE_TOKEN");
+  await expect(lstat(path.join(workspace, ".codex"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test("malformed and secret-bearing native entries remain untouched with safe visible diagnostics", async () => {
@@ -363,19 +611,23 @@ test("malformed and secret-bearing native entries remain untouched with safe vis
   expect(JSON.stringify(state)).not.toContain("NATIVE_URL_PRIVATE_SENTINEL");
 });
 
-test("deleting a Pi-originated MCP removes its generated representations across restart", async () => {
+test("a Pi-only MCP definition is never copied or discovered across a restart", async () => {
   let h = await startPlugins();
   const workspace = path.join(h.home, ".omarchy-bot", "workspace");
   const overlay = path.join(workspace, ".pi", "mcp.json");
-  await writeFile(overlay, JSON.stringify({ mcpServers: { "pi-origin": { command: process.execPath, args: ["--version"] } } }));
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.some((entry) => entry.name === "pi-origin")).toBe(true);
-  await writeFile(overlay, JSON.stringify({ mcpServers: {} }));
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.some((entry) => entry.name === "pi-origin")).toBe(false);
-  await h.stop();
-  h = harness = await startDaemon(h.home);
-  expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp.some((entry) => entry.name === "pi-origin")).toBe(false);
-  expect(await readFile(path.join(workspace, ".mcp.json"), "utf8")).not.toContain("pi-origin");
-  expect(await readFile(path.join(workspace, ".codex", "config.toml"), "utf8")).not.toContain("pi-origin");
+  const contents = JSON.stringify({ mcpServers: { "pi-origin": { command: process.execPath, args: ["--version"] } } });
+  await mkdir(path.dirname(overlay), { recursive: true });
+  await writeFile(overlay, contents);
+  for (let boot = 0; boot < 2; boot++) {
+    expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).mcp).toEqual([]);
+    await expect(lstat(path.join(workspace, ".mcp.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(path.join(workspace, ".codex"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(overlay, "utf8")).toBe(contents);
+    if (boot === 0) {
+      await h.stop();
+      h = harness = await startDaemon(h.home);
+    }
+  }
 });
 
 test("ordinary Creator Python cache files do not masquerade as local source modifications", async () => {
@@ -399,4 +651,40 @@ test("disabling a skill reads enabled from the request body", async () => {
   if (!skill) throw new Error("toggle-check was not discovered");
   expect((await apiStatus(h, "PATCH", `/api/plugins/skills/${encodeURIComponent(skill.id)}`, { enabled: false })).status).toBe(204);
   expect((await api<PluginStateDto>(h, "GET", "/api/plugins")).skills.find((entry) => entry.id === skill.id)?.enabled).toBe(false);
+});
+
+test("Services refresh lists a Skill disabled during catalog loading exactly once", async () => {
+  const requested = Promise.withResolvers<void>();
+  const providerResponse = Promise.withResolvers<Response>();
+  const h = await startPlugins(() => {
+    requested.resolve();
+    return providerResponse.promise;
+  });
+  const name = "disable-during-refresh";
+  const source = path.join(h.home, name);
+  await mkdir(source);
+  await writeFile(path.join(source, "SKILL.md"), `---\nname: ${name}\ndescription: Disable while Services refreshes\n---\n`);
+  const installed = await api<InstalledSkillDto>(h, "POST", "/api/plugins/skills", { source });
+  expect(installed).toMatchObject({ name, enabled: true, path: expect.any(String) });
+
+  const refresh = api<PluginStateDto>(h, "GET", "/api/plugins");
+  await requested.promise;
+  let disabled: Awaited<ReturnType<typeof apiStatus>>;
+  try {
+    disabled = await apiStatus(h, "PATCH", `/api/plugins/skills/${encodeURIComponent(installed.id)}`, { enabled: false });
+  } finally {
+    providerResponse.resolve(Response.json([]));
+  }
+  const refreshed = await refresh;
+  expect(disabled.status).toBe(204);
+  const matches = [...refreshed.skills, ...refreshed.nativeSkills].filter((skill) => skill.name === name);
+  expect(matches).toEqual([expect.objectContaining({ id: installed.id, enabled: false, path: expect.stringMatching(/\/disabled-skills\/[^/]+\/SKILL\.md$/) })]);
+
+  const plugins = h.svc.plugins;
+  plugins.enableSkill(installed.id, true);
+  const commandsBeforeDisable = plugins.commands();
+  plugins.enableSkill(installed.id, false);
+  const commandsAfterDisable = plugins.commands();
+  const [, commands] = await Promise.all([commandsBeforeDisable, commandsAfterDisable]);
+  expect(commands.filter((skill) => skill.command === `/skill:${name}`)).toEqual([]);
 });

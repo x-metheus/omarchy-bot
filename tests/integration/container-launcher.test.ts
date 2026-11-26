@@ -61,6 +61,43 @@ test("container build refuses a corrupt runtime before launching Docker or fetch
   expect(await stderr).toContain("runtime archive checksum mismatch");
 });
 
+test.each(["workers/pi/resources", "apps/daemon/resources"])("container preparation retains the Skill Creator bundle from %s", async (resources) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ob-container-resources-"));
+  roots.push(root);
+  const archive = path.join(root, "runtime.tar.zst");
+  const bundle = {
+    [`${resources}/skill-creator/SKILL.md`]: "Skill Creator instructions",
+    [`${resources}/skill-creator/scripts/init_skill.py`]: "Skill Creator script",
+    [`${resources}/skill-creator-source.json`]: "Skill Creator source metadata",
+    [`${resources}/python/yaml/__init__.py`]: "Skill Creator Python dependency",
+  };
+  const bytes = Bun.zstdCompressSync(await new Bun.Archive({
+    "scripts/serve.sh": "#!/bin/sh\n",
+    "sway/.omarchy-bot-runtime": "test Sway runtime",
+    "fonts/example.ttf": "test font",
+    "apps/daemon/src/bootstrap/main.ts": "// test Service entrypoint",
+    "apps/daemon/src/modules/computer/botComputerAssets.ts": 'export const BROWSER_ASSET = { sha256: "fixture" }; export const BROWSER_LIBRARY_ASSETS = [];',
+    ...bundle,
+  }).bytes());
+  writeFileSync(archive, bytes);
+  writeFileSync(`${archive}.sha256`, new Bun.CryptoHasher("sha256").update(bytes).digest("hex"));
+  const bin = path.join(root, "bin");
+  mkdirSync(bin);
+  // Stop at asset preparation to exercise the archive path without network or Docker.
+  writeFileSync(path.join(bin, "curl"), "#!/bin/sh\nprintf 'fixture reached asset preparation\\n' >&2\nexit 1\n", { mode: 0o755 });
+  const staging = path.join(root, "staging");
+  const child = Bun.spawn([
+    process.execPath, path.resolve(import.meta.dir, "../../scripts/container-image/prepare.ts"),
+    archive, path.join(root, "cache"), staging,
+  ], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
+  const stderr = await new Response(child.stderr).text();
+  expect(await child.exited).toBe(1);
+  expect(stderr).toContain("fixture reached asset preparation");
+  for (const [file, content] of Object.entries(bundle)) {
+    expect(readFileSync(path.join(staging, "runtime", file), "utf8")).toBe(content);
+  }
+});
+
 test("container health probe follows configured IPv4, IPv6 and wildcard listeners", async () => {
   const dockerfile = readFileSync(path.resolve(import.meta.dir, "../../scripts/container-image/Dockerfile"), "utf8");
   expect(dockerfile).toContain("STOPSIGNAL SIGINT");

@@ -196,9 +196,7 @@ async function stop(): Promise<void> {
 async function restart(): Promise<void> { await stop(); await start(); }
 async function bootService(port: number, tls: false | "trusted" | "untrusted" = false, host = "127.0.0.1", machineIdFile = process.env.OMARCHY_BOT_MACHINE_ID_FILE): Promise<string> {
   const dir = path.join(run!, `service-${port}`);
-  mkdirSync(path.join(dir, "data/conformance"), { recursive: true });
   mkdirSync(path.join(dir, "state"), { recursive: true });
-  writeFileSync(path.join(dir, "data/conformance/pi-fake-pi-1.json"), JSON.stringify({ ok: true }));
   const log = Bun.file(path.join(evidence, `service-${port}${port === 7435 ? `-${tls}` : ""}.log`));
   const command = services.has(port)
     ? ["bun", "--eval", `import {main} from './apps/daemon/src/bootstrap/main.ts'; await main({useHostApplicationUnits:false,botScreenRuntimeDir:${JSON.stringify(path.join(dir, "data/r"))}});`]
@@ -209,7 +207,6 @@ async function bootService(port: number, tls: false | "trusted" | "untrusted" = 
       OMARCHY_TEST_DISABLE_KEYRING: "1",
       OMARCHY_BOT_MACHINE_ID_FILE: machineIdFile,
       OMARCHY_BOT_SCREEN_PROFILE: "720p",
-      OMARCHY_BOT_WORKERS_DIR: path.resolve("tests/integration/fake-workers"),
       ...(tls ? { OMARCHY_BOT_TLS_CERT: tls === "trusted" ? path.join(process.env.OMARCHY_BOT_SMOKE_TRUST!, "cert.pem") : path.join(run!, "tls.pem"),
         OMARCHY_BOT_TLS_KEY: tls === "trusted" ? path.join(process.env.OMARCHY_BOT_SMOKE_TRUST!, "key.pem") : path.join(run!, "tls.key") } : {}),
     }, stdout: log, stderr: Bun.file(path.join(evidence, `service-${port}${port === 7435 ? `-${tls}` : ""}-stderr.log`)),

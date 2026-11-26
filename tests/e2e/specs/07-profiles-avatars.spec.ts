@@ -5,7 +5,6 @@ async function createBot(page: Page, name: string): Promise<string> {
   await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
   await page.getByRole("textbox", { name: "Name" }).fill(name);
   await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Original instructions");
-  await page.getByRole("radio", { name: /^Pi/ }).check();
   await page.getByRole("button", { name: "Create bot" }).click();
   const row = page.getByRole("button", { name, exact: true });
   await expect(row).toBeVisible();
@@ -116,9 +115,6 @@ test.describe("Bot profiles and avatars", () => {
     await openBotSettings(page, "Profile Bot");
 
     const botSettings = page.getByRole("complementary", { name: "Bot settings" });
-    await expect(botSettings.getByText("Backing Agent", { exact: true })).toBeVisible();
-    await expect(botSettings.getByText("Pi", { exact: true })).toBeVisible();
-    await expect(botSettings.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
     await botSettings.getByRole("textbox", { name: "Name" }).fill("Renamed Profile Bot");
     await botSettings.getByRole("textbox", { name: "Job / Instructions" }).fill("Use the latest profile instructions");
     await botSettings.getByRole("button", { name: "Save profile" }).click();
@@ -134,37 +130,6 @@ test.describe("Bot profiles and avatars", () => {
       .poll(async () => new URL((await profileAvatar.getAttribute("src")) ?? "http://invalid/", page.url()).pathname)
       .toBe(`/api/bots/${botId}/avatar`);
   });
-
-  test("applies a validated prompt recipe through the profile UI", async ({ page, request }) => {
-    const botId = await createBot(page, "Recipe UI Bot");
-    const currentResponse = await request.get(`/api/bots/${botId}`);
-    const current: unknown = await currentResponse.json();
-    if (current === null || typeof current !== "object") throw new Error("Bot API returned an invalid profile");
-    await page.route(`**/api/bots/${botId}/avatar/recipe`, async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          ...current,
-          avatar: {
-            kind: "recipe",
-            recipe: {
-              rendererVersion: "dicebear-core@10.7.0+styles@10.6.0",
-              style: "thumbs",
-              seed: "e2e-recipe",
-              options: {},
-            },
-          },
-        }),
-      });
-    });
-
-    await openBotSettings(page, "Recipe UI Bot");
-    await page.getByRole("textbox", { name: "Describe avatar" }).fill("A friendly teammate with round glasses");
-    await page.getByRole("button", { name: "Create from description" }).click();
-    await expect(page.getByRole("complementary", { name: "Bot settings" }).getByTestId("avatar-thumbs")).toBeVisible();
-  });
-
 
   test("keeps Sidebar activity independent while one generated working avatar follows the selected Thread", async ({ page }) => {
     const botId = await createBot(page, "Activity Avatar Bot");

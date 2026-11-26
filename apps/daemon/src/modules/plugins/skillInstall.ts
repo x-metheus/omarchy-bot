@@ -12,7 +12,6 @@ export interface SkillHost {
   stopping(): boolean;
   detail(id: string): Promise<CatalogSkillDetailDto>;
   persist(changed?: boolean): void;
-  clearNative(): void;
   legacyDirectories(): string[];
   accounts(): { id: string; providerId: string; enabledServices: string[] }[];
   updateService(id: string, serviceId: string): Promise<void>;
@@ -45,7 +44,6 @@ export class SkillInstalls {
       try {
         if (this.host.stopping() || (previous && !this.host.skills.list().some((skill) => skill.id === id))) throw new HttpError(409, "Skill was removed or plugin runtime stopped during installation");
         const skill = this.host.skills.install(detail, installed);
-        this.host.clearNative();
         this.host.persist(true);
         return skill;
       } finally { await this.#removeUnused(installed.directory); }
@@ -67,7 +65,6 @@ export class SkillInstalls {
         if (this.host.stopping() || (existingId && !this.host.skills.list().some((skill) => skill.id === existingId))) throw new HttpError(409, "Skill was removed or plugin runtime stopped during installation");
         const catalog = existingId ? { ...source.catalog, id: existingId } : source.catalog;
         const installed = this.host.skills.install(catalog, source);
-        this.host.clearNative();
         this.host.persist(true);
         return installed;
       } finally { await this.#removeUnused(source.directory); }
@@ -100,13 +97,11 @@ export class SkillInstalls {
 
   enable(id: string, enabled: boolean): void {
     this.host.skills.enable(id, enabled);
-    this.host.clearNative();
     this.host.persist(true);
   }
 
   remove(id: string): void {
     this.host.skills.remove(id);
-    this.host.clearNative();
     this.host.persist(true);
   }
 

@@ -39,6 +39,22 @@ async function waitUntil(condition: () => boolean | Promise<boolean>, descriptio
   }
 }
 
+async function writeCounterFixture(home: string, token: string) {
+  const script = path.join(home, "server.ts");
+  const evidence = path.join(home, "counter-process.json");
+  await writeFile(script, `
+import { writeFileSync } from "node:fs";
+import { McpServer } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/mcp.js", daemon))};
+import { StdioServerTransport } from ${JSON.stringify(Bun.resolveSync("@modelcontextprotocol/sdk/server/stdio.js", daemon))};
+if (process.env.NATIVE_COUNTER_TOKEN !== ${JSON.stringify(token)}) throw new Error("Private fixture authentication required");
+writeFileSync(${JSON.stringify(evidence)}, JSON.stringify({ pid: process.pid, argument: process.argv[2] }), { mode: 0o600 });
+const server = new McpServer({ name: "native-counter", version: "1" });
+server.registerTool("count", { description: "Return the current fixture count", inputSchema: {} }, async () => ({ content: [{ type: "text", text: "count=1" }] }));
+await server.connect(new StdioServerTransport());
+`, { mode: 0o600 });
+  return { script, evidence };
+}
+
 test("durable MCP journals the redacted result, reports Services status, and releases children on abort and shutdown", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-durable-"));
   const script = path.join(root, "server.ts");
@@ -102,7 +118,7 @@ await server.connect(new StdioServerTransport());
       expect(state.mcp).toEqual([
         expect.objectContaining({ name: "disabled", enabled: false, status: "disabled", toolCount: 0, pendingReload: false }),
         expect.objectContaining({ name: "local", enabled: true, status: "connected", toolCount: 1, pendingReload: false,
-          source: ".mcp.json, .codex/config.toml", transport: { type: "stdio", command: process.execPath, args: [script], envKeys: ["SERVICE_TOKEN"] } }),
+          source: ".mcp.json", transport: { type: "stdio", command: process.execPath, args: [script], envKeys: ["SERVICE_TOKEN"] } }),
       ]);
       expect(JSON.stringify(state)).not.toContain(token);
 
@@ -130,6 +146,86 @@ await server.connect(new StdioServerTransport());
   } finally {
     publisherFetch.mockRestore();
     await rm(root, { recursive: true, force: true });
+  }
+}, 25_000);
+
+test("durable MCP reconnects a project stdio server after an argument edit and retains its private environment", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-mcp-runtime-"));
+  const token = crypto.randomUUID();
+  const fetch = globalThis.fetch;
+  const publisherFetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (String(input) === `${publisher}/api/plugins/providers`) return Promise.resolve(Response.json([]));
+    return fetch(input, init);
+  }, { preconnect: fetch.preconnect }));
+  let h: Harness | undefined;
+  try {
+    const { script, evidence } = await writeCounterFixture(home, token);
+    h = await startDaemon(home, { seedDurableProvider: false, stateDir: path.join(home, "service-state") });
+    const service = h.svc.plugins;
+    const runtime = h.svc.turns["runtime"];
+    service.configure(publisher);
+    const connection = await service.saveMcp(null, { name: "counter", enabled: true,
+      transport: { type: "stdio", command: process.execPath, args: [script, "initial"], env: { NATIVE_COUNTER_TOKEN: token } } });
+    expect(connection.pendingReload).toBe(true);
+    expect(await readFile(path.join(h.svc.cfg.sharedWorkspaceDir, ".mcp.json"), "utf8")).not.toContain(token);
+    const beforeConnect = await api<PluginStateDto>(h, "GET", "/api/plugins");
+    expect(beforeConnect.mcp.find((entry) => entry.id === connection.id)).toMatchObject({ status: "not-connected", toolCount: 0 });
+
+    const connected = await runtime.mcpControl({ action: "connect", server: "counter" });
+    expect(connected.result?.error).toBeUndefined();
+    expect(connected.servers).toContainEqual(expect.objectContaining({
+      name: "counter", status: "connected", toolCount: 1, configurationRevision: service.mcp.effectiveServers().revision,
+    }));
+    const initialEvidence = JSON.parse(await readFile(evidence, "utf8"));
+    expect(initialEvidence.argument).toBe("initial");
+    expect(childAlive(initialEvidence.pid)).toBe(true);
+    const connectedState = await api<PluginStateDto>(h, "GET", "/api/plugins");
+    expect(connectedState.mcp.find((entry) => entry.id === connection.id)).toMatchObject({ status: "connected", toolCount: 1, pendingReload: false });
+    expect(JSON.stringify(connectedState)).not.toContain(token);
+
+    const edited = await service.saveMcp(connection.id, { name: "counter", enabled: true,
+      transport: { type: "stdio", command: process.execPath, args: [script, "edited"] } });
+    expect(edited.pendingReload).toBe(true);
+    const reconnected = await runtime.mcpControl({ action: "connect", server: "counter" });
+    expect(reconnected.result?.error).toBeUndefined();
+    const editedEvidence = JSON.parse(await readFile(evidence, "utf8"));
+    expect(editedEvidence.argument).toBe("edited");
+    expect(editedEvidence.pid).not.toBe(initialEvidence.pid);
+    expect(childAlive(editedEvidence.pid)).toBe(true);
+    const editedState = await api<PluginStateDto>(h, "GET", "/api/plugins");
+    expect(editedState.mcp.find((entry) => entry.id === connection.id)).toMatchObject({ status: "connected", toolCount: 1, pendingReload: false });
+    expect(JSON.stringify(editedState)).not.toContain(token);
+  } finally {
+    publisherFetch.mockRestore();
+    try { await h?.stop(); }
+    finally { await rm(home, { recursive: true, force: true }); }
+  }
+}, 25_000);
+
+test("durable MCP closes an idle project stdio child after its connection is removed", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "bot-mcp-durable-idle-"));
+  const token = crypto.randomUUID();
+  let h: Harness | undefined;
+  try {
+    const { script, evidence } = await writeCounterFixture(home, token);
+    h = await startDaemon(home, { seedDurableProvider: false, stateDir: path.join(home, "service-state") });
+    const service = h.svc.plugins;
+    const runtime = h.svc.turns["runtime"];
+    const connection = await service.saveMcp(null, { name: "counter", enabled: true,
+      transport: { type: "stdio", command: process.execPath, args: [script], env: { NATIVE_COUNTER_TOKEN: token } } });
+
+    const connected = await runtime.mcpControl({ action: "connect", server: "counter" });
+    expect(connected.result?.error).toBeUndefined();
+    expect(connected.servers).toContainEqual(expect.objectContaining({ name: "counter", status: "connected", toolCount: 1 }));
+    const { pid } = JSON.parse(await readFile(evidence, "utf8"));
+    expect(childAlive(pid)).toBe(true);
+
+    service.removeMcp(connection.id);
+    await waitUntil(() => !childAlive(pid), `Idle MCP child ${pid} remained alive after its connection was removed`);
+    expect(await api<{ ok: boolean }>(h, "GET", "/api/health")).toMatchObject({ ok: true });
+  } finally {
+    try { await h?.stop(); }
+    finally { await rm(home, { recursive: true, force: true }); }
   }
 }, 25_000);
 

@@ -120,7 +120,6 @@ payload=(
   manifest.json
   apps
   packages
-  workers
   patches
   scripts/serve.sh
 )

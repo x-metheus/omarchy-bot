@@ -1,8 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, workerOnly, type Harness } from "./helpers/harness.ts";
+import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 let h: Harness;
 
@@ -49,110 +46,35 @@ async function until(fn: () => Promise<boolean>, timeoutMs = 10_000): Promise<vo
   }
 }
 
-workerOnly("worker loss reports failed on shutdown; the durable runtime cancels instead", { timeout: 15_000 })("daemon shutdown cancels active Turn timeouts before closing persistence", async () => {
-  const daemon = await startDaemon();
-  try {
-    daemon.svc.cfg.turnTimeoutMs = 100;
-    const botId = await makeBot(daemon, "Shutdown timeout");
-    const sent = await sendToBot(daemon, botId, "hang");
-    await until(async () => {
-      const thread = await api<{ activeTurn?: { status: string } }>(daemon, "GET", `/api/threads/${sent.threadId}`);
-      return thread.activeTurn?.status === "working";
-    });
-    await daemon.svc.turns.shutdown();
-    const rejected = await apiStatus(daemon, "POST", `/api/bots/${botId}/messages`, { text: "late work" });
-    expect(rejected.status).toBe(503);
-    await daemon.stop();
-    // Real worker shutdown races the platform timeout; fake timers cannot drive the child process.
-    await Bun.sleep(5_500);
-    const restarted = await startDaemon(daemon.home);
-    try {
-      const thread = await api<{ latestTurn?: { status: string } }>(restarted, "GET", `/api/threads/${sent.threadId}`);
-      expect(thread.latestTurn?.status).toBe("failed");
-      const agents = await api<{ id: string; status: string }[]>(restarted, "GET", "/api/agents");
-      expect(agents.find((agent) => agent.id === "pi")?.status).toBe("ready");
-    } finally {
-      await restarted.stop();
-    }
-  } finally {
-    await daemon.stop();
-  }
-});
-
-describe("integration: agents API", () => {
-  test("lists all nine agents with version/status/reason/guidance fields", async () => {
-    const agents = await api<{ id: string; displayName: string; version: string; status: string; reason?: string; guidance?: string }[]>(h, "GET", "/api/agents");
-    expect(agents.length).toBe(9);
-    const ids = agents.map((a) => a.id);
-    for (const expected of ["pi", "omp", "codex", "claude", "grok", "opencode", "gemini", "copilot", "crush"]) {
-      expect(ids).toContain(expected);
-    }
-    for (const a of agents) {
-      expect(typeof a.displayName).toBe("string");
-      expect(typeof a.version).toBe("string");
-      expect(["ready", "missing", "unconfigured", "incompatible", "checking", "offline"]).toContain(a.status);
-    }
-    const pi = agents.find((a) => a.id === "pi")!;
-    expect(pi.status).toBe("ready");
-    expect(pi.version).toBe("fake-pi-1");
-    // Unavailable agents carry plain-language guidance.
-    const unavailable = agents.filter((a) => a.status !== "ready" && a.status !== "checking");
-    expect(unavailable.length).toBeGreaterThan(0);
-    for (const a of unavailable) expect(typeof a.guidance).toBe("string");
-  });
-
-  test("keeps its worker environment when process configuration changes", async () => {
-    const foreignHome = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-foreign-home-"));
-    const priorHome = process.env.OMARCHY_BOT_HOME;
-    let imageCapability: boolean | undefined;
-    try {
-      process.env.OMARCHY_BOT_HOME = foreignHome;
-      await h.svc.supervisor.stopAgentWorker("pi");
-      imageCapability = (await h.svc.agents.recheck("pi")).capabilities?.attachments.image;
-    } finally {
-      if (priorHome === undefined) delete process.env.OMARCHY_BOT_HOME;
-      else process.env.OMARCHY_BOT_HOME = priorHome;
-      await h.svc.supervisor.stopAgentWorker("pi");
-      await h.svc.agents.recheck("pi");
-      rmSync(foreignHome, { recursive: true, force: true });
-    }
-    expect(imageCapability).toBeTrue();
-  }, 15_000);
-});
-
 describe("integration: bots API", () => {
-  test("creates bots with pi when given a different recognized agent", async () => {
-    const res = await apiStatus(h, "POST", "/api/bots", { name: "Nope", instructions: "", agentId: "claude" });
-    expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({ agentId: "pi" });
-  });
-
-  test("rejects bot creation for an unknown agent", async () => {
-    const res = await apiStatus(h, "POST", "/api/bots", { name: "Nope", instructions: "", agentId: "nonsense" });
-    expect(res.status).toBe(400);
+  test("creates a Bot using the identity seeded on a fresh database", async () => {
+    expect(h.svc.db.query("SELECT id FROM agents ORDER BY id").all()).toEqual([{ id: "pi" }]);
+    const { status, body } = await apiStatus(h, "POST", "/api/bots", { name: "Seeded Bot" });
+    expect(status).toBe(201);
+    expect(body).toMatchObject({ name: "Seeded Bot" });
+    expect(body).not.toHaveProperty("agentId");
+    const { id } = body as { id: string };
+    expect(id).toBeString();
+    expect(h.svc.db.query("SELECT agent_id FROM bots WHERE id = ?").get(id)).toEqual({ agent_id: "pi" });
+    expect(h.svc.db.query("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
+    expect(h.svc.db.query("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
   test("rejects empty names", async () => {
-    const res = await apiStatus(h, "POST", "/api/bots", { name: "   ", instructions: "", agentId: "pi" });
+    const res = await apiStatus(h, "POST", "/api/bots", { name: "   ", instructions: "" });
     expect(res.status).toBe(400);
   });
 
-  test("two bots on one agent get independent ids", async () => {
-    const a = await api<{ id: string; name: string; agentId: string; avatar: { kind: string } }>(h, "POST", "/api/bots", { name: "Alpha", instructions: "alpha job", agentId: "pi" });
-    const b = await api<{ id: string; name: string; agentId: string }>(h, "POST", "/api/bots", { name: "Beta", instructions: "beta job", agentId: "pi" });
+  test("two Bots have independent ids and share the stored identity", async () => {
+    const a = await api<{ id: string; name: string; avatar: { kind: string } }>(h, "POST", "/api/bots", { name: "Alpha", instructions: "alpha job" });
+    const b = await api<{ id: string; name: string }>(h, "POST", "/api/bots", { name: "Beta", instructions: "beta job" });
     expect(a.id).not.toBe(b.id);
     expect(a.id.startsWith("bot_")).toBeTrue();
     expect(b.id.startsWith("bot_")).toBeTrue();
-    expect(a.agentId).toBe("pi");
-    expect(b.agentId).toBe("pi");
+    expect(h.svc.db.query("SELECT agent_id FROM bots WHERE id IN (?, ?)").all(a.id, b.id)).toEqual([
+      { agent_id: "pi" }, { agent_id: "pi" },
+    ]);
     expect(a.avatar.kind).toBe("generated");
-  });
-
-  test("PATCH cannot change agentId", async () => {
-    const botId = await makeBot(h, "Patched");
-    const res = await apiStatus(h, "PATCH", `/api/bots/${botId}`, { agentId: "claude" });
-    expect(res.status).toBe(400);
-    expect((res.body as { error?: string }).error).toContain("agent");
   });
 
   test("PATCH updates name and instructions", async () => {
@@ -213,30 +135,6 @@ describe("integration: chat through a bot", () => {
     expect(responses).toContain("two");
   });
 
-  workerOnly("fake worker fake.progress event and fixed bash summary fields")("Tool Calls, residual Native Events, and Responses remain distinct records", async () => {
-    const botId = await makeBot(h, "Tools");
-    const sent = await sendToBot(h, botId, "tool please");
-    await waitThreadIdle(h, sent.threadId);
-    const msgs = await messages(sent.threadId);
-    const tool = msgs.find((message) => message.kind === "tool");
-    expect(tool?.toolCall).toEqual({
-      id: expect.any(String),
-      name: "bash",
-      status: "completed",
-      target: "echo fake",
-      durationMs: 12,
-    });
-    expect(tool?.payload).toBeUndefined();
-    expect(JSON.stringify(tool)).not.toContain("fake output");
-    expect(msgs.find((message) => message.kind === "event")?.payload).toEqual({
-      capability: "fake.progress",
-      sensitivity: "public",
-      payload: { stage: "tool-running" },
-    });
-    expect(msgs.some((message) => message.author.kind === "bot" && message.kind === "response" && message.text === "tool finished")).toBeTrue();
-    expect(msgs.some((message) => message.author.kind === "user")).toBeTrue();
-  });
-
   test("a failed turn exposes its terminal reason without adding an operational history message", async () => {
     const botId = await makeBot(h, "Fails");
     const sent = await sendToBot(h, botId, "fail");
@@ -262,32 +160,6 @@ describe("integration: chat through a bot", () => {
     // The steered user message is correlated with the active turn.
     const steerMsg = msgs.find((m) => m.author.kind === "user" && m.text === "redirect me");
     expect(steerMsg?.payload?.turnId).toBe(sent.turnId);
-  });
-
-  workerOnly("removes fake-worker steering and abort transcript mechanics")("steering a non-steerable (hanging) turn fails cleanly with a transcript note", async () => {
-    const botId = await makeBot(h, "Hangs");
-    const sent = await sendToBot(h, botId, "hang");
-    await until(async () => (await api<{ activeTurn?: unknown }>(h, "GET", `/api/threads/${sent.threadId}`)).activeTurn !== undefined);
-    const res = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "redirect" });
-    expect(res.status).toBe(409);
-    // Internal cancellation remains available to delete and timeout flows.
-    await h.svc.turns.abortTurn(sent.turnId, "test cleanup");
-    await waitThreadIdle(h, sent.threadId);
-    const msgs = await messages(sent.threadId);
-    expect(msgs.some((m) => m.author.kind === "system" && (m.text ?? "").includes("steer unavailable"))).toBeTrue();
-    expect(msgs.some((m) => m.author.kind === "system" && m.kind === "text" && (m.text ?? "").includes("cancel"))).toBeTrue();
-  });
-
-  workerOnly("fake worker native event in the tool Turn transcript")("tool activity remains, the public abort route is absent, and no approval is pending", async () => {
-    const botId = await makeBot(h, "Tool user");
-    const sent = await sendToBot(h, botId, "tool");
-    await waitThreadIdle(h, sent.threadId);
-    const msgs = await messages(sent.threadId);
-    expect(msgs.some((m) => m.kind === "tool")).toBeTrue();
-    expect(msgs.some((m) => m.kind === "event")).toBeTrue();
-    // Durable file approvals (bot-runtime Task 9) replaced the legacy worker approval routes.
-    expect(await api<unknown[]>(h, "GET", "/api/approvals")).toEqual([]);
-    expect((await apiStatus(h, "POST", `/api/turns/${sent.turnId}/abort`)).status).toBe(404);
   });
 
   test("a completed Turn keeps its Tool Call and Response separate with no pending approvals or public abort", async () => {
@@ -325,14 +197,5 @@ describe("integration: threads API", () => {
     const filtered = await api<{ id: string }[]>(h, "GET", `/api/bots/${botId}/threads?q=apple`);
     expect(filtered.length).toBe(1);
     expect(filtered[0]!.id).toBe(one.threadId);
-  });
-
-  test("thread rename is rejected with a 409 naming the agent", async () => {
-    const botId = await makeBot(h, "Renamer");
-    const sent = await sendToBot(h, botId, "say: rename me");
-    await waitThreadIdle(h, sent.threadId);
-    const res = await apiStatus(h, "PATCH", `/api/threads/${sent.threadId}`, { title: "Nope" });
-    expect(res.status).toBe(409);
-    expect((res.body as { error?: string }).error).toContain("pi");
   });
 });

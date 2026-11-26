@@ -4,7 +4,6 @@ async function createBot(page: Page, name: string): Promise<string> {
   await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
   await page.getByRole("textbox", { name: "Name" }).fill(name);
   await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Local deletion E2E bot");
-  await page.getByRole("radio", { name: /^Pi/ }).check();
   await page.getByRole("button", { name: "Create bot" }).click();
   await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   const botId = new URL(page.url()).searchParams.get("bot");
@@ -117,7 +116,7 @@ test.describe("direct local Bot deletion", () => {
     await expect(confirmation).toContainText("conversations");
     await expect(confirmation).toContainText("managed attachments");
     await expect(confirmation).toContainText("private folder, and its private secrets");
-    await expect(confirmation).toContainText("Agent-owned Native Sessions may remain");
+    await expect(confirmation).toContainText("Some older Bot session files may remain.");
 
     await page.getByRole("button", { name: "Cancel" }).click();
     await expect(confirmation).not.toBeVisible();
