@@ -2,6 +2,8 @@
 
 The [development guide](development.md) covers skill selection, GitHub specifications and tickets, repository documents, and verification commands. Coding agents start with the [project instructions](../AGENTS.md).
 
+The [Agent Daemon guide](../apps/agent-daemon/README.md) covers standalone startup and an OpenAI smoke test.
+
 ## Code map
 
 These paths are starting points. Follow imports, contracts, and tests when a change crosses packages.
