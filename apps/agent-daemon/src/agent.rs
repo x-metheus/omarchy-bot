@@ -12,7 +12,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::store::{Conversation as StoredConversation, Role, Store};
-use crate::user_memory::{self, MemoryInput, REMEMBER_TOOL};
+use crate::user_memory::{self, FORGET_TOOL, INSPECT_TOOL, MemoryInput, REMEMBER_TOOL};
 
 pub(crate) struct TurnRequest {
     pub(crate) history: StoredConversation,
@@ -88,7 +88,7 @@ fn deliver(world: &mut World) {
                     Name::new(bot.name),
                     conversation,
                     request.model,
-                    ToolAccess::only([REMEMBER_TOOL]),
+                    ToolAccess::only([REMEMBER_TOOL, INSPECT_TOOL, FORGET_TOOL]),
                     MemoryInput::new(bot.id, request.message_id, request.prompt.clone()),
                     Reply {
                         stream: Some(request.stream),
