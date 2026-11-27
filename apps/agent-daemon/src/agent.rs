@@ -1,4 +1,5 @@
 pub(crate) mod conversation;
+mod recovery;
 
 pub(crate) use conversation::{AgentCommand, ReplySink, TurnRequest};
 
@@ -46,6 +47,7 @@ pub(crate) fn headless_app(
         // Subagents inherit the parent's BYOK connection. There is no second catalog login.
         .insert_resource(Models(Connector::new(Catalog::default())));
     rig_harness::load::<SubagentsPlugin>(&mut app, "rig-basics", "");
+    recovery::register(&mut app, store, conversations.clone());
     conversation::add(&mut app, pending, conversations);
     user_memory::install(&mut app, store);
     duties::register(&mut app);

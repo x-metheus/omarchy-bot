@@ -26,7 +26,10 @@ pub(super) async fn read(
             .filter(|id| *id >= 0)
             .ok_or(ApiError(
                 StatusCode::BAD_REQUEST,
-                Problem::new("invalid_event_cursor", "expected a nonnegative SSE event ID"),
+                Problem::new(
+                    "invalid_event_cursor",
+                    "expected a nonnegative SSE event ID",
+                ),
             ))?,
     };
     let store = daemon.store;
@@ -42,7 +45,10 @@ pub(super) async fn read(
             loop {
                 if let Some(event) = page.next() {
                     after = event.id;
-                    return Some((Ok::<_, Infallible>(event.sse()), (store, changes, after, page)));
+                    return Some((
+                        Ok::<_, Infallible>(event.sse()),
+                        (store, changes, after, page),
+                    ));
                 }
                 match store.events_after(bot, after).await {
                     Ok(events) if events.is_empty() => changes.changed().await.ok()?,

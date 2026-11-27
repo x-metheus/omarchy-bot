@@ -25,6 +25,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 #[path = "conversation/host_tools.rs"]
 mod host_tools;
+#[path = "conversation/recovery.rs"]
+mod recovery;
 #[path = "conversation/source_recall.rs"]
 mod source_recall;
 #[path = "conversation/user_memory.rs"]
@@ -392,13 +394,13 @@ impl ReplyStream {
             if let Some(end) = self.buffer.windows(2).position(|bytes| bytes == b"\n\n") {
                 let frame: Vec<u8> = self.buffer.drain(..end + 2).collect();
                 let frame = std::str::from_utf8(&frame).expect("SSE frame is UTF-8");
+                if frame.starts_with(':') {
+                    continue;
+                }
                 self.cursor = frame
                     .lines()
                     .find_map(|line| line.strip_prefix("id: "))
                     .map(|id| id.parse().expect("SSE id is a numeric cursor"));
-                if frame.starts_with(':') {
-                    continue;
-                }
                 let event = frame
                     .lines()
                     .find_map(|line| line.strip_prefix("event: "))
@@ -759,7 +761,7 @@ async fn a_disconnected_stream_keeps_its_turn_and_accepts_an_overlap() {
     call.finish().await;
     let mut resumed = daemon.events(&client, id, before).await;
     assert!(before > 0, "the POST stream supplies a reconnect cursor");
-    assert_eq!(resumed.expect("delta").await, "here.");
+    assert_eq!(resumed.expect_reply("delta").await, "here.");
     assert!(resumed.cursor.unwrap() > before);
     let call = provider.next().await;
     call.text("I read your messages.").await;
@@ -767,8 +769,8 @@ async fn a_disconnected_stream_keeps_its_turn_and_accepts_an_overlap() {
     assert_eq!(later.expect("delta").await, "I read your messages.");
     assert_eq!(other.expect("delta").await, "I read your messages.");
     let committed = later.expect("committed").await;
-    assert_eq!(resumed.expect("delta").await, "I read your messages.");
-    assert_eq!(resumed.expect("committed").await, committed);
+    assert_eq!(resumed.expect_reply("delta").await, "I read your messages.");
+    assert_eq!(resumed.expect_reply("committed").await, committed);
     assert_eq!(resumed.cursor, later.cursor);
     assert_eq!(other.expect("committed").await, committed);
     assert!(other.next().await.is_none());

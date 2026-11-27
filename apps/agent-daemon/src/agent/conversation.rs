@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use axum::response::sse::Event;
@@ -9,11 +9,14 @@ use rig_harness::prelude::*;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use super::recovery::{DeliveredReports, Journal};
 use crate::api::ConversationCommand;
 use crate::attachments::Stored as StoredAttachment;
 use crate::duties::{self, DutyTurn};
 use crate::host_tools::WorkspaceRoot;
-use crate::store::{Conversation as StoredConversation, Role};
+use crate::store::{
+    Admission, Conversation as StoredConversation, History, Role, work::Settlement,
+};
 
 const DELEGATION_GUIDANCE: &str = "\n\nWhen you delegate independent work, acknowledge what is \
     underway and end your turn so you can respond to new messages. Share relevant results as \
@@ -21,6 +24,7 @@ const DELEGATION_GUIDANCE: &str = "\n\nWhen you delegate independent work, ackno
 
 pub(crate) enum AgentCommand {
     Message(TurnRequest),
+    Recover(UserMessageSource),
     Duties { bot: Uuid, prompt: SystemPrompt },
 }
 
@@ -31,7 +35,7 @@ pub(crate) struct TurnRequest {
     pub(crate) text: String,
     pub(crate) attachments: Vec<StoredAttachment>,
     pub(crate) model: Connection,
-    pub(crate) stream: ReplySink,
+    pub(crate) stream: Option<ReplySink>,
 }
 
 /// A subscriber may fall behind or disconnect without holding up Rig or SQLite.
@@ -100,6 +104,7 @@ struct DeliveredUser {
 pub(crate) struct TurnDelivery {
     streams: Vec<ReplySink>,
     messages: Vec<DeliveredUser>,
+    started: usize,
     source: Option<(EffectId, UserMessageSource, ModelUserInput)>,
 }
 
@@ -118,8 +123,9 @@ struct ModelDelivery {
 struct Conversations {
     roots: HashMap<Uuid, Entity>,
     pending: mpsc::UnboundedReceiver<AgentCommand>,
+    deferred: VecDeque<AgentCommand>,
     outgoing: mpsc::UnboundedSender<ConversationCommand>,
-    settled: Vec<Entity>,
+    settled: Vec<(Entity, Vec<i64>)>,
 }
 
 pub(super) fn add(
@@ -140,6 +146,7 @@ pub(super) fn add(
     app.insert_resource(Conversations {
         roots: HashMap::new(),
         pending,
+        deferred: VecDeque::new(),
         outgoing,
         settled: Vec::new(),
     })
@@ -158,10 +165,76 @@ pub(super) fn add(
 
 fn deliver(world: &mut World) {
     world.resource_scope(|world, mut conversations: Mut<Conversations>| {
-        let mut first = HashSet::new();
         while let Ok(command) = conversations.pending.try_recv() {
+            conversations.deferred.push_back(command);
+        }
+        let mut blocked = HashSet::new();
+        let mut first = HashSet::new();
+        for _ in 0..conversations.deferred.len() {
+            let command = conversations
+                .deferred
+                .pop_front()
+                .expect("deferred command");
             let request = match command {
-                AgentCommand::Message(request) => request,
+                AgentCommand::Message(request) => {
+                    if blocked.contains(&request.bot) {
+                        conversations
+                            .deferred
+                            .push_back(AgentCommand::Message(request));
+                        continue;
+                    }
+                    request
+                }
+                AgentCommand::Recover(source) => {
+                    let root = conversations.roots.get(&source.bot).copied();
+                    if !blocked.insert(source.bot)
+                        || first.contains(&source.bot)
+                        || root.is_some_and(|root| world.get::<ActiveTurn>(root).is_some())
+                    {
+                        conversations
+                            .deferred
+                            .push_back(AgentCommand::Recover(source));
+                        continue;
+                    }
+                    let history = if root.is_some() {
+                        History::Live
+                    } else {
+                        History::Restore
+                    };
+                    match world
+                        .resource::<Journal>()
+                        .store
+                        .load_queued(source, history)
+                    {
+                        Ok(Some(Admission::Accepted {
+                            history,
+                            message_id,
+                            text,
+                            attachments,
+                            model,
+                        })) => TurnRequest {
+                            bot: source.bot,
+                            history,
+                            message_id,
+                            text,
+                            attachments,
+                            model,
+                            stream: None,
+                        },
+                        Ok(None) => {
+                            conversations
+                                .deferred
+                                .push_back(AgentCommand::Recover(source));
+                            continue;
+                        }
+                        Ok(Some(_)) => unreachable!("queued work was already admitted"),
+                        Err(error) => {
+                            eprintln!("could not load queued Conversation work: {error:#}");
+                            world.write_message(rig_harness::AppExit::error());
+                            return;
+                        }
+                    }
+                }
                 AgentCommand::Duties { bot, prompt } => {
                     if let Some(&agent) = conversations.roots.get(&bot) {
                         world.entity_mut(agent).insert(prompt);
@@ -237,18 +310,21 @@ fn deliver(world: &mut World) {
                         let _ = conversations.outgoing.send(ConversationCommand::Event {
                             bot,
                             name: "attachment_warning",
-                            data: serde_json::to_value(warning).expect("serialize attachment warning"),
-                            streams: vec![stream.clone()],
+                            data: serde_json::to_value(warning)
+                                .expect("serialize attachment warning"),
+                            streams: stream.iter().cloned().collect(),
                         });
                     }
                 }
             }
-            world.spawn((
+            let mut delivery = world.spawn((
                 incoming,
                 ForAgent(agent),
                 UserMessageSource { bot, message_id },
-                stream,
             ));
+            if let Some(stream) = stream {
+                delivery.insert(stream);
+            }
         }
     });
 }
@@ -321,6 +397,7 @@ fn on_model_request(
     built: On<Add<ModelRequest>>,
     calls: Query<(&CallOf, &Effect, &ModelRequest), With<TurnCall>>,
     mut turns: Query<&mut TurnDelivery>,
+    journal: Res<Journal>,
     mut commands: Commands,
 ) {
     let Ok((&CallOf(turn), effect, request)) = calls.get(built.entity) else {
@@ -338,6 +415,17 @@ fn on_model_request(
             .map(|delivered| (delivered.id, delivered.source))
     });
     let mut call = commands.entity(built.entity);
+    if delivery.started < delivery.messages.len() {
+        let sources = delivery.messages[delivery.started..]
+            .iter()
+            .map(|user| user.source)
+            .collect();
+        if !journal.start(sources) {
+            call.try_insert_if_new(Outcome::refused("work could not be stored"));
+            return;
+        }
+        delivery.started = delivery.messages.len();
+    }
     call.insert(ModelDelivery {
         subscribers: delivery.streams.len(),
     });
@@ -349,21 +437,39 @@ fn on_model_request(
 
 fn on_tool_request(
     added: On<Add<ToolRequest>>,
-    calls: Query<(&CallOf, &Effect)>,
+    calls: Query<(&CallOf, &Effect, &ForAgent, &ToolRequest, &InReply)>,
     turns: Query<&TurnDelivery>,
+    reports: Query<&DeliveredReports>,
+    roots: Query<&BotAgent>,
+    mut journal: ResMut<Journal>,
     mut commands: Commands,
 ) {
-    let Ok((&CallOf(turn), effect)) = calls.get(added.entity) else {
+    let Ok((&CallOf(turn), effect, &ForAgent(agent), tool, place)) = calls.get(added.entity) else {
         return;
     };
-    if let Some((id, source, input)) = turns.get(turn).ok().and_then(|delivery| delivery.source)
-        && effect.parent == Some(id)
+    let input = turns
+        .get(turn)
+        .ok()
+        .and_then(|delivery| delivery.source)
+        .filter(|(id, ..)| effect.parent == Some(*id));
+    let mut call = commands.entity(added.entity);
+    if let Some((_, source, input)) = input {
+        call.insert((source, input));
+    }
+    if let Ok(bot) = roots.get(agent)
+        && let Some(origin) = journal.prepare_delegation(
+            input.map(|(_, source, _)| source),
+            reports.get(turn).ok(),
+            bot.0,
+            tool,
+            place,
+        )
     {
-        commands.entity(added.entity).insert((source, input));
+        call.insert(origin);
     }
 }
 
-type ReplySettlement = Or<(With<Turn>, With<ReplySink>)>;
+type ReplySettlement = Or<(With<Turn>, (With<Incoming>, With<UserMessageSource>))>;
 
 fn on_settled(
     added: On<Add<Settled>>,
@@ -378,7 +484,13 @@ fn on_settled(
     let Ok(mut conversation) = roots.get_mut(agent) else {
         return;
     };
+    let mut started = Vec::new();
     if let Ok(mut delivery) = deliveries.get_mut(added.entity) {
+        started.extend(
+            delivery.messages[..delivery.started]
+                .iter()
+                .map(|user| user.source.message_id),
+        );
         // Keep committed inputs after Rig recalls failed text, and retire attachment payloads
         // before a subsequent Turn can reuse this Conversation.
         for user in delivery.messages.drain(..) {
@@ -396,7 +508,7 @@ fn on_settled(
             conversation.restore(range, [user.original], Author::plugin("omarchy-daemon"));
         }
     }
-    conversations.settled.push(added.entity);
+    conversations.settled.push((added.entity, started));
 }
 
 fn stream_deltas(
@@ -435,12 +547,19 @@ fn stream_deltas(
 fn finish_turns(world: &mut World) {
     world.resource_scope(|world, mut conversations: Mut<Conversations>| {
         let conversations = &mut *conversations;
-        for settled in conversations.settled.drain(..) {
+        for (settled, started) in conversations.settled.drain(..) {
             let Some(&ForAgent(agent)) = world.get::<ForAgent>(settled) else {
                 continue;
             };
             let Some(&BotAgent(bot)) = world.get::<BotAgent>(agent) else {
                 continue;
+            };
+            let undelivered = if world.get::<DeliveredIn>(settled).is_none() {
+                world
+                    .get::<UserMessageSource>(settled)
+                    .map(|source| source.message_id)
+            } else {
+                None
             };
             let mut settled = world.entity_mut(settled);
             let answer = match settled.get::<TurnOutcome>() {
@@ -457,11 +576,24 @@ fn finish_turns(world: &mut World) {
             if let Some(stream) = settled.take::<ReplySink>() {
                 streams.push(stream);
             }
-            if answer.is_some() || !streams.is_empty() {
+            let reports = settled
+                .take::<DeliveredReports>()
+                .map_or_else(Vec::new, |reports| reports.0);
+            if answer.is_some()
+                || !streams.is_empty()
+                || !started.is_empty()
+                || undelivered.is_some()
+                || !reports.is_empty()
+            {
                 let _ = conversations.outgoing.send(ConversationCommand::Settled {
                     bot,
                     answer,
                     duties,
+                    work: Settlement {
+                        started,
+                        undelivered,
+                        reports,
+                    },
                     streams,
                 });
             }

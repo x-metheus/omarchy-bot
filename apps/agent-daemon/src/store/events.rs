@@ -64,7 +64,11 @@ impl Store {
         .await
     }
 
-    pub(crate) async fn events_after(&self, bot: Uuid, after: i64) -> Result<Vec<ConversationEvent>> {
+    pub(crate) async fn events_after(
+        &self,
+        bot: Uuid,
+        after: i64,
+    ) -> Result<Vec<ConversationEvent>> {
         self.run(move |db| {
             let mut select = db.connection.prepare_cached(
                 "SELECT id, name, data FROM conversation_events

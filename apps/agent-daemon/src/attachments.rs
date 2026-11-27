@@ -191,13 +191,25 @@ pub(crate) fn for_bot(db: &Connection, bot: Uuid, id: Uuid) -> rusqlite::Result<
              WHERE ma.attachment_id = a.id AND m.bot_id = ?2
          )",
     )?
-    .query_row(params![id.as_bytes(), bot.as_bytes()], |row| {
-        Ok(Stored {
-            metadata: metadata(row)?,
-            content: row.get(4)?,
-        })
-    })
+    .query_row(params![id.as_bytes(), bot.as_bytes()], stored)
     .optional()
+}
+
+pub(crate) fn for_message(db: &Connection, message: i64) -> rusqlite::Result<Vec<Stored>> {
+    db.prepare_cached(
+        "SELECT a.id, a.name, a.media_type, a.content IS NOT NULL, a.content
+         FROM message_attachments ma JOIN attachments a ON a.id = ma.attachment_id
+         WHERE ma.message_id = ?1 ORDER BY ma.position",
+    )?
+    .query_map([message], stored)?
+    .collect()
+}
+
+fn stored(row: &Row<'_>) -> rusqlite::Result<Stored> {
+    Ok(Stored {
+        metadata: metadata(row)?,
+        content: row.get(4)?,
+    })
 }
 
 pub(crate) fn visit_conversation(
