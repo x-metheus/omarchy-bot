@@ -1,5 +1,6 @@
 mod agent;
 mod api;
+mod recall;
 mod settings;
 mod store;
 
@@ -27,14 +28,22 @@ fn main() -> Result<AppExit> {
     let store = Store::open(&path)?;
 
     let runtime = Runtime::new().context("start HTTP runtime")?;
+    let recall = recall::Recall::start(
+        runtime.handle(),
+        env::var_os("OMARCHY_AGENT_RECALL_MODEL_DIR").map(PathBuf::from),
+        store.clone(),
+    );
     let scratch = tempfile::tempdir().context("create private Rig scratch directory")?;
     let (turns, pending) = mpsc::unbounded_channel();
     let mut app = agent::headless_app(pending, runtime.handle().clone(), scratch.path());
+    app.insert_resource(recall.clone());
+    recall::register(&mut app);
     let router = api::router(
         store,
         turns,
         app.world().resource::<Wake>().clone(),
         settings_token,
+        recall,
     );
     let listener = runtime
         .block_on(TcpListener::bind(SocketAddrV4::new(

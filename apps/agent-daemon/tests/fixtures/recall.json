@@ -1,0 +1,36 @@
+{
+  "messages": [
+    "La factura del taller de cerámica de Sevilla debe pagarse antes del 14 de junio.",
+    "Le plombier de Lyon a déplacé le rendez-vous au mardi après-midi.",
+    "备用钥匙放在玄关柜的第二个抽屉里。",
+    "京都の展示会には、青い花瓶を持っていくことにした。",
+    "The community garden seed order uses pickup code GDN-417-Q.",
+    "Für den Workshop in Köln brauchen wir einen Beamer und zwei Verlängerungskabel.",
+    "Vamos guardar as fotografias da festa no álbum partilhado da família.",
+    "The neighborhood library is substituting audiobooks for the cancelled reading circle.",
+    "The gallery receipt for the frame uses reference GDN-417-R.",
+    "Das Hotel in Sevilla hat unsere Buchung auf das Wochenende verschoben.",
+    "请在 Friday 带上蓝色 notebook，植物调查的路线写在里面。",
+    "The spare battery is in the top drawer of the desk by the window.",
+    "The pottery studio in Valencia opens at ten on Saturdays.",
+    "A yellow teapot will be on display in Osaka next spring.",
+    "本棚の上の箱に自転車の鍵を入れました。",
+    "La entrada para el taller de Sevilla incluye el alquiler del delantal."
+  ],
+  "queries": [
+    {"kind":"es paraphrase", "text":"¿Cuándo vence el recibo del curso de alfarería?", "expected":0},
+    {"kind":"en to es", "text":"What's the deadline for settling the bill for the pottery class?", "expected":0},
+    {"kind":"de to fr", "text":"Auf wann wurde der Termin des Klempners verschoben?", "expected":1},
+    {"kind":"zh paraphrase", "text":"家门的那把备份钥匙搁哪儿了？", "expected":2},
+    {"kind":"en to zh", "text":"Where did we put the extra key to the house?", "expected":2},
+    {"kind":"ja paraphrase", "text":"京都で開かれる催しに何を持参する予定だった？", "expected":3},
+    {"kind":"zh to ja", "text":"去京都参加展览时要带哪件东西？", "expected":3},
+    {"kind":"exact identifier", "text":"GDN-417-R", "expected":8},
+    {"kind":"identifier in sentence", "text":"What was the reference GDN-417-Q for?", "expected":4},
+    {"kind":"de paraphrase", "text":"Welche Präsentationstechnik müssen wir für das Kölner Seminar besorgen?", "expected":5},
+    {"kind":"en to pt", "text":"Where are we keeping the pictures from the celebration?", "expected":6},
+    {"kind":"en paraphrase", "text":"What will take the place of the book discussion that was called off?", "expected":7},
+    {"kind":"mixed zh/en to mixed", "text":"Which notebook 记录了植物调查的路线？", "expected":10},
+    {"kind":"ja to en", "text":"予備の電池はどこにありますか？", "expected":11}
+  ]
+}

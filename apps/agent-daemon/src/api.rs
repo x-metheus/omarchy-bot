@@ -20,6 +20,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::agent::TurnRequest;
+use crate::recall::{Availability, Recall};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
 use crate::store::{Admission, Bot, Conversation, Store};
 
@@ -29,6 +30,7 @@ struct Daemon {
     turns: mpsc::UnboundedSender<TurnRequest>,
     wake: Wake,
     active: Arc<Mutex<HashSet<Uuid>>>,
+    recall: Recall,
 }
 
 pub(crate) fn router(
@@ -36,11 +38,13 @@ pub(crate) fn router(
     turns: mpsc::UnboundedSender<TurnRequest>,
     wake: Wake,
     settings_token: Option<Digest>,
+    recall: Recall,
 ) -> Router {
     Router::new()
         .route("/bots", post(create_bot))
         .route("/bots/{bot}", get(read_bot))
         .route("/bots/{bot}/messages", post(send_message))
+        .route("/recall/status", get(recall_status))
         .merge(
             Router::new()
                 .route("/settings", get(read_settings).put(write_settings))
@@ -54,7 +58,12 @@ pub(crate) fn router(
             turns,
             wake,
             active: Arc::default(),
+            recall,
         })
+}
+
+async fn recall_status(State(daemon): State<Daemon>) -> Json<Availability> {
+    Json(daemon.recall.availability())
 }
 
 async fn authorize_settings(
@@ -242,6 +251,7 @@ async fn run_turn(
             return;
         }
     };
+    daemon.recall.history_changed();
     let (finished, result) = oneshot::channel();
     if daemon
         .turns
@@ -264,7 +274,10 @@ async fn run_turn(
     let Ok(result) = result.await else { return };
     let terminal = match result.answer {
         Some(text) => match daemon.store.commit_reply(bot, text).await {
-            Ok(message) => event("committed", message),
+            Ok(message) => {
+                daemon.recall.history_changed();
+                event("committed", message)
+            }
             Err(error) => event("error", store_error(error).1),
         },
         None => event(

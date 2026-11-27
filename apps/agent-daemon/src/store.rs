@@ -1,3 +1,5 @@
+mod recall_index;
+
 use std::path::{self, Path};
 use std::sync::{Arc, Mutex};
 
@@ -24,12 +26,12 @@ pub(crate) struct Conversation {
 
 #[derive(Serialize)]
 pub(crate) struct Message {
-    id: i64,
+    pub(crate) id: i64,
     pub(crate) role: Role,
     pub(crate) text: String,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Role {
     User = 0,
@@ -86,6 +88,11 @@ impl Store {
                      text TEXT NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS messages_by_bot ON messages(bot_id, id);
+                 CREATE TABLE IF NOT EXISTS recall_vectors (
+                     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                     revision TEXT NOT NULL,
+                     embedding BLOB NOT NULL
+                 );
                  CREATE TABLE IF NOT EXISTS provider_credentials (
                      provider TEXT PRIMARY KEY NOT NULL CHECK (provider IN ('openai', 'anthropic')),
                      sealed_key BLOB NOT NULL
