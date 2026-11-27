@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::duties::{self, DutyTurn, SET_DUTIES};
 use crate::recall::{RecallScope, TOOL_NAME};
 use crate::store::{Conversation as StoredConversation, Role, Store};
-use crate::user_memory::{self, MemoryInput, REMEMBER_TOOL};
+use crate::user_memory::{self, FORGET_TOOL, INSPECT_TOOL, MemoryInput, REMEMBER_TOOL};
 
 pub(crate) struct TurnRequest {
     pub(crate) history: StoredConversation,
@@ -97,7 +97,13 @@ fn deliver(world: &mut World) {
                     conversation,
                     request.model,
                     duties::system_prompt(bot.duties.as_deref()),
-                    ToolAccess::only([REMEMBER_TOOL, SET_DUTIES, TOOL_NAME]),
+                    ToolAccess::only([
+                        REMEMBER_TOOL,
+                        INSPECT_TOOL,
+                        FORGET_TOOL,
+                        SET_DUTIES,
+                        TOOL_NAME,
+                    ]),
                     DutyTurn::default(),
                     MemoryInput::new(bot.id, request.message_id, request.prompt.clone()),
                     scope,

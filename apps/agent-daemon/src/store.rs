@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::attachments::{self, Metadata, Stored, Submission};
 use crate::settings::{Settings, SettingsStatus, SettingsUpdate, Update};
-use crate::user_memory::{self, CurrentMemory, MemorySource, Proposal, Remembered};
+use crate::user_memory::{self, CurrentMemory, MemorySource, MemoryWrite, Proposal};
 
 #[derive(Serialize)]
 pub(crate) struct Bot {
@@ -311,10 +311,28 @@ impl Store {
         &self,
         source: MemorySource,
         proposal: Proposal,
-    ) -> Result<Remembered> {
+    ) -> Result<MemoryWrite> {
         let current = self.1.clone();
         self.run(move |db| user_memory::remember(&mut db.connection, &current, source, proposal))
             .await
+    }
+
+    pub(crate) async fn inspect_memory(&self, key: Option<String>) -> Result<serde_json::Value> {
+        self.run(move |db| user_memory::inspect(&db.connection, key.as_deref()))
+            .await
+    }
+
+    pub(crate) async fn forget_memory(
+        &self,
+        source: MemorySource,
+        key: String,
+        evidence: String,
+    ) -> Result<MemoryWrite> {
+        let current = self.1.clone();
+        self.run(move |db| {
+            user_memory::forget(&mut db.connection, &current, source, &key, &evidence)
+        })
+        .await
     }
 
     async fn run<T: Send + 'static>(
