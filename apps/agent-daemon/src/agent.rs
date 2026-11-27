@@ -11,6 +11,7 @@ use rig_harness::prelude::*;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::duties::{self, DutyTurn, SET_DUTIES};
 use crate::store::{Conversation as StoredConversation, Role, Store};
 use crate::user_memory::{self, MemoryInput, REMEMBER_TOOL};
 
@@ -68,6 +69,7 @@ pub(crate) fn headless_app(
         .add_systems(PreUpdate, deliver)
         .add_systems(PostUpdate, (stream_deltas, finish_turns).chain());
     user_memory::install(&mut app, store);
+    duties::register(&mut app);
     app
 }
 
@@ -89,7 +91,9 @@ fn deliver(world: &mut World) {
                     Name::new(bot.name),
                     conversation,
                     request.model,
-                    ToolAccess::only([REMEMBER_TOOL]),
+                    duties::system_prompt(bot.duties.as_deref()),
+                    ToolAccess::only([REMEMBER_TOOL, SET_DUTIES]),
+                    DutyTurn::default(),
                     MemoryInput::new(bot.id, request.message_id, request.prompt.clone()),
                     Reply {
                         stream: Some(request.stream),
