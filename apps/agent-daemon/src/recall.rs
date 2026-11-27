@@ -101,8 +101,9 @@ impl Recall {
                 let ready = loaded.is_ok();
                 let _ = recall.0.model.set(loaded);
                 if ready {
+                    let mut after = 0;
                     loop {
-                        if recall.backfill(None).await.is_err() {
+                        if recall.backfill(None, &mut after).await.is_err() {
                             eprintln!("Recall could not index Conversation history");
                         }
                         recall.0.changes.notified().await;
@@ -135,16 +136,15 @@ impl Recall {
             .context("Recall model unavailable")
     }
 
-    async fn backfill(&self, scope: Option<RecallScope>) -> Result<()> {
-        let mut after = 0;
+    async fn backfill(&self, scope: Option<RecallScope>, after: &mut i64) -> Result<()> {
         loop {
             // Release inference between database batches so Recall queries can run during backfill.
             let _inference = self.0.inference.lock().await;
-            let pending = self.0.store.unindexed_messages(after, scope).await?;
+            let pending = self.0.store.unindexed_messages(*after, scope).await?;
             let Some(last) = pending.last() else {
                 return Ok(());
             };
-            after = last.id;
+            let through = last.id;
             let recall = self.clone();
             let rows = tokio::task::spawn_blocking(move || {
                 let encoder = recall.encoder()?;
@@ -163,6 +163,7 @@ impl Recall {
             })
             .await??;
             self.0.store.save_recall_vectors(rows).await?;
+            *after = through;
         }
     }
 
@@ -203,7 +204,7 @@ impl Recall {
             return Ok(Vec::new());
         }
         // A follow-up can arrive before the background index catches up.
-        self.backfill(Some(scope)).await?;
+        self.backfill(Some(scope), &mut 0).await?;
         let guard = self.0.inference.lock().await;
         let recall = self.clone();
         let query = query.to_owned();
@@ -297,9 +298,9 @@ impl Encoder {
     fn embed(&self, prefix: &str, text: &str) -> Result<[f32; DIMENSIONS]> {
         let input = format!("{prefix}{text}");
         // Dynamic quantization adjusts to each input. Encode passages and queries individually.
-        let result = self
-            .tokenizers
-            .install(|| futures::executor::block_on(self.model.embed_text(&input)))?;
+        let result = self.tokenizers.install(|| {
+            futures::executor::block_on(self.model.embed_text(&input)).map_err(anyhow::Error::new)
+        })?;
         ensure!(
             result.vec.len() == DIMENSIONS,
             "unexpected Recall vector width"

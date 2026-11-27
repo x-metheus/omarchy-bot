@@ -457,10 +457,20 @@ async fn recall_returns_original_messages_from_the_calling_bot_after_restart() {
     let fixture: Value = serde_json::from_str(include_str!("fixtures/recall.json")).unwrap();
     let messages = fixture["messages"].as_array().unwrap();
     let original = messages[0].as_str().unwrap();
+    let exact = format!(
+        "{}\n{}",
+        "植物研究のメモ。\n".repeat(70),
+        messages[4].as_str().unwrap()
+    );
+    let mixed = messages[10].as_str().unwrap();
     for (owner, text) in [
         (bot, original),
         (bot, messages[15].as_str().unwrap()),
+        (bot, &exact),
+        (bot, messages[8].as_str().unwrap()),
+        (bot, mixed),
         (bot_id(&other), original),
+        (bot_id(&other), messages[4].as_str().unwrap()),
     ] {
         let mut reply = ReplyStream::new(daemon.send(&client, owner, text).await);
         chat_reply(provider.next().await, &mut reply, "Recorded").await;
@@ -487,39 +497,73 @@ async fn recall_returns_original_messages_from_the_calling_bot_after_restart() {
         "Recall available to the Agent: {}",
         call.body["tools"]
     );
+    let cases = [
+        ("call_recall", query, &history["messages"][0], original),
+        (
+            "call_exact",
+            fixture["queries"][8]["text"].as_str().unwrap(),
+            &history["messages"][4],
+            messages[4].as_str().unwrap(),
+        ),
+        (
+            "call_mixed",
+            fixture["queries"][12]["text"].as_str().unwrap(),
+            &history["messages"][8],
+            mixed,
+        ),
+    ];
+    let tool_calls: Vec<_> = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (id, query, ..))| {
+            json!({
+                "index": index, "id": id, "type": "function", "function": {
+                    "name": "recall", "arguments": json!({ "query": query }).to_string()
+                }
+            })
+        })
+        .collect();
     call.chunk(
-        json!({"role":"assistant", "tool_calls":[{
-            "index":0, "id":"call_recall", "type":"function", "function":{
-                "name":"recall", "arguments":json!({"query":query}).to_string()
-            }
-        }]}),
+        json!({ "role": "assistant", "tool_calls": tool_calls }),
         None,
     )
     .await;
     call.chunk(json!({}), Some("tool_calls")).await;
     call.frame("[DONE]").await;
     let continuation = provider.next().await;
-    let tool_result = continuation.body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|message| message["role"] == "tool" && message["tool_call_id"] == "call_recall")
-        .expect("Recall output reached the same Turn");
-    let content = tool_result["content"]
-        .as_str()
-        .expect("Recall output is JSON text");
-    let result: Value = serde_json::from_str(content).expect("parse Recall result");
-    let hits = result["messages"]
-        .as_array()
-        .expect("Recall returns a message list");
-    assert_eq!(
-        hits[0]["text"], original,
-        "the cross-language match ranks first: {hits:?}"
-    );
-    assert_eq!(hits[0]["message_id"], history["messages"][0]["id"]);
-    assert_eq!(hits[0]["role"], "user");
-    assert!(hits.iter().all(|hit| hit["bot_id"] == bot));
-    assert!(hits.iter().all(|hit| hit["text"] != query));
+    for (id, lookup, source, expected_text) in cases {
+        let result = continuation.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == id)
+            .expect("each Recall output reached the same Turn");
+        let result: Value = serde_json::from_str(result["content"].as_str().unwrap())
+            .expect("Recall output is JSON");
+        assert_eq!(result["historical"], true);
+        let hits = result["messages"]
+            .as_array()
+            .expect("Recall returns a message list");
+        let first = hits.first().expect("the original message was found");
+        assert_eq!(
+            first["message_id"], source["id"],
+            "expected first hit for {lookup}: {hits:?}"
+        );
+        assert_eq!(first["role"], "user");
+        assert!(hits.iter().all(|hit| hit["bot_id"] == bot));
+        assert!(hits.iter().all(|hit| hit["text"] != query));
+        let start = first["start_byte"].as_u64().unwrap() as usize;
+        let end = first["end_byte"].as_u64().unwrap() as usize;
+        let original = source["text"].as_str().unwrap();
+        assert_eq!(first["text"], &original[start..end]);
+        assert!(original[start..end].contains(expected_text));
+        if id == "call_exact" {
+            assert!(
+                start > 0,
+                "Recall found an identifier later in a long message"
+            );
+        }
+    }
     chat_reply(continuation, &mut reply, "The bill was due June 14").await;
     daemon.stop().await;
 }

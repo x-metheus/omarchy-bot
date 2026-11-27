@@ -28,7 +28,7 @@ pub(crate) struct Conversation {
 
 #[derive(Serialize)]
 pub(crate) struct Message {
-    pub(crate) id: i64,
+    id: i64,
     pub(crate) role: Role,
     pub(crate) text: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
