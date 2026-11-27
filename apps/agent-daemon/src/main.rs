@@ -2,6 +2,7 @@ mod agent;
 mod api;
 mod settings;
 mod store;
+mod user_memory;
 
 use std::env;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -29,7 +30,7 @@ fn main() -> Result<AppExit> {
     let runtime = Runtime::new().context("start HTTP runtime")?;
     let scratch = tempfile::tempdir().context("create private Rig scratch directory")?;
     let (turns, pending) = mpsc::unbounded_channel();
-    let mut app = agent::headless_app(pending, runtime.handle().clone(), scratch.path());
+    let mut app = agent::headless_app(pending, runtime.handle().clone(), scratch.path(), &store);
     let router = api::router(
         store,
         turns,

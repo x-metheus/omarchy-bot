@@ -10,10 +10,12 @@ use rig_harness::prelude::*;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::store::{Conversation as StoredConversation, Role};
+use crate::store::{Conversation as StoredConversation, Role, Store};
+use crate::user_memory::{self, MemoryInput, REMEMBER_TOOL};
 
 pub(crate) struct TurnRequest {
     pub(crate) history: StoredConversation,
+    pub(crate) message_id: i64,
     pub(crate) model: Connection,
     pub(crate) prompt: String,
     pub(crate) stream: mpsc::Sender<Event>,
@@ -40,6 +42,7 @@ pub(crate) fn headless_app(
     pending: mpsc::UnboundedReceiver<TurnRequest>,
     runtime: Handle,
     scratch: &Path,
+    store: &Store,
 ) -> App {
     // Provider diagnostics can include raw response bodies. Keep them inside Rig.
 
@@ -61,6 +64,7 @@ pub(crate) fn headless_app(
         .insert_resource(Turns { pending })
         .add_systems(PreUpdate, deliver)
         .add_systems(PostUpdate, (stream_deltas, finish_turns).chain());
+    user_memory::install(&mut app, store);
     app
 }
 
@@ -82,7 +86,8 @@ fn deliver(world: &mut World) {
                     Name::new(bot.name),
                     conversation,
                     request.model,
-                    ToolAccess::only([]),
+                    ToolAccess::only([REMEMBER_TOOL]),
+                    MemoryInput::new(bot.id, request.message_id, request.prompt.clone()),
                     Reply {
                         stream: Some(request.stream),
                         finished: request.finished,

@@ -115,6 +115,22 @@ A successful message POST commits the user message before starting the model cal
 
 A Bot accepts one Turn at a time. An overlapping POST receives `409` with `turn_in_progress` and adds no message. A Turn continues after its client disconnects. A client whose stream closes before a terminal event can use `GET` to read the committed state. On process restart, the daemon loads committed messages from SQLite and starts a fresh Turn on the next POST.
 
+## Shared UserMemory
+
+A Bot can save a fact or standing preference from its current user message. For example, say “Always reply in French,” “My time zone is Europe/Paris,” or “Please call me Áine.” The daemon verifies the proposal against the original committed text and shares the saved value with all Bots on that daemon. Use a direct first-person statement for facts, such as “Remember that my favorite tea is hojicha.” Ambiguous wording requires clarification. Use a model that supports tool calls when saving UserMemory.
+
+Each model request receives the current reply language, time zone, and preferred name when available. Other entries are selected by matching words from the current request against the entry's topic, with a limit of six. A current instruction such as “Reply in English this time” takes precedence for that request. Request context and tool traces do not become Conversation messages.
+
+### Storage and provenance contract
+
+`user_memory` holds one current value per key. Recurring keys are `preferences.reply_language`, `profile.time_zone`, and `profile.preferred_name`. Additional keys are `preferences.units`, `preferences.format`, and `facts.<snake_case_topic>`. Each row stores `source_bot_id`, `source_message_id`, `source_order`, and the half-open UTF-8 byte range `[evidence_start, evidence_end)` in the original user text. Source identifiers survive deletion independently of the source row. A missing source row makes the original evidence unavailable.
+
+`messages.id` is the global committed order. `message_order` keeps its SQLite high-water mark across restarts and source deletion. Message insertions allocate through the daemon Store, and the insertion trigger advances the high-water mark in the same transaction. The memory write updates SQLite only for a strictly newer `source_order`, then publishes the committed value to Rig's shared read snapshot.
+
+Rig's request preparation stage records the eligible committed input against each model effect. A tool call resolves its originating effect, then the daemon verifies the source Bot, message ID, user role, and verbatim evidence against SQLite. When several deliveries share an Agent, request preparation must select the eligible authored input using the durable message identity carried through `Incoming` and `DeliveredAs`/`DeliveredIn`. The captured source remains stable for tool calls originating from that invocation.
+
+Issue #22 can use the stable keys, source lookup, and committed order for inspection and tombstones. Clear operations must publish to the same read snapshot after commit, and the ordering guard must continue to compare against the last operation even when the current value is absent.
+
 ## Checks
 
 Run from `apps/agent-daemon`.

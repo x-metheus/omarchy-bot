@@ -118,7 +118,10 @@ impl Endpoints {
         };
         let provider =
             ProviderId::catalog(selection.provider.name()).expect("built-in Rig provider");
-        let spec = ModelSpec::new(provider, &selection.model);
+        // Rig's bare spec disables tools. The configured provider wires support tool calls
+        // on gateway aliases, and catalog entries can declare a model's exception.
+        let spec = ModelSpec::new(provider, &selection.model)
+            .with_tools(model.spec().is_none_or(|spec| spec.tools));
         let handler = ModelAdapter::<Completion>::new(spec.reference(), model);
         ConfiguredModel {
             selection,

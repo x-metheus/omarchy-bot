@@ -9,6 +9,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::settings::{Settings, SettingsStatus, SettingsUpdate, Update};
+use crate::user_memory::{self, CurrentMemory, MemorySource, Proposal, Remembered};
 
 #[derive(Serialize)]
 pub(crate) struct Bot {
@@ -51,6 +52,7 @@ pub(crate) enum Admission {
     Unconfigured,
     Accepted {
         history: Conversation,
+        message_id: i64,
         prompt: String,
         model: RigConnection,
     },
@@ -62,7 +64,7 @@ struct Database {
 }
 
 #[derive(Clone)]
-pub(crate) struct Store(Arc<Mutex<Database>>);
+pub(crate) struct Store(Arc<Mutex<Database>>, CurrentMemory);
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
@@ -86,6 +88,16 @@ impl Store {
                      text TEXT NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS messages_by_bot ON messages(bot_id, id);
+                 CREATE TABLE IF NOT EXISTS message_order (
+                     one INTEGER PRIMARY KEY CHECK (one = 1),
+                     high_water INTEGER NOT NULL
+                 );
+                 INSERT OR IGNORE INTO message_order
+                     SELECT 1, coalesce(max(id), 0) FROM messages;
+                 CREATE TRIGGER IF NOT EXISTS advance_message_order AFTER INSERT ON messages
+                 BEGIN
+                     UPDATE message_order SET high_water = max(high_water, NEW.id) WHERE one = 1;
+                 END;
                  CREATE TABLE IF NOT EXISTS provider_credentials (
                      provider TEXT PRIMARY KEY NOT NULL CHECK (provider IN ('openai', 'anthropic')),
                      sealed_key BLOB NOT NULL
@@ -99,10 +111,14 @@ impl Store {
             )
             .context("initialize SQLite database and acquire its daemon lock")?;
         let settings = Settings::load(&connection)?;
-        Ok(Self(Arc::new(Mutex::new(Database {
-            connection,
-            settings,
-        }))))
+        let user_memory = CurrentMemory::load(&connection)?;
+        Ok(Self(
+            Arc::new(Mutex::new(Database {
+                connection,
+                settings,
+            })),
+            user_memory,
+        ))
     }
 
     pub(crate) async fn settings(&self) -> Result<SettingsStatus> {
@@ -141,10 +157,11 @@ impl Store {
             let Some(model) = db.settings.connection() else {
                 return Ok(Admission::Unconfigured);
             };
-            insert_message(&transaction, bot, Role::User, &text)?;
+            let message_id = insert_message(&transaction, bot, Role::User, &text)?;
             transaction.commit()?;
             Ok(Admission::Accepted {
                 history,
+                message_id,
                 prompt: text,
                 model,
             })
@@ -159,6 +176,20 @@ impl Store {
             Ok(Message { id, role, text })
         })
         .await
+    }
+
+    pub(crate) fn user_memory(&self) -> &CurrentMemory {
+        &self.1
+    }
+
+    pub(crate) async fn remember(
+        &self,
+        source: MemorySource,
+        proposal: Proposal,
+    ) -> Result<Remembered> {
+        let current = self.1.clone();
+        self.run(move |db| user_memory::remember(&mut db.connection, &current, source, proposal))
+            .await
     }
 
     async fn run<T: Send + 'static>(
@@ -206,9 +237,11 @@ fn insert_message(
     role: Role,
     text: &str,
 ) -> rusqlite::Result<i64> {
-    connection.execute(
-        "INSERT INTO messages (bot_id, role, text) VALUES (?1, ?2, ?3)",
+    connection.query_row(
+        "INSERT INTO messages (id, bot_id, role, text)
+         VALUES ((SELECT high_water + 1 FROM message_order WHERE one = 1), ?1, ?2, ?3)
+         RETURNING id",
         params![bot.as_bytes().as_slice(), role as i64, text],
-    )?;
-    Ok(connection.last_insert_rowid())
+        |row| row.get(0),
+    )
 }
