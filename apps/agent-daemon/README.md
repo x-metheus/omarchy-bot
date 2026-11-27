@@ -120,7 +120,7 @@ A Bot accepts new messages while a Turn is running. Rig delivers them through th
 
 The daemon restores a Bot's committed Conversation into its root Agent on the first POST after startup. Subsequent POSTs append the user message to SQLite before handing it to the root's Rig Inbox. The Inbox effect carries the Bot and durable user message ID, and Rig provides its `DeliveredAs` and `DeliveredIn` mapping when the message reaches the model. Model calls and the tools they produce carry the eligible source for that invocation. Subagent results enter the root Inbox with Rig's Agent author and are available to the root on its next model call.
 
-`SubagentsPlugin` owns delegation, messaging, and reports. The root is prompted to end its Turn after dispatching asynchronous work, leaving it available for new requests. Turn settlement sends one reply to the ordered Conversation writer, which commits before notifying any attached POST streams. A report can start a Turn with no attached POST stream. SQLite preserves committed messages across a daemon restart. Live Rig Inbox entries and Subagents last for the daemon process.
+`SubagentsPlugin` owns delegation, messaging, and reports. The `task` tool instructs the root to end its Turn after dispatching asynchronous work, leaving it available for new requests. Turn settlement sends one reply to the ordered Conversation writer, which commits before notifying any attached POST streams. A report can start a Turn with no attached POST stream. SQLite preserves committed messages across a daemon restart. Live Rig Inbox entries and Subagents last for the daemon process.
 
 ## Shared UserMemory
 
@@ -134,7 +134,7 @@ Each model request receives the current reply language, time zone, and preferred
 
 `messages.id` is the global committed order. `message_order` keeps its SQLite high-water mark across restarts and source deletion. Message insertions allocate through the daemon Store, and the insertion trigger advances the high-water mark in the same transaction. The memory write updates SQLite only for a strictly newer `source_order`, then publishes the committed value to Rig's shared read snapshot.
 
-Rig's request preparation stage records the eligible committed input against each model effect. A tool call resolves its originating effect, then the daemon verifies the source Bot, message ID, user role, and verbatim evidence against SQLite. When several deliveries share an Agent, request preparation must select the eligible authored input using the durable message identity carried through `Incoming` and `DeliveredAs`/`DeliveredIn`. The captured source remains stable for tool calls originating from that invocation.
+When Rig builds a request, the daemon binds it to the most recent authored input delivered into that Turn and present in its model context. Tool calls carry the source of the model effect that produced them. The daemon verifies the source Bot, message ID, user role, and verbatim evidence against SQLite. Report-only Turns have no source for memory writes.
 
 Issue #22 can use the stable keys, source lookup, and committed order for inspection and tombstones. Clear operations must publish to the same read snapshot after commit, and the ordering guard must continue to compare against the last operation even when the current value is absent.
 

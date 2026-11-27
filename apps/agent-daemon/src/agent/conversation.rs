@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::response::sse::Event;
-use rig_basics::subagents::{MESSAGE, TASK, WAIT};
+use rig_basics::subagents::{MESSAGE, SpawnedAgent, TASK, WAIT};
 use rig_core::completion::Message;
 use rig_core::effect::EffectId;
 use rig_harness::prelude::*;
@@ -10,17 +10,19 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::api::{ConversationCommand, event};
-use crate::store::{Conversation as StoredConversation, Message as StoredMessage, Role};
+use crate::attachments::Stored as StoredAttachment;
+use crate::store::{Conversation as StoredConversation, Role};
 
-const DELEGATION_PROMPT: &str = "Use task for independent work that can continue in the background. \
-    When you delegate, acknowledge what is underway and end your turn so you can respond to new \
-    messages while the subagents work. Their reports arrive here. Respond to the user with the \
-    relevant results as they arrive, using earlier reports when they help answer the request.";
+const DELEGATION_GUIDANCE: &str = "\n\nWhen you delegate independent work, acknowledge what is \
+    underway and end your turn so you can respond to new messages. Share relevant results as \
+    reports arrive, using earlier reports when they help answer the request.";
 
 pub(crate) struct TurnRequest {
     pub(crate) bot: Uuid,
     pub(crate) history: Option<StoredConversation>,
-    pub(crate) message: StoredMessage,
+    pub(crate) message_id: i64,
+    pub(crate) text: String,
+    pub(crate) attachments: Vec<StoredAttachment>,
     pub(crate) model: Connection,
     pub(crate) stream: ReplySink,
 }
@@ -56,14 +58,28 @@ pub(crate) struct UserMessageSource {
     pub(crate) message_id: i64,
 }
 
+/// The authored input's Rig Conversation entry in this model request.
+#[derive(Component)]
+pub(crate) struct ModelUserInput(pub(crate) MessageId);
+
 /// Tools explicitly offered to Bot Agents through Rig.
 #[derive(Resource)]
-pub(crate) struct ConversationTools(pub(crate) Vec<&'static str>);
+pub(crate) struct ConversationTools {
+    shared: Vec<&'static str>,
+    pub(crate) root_only: Vec<&'static str>,
+}
+
+struct DeliveredUser {
+    id: MessageId,
+    source: UserMessageSource,
+    original: Entry,
+    had_attachments: bool,
+}
 
 #[derive(Component, Default)]
 struct TurnDelivery {
     streams: Vec<ReplySink>,
-    messages: Vec<(MessageId, UserMessageSource)>,
+    messages: Vec<DeliveredUser>,
     source: Option<(EffectId, UserMessageSource)>,
 }
 
@@ -85,13 +101,27 @@ pub(super) fn add(
     pending: mpsc::UnboundedReceiver<TurnRequest>,
     outgoing: mpsc::UnboundedSender<ConversationCommand>,
 ) {
+    let world = app.world_mut();
+    let mut tools = world.query::<&mut ToolDef>();
+    if let Some(mut task) = tools
+        .iter_mut(world)
+        .find(|tool| tool.0.name.as_str() == TASK)
+    {
+        Arc::make_mut(&mut task.0)
+            .description
+            .push_str(DELEGATION_GUIDANCE);
+    }
     app.insert_resource(Conversations {
         roots: HashMap::new(),
         pending,
         outgoing,
         settled: Vec::new(),
     })
-    .insert_resource(ConversationTools(vec![TASK, MESSAGE, WAIT]))
+    .insert_resource(ConversationTools {
+        shared: vec![TASK, MESSAGE, WAIT],
+        root_only: Vec::new(),
+    })
+    .add_observer(limit_subagent_tools)
     .add_observer(on_delivery)
     .add_observer(on_model_request)
     .add_observer(on_tool_request)
@@ -107,7 +137,9 @@ fn deliver(world: &mut World) {
             let TurnRequest {
                 bot,
                 history,
-                message,
+                message_id,
+                text,
+                attachments,
                 model,
                 stream,
             } = request;
@@ -119,8 +151,8 @@ fn deliver(world: &mut World) {
                         Role::Assistant => Message::assistant(message.text),
                     },
                 ));
-                let tools =
-                    ToolAccess::only(world.resource::<ConversationTools>().0.iter().copied());
+                let tools = world.resource::<ConversationTools>();
+                let tools = ToolAccess::only(tools.shared.iter().chain(&tools.root_only).copied());
                 let choice = ModelChoice(model.spec.reference());
                 let agent = spawn_root(
                     world,
@@ -135,10 +167,6 @@ fn deliver(world: &mut World) {
                     ),
                 )
                 .id();
-                world.spawn((
-                    PromptSection::new(PromptSection::ORDER_ROLE, "delegation", DELEGATION_PROMPT),
-                    SectionOf(agent),
-                ));
                 conversations.roots.insert(bot, agent);
                 first.insert(bot);
                 agent
@@ -156,37 +184,86 @@ fn deliver(world: &mut World) {
                 }
                 agent
             };
+            let mut incoming = Incoming::new(text, DeliveryMode::Steer).literal();
+            let mut stream = stream;
+            let connection = world
+                .get::<Connection>(agent)
+                .expect("a Bot has its admitted connection");
+            for attachment in attachments {
+                match attachment.into_part(&connection.spec) {
+                    Ok(part) => incoming.parts.push(MessagePart::Attachment(part)),
+                    Err(warning) => stream.send(event("attachment_warning", warning)),
+                }
+            }
             world.spawn((
-                Incoming::new(message.text, DeliveryMode::Steer).literal(),
+                incoming,
                 ForAgent(agent),
-                UserMessageSource {
-                    bot,
-                    message_id: message.id,
-                },
+                UserMessageSource { bot, message_id },
                 stream,
             ));
         }
     });
 }
 
-fn on_delivery(
-    delivered: On<Add<DeliveredIn>>,
-    incoming: Query<(&DeliveredIn, &DeliveredAs, &UserMessageSource)>,
+fn limit_subagent_tools(
+    added: On<Add<SpawnedAgent>>,
+    spawned: Query<&SpawnedAgent>,
+    access: Query<&ToolAccess>,
+    tools: Res<ConversationTools>,
     mut commands: Commands,
 ) {
-    let Ok((&DeliveredIn(turn), &DeliveredAs(entry), &source)) = incoming.get(delivered.entity)
+    let Ok(&SpawnedAgent(child)) = spawned.get(added.entity) else {
+        return;
+    };
+    if let Ok(access) = access.get(child) {
+        commands
+            .entity(child)
+            .insert(access.narrow(tools.shared.iter().copied()));
+    }
+}
+
+fn on_delivery(
+    delivered: On<Add<DeliveredIn>>,
+    incoming: Query<(&DeliveredIn, &DeliveredAs, &UserMessageSource, &ForAgent)>,
+    mut commands: Commands,
+) {
+    let Ok((&DeliveredIn(turn), &DeliveredAs(entry), &source, &ForAgent(agent))) =
+        incoming.get(delivered.entity)
     else {
         return;
     };
     let entity = delivered.entity;
     commands.queue(move |world: &mut World| {
         let stream = world.entity_mut(entity).take::<ReplySink>();
+        let conversation = world
+            .get::<Conversation>(agent)
+            .expect("the addressed Agent owns a Conversation");
+        let index = conversation
+            .index_of(entry)
+            .expect("Rig recorded the delivered entry");
+        let mut original = conversation
+            .entry(index)
+            .expect("the delivered entry is in the Conversation");
+        let mut had_attachments = false;
+        if let Message::User { content } = &*original.message
+            && let [text, _, ..] = content.as_slice()
+        {
+            original.message = Arc::new(Message::User {
+                content: vec![text.clone()],
+            });
+            had_attachments = true;
+        }
         let mut turn = world.entity_mut(turn);
         let mut delivery = turn.entry::<TurnDelivery>().or_default().into_mut();
-        debug_assert!(delivery.messages.last().is_none_or(|(_, prev)| {
-            prev.bot == source.bot && prev.message_id < source.message_id
+        debug_assert!(delivery.messages.last().is_none_or(|prev| {
+            prev.source.bot == source.bot && prev.source.message_id < source.message_id
         }));
-        delivery.messages.push((entry, source));
+        delivery.messages.push(DeliveredUser {
+            id: entry,
+            source,
+            original,
+            had_attachments,
+        });
         delivery.streams.extend(stream);
     });
 }
@@ -208,15 +285,16 @@ fn on_model_request(
             .messages
             .iter()
             .rev()
-            .find_map(|(entry, source)| history.index_of(*entry).map(|_| *source))
+            .find(|delivered| history.index_of(delivered.id).is_some())
+            .map(|delivered| (delivered.id, delivered.source))
     });
     let mut call = commands.entity(built.entity);
     call.insert(ModelDelivery {
         subscribers: delivery.streams.len(),
     });
-    delivery.source = source.map(|source| (effect.id(), source));
-    if let Some(source) = source {
-        call.insert(source);
+    delivery.source = source.map(|(_, source)| (effect.id(), source));
+    if let Some((entry, source)) = source {
+        call.insert((source, ModelUserInput(entry)));
     }
 }
 
@@ -236,18 +314,40 @@ fn on_tool_request(
     }
 }
 
+type ReplySettlement = Or<(With<Turn>, With<ReplySink>)>;
+
 fn on_settled(
     added: On<Add<Settled>>,
-    settled: Query<&ForAgent, Or<(With<Turn>, With<ReplySink>)>>,
-    roots: Query<(), With<BotAgent>>,
+    settled: Query<&ForAgent, ReplySettlement>,
+    mut deliveries: Query<&mut TurnDelivery>,
+    mut roots: Query<&mut Conversation, With<BotAgent>>,
     mut conversations: ResMut<Conversations>,
 ) {
-    if settled
-        .get(added.entity)
-        .is_ok_and(|&ForAgent(agent)| roots.contains(agent))
-    {
-        conversations.settled.push(added.entity);
+    let Ok(&ForAgent(agent)) = settled.get(added.entity) else {
+        return;
+    };
+    let Ok(mut conversation) = roots.get_mut(agent) else {
+        return;
+    };
+    if let Ok(mut delivery) = deliveries.get_mut(added.entity) {
+        // Keep committed inputs after Rig recalls failed text, and retire attachment payloads
+        // before a subsequent Turn can reuse this Conversation.
+        for user in delivery.messages.drain(..) {
+            let range = match conversation.index_of(user.id) {
+                Some(index) if user.had_attachments => index..index + 1,
+                Some(_) => continue,
+                None => {
+                    let index = conversation
+                        .entries()
+                        .position(|entry| entry.id > user.id)
+                        .unwrap_or_else(|| conversation.messages().len());
+                    index..index
+                }
+            };
+            conversation.restore(range, [user.original], Author::plugin("omarchy-daemon"));
+        }
     }
+    conversations.settled.push(added.entity);
 }
 
 fn stream_deltas(

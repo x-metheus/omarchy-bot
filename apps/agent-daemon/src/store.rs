@@ -8,9 +8,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::agent::conversation::UserMessageSource;
 use crate::attachments::{self, Metadata, Stored, Submission};
 use crate::settings::{Settings, SettingsStatus, SettingsUpdate, Update};
-use crate::user_memory::{self, CurrentMemory, MemorySource, Proposal, Remembered};
+use crate::user_memory::{self, CurrentMemory, Proposal, Remembered};
 
 #[derive(Serialize)]
 pub(crate) struct Bot {
@@ -49,6 +50,7 @@ impl FromSql for Role {
         }
     }
 }
+
 pub(crate) enum History {
     Restore,
     Live,
@@ -60,7 +62,9 @@ pub(crate) enum Admission {
     Unconfigured,
     Accepted {
         history: Option<Conversation>,
-        message: Message,
+        message_id: i64,
+        text: String,
+        attachments: Vec<Stored>,
         model: RigConnection,
     },
 }
@@ -195,6 +199,7 @@ impl Store {
         &self,
         bot: Uuid,
         text: String,
+        submissions: Vec<Submission>,
         history: History,
     ) -> Result<Admission> {
         self.run(move |db| {
@@ -212,12 +217,33 @@ impl Store {
             let Some(model) = db.settings.connection() else {
                 return Ok(Admission::Unconfigured);
             };
-            let role = Role::User;
-            let id = insert_message(&transaction, bot, role, &text)?;
+            // Resolve against committed history before inserting any associations for this message.
+            let mut attachments = Vec::with_capacity(submissions.len());
+            for submission in submissions {
+                let attachment = match submission {
+                    Submission::Inline(attachment) => {
+                        attachments::insert(&transaction, &attachment)?;
+                        attachment
+                    }
+                    Submission::Reference(id) => {
+                        let Some(attachment) = attachments::for_bot(&transaction, bot, id)? else {
+                            return Ok(Admission::AttachmentNotFound);
+                        };
+                        attachment
+                    }
+                };
+                attachments.push(attachment);
+            }
+            let message_id = insert_message(&transaction, bot, Role::User, &text)?;
+            for (position, attachment) in attachments.iter().enumerate() {
+                attachments::associate(&transaction, message_id, position, attachment.metadata.id)?;
+            }
             transaction.commit()?;
             Ok(Admission::Accepted {
                 history,
-                message: Message { id, role, text },
+                message_id,
+                text,
+                attachments,
                 model,
             })
         })
@@ -244,7 +270,7 @@ impl Store {
 
     pub(crate) async fn remember(
         &self,
-        source: MemorySource,
+        source: UserMessageSource,
         proposal: Proposal,
     ) -> Result<Remembered> {
         let current = self.1.clone();

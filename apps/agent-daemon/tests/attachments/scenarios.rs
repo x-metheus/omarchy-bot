@@ -76,6 +76,17 @@ async fn forwards_text_and_image_through_chat_completions() {
         format!("data:image/png;base64,{PNG}")
     );
     chat_reply(call, &mut stream, "Cobalt and red").await;
+
+    let mut follow_up = ReplyStream::new(daemon.send(&client, bot_id(&bot), "Thanks.").await);
+    let call = provider.next().await;
+    let history = &call.body["messages"];
+    assert_eq!(
+        history[0]["content"],
+        "What are the sample and pixel colors?"
+    );
+    assert!(!history.to_string().contains(TEXT));
+    assert!(!history.to_string().contains(PNG));
+    chat_reply(call, &mut follow_up, "You're welcome.").await;
     daemon.stop().await;
 }
 

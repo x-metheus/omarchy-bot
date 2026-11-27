@@ -2,6 +2,7 @@ use std::{env, fs, str};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use rig_core::catalog::{Catalog, ModelSpec};
+use rig_core::completion::{Accepts, ReplayTarget};
 use rig_core::driver::{DynModel, Model};
 use rig_core::operation::Completion;
 use rig_core::providers::anthropic::AnthropicConfig;
@@ -121,11 +122,11 @@ impl Endpoints {
         };
         let provider =
             ProviderId::catalog(selection.provider.name()).expect("built-in Rig provider");
-        let mut spec = ModelSpec::new(provider, &selection.model);
-        // Gateway aliases use the tool-capable Chat Completions and Messages protocols.
-        spec.tools = Catalog::builtin()
-            .resolve(&spec.reference())
-            .map_or(true, |model| model.spec.tools);
+        let known = Catalog::builtin().get(provider, &selection.model);
+        // Rig's bare spec disables tools. Use the provider wire capabilities for gateway aliases.
+        let mut spec = ModelSpec::new(provider, &selection.model)
+            .with_tools(accepts.tools && known.as_ref().is_none_or(|known| known.spec.tools));
+        spec.input.image = known.map_or(accepts.user_images, |known| known.spec.input.image);
         let handler = ModelAdapter::<Completion>::new(spec.reference(), model);
         ConfiguredModel {
             selection,

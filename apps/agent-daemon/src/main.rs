@@ -37,6 +37,7 @@ fn main() -> Result<AppExit> {
         conversations.clone(),
         runtime.handle().clone(),
         scratch.path(),
+        &store,
     );
     let router = api::router(store.clone(), conversations, settings_token);
     let conversation_loop = runtime.spawn(api::run_conversations(

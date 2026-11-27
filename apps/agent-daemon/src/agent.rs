@@ -15,6 +15,8 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use crate::api::ConversationCommand;
+use crate::store::Store;
+use crate::user_memory;
 
 pub(crate) fn headless_app(
     pending: mpsc::UnboundedReceiver<TurnRequest>,
@@ -44,5 +46,6 @@ pub(crate) fn headless_app(
         .insert_resource(Models(Connector::new(Catalog::default())));
     rig_harness::load::<SubagentsPlugin>(&mut app, "rig-basics", "");
     conversation::add(&mut app, pending, conversations);
+    user_memory::install(&mut app, store);
     app
 }

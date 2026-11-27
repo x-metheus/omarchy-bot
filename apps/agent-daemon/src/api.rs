@@ -19,6 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::agent::{ReplySink, TurnRequest};
+use crate::attachments::{Input as AttachmentInput, MAX_ATTACHMENTS, Submission};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
 use crate::store::{Admission, Bot, Conversation, History, Store};
 
@@ -244,13 +245,41 @@ async fn send_message(
             Problem::new("empty_message", "message text must be nonempty"),
         ));
     }
+    if input.attachments.len() > MAX_ATTACHMENTS
+        || !input
+            .attachments
+            .iter()
+            .all(AttachmentInput::valid_metadata)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            Problem::new(
+                "invalid_attachments",
+                "expected at most eight attachments with valid metadata",
+            ),
+        ));
+    }
+    let SendMessage { text, attachments } = input;
+    let submissions = if attachments.is_empty() {
+        Vec::new()
+    } else {
+        tokio::task::spawn_blocking(move || {
+            attachments
+                .into_iter()
+                .map(AttachmentInput::prepare)
+                .collect()
+        })
+        .await
+        .map_err(|_| UNAVAILABLE)?
+    };
     let (events, stream) = mpsc::channel(64);
     let (accepted, admission) = oneshot::channel();
     daemon
         .conversations
         .send(ConversationCommand::Message {
             bot,
-            text: input.text,
+            text,
+            submissions,
             stream: ReplySink::new(events),
             accepted,
         })
@@ -265,6 +294,7 @@ pub(crate) enum ConversationCommand {
     Message {
         bot: Uuid,
         text: String,
+        submissions: Vec<Submission>,
         stream: ReplySink,
         accepted: oneshot::Sender<Result<(), ApiError>>,
     },
@@ -288,6 +318,7 @@ pub(crate) async fn run_conversations(
             ConversationCommand::Message {
                 bot,
                 text,
+                submissions,
                 stream,
                 accepted,
             } => {
@@ -296,16 +327,20 @@ pub(crate) async fn run_conversations(
                 } else {
                     History::Restore
                 };
-                let admission = match store.accept_message(bot, text, history).await {
+                let admission = match store.accept_message(bot, text, submissions, history).await {
                     Ok(Admission::Accepted {
                         history,
-                        message,
+                        message_id,
+                        text,
+                        attachments,
                         model,
                     }) => turns
                         .send(TurnRequest {
                             bot,
                             history,
-                            message,
+                            message_id,
+                            text,
+                            attachments,
                             model,
                             stream,
                         })
@@ -315,6 +350,7 @@ pub(crate) async fn run_conversations(
                             wake.wake();
                         }),
                     Ok(Admission::BotNotFound) => Err(BOT_NOT_FOUND),
+                    Ok(Admission::AttachmentNotFound) => Err(ATTACHMENT_NOT_FOUND),
                     Ok(Admission::Unconfigured) => Err(UNCONFIGURED),
                     Err(error) => Err(store_error(error)),
                 };

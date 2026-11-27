@@ -1,15 +1,14 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use crate::agent::conversation::{ConversationTools, ModelUserInput, UserMessageSource};
 use anyhow::Result;
 use bevy_tasks::AsyncComputeTaskPool;
 use rig_core::completion::Section;
-use rig_core::effect::EffectId;
 use rig_harness::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use uuid::Uuid;
 
 use crate::store::{Role, Store as DaemonStore};
 
@@ -20,29 +19,6 @@ const PREFERRED_NAME: &str = "profile.preferred_name";
 const UNITS: &str = "preferences.units";
 const FORMAT: &str = "preferences.format";
 const RELEVANT_LIMIT: usize = 6;
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct MemorySource {
-    bot: Uuid,
-    message_id: i64,
-}
-
-#[derive(Component, Debug)]
-pub(crate) struct MemoryInput {
-    source: MemorySource,
-    text: String,
-    calls: HashMap<EffectId, MemorySource>,
-}
-
-impl MemoryInput {
-    pub(crate) fn new(bot: Uuid, message_id: i64, text: String) -> Self {
-        Self {
-            source: MemorySource { bot, message_id },
-            text,
-            calls: HashMap::new(),
-        }
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -118,7 +94,7 @@ impl CurrentMemory {
 pub(crate) fn remember(
     db: &mut Connection,
     current: &CurrentMemory,
-    source: MemorySource,
+    source: UserMessageSource,
     proposal: Proposal,
 ) -> Result<Remembered> {
     let tx = db.transaction()?;
@@ -288,6 +264,10 @@ fn relevant(key: &str, prompt: &[String]) -> bool {
 struct MemoryStore(DaemonStore);
 
 pub(crate) fn install(app: &mut App, store: &DaemonStore) {
+    app.world_mut()
+        .resource_mut::<ConversationTools>()
+        .root_only
+        .push(REMEMBER_TOOL);
     app.insert_resource(store.user_memory().clone())
         .insert_resource(MemoryStore(store.clone()))
         .add_systems(AgentPass, prepare.in_set(PrepareSystems::Edit))
@@ -303,19 +283,24 @@ pub(crate) fn install(app: &mut App, store: &DaemonStore) {
 
 fn prepare(
     current: Res<CurrentMemory>,
-    mut calls: Query<(&ForAgent, &Effect, &mut ModelRequest, Has<TurnCall>), Added<Admitted>>,
-    mut inputs: Query<&mut MemoryInput>,
+    mut calls: Query<(&mut ModelRequest, Option<&ModelUserInput>), Added<Admitted>>,
 ) {
-    for (agent, effect, mut call, turn_call) in &mut calls {
-        let Ok(mut input) = inputs.get_mut(agent.0) else {
-            continue;
-        };
-        if turn_call {
-            let source = input.source;
-            input.calls.insert(effect.id(), source);
-        }
-        if let Some(prompt) = &mut call.prompt
-            && let Some(context) = current.context(&input.text)
+    for (mut call, input) in &mut calls {
+        let source_text = input
+            .and_then(|input| {
+                let history = call.history.as_ref()?;
+                let message = history.messages().get(history.index_of(input.0)?)?;
+                let message::Message::User { content } = &**message else {
+                    return None;
+                };
+                let UserContent::Text(text) = content.first()? else {
+                    return None;
+                };
+                Some(text.text.as_str())
+            })
+            .unwrap_or_default();
+        if let Some(context) = current.context(source_text)
+            && let Some(prompt) = &mut call.prompt
         {
             prompt.sections.push(Section::new("user_memory", context));
         }
@@ -324,17 +309,14 @@ fn prepare(
 
 fn write_tool(
     called: On<ToolCalled<Proposal>>,
-    inputs: Query<&MemoryInput>,
+    inputs: Query<&UserMessageSource>,
     mut decisions: Query<&mut Decision>,
     store: Res<MemoryStore>,
     runtime: Res<TokioRuntime>,
     wake: Res<Wake>,
     mut commands: Commands,
 ) {
-    let source = called
-        .parent
-        .and_then(|parent| inputs.get(called.agent).ok()?.calls.get(&parent));
-    let Some(&source) = source else {
+    let Ok(&source) = inputs.get(called.call) else {
         if let Ok(mut decision) = decisions.get_mut(called.call) {
             decision.decide(
                 Decider::plugin(REMEMBER_TOOL),

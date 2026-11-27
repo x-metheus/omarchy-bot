@@ -267,6 +267,41 @@ async fn user_memory_source_order_survives_existing_history_and_deletion() {
     daemon.stop().await;
 }
 
+#[tokio::test]
+async fn a_shared_turn_verifies_memory_against_the_input_delivered_to_its_model_call() {
+    let mut provider = Provider::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let client = http_client();
+    let daemon = Daemon::start(&directory.path().join("memory.sqlite3"), &provider).await;
+    let bot = daemon.create(&client).await;
+    let id = bot_id(&bot);
+    let (earlier, later) = ("Please call me Cedar.", "Please call me Indigo.");
+    let mut first = ReplyStream::new(daemon.send(&client, id, earlier).await);
+    let call = provider.next().await;
+    call.text("Let me check.").await;
+    assert_eq!(first.expect("delta").await, "Let me check.");
+    let mut second = ReplyStream::new(daemon.send(&client, id, later).await);
+    call.finish().await;
+
+    let call = provider.next().await;
+    assert_eq!(call.last_message()["content"], later);
+    propose_all(
+        call,
+        &[
+            ("profile.preferred_name", "Cedar", earlier),
+            ("profile.preferred_name", "Indigo", later),
+        ],
+    )
+    .await;
+    let call = provider.next().await;
+    assert_tool_result(&call, "UserMemory was not written");
+    assert_tool_result(&call, "Saved UserMemory.");
+    assert!(system_prompt(&call).contains("Indigo"));
+    chat_reply(call, &mut second, "Saved Indigo.").await;
+    assert_eq!(first.expect("delta").await, "Saved Indigo.");
+    assert_eq!(first.expect("committed").await["text"], "Saved Indigo.");
+}
+
 async fn propose(call: ProviderCall, key: &str, value: &str, evidence: &str) {
     propose_all(call, &[(key, value, evidence)]).await;
 }
