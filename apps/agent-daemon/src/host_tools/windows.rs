@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use rig_core::tool::{Tool, ToolAnnotations, ToolContext, ToolExecutionError};
+use rig_core::completion::ToolAnnotations;
+use rig_core::tool::{Tool, ToolContext, ToolExecutionError};
 use rig_harness::prelude::{CallPlace, PerCallShell, PerCallTool};
 use rig_harness::rig_tools::process::{Launcher, Process, Spawn};
 use rig_harness::rig_tools::workspace::{Contents, Listed, Listing, Stat, Workspace};

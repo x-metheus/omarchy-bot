@@ -336,7 +336,7 @@ async fn host_tools_read_forwards_the_image_as_a_multimodal_result() {
         .flatten()
         .find(|block| block["type"] == "tool_result")
         .expect("Anthropic receives the image read result");
-    assert_eq!(result["is_error"], false);
+    assert!(result.get("is_error").is_none());
     assert!(result["content"].as_array().unwrap().contains(&json!({
         "type": "image", "source": {"type": "base64", "media_type": "image/png", "data": PNG}
     })));
