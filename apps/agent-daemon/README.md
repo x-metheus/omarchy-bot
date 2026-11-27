@@ -175,7 +175,9 @@ Expect a committed reply identifying cobalt and red and a Conversation with both
 
 An Agent using a tool-capable chat model can call `recall` with a query. Recall searches committed user and assistant message text from the calling Bot before the current Turn. It returns up to five historical matches with `bot_id`, `message_id`, `role`, verbatim `text`, and the half-open UTF-8 range `[start_byte, end_byte)` in the original message. `message_id` is the global committed order and resolves against `GET /bots/{id}`. Each tool result labels its messages as `historical`. Recall evidence has no authority to update UserMemory or establish a current preference.
 
-The daemon embeds and indexes messages locally. Ordinary chat can run while Recall verifies the model or builds its index. A Recall call can catch up on its own Bot's pending messages. If the Agent chooses to use Recall, retrieved text is included in the configured chat provider's next request.
+When the user asks which other Bot discussed a specific earlier topic, the Agent can opt in with `recall` and `scope: "source_bot"`. This searches the owner's other Bots on the same daemon for messages committed before the current Turn. It returns up to three matching passages with the source Bot's current name and stable ID. Reference-code queries require an exact identifier match, and topic queries use a minimum semantic similarity. The Agent receives the passages in the same Turn and replies in the current Conversation.
+
+The daemon embeds and indexes messages locally. Ordinary chat can run while Recall verifies the model or builds its index. A Recall call can catch up on pending messages within its scope. If the Agent chooses to use Recall, retrieved text is included in the configured chat provider's next request.
 
 ### Offline provision
 
@@ -212,6 +214,9 @@ To exercise the real daemon and verified local model with a scripted provider on
 ```sh
 OMARCHY_AGENT_RECALL_TEST_MODEL_DIR="$recall_dir" cargo test --locked -j 3 \
   --test conversation recall_returns_original_messages_from_the_calling_bot_after_restart \
+  -- --ignored --exact
+OMARCHY_AGENT_RECALL_TEST_MODEL_DIR="$recall_dir" cargo test --locked -j 3 \
+  --test conversation source_recall::source_bot_recall_returns_matching_originals_in_the_current_conversation \
   -- --ignored --exact
 ```
 

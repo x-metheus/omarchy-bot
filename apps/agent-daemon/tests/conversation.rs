@@ -21,6 +21,9 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "conversation/source_recall.rs"]
+mod source_recall;
+
 #[path = "conversation/user_memory.rs"]
 mod user_memory;
 
