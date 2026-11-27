@@ -42,3 +42,4 @@ coverage/
 apps/omarchy-bot/src-tauri/target/
 apps/omarchy-bot/src-tauri/binaries/
 apps/sidecar-rust/target/
+apps/agent-daemon/target/
