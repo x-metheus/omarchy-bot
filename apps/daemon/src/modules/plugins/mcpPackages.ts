@@ -22,7 +22,7 @@ const Installation = z.object({
 });
 type Installation = z.infer<typeof Installation>;
 const PublishedPackage = z.object({ name: z.string(), version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/), dist: z.object({ tarball: z.string().url(), integrity: z.string() }) });
-const PackageManifest = z.object({ name: z.string(), version: z.string(), bin: z.union([z.string(), z.record(z.string())]).optional(), scripts: z.record(z.string()).optional(), engines: z.object({ node: z.string().optional() }).optional(), dependencies: z.record(z.string()).optional(), optionalDependencies: z.record(z.string()).optional(), peerDependencies: z.record(z.string()).optional() }).passthrough();
+const PackageManifest = z.object({ name: z.string(), version: z.string(), bin: z.union([z.string(), z.record(z.string(), z.string())]).optional(), scripts: z.record(z.string(), z.string()).optional(), engines: z.object({ node: z.string().optional() }).optional(), dependencies: z.record(z.string(), z.string()).optional(), optionalDependencies: z.record(z.string(), z.string()).optional(), peerDependencies: z.record(z.string(), z.string()).optional() }).passthrough();
 const Lease = z.object({ pid: z.number().int().positive(), startTime: z.string().regex(/^\d+$/), directory: z.string().uuid().nullable() });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 

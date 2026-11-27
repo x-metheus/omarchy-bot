@@ -60,7 +60,7 @@ export function BotSettingsPanel({
   const panelOpenRef = useRef(false);
   const panelBotIdRef = useRef<string | undefined>(undefined);
   const nameInput = useRef<HTMLInputElement>(null);
-  const modelField = useRef<HTMLDivElement>(null);
+  const modelField = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
   const providers = useQuery({
     queryKey: ["providers", getShell().service.baseUrl()],
@@ -291,7 +291,7 @@ export function BotSettingsPanel({
           if (settingBusyRef.current !== "model") void save();
         }}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && event.target instanceof HTMLInputElement && modelField.current?.contains(event.target)) {
+          if (event.key === "Enter" && event.target === modelField.current) {
             event.preventDefault();
           }
         }}
@@ -303,7 +303,7 @@ export function BotSettingsPanel({
           <HStack gap={3} align="center" wrap="wrap">
             <AvatarView avatar={current.avatar} name={current.name} size="lg" presentation="static" />
             <VStack gap={0.5}>
-              <Text type="label-lg">Current avatar</Text>
+              <Text type="label">Current avatar</Text>
               <Text color="secondary">This image represents the bot throughout your workspace.</Text>
             </VStack>
           </HStack>
@@ -362,7 +362,7 @@ export function BotSettingsPanel({
           />
 
           <VStack gap={2}>
-            <Text type="label-lg">Avatar choices</Text>
+            <Text type="label">Avatar choices</Text>
             <HStack gap={2} wrap="wrap">
               <Button
                 label="New variation"

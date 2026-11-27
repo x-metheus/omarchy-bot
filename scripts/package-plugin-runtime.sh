@@ -120,7 +120,6 @@ payload=(
   manifest.json
   apps
   packages
-  patches
   scripts/serve.sh
 )
 existing=()

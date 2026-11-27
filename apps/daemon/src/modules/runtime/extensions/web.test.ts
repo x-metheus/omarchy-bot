@@ -7,7 +7,7 @@ import { Worker } from "node:worker_threads";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, Harness, ToolResultEntry, type ToolExecutionResult } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, ToolResultEntry, type ToolExecutionResult, type ToolPark } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { McpClient } from "@earendil-works/pi-mcp";
 import { setSetting } from "../../../persistence/settings.ts";
@@ -25,10 +25,15 @@ const article = `<!DOCTYPE html><html><head><title>A field guide</title></head><
 
 type WebOptions = Parameters<typeof createWebExtension>[0];
 
-function webFetch(url: string, options?: WebOptions, context: Context = BACKGROUND_CONTEXT) {
+function expectToolResult(outcome: ToolExecutionResult | ToolPark): ToolExecutionResult {
+  if ("kind" in outcome) throw new Error(`Unexpected tool park: ${outcome.kind}`);
+  return outcome;
+}
+
+async function webFetch(url: string, options?: WebOptions, context: Context = BACKGROUND_CONTEXT) {
   const tool = createWebExtension(options).tools?.find((item) => item.name === "web_fetch");
   if (!tool) throw new Error("web_fetch was not registered");
-  return tool.execute({ url }, {} as never, context);
+  return expectToolResult(await tool.execute({ url }, {} as never, context));
 }
 
 function text(result: ToolExecutionResult) {
@@ -368,7 +373,7 @@ test("a scripted Turn receives the registered web_fetch tool result", async () =
 async function webSearch(args: Record<string, unknown>, options: WebOptions, context: Context = BACKGROUND_CONTEXT) {
   const tool = createWebExtension(options).tools?.find((item) => item.name === "web_search");
   if (!tool) throw new Error("web_search was not registered");
-  return tool.execute(args, {} as never, context);
+  return expectToolResult(await tool.execute(args, {} as never, context));
 }
 
 type McpRequest = { id: number; method: string; params?: Record<string, unknown> };

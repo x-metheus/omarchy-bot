@@ -69,57 +69,36 @@ function removeUnreferencedSnapshotFiles(db: Database, cfg: MigrationConfig | un
   }
 }
 
-const CURRENT_AVATAR_REPAIR_SQL = `
-UPDATE bots
-SET avatar_kind = 'generated',
-    avatar_recipe = json_object(
-      'rendererVersion', '${AVATAR_RENDERER_ID}',
-      'style', '${DEFAULT_AVATAR_STYLE_ID}',
-      'seed', id,
-      'options', json('{}')
-    )
-WHERE avatar_kind IN ('generated', 'recipe')
-  AND CASE
-    WHEN json_valid(avatar_recipe) = 1 THEN
-      CASE
-        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT COALESCE(
-          json_extract(avatar_recipe, '$.rendererVersion') = '${AVATAR_RENDERER_ID}'
-          AND json_extract(avatar_recipe, '$.style') IN (
-            'clay', 'critters', 'gaze', 'initial-face', 'moods', 'pixelbot',
-            'shapes', 'sprouts', 'thumbs', 'voxel-art', 'voxel-bot'
-          )
-          AND json_type(avatar_recipe, '$.seed') = 'text'
-          AND json_type(avatar_recipe, '$.options') = 'object',
-          0
-        )
-        ELSE 1
-      END
-    ELSE 1
-  END;
-`;
-
-const PROFILE_AVATAR_REPAIR_WITH_ARCHIVE_SQL = `
-UPDATE bots
-SET avatar_kind = 'generated',
-    avatar_recipe = json_object(
-      'rendererVersion', '${AVATAR_RENDERER_ID}',
-      'style', '${DEFAULT_AVATAR_STYLE_ID}',
-      'seed', id,
-      'options', json('{}')
-    )
-WHERE avatar_kind IN ('generated', 'recipe')
-  AND CASE
-    WHEN json_valid(avatar_recipe) = 1 THEN
-      CASE
-        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT COALESCE(
-          json_extract(avatar_recipe, '$.rendererVersion') = '${AVATAR_RENDERER_ID}'
-          AND (
+function avatarRepairSql(allowedRenderers: readonly string[], allowArchivedShapes: boolean): string {
+  const rendererList = allowedRenderers.map((version) => `'${version}'`).join(", ");
+  const stylePredicate = allowArchivedShapes
+    ? `(
             json_extract(avatar_recipe, '$.style') IN (
               'clay', 'critters', 'gaze', 'initial-face', 'moods',
               'pixelbot', 'sprouts', 'thumbs', 'voxel-art', 'voxel-bot'
             )
             OR (archived = 1 AND json_extract(avatar_recipe, '$.style') = 'shapes')
-          )
+          )`
+    : `json_extract(avatar_recipe, '$.style') IN (
+            'clay', 'critters', 'gaze', 'initial-face', 'moods', 'pixelbot',
+            'shapes', 'sprouts', 'thumbs', 'voxel-art', 'voxel-bot'
+          )`;
+  return `
+UPDATE bots
+SET avatar_kind = 'generated',
+    avatar_recipe = json_object(
+      'rendererVersion', '${AVATAR_RENDERER_ID}',
+      'style', '${DEFAULT_AVATAR_STYLE_ID}',
+      'seed', id,
+      'options', json('{}')
+    )
+WHERE avatar_kind IN ('generated', 'recipe')
+  AND CASE
+    WHEN json_valid(avatar_recipe) = 1 THEN
+      CASE
+        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT COALESCE(
+          json_extract(avatar_recipe, '$.rendererVersion') IN (${rendererList})
+          AND ${stylePredicate}
           AND json_type(avatar_recipe, '$.seed') = 'text'
           AND json_type(avatar_recipe, '$.options') = 'object',
           0
@@ -129,6 +108,12 @@ WHERE avatar_kind IN ('generated', 'recipe')
     ELSE 1
   END;
 `;
+}
+
+const PRE_V11_AVATAR_RENDERERS = ["dicebear-core@10.7.0+styles@10.6.0", AVATAR_RENDERER_ID] as const;
+const PRE_V11_AVATAR_REPAIR_SQL = avatarRepairSql(PRE_V11_AVATAR_RENDERERS, false);
+const PRE_V11_PROFILE_AVATAR_REPAIR_WITH_ARCHIVE_SQL = avatarRepairSql(PRE_V11_AVATAR_RENDERERS, true);
+const CURRENT_AVATAR_REPAIR_SQL = avatarRepairSql([AVATAR_RENDERER_ID], false);
 
 function columnNames(db: Database, table: string): Set<string> {
   return new Set(
@@ -137,7 +122,7 @@ function columnNames(db: Database, table: string): Set<string> {
 }
 
 function repairProfileAvatars(db: Database): void {
-  db.exec(columnNames(db, "bots").has("archived") ? PROFILE_AVATAR_REPAIR_WITH_ARCHIVE_SQL : CURRENT_AVATAR_REPAIR_SQL);
+  db.exec(columnNames(db, "bots").has("archived") ? PRE_V11_PROFILE_AVATAR_REPAIR_WITH_ARCHIVE_SQL : PRE_V11_AVATAR_REPAIR_SQL);
 }
 
 function removeBotArchiveLifecycle(db: Database): void {
@@ -647,7 +632,7 @@ WHERE NOT EXISTS (SELECT 1 FROM bot_state WHERE bot_state.bot_id = bots.id)
     END
     OR (
       json_valid(avatar_recipe)
-      AND json_extract(avatar_recipe, '$.rendererVersion') IN ('9.4.3', '${AVATAR_RENDERER_ID}')
+      AND json_extract(avatar_recipe, '$.rendererVersion') IN ('9.4.3', 'dicebear-core@10.7.0+styles@10.6.0', '${AVATAR_RENDERER_ID}')
       AND json_extract(avatar_recipe, '$.seed') = id
     )
   );
@@ -663,11 +648,11 @@ UPDATE bots
 SET avatar_recipe = json_set(
   avatar_recipe,
   '$.rendererVersion',
-  'dicebear-core@10.7.0+styles@10.6.0'
+  '${AVATAR_RENDERER_ID}'
 )
 WHERE json_valid(avatar_recipe)
   AND json_type(avatar_recipe, '$') = 'object'
-  AND json_extract(avatar_recipe, '$.rendererVersion') = '10.7.0'
+  AND json_extract(avatar_recipe, '$.rendererVersion') IN ('10.7.0', 'dicebear-core@10.7.0+styles@10.6.0')
   AND json_type(avatar_recipe, '$.style') = 'text'
   AND json_type(avatar_recipe, '$.seed') = 'text'
   AND json_type(avatar_recipe, '$.options') = 'object'
@@ -691,7 +676,7 @@ ALTER TABLE attachments ADD COLUMN draft_token TEXT;
     // generated recipes become deterministic current defaults; no legacy
     // renderer remains in the browser bundle.
     name: "0009-current-avatar-renderer-only",
-    sql: CURRENT_AVATAR_REPAIR_SQL,
+    sql: PRE_V11_AVATAR_REPAIR_SQL,
   },
   {
     name: "0010-bot-computer-surfaces",
@@ -797,7 +782,7 @@ DROP TABLE IF EXISTS legacy_unscoped_artifacts;
   {
     // Reassert the checked-in renderer contract after every historical path.
     name: "0014-enforce-current-avatar-recipes",
-    sql: CURRENT_AVATAR_REPAIR_SQL,
+    sql: PRE_V11_AVATAR_REPAIR_SQL,
   },
   {
     // Every divergent ledger converges on Surface-scoped authority while the
@@ -821,7 +806,7 @@ WHERE NOT EXISTS (
   FROM computer_surface_coordination
   WHERE computer_surface_coordination.surface_id = bot_surfaces.surface_id
 );
-${CURRENT_AVATAR_REPAIR_SQL}
+${PRE_V11_AVATAR_REPAIR_SQL}
 `);
       removeUnreferencedSnapshotFiles(db, cfg);
     },
@@ -1063,6 +1048,46 @@ CREATE TABLE approvals (
   answered_at TEXT
 );
 CREATE INDEX idx_approvals_pending ON approvals(thread_id, bot_id) WHERE status = 'pending';
+`,
+  },
+  {
+    // Upgrade valid v10 DiceBear recipes in existing databases to v11 in place,
+    // preserving user-chosen style/seed/options while repairing invalid v10 ones.
+    name: "0027-upgrade-dicebear-v11-renderer-id",
+    sql: `
+UPDATE bots
+SET avatar_recipe = json_set(
+  avatar_recipe,
+  '$.rendererVersion',
+  '${AVATAR_RENDERER_ID}'
+)
+WHERE json_valid(avatar_recipe)
+  AND json_type(avatar_recipe, '$') = 'object'
+  AND json_extract(avatar_recipe, '$.rendererVersion') = 'dicebear-core@10.7.0+styles@10.6.0'
+  AND json_extract(avatar_recipe, '$.style') IN (
+    'clay', 'critters', 'gaze', 'initial-face', 'moods', 'pixelbot',
+    'shapes', 'sprouts', 'thumbs', 'voxel-art', 'voxel-bot'
+  )
+  AND json_type(avatar_recipe, '$.seed') = 'text'
+  AND json_type(avatar_recipe, '$.options') = 'object'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM json_each(json_extract(bots.avatar_recipe, '$.options'))
+    WHERE type NOT IN ('text', 'integer', 'real', 'true', 'false')
+  );
+
+UPDATE bots
+SET avatar_kind = 'generated',
+    avatar_recipe = json_object(
+      'rendererVersion', '${AVATAR_RENDERER_ID}',
+      'style', '${DEFAULT_AVATAR_STYLE_ID}',
+      'seed', id,
+      'options', json('{}')
+    )
+WHERE avatar_kind IN ('generated', 'recipe')
+  AND json_valid(avatar_recipe) = 1
+  AND json_type(avatar_recipe, '$') = 'object'
+  AND json_extract(avatar_recipe, '$.rendererVersion') = 'dicebear-core@10.7.0+styles@10.6.0';
 `,
   },
 ];

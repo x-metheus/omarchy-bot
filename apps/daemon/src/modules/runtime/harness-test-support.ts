@@ -160,8 +160,10 @@ export function installDurableSuiteProvider(onMailReplay?: DurableMailReplayObse
         ...tool,
         async execute(args: Parameters<typeof tool.execute>[0], api: ToolExecutionApi, context: Context) {
           const first = await tool.execute(args, api, context);
+          const replayed = await tool.execute(args, api, context);
+          if ("kind" in first || "kind" in replayed) throw new Error("Unexpected tool park during mail replay");
           // Replay the same task while its active Turn still owns the execution.
-          onMailReplay(first, await tool.execute(args, api, context));
+          onMailReplay(first, replayed);
           return first;
         },
       }] });

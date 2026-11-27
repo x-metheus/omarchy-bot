@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitWithContext, type Context } from "@earendil-works/chord/context";
 import { OutputBuffer, sanitizeOutput, type BoundedOutput } from "@earendil-works/chord/output";
-import { defineExtension, defineTool, hook, ToolTask, type JsonObject, type ToolDiagnostic, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, hook, ToolTask, type JsonObject, type ToolDiagnostic, type ToolExecutionApi, type ToolExecutionResult, type ToolPark, type ToolRegistration } from "@earendil-works/pi-durable";
 import { err, ExecutionError, FileError, ok, type ExecutionEnv, type Result, type WatchTarget } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createBashTool, createEditTool, createReadTool, createWriteTool, type BashToolInput } from "@earendil-works/pi-durable/tools";
@@ -278,8 +278,8 @@ async function fileDigest(env: ExecutionEnv, file: string, context: Context): Pr
  */
 async function changeOnce(
   tool: FileTool, args: { path: string; content?: unknown }, env: ExecutionEnv, api: ToolExecutionApi, context: Context,
-  run: () => Promise<ToolExecutionResult>,
-): Promise<ToolExecutionResult> {
+  run: () => Promise<ToolExecutionResult | ToolPark>,
+): Promise<ToolExecutionResult | ToolPark> {
   if (tool === "read") return run();
   const current = await fileDigest(env, args.path, context);
   const recorded = await api.memo<{ before: string | null }>(FILE_EFFECT_MEMO, { before: current }, context);
@@ -385,7 +385,8 @@ export function createFilesShellExtension(platform = process.platform, approvals
             env: { type: "object", additionalProperties: { type: "string" }, description: "Environment variables for this command" },
           },
         },
-        async execute(args: BashToolInput & { env?: Record<string, string> }, api, context) {
+        async execute(rawArgs, api, context) {
+          const args = rawArgs as BashToolInput & { env?: Record<string, string> };
           if (platform === "win32") return textResult("bash is unsupported on Windows.");
           const variables = Object.entries(args.env ?? {});
           const names = new Set([args.command, ...variables.map(([, value]) => value)].flatMap(secretPlaceholderNames));
@@ -452,7 +453,7 @@ export function createFilesShellExtension(platform = process.platform, approvals
               diagnostic(item) { if (canPublish()) api.diagnostic(redactDiagnostic(item)); },
             }, context);
             const result = await awaitWithContext(Promise.race([running, deadline]), context);
-            if (!usesSecrets) return result;
+            if ("kind" in result || !usesSecrets) return result;
             const structured = result.structuredOutput;
             const output = result.output?.map((item) => item.type === "text" ? { ...item, text: redact(item.text) } : item)
               ?? (retained?.text ? [{ type: "text" as const, text: retained.text }] : []);

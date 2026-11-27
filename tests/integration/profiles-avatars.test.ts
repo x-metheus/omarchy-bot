@@ -46,7 +46,7 @@ describe("pinned local avatar renderers", () => {
 
       const svg = svgFromDataUri(renderAvatarRecipe(recipe, "working"));
       expect(svg).toContain("@keyframes");
-      expect(svg).toContain("@media (prefers-reduced-motion: no-preference)");
+      expect(svg).toMatch(/@media\s*\(\s*prefers-reduced-motion:\s*no-preference\s*\)/);
     }
   });
 

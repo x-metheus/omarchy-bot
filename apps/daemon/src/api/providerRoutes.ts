@@ -21,7 +21,9 @@ async function parseProviderBody<T>(req: Request, schema: ZodType<T>): Promise<T
   const issue = parsed.error.issues[0];
   // An unrecognized field name can contain private request data.
   if (issue?.code === "unrecognized_keys") throw new HttpError(400, "Unsupported provider fields");
-  if (issue?.code === "invalid_union_discriminator") throw new HttpError(400, "Provider protocol must be openai-compatible, anthropic-messages, or built-in");
+  if (issue?.code === "invalid_union" && "note" in issue && issue.note === "No matching discriminator") {
+    throw new HttpError(400, "Provider protocol must be openai-compatible, anthropic-messages, or built-in");
+  }
   throw new HttpError(400, issue?.message ?? "Invalid provider body");
 }
 

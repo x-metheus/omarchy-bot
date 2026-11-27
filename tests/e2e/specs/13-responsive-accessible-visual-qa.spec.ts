@@ -1,4 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
+import { AVATAR_RENDERER_ID } from "../../../packages/protocol/src/index.ts";
 import { expect, test, type Locator, type Page, type Route } from "../fixtures.ts";
 
 const PRIMARY_BOT_ID = "bot_ticket13_primary";
@@ -31,7 +32,7 @@ interface SeedOptions {
 const avatar = (seed: string) => ({
   kind: "generated",
   recipe: {
-    rendererVersion: "dicebear-core@10.7.0+styles@10.6.0",
+    rendererVersion: AVATAR_RENDERER_ID,
     style: "pixelbot",
     seed,
     options: {},

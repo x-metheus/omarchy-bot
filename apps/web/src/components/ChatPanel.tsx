@@ -218,7 +218,7 @@ function PeerMailSystemMessage({ message }: { message: MessageDto }): JSX.Elemen
   return (
     <ChatSystemMessage>
       <VStack gap={1} data-testid="peer-mail-message">
-        <Text type="label-lg">{`From ${message.peerMail!.sourceName}`}</Text>
+        <Text type="label">{`From ${message.peerMail!.sourceName}`}</Text>
         <Text>{message.text ?? ""}</Text>
       </VStack>
     </ChatSystemMessage>
@@ -1040,7 +1040,7 @@ export function ChatPanel({
     onSelect: (item) => `${item.id} `,
     renderItem: (item) => item.element ?? item.label,
     menuLabel: "Skill commands",
-    emptySearchResultsText: "No matching skills. Open Plugins in the sidebar to manage Skills.",
+    emptySearchText: "No matching skills. Open Plugins in the sidebar to manage Skills.",
     loadingText: "Loading skills…",
   }], [skillSearch]);
   const canChooseSkill = !composerIsDisabled && !selectedThreadIsActive && /^\/?[^\s]*$/.test(draft.text);

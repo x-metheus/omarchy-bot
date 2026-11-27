@@ -31,5 +31,5 @@ export function BottomSheetWithReturnFocus({
     return () => dialog.removeEventListener("close", restoreFocus);
   }, [returnFocusRef]);
 
-  return <BottomSheet {...props} ref={panelRef} />;
+  return <BottomSheet padding={0} {...props} ref={panelRef} />;
 }

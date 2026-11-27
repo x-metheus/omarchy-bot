@@ -17,17 +17,13 @@
     "test:e2e": "bunx playwright test -c tests/e2e"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.13.0",
-    "@playwright/test": "1.62.1",
-    "@types/bun": "latest",
-    "@types/cross-spawn": "^6.0.6",
-    "@types/node": "26.4.0",
-    "typescript": "^5.7.0"
+    "@axe-core/playwright": "^4.14.1",
+    "@playwright/test": "1.65.1",
+    "@types/bun": "^1.4.5",
+    "@types/node": "26.6.11",
+    "typescript": "^7.0.2"
   },
   "overrides": {
-    "@types/node": "26.4.0"
-  },
-  "patchedDependencies": {
-    "@astryxdesign/core@0.5.2": "patches/@astryxdesign%2Fcore@0.5.2.patch"
+    "@types/node": "26.6.11"
   }
 }

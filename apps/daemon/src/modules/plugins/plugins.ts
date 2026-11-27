@@ -34,7 +34,7 @@ export const PLUGIN_MANAGEMENT_TOOL = {
 const Account = z.object({
   id: z.string(), providerId: PluginProviderId, label: z.string(), identity: z.string(), enabledServices: z.array(z.string()),
   status: z.enum(["connected", "reauthorize"]), error: z.string().optional(), grant: Grant.optional(),
-  bundleErrors: z.record(z.string()).default({}),
+  bundleErrors: z.record(z.string(), z.string()).default({}),
   native: z.object({ serviceId: z.string(), name: z.string() }).optional(), nativeManaged: z.boolean().default(false),
 });
 type Account = z.infer<typeof Account>;

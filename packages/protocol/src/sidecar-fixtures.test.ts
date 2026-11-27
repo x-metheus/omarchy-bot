@@ -8,7 +8,7 @@ import { DeviceClientFrameSchema, DeviceServerFrameSchema } from "./devices.ts";
 const directory = path.resolve(import.meta.dir, "../fixtures/sidecar");
 const FixtureSchema = z.object({
   direction: z.enum(["client", "server"]),
-  frame: z.record(z.unknown()),
+  frame: z.record(z.string(), z.unknown()),
 }).strict();
 const fixtures = readdirSync(directory).filter((name) => name.endsWith(".json")).sort().map((name) => ({
   name,
@@ -36,7 +36,7 @@ test("canonical Sidecar fixtures survive the authoritative schemas without strip
 test("Sidecar fixtures cover every device frame variant and its required and optional properties", () => {
   const schemas = {
     client: DeviceClientFrameSchema,
-    server: DeviceServerFrameSchema.innerType(),
+    server: DeviceServerFrameSchema.in,
   };
   for (const [direction, schema] of Object.entries(schemas)) {
     for (const variant of schema.options) {
@@ -44,7 +44,7 @@ test("Sidecar fixtures cover every device frame variant and its required and opt
       const shape: Record<string, z.ZodTypeAny> = variant.shape;
       const frames = fixtures.filter((fixture) => fixture.direction === direction && fixture.frame.type === type).map(({ frame }) => frame);
       coverProperties(`${direction}:${type}`, Object.fromEntries(
-        Object.entries(shape).map(([key, property]) => [key, { optional: property.isOptional() }]),
+        Object.entries(shape).map(([key, property]) => [key, { optional: property.safeParse(undefined).success }]),
       ), frames);
     }
   }

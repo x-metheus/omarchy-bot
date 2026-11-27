@@ -325,7 +325,7 @@ test("DurableTranscript reuses persisted rows and events when a new projector re
 
 test("DurableTranscript ends aborted and unresolved calls with the worker interruption summary", async () => {
   using db = new Database(":memory:");
-  const { initial, beforeResult, throughResult } = await committedTurn(fauxAssistantMessage(tool(), { stopReason: "toolUse" }), async (signal) => {
+  const { initial, beforeResult, throughResult, modelResult } = await committedTurn(fauxAssistantMessage(tool(), { stopReason: "toolUse" }), async (signal) => {
     await new Promise<void>((_resolve, reject) => {
       if (signal?.aborted) reject(signal.reason);
       else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -336,8 +336,12 @@ test("DurableTranscript ends aborted and unresolved calls with the worker interr
   const transcript = projector();
   transcript.update(throughResult);
   const interrupted = { id: callId, name: "check", status: "error", errorSummary: TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } as const;
-  expect(messages()[0]?.toolCall).toEqual(interrupted);
-  expect(events()[1]?.payload).toEqual({ threadId, messageId: messages()[0]!.id, toolCall: interrupted });
+  const abortedWithDuration = {
+    ...interrupted,
+    ...(modelResult.durationMs === undefined ? {} : { durationMs: modelResult.durationMs }),
+  };
+  expect(messages()[0]?.toolCall).toEqual(abortedWithDuration);
+  expect(events()[1]?.payload).toEqual({ threadId, messageId: messages()[0]!.id, toolCall: abortedWithDuration });
 
   // Rebuild from an interrupted journal that ended before any result was written.
   db.query("DELETE FROM messages").run();

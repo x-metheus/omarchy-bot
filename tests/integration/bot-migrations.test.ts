@@ -81,7 +81,7 @@ function deployedArchivelessDatabase(): { dbPath: string; home: string } {
 
 describe("integration: deployed schema convergence", () => {
   test("keeps Bot Screen and divergent-ledger migrations in dependency order", () => {
-    expect(MIGRATIONS.slice(-20).map((migration) => migration.name)).toEqual([
+    expect(MIGRATIONS.slice(-21).map((migration) => migration.name)).toEqual([
       "0010-bot-computer-surfaces",
       "0011-redacted-input-diagnostics",
       "0012-bot-screen-contract",
@@ -102,6 +102,7 @@ describe("integration: deployed schema convergence", () => {
       "0024-bot-max-turns",
       "0025-durable-turn-submissions",
       "0026-durable-approvals",
+      "0027-upgrade-dicebear-v11-renderer-id",
     ]);
   });
 
@@ -984,4 +985,61 @@ test("model settings migration preserves existing Bots and adds a nullable overr
     expect(migrated.query<{ value: string }, []>("SELECT value FROM service_settings WHERE key = 'default_model'").get()?.value).toBe("provider/model");
     expect(migrated.query("SELECT name FROM schema_migrations WHERE name = '0022-model-settings'").get()).toBeTruthy();
   } finally { migrated.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test("dicebear v11 migration upgrades valid v10 recipes in place and repairs invalid v10 options", () => {
+  const { db, dbPath, home } = databaseThrough("0026-durable-approvals");
+  const now = "2026-09-01T00:02:00.000Z";
+  try {
+    db.query("INSERT INTO agents (id, display_name, status, updated_at) VALUES ('pi', 'Pi', 'ready', ?)").run(now);
+    db.query(
+      `INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at, provenance)
+       VALUES ('bot_valid_v10', 'Valid v10', '', 'pi', 'generated', '{"rendererVersion":"dicebear-core@10.7.0+styles@10.6.0","style":"thumbs","seed":"kept-seed","options":{"flip":true}}', ?, ?, 'user_created'),
+              ('bot_bad_opts', 'Bad v10', '', 'pi', 'recipe', '{"rendererVersion":"dicebear-core@10.7.0+styles@10.6.0","style":"thumbs","seed":"bad-seed","options":{"nested":["nope"]}}', ?, ?, 'user_created')`,
+    ).run(now, now, now, now);
+
+    const migrated = finishMigrations(db, dbPath);
+    try {
+      const rows = migrated.query<{ id: string; avatar_kind: string; avatar_recipe: string }, []>(
+        "SELECT id, avatar_kind, avatar_recipe FROM bots ORDER BY id",
+      ).all();
+      expect(rows).toEqual([
+        {
+          id: "bot_bad_opts",
+          avatar_kind: "generated",
+          avatar_recipe: JSON.stringify({
+            rendererVersion: AVATAR_RENDERER_ID,
+            style: "pixelbot",
+            seed: "bot_bad_opts",
+            options: {},
+          }),
+        },
+        {
+          id: "bot_valid_v10",
+          avatar_kind: "generated",
+          avatar_recipe: JSON.stringify({
+            rendererVersion: AVATAR_RENDERER_ID,
+            style: "thumbs",
+            seed: "kept-seed",
+            options: { flip: true },
+          }),
+        },
+      ]);
+      expect(AvatarRecipeDto.parse(JSON.parse(rows[1]!.avatar_recipe))).toEqual({
+        rendererVersion: AVATAR_RENDERER_ID,
+        style: "thumbs",
+        seed: "kept-seed",
+        options: { flip: true },
+      });
+    } finally {
+      migrated.close();
+    }
+  } finally {
+    try {
+      db.close();
+    } catch {
+      // finishMigrations already closed the setup connection.
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -190,7 +190,7 @@ function installBrowserInstrumentation(): void {
           pendingHeader = undefined;
         });
         const nativeSend = socket.send.bind(socket);
-        socket.send = (data: string | ArrayBufferLike | Blob | ArrayBufferView): void => {
+        socket.send = (data: Parameters<WebSocket["send"]>[0]): void => {
           const pendingInput = instrument.pendingInput;
           if (typeof data === "string") {
             try {
@@ -620,7 +620,7 @@ export class BrowserSurfaceSession {
 interface ProjectionProxyData {
   target: string;
   upstream: WebSocket | undefined;
-  pending: Array<string | Uint8Array>;
+  pending: Array<string | Uint8Array<ArrayBuffer>>;
   pendingBytes: number;
   closed: boolean;
 }
@@ -670,7 +670,7 @@ export function startProjectionProxy(
         remote.addEventListener("message", (event) => {
           if (data.closed) return;
           const message = typeof event.data === "string" ? event.data : new Uint8Array(event.data as ArrayBuffer);
-          if (client.getBufferedAmount() + byteLength(message) > maxBufferedBytes || client.send(message) === 0) {
+          if (client.getBufferedAmount() + byteLength(message) > maxBufferedBytes || client.send(message as string | Uint8Array<ArrayBuffer>) === 0) {
             client.close(1013, "proxy backpressure");
             remote.close();
           }
@@ -691,7 +691,7 @@ export function startProjectionProxy(
           return;
         }
         if (remote?.readyState === WebSocket.OPEN) remote.send(raw);
-        else { data.pending.push(typeof raw === "string" ? raw : raw.slice()); data.pendingBytes += size; }
+        else { data.pending.push(typeof raw === "string" ? raw : new Uint8Array(raw)); data.pendingBytes += size; }
       },
       close(client) {
         client.data.closed = true;

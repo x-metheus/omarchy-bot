@@ -53,7 +53,7 @@ export const compactionExtension = defineExtension({
         runtime.signal.throwIfAborted();
         const summary = response.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n").trim();
         if (response.stopReason !== "stop" || response.content.some((part) => part.type === "toolCall") || !summary) throw new Error("Summary was incomplete");
-        return { summary };
+        return { kind: "summary", summary };
       } catch {
         // The same runtime signal is passed at compaction.js:86 and exposed at scheduler.js:2497-2508; HookApi omits it.
         (api as typeof api & { signal: AbortSignal }).signal.throwIfAborted();

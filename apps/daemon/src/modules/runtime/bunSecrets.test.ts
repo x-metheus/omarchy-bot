@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import { API } from "typescript/unstable/async";
+import { isCallExpression, isIdentifier, isPropertyAccessExpression, type Node } from "typescript/unstable/ast";
+import { createVirtualFileSystem } from "typescript/unstable/fs";
 import { BunSecretsBackend, probeBunSecrets, type BunSecretsApi } from "./bunSecrets.ts";
 
 type Account = Parameters<BunSecretsApi["get"]>[0];
@@ -198,27 +200,60 @@ test("probeBunSecrets shares the time limit across successive calls", async () =
   }
 });
 
-function countBunSecretsGetCalls(source: string, file = "source.ts"): number {
-  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest);
+function countNodeBunSecretsGetCalls(root: Node): number {
   let count = 0;
-  function visit(node: ts.Node): void {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "get") {
+  function visit(node: Node): void {
+    if (isCallExpression(node) && isPropertyAccessExpression(node.expression) && node.expression.name.text === "get") {
       const receiver = node.expression.expression;
-      if (ts.isPropertyAccessExpression(receiver) && receiver.name.text === "secrets" &&
-        ts.isIdentifier(receiver.expression) && receiver.expression.text === "Bun") {
+      if (isPropertyAccessExpression(receiver) && receiver.name.text === "secrets" &&
+        isIdentifier(receiver.expression) && receiver.expression.text === "Bun") {
         count++;
       }
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   }
-  visit(sourceFile);
+  visit(root);
   return count;
 }
 
-test("countBunSecretsGetCalls counts calls and ignores comments and strings", () => {
-  expect(countBunSecretsGetCalls("Bun.secrets.get(options); // Bun.secrets.get(")).toBe(1);
-  expect(countBunSecretsGetCalls("// Bun.secrets.get(")).toBe(0);
-  expect(countBunSecretsGetCalls('const text = "Bun.secrets.get(";')).toBe(0);
+async function countBunSecretsGetCallsInFiles(files: Record<string, string>): Promise<Map<string, number>> {
+  const virtualFiles: Record<string, string> = {};
+  const virtualPaths = new Map<string, string>();
+  for (const [file, source] of Object.entries(files)) {
+    const virtualPath = `/virtual/src/${file}`;
+    virtualFiles[virtualPath] = source;
+    virtualPaths.set(file, virtualPath);
+  }
+  virtualFiles["/virtual/tsconfig.json"] = JSON.stringify({
+    compilerOptions: { allowJs: true, noLib: true, types: [] },
+    files: [...virtualPaths.values()],
+  });
+  const api = new API({ cwd: "/virtual", fs: createVirtualFileSystem(virtualFiles) });
+  try {
+    const snapshot = await api.updateSnapshot({ openProject: "/virtual/tsconfig.json" });
+    const project = snapshot.getProject("/virtual/tsconfig.json");
+    if (!project) throw new Error("Unable to open virtual TypeScript project");
+    const counts = new Map<string, number>();
+    for (const [file, virtualPath] of virtualPaths) {
+      const sourceFile = await project.program.getSourceFile(virtualPath);
+      if (!sourceFile) throw new Error(`Missing TypeScript AST for ${file}`);
+      counts.set(file, countNodeBunSecretsGetCalls(sourceFile));
+    }
+    return counts;
+  } finally {
+    await api.close();
+  }
+}
+
+test("countBunSecretsGetCalls counts calls and ignores comments and strings", async () => {
+  const counts = await countBunSecretsGetCallsInFiles({
+    "call-and-comment.ts": "Bun.secrets.get(options); // Bun.secrets.get(",
+    "comment-only.ts": "// Bun.secrets.get(",
+    "string-only.ts": 'const text = "Bun.secrets.get(";',
+  });
+  expect(counts.get("call-and-comment.ts")).toBe(1);
+  expect(counts.get("comment-only.ts")).toBe(0);
+  expect(counts.get("string-only.ts")).toBe(0);
 });
 
 test("daemon product source confines Bun.secrets to runtime keychain files", async () => {
@@ -226,13 +261,15 @@ test("daemon product source confines Bun.secrets to runtime keychain files", asy
   const sourceFiles = new Bun.Glob("**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}");
   const secretReferences = /\bBun\s*(?:\.\s*secrets\b|\[\s*["']secrets["']\s*\])/;
   const mentioningFiles: string[] = [];
-  const directGetFiles: string[] = [];
+  const scannedSources: Record<string, string> = {};
   for await (const file of sourceFiles.scan({ cwd: fileURLToPath(sourceDir), dot: true })) {
     if (/\.(test|spec)\.[^.]+$/.test(file)) continue;
     const source = await Bun.file(new URL(file, sourceDir)).text();
     if (secretReferences.test(source)) mentioningFiles.push(file);
-    if (countBunSecretsGetCalls(source, file) > 0) directGetFiles.push(file);
+    scannedSources[file] = source;
   }
+  const counts = await countBunSecretsGetCallsInFiles(scannedSources);
+  const directGetFiles = [...counts.entries()].filter(([, count]) => count > 0).map(([file]) => file);
   expect(directGetFiles.sort()).toEqual([]);
   expect(mentioningFiles.sort()).toEqual([
     "modules/runtime/bunSecrets.ts",

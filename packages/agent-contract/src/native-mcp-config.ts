@@ -36,11 +36,11 @@ const NativeMcpEntry = z.object({
 
 export const NativeMcpMetadata = z.object({
   version: z.literal(1),
-  entries: z.record(NativeMcpEntry),
+  entries: z.record(z.string(), NativeMcpEntry),
   adapterPackage: z.string().optional(),
-  packageRevisions: z.record(z.string()).default({}),
-  serviceTokens: z.record(NativeMcpServiceToken).default({}),
-  secrets: z.record(NativeMcpSecret).default({}),
+  packageRevisions: z.record(z.string(), z.string()).default({}),
+  serviceTokens: z.record(z.string(), NativeMcpServiceToken).default({}),
+  secrets: z.record(z.string(), NativeMcpSecret).default({}),
 });
 export type NativeMcpMetadata = z.infer<typeof NativeMcpMetadata>;
 

@@ -78,7 +78,7 @@ async function installProjectionPeer(
         }
       }
       const nativeSend = WebSocket.prototype.send;
-      WebSocket.prototype.send = function(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+      WebSocket.prototype.send = function(data: Parameters<WebSocket["send"]>[0]): void {
         const pathname = new URL(this.url).pathname;
         if (pathname.endsWith("/control") && typeof data === "string") {
           try {

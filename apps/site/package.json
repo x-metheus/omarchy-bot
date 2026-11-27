@@ -11,14 +11,14 @@
   },
   "dependencies": {
     "@omarchy-bot/protocol": "workspace:*",
-    "@vercel/oidc": "^3",
-    "jose": "^6",
-    "zod": "^3.25"
+    "@vercel/oidc": "^5.0.0",
+    "jose": "^6.2.18",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^22",
-    "@vercel/node": "^5",
-    "typescript": "^5.9",
-    "vite": "^7"
+    "@types/node": "^26.6.11",
+    "@vercel/node": "^33.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
   }
 }

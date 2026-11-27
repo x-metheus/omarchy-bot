@@ -43,12 +43,12 @@ export const McpTransport = z.discriminatedUnion("type", [
     type: z.literal("stdio"),
     command: z.string().trim().min(1).max(4096),
     args: z.array(z.string()).max(128).default([]),
-    env: z.record(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
   }).strict(),
   z.object({
     type: z.literal("http"),
     url: z.string().min(1).refine(isMcpHttpUrl, "Use an HTTP or HTTPS URL with a valid host"),
-    headers: z.record(z.string()).optional(),
+    headers: z.record(z.string(), z.string()).optional(),
   }).strict(),
 ]);
 export type McpTransport = z.infer<typeof McpTransport>;
@@ -63,7 +63,7 @@ export const NpmMcpPackage = z.object({
   name: z.string().trim().max(214).regex(/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/, "Use an exact public npm package name, without a version or command"),
   bin: z.string().trim().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
   args: z.array(z.string()).max(126).default([]),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
 }).strict();
 export type NpmMcpPackage = z.input<typeof NpmMcpPackage>;
 

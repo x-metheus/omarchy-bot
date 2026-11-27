@@ -7,7 +7,7 @@ import {
 } from "@omarchy-bot/domain";
 
 // ----- Avatars -----
-export const AVATAR_RENDERER_ID = "dicebear-core@10.7.0+styles@10.6.0" as const;
+export const AVATAR_RENDERER_ID = "dicebear-core@11.0.0+styles@11.0.0" as const;
 export const AVATAR_STYLE_IDS = [
   "clay",
   "critters",
@@ -35,7 +35,7 @@ export const AvatarRecipeDto = z.object({
   rendererVersion: z.literal(AVATAR_RENDERER_ID),
   style: z.enum(AVATAR_STYLE_IDS),
   seed: z.string(),
-  options: z.record(AvatarOptionValueDto),
+  options: z.record(z.string(), AvatarOptionValueDto),
 });
 export type AvatarRecipeDto = z.infer<typeof AvatarRecipeDto>;
 
@@ -631,7 +631,7 @@ export type ProviderModelDto = z.infer<typeof ProviderModelDto>;
 export const BuiltinProviderDto = z.object({ id: z.string(), name: z.string() });
 export type BuiltinProviderDto = z.infer<typeof BuiltinProviderDto>;
 
-export const ProviderBaseUrl = z.string({ required_error: "Provider base URL is required", invalid_type_error: "Provider base URL must be a string" }).trim().refine((value) => {
+export const ProviderBaseUrl = z.string({ error: (issue) => issue.input === undefined ? "Provider base URL is required" : "Provider base URL must be a string" }).trim().refine((value) => {
   const url = URL.parse(value);
   return url !== null && (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password;
 }, "Provider base URL must be HTTP or HTTPS and cannot include a username or password");
@@ -644,10 +644,10 @@ export const ProviderDto = BuiltinProviderDto.extend({
 });
 export type ProviderDto = z.infer<typeof ProviderDto>;
 
-const ProviderKey = z.string({ required_error: "Provider key is required", invalid_type_error: "Provider key must be a string" })
+const ProviderKey = z.string({ error: (issue) => issue.input === undefined ? "Provider key is required" : "Provider key must be a string" })
   .refine((value) => value.trim().length > 0, "Provider key is required");
 const ProviderModels = z.array(z.string().trim().min(1, "Model ID is required"));
-const CustomProviderName = z.string({ required_error: "Provider name is required" }).trim().min(1, "Provider name is required");
+const CustomProviderName = z.string({ error: (issue) => issue.input === undefined ? "Provider name is required" : "Provider name must be a string" }).trim().min(1, "Provider name is required");
 
 export const CreateProviderBody = z.discriminatedUnion("protocol", [
   z.object({ protocol: CustomProviderProtocol, name: CustomProviderName, baseUrl: ProviderBaseUrl, key: ProviderKey, models: ProviderModels.optional() }).strict(),

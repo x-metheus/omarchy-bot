@@ -14,8 +14,6 @@ import currentVoxelBotDefinition from "@dicebear/styles/voxel-bot.json";
 
 export type AvatarPresentation = "static" | "ambient" | "working";
 
-type AnimationVariant = "fast" | "medium";
-
 const currentStyles: Record<(typeof AVATAR_STYLE_IDS)[number], CurrentStyle> = {
   clay: new CurrentStyle(currentClayDefinition),
   critters: new CurrentStyle(currentCrittersDefinition),
@@ -33,12 +31,12 @@ const currentStyles: Record<(typeof AVATAR_STYLE_IDS)[number], CurrentStyle> = {
 const MAX_CACHE_ENTRIES = 256;
 const svgCache = new Map<string, string>();
 
-function animationVariant(presentation: AvatarPresentation): AnimationVariant | undefined {
+function animationOptions(presentation: AvatarPresentation): { animation: true; animationSpeed: number } | undefined {
   switch (presentation) {
     case "ambient":
-      return "medium";
+      return { animation: true, animationSpeed: 1 };
     case "working":
-      return "fast";
+      return { animation: true, animationSpeed: 1.25 };
     case "static":
       return undefined;
   }
@@ -65,10 +63,10 @@ function remember(key: string, dataUri: string): string {
 
 function renderCurrent(recipe: AvatarRecipeDto, presentation: AvatarPresentation): string {
   const style = currentStyles[recipe.style];
-  const variant = animationVariant(presentation);
-  const options = variant === undefined
+  const animation = animationOptions(presentation);
+  const options = animation === undefined
     ? { ...(recipe.options as object), seed: recipe.seed }
-    : { ...(recipe.options as object), seed: recipe.seed, animationVariant: variant };
+    : { ...(recipe.options as object), seed: recipe.seed, ...animation };
   return new CurrentAvatar(style, options).toDataUri();
 }
 

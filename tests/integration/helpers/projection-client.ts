@@ -203,7 +203,7 @@ export class RfbViewProbe {
     return this.serverInit;
   }
 
-  send(bytes: Uint8Array): void {
+  send(bytes: Uint8Array<ArrayBuffer>): void {
     if (this.serverInit === undefined) throw new Error("RFB probe must negotiate before sending protocol messages");
     this.socket.send(bytes);
   }

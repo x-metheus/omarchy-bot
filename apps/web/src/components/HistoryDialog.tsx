@@ -59,7 +59,7 @@ function HistoryContent({
         data-testid="history-new-conversation"
       />
       <TextInput
-        autoFocus
+        hasAutoFocus
         label="Search conversations"
         value={query}
         onChange={onQueryChange}
@@ -179,7 +179,12 @@ export function HistoryDialog({
 
   if (isSmallScreen) {
     return (
-      <BottomSheet label="Conversation history" isOpen={open} onOpenChange={(nextOpen) => !nextOpen && onClose()} height="tall">
+      <BottomSheet
+        label="Conversation history"
+        isOpen={open}
+        onOpenChange={(nextOpen) => !nextOpen && onClose()}
+        height="tall"
+        padding={0}>
         {content}
       </BottomSheet>
     );

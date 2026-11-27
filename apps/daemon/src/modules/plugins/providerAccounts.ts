@@ -16,7 +16,7 @@ const ProviderIdentityId = z.union([z.string().min(1), z.number().int()]);
 /** A provider credential set held on a Service account. The class below owns every write to it. */
 export const Grant = z.object({
   generation: z.string(), accessToken: z.string(), refreshToken: z.string().optional(), expiresAt: z.number().optional(),
-  scopes: z.array(z.string()), cloudUrl: HttpsOrigin, metadata: z.record(z.unknown()).default({}),
+  scopes: z.array(z.string()), cloudUrl: HttpsOrigin, metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type Grant = z.infer<typeof Grant>;
 
@@ -85,7 +85,7 @@ export async function identifyAccount(providerId: PluginProviderId, grant: Accou
   const json = async (url: string, init?: RequestInit): Promise<Record<string, unknown>> => {
     const response = await fetchWithAccount(url, { ...init, signal: AbortSignal.timeout(30_000), headers: { "content-type": "application/json", accept: "application/json", ...init?.headers } });
     if (!response.ok) throw new HttpError(502, `${provider.name} identity lookup returned HTTP ${response.status}`);
-    return z.record(z.unknown()).parse(await response.json());
+    return z.record(z.string(), z.unknown()).parse(await response.json());
   };
   let id: unknown;
   let label: unknown;
@@ -124,8 +124,8 @@ export async function identifyAccount(providerId: PluginProviderId, grant: Accou
         const result = await connection.client.callTool({ name: "get_user_details", arguments: {} }, undefined, { timeout: 30_000 });
         if (result.isError) throw new HttpError(502, "HubSpot could not return its authenticated user details");
         const text = (result.content as { type: string; text?: string }[]).filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n");
-        const user = z.record(z.unknown()).parse(result.structuredContent ?? JSON.parse(text));
-        const details = z.record(z.unknown()).parse(user.data ?? user);
+        const user = z.record(z.string(), z.unknown()).parse(result.structuredContent ?? JSON.parse(text));
+        const details = z.record(z.string(), z.unknown()).parse(user.data ?? user);
         const userId = ProviderIdentityId.parse(details.userId ?? details.user_id);
         const hubId = ProviderIdentityId.parse(details.hubId ?? details.hub_id ?? details.portalId);
         id = `${hubId}:${userId}`;

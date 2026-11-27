@@ -87,7 +87,7 @@ export function CreateBotDialog({
         {error !== undefined ? <Banner status="error" title={error} /> : null}
         <TextInput
           ref={nameRef}
-          autoFocus
+          hasAutoFocus
           label="Name"
           value={name}
           onChange={(value) => {
