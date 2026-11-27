@@ -1,6 +1,6 @@
 pub(crate) mod conversation;
 
-pub(crate) use conversation::{ReplySink, TurnRequest};
+pub(crate) use conversation::{AgentCommand, ReplySink, TurnRequest};
 
 use std::path::Path;
 
@@ -15,11 +15,12 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use crate::api::ConversationCommand;
+use crate::duties;
 use crate::store::Store;
 use crate::user_memory;
 
 pub(crate) fn headless_app(
-    pending: mpsc::UnboundedReceiver<TurnRequest>,
+    pending: mpsc::UnboundedReceiver<AgentCommand>,
     conversations: mpsc::UnboundedSender<ConversationCommand>,
     runtime: Handle,
     scratch: &Path,

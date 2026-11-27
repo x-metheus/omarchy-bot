@@ -18,8 +18,9 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::agent::{ReplySink, TurnRequest};
+use crate::agent::{AgentCommand, ReplySink, TurnRequest};
 use crate::attachments::{Input as AttachmentInput, MAX_ATTACHMENTS, Submission};
+use crate::duties;
 use crate::recall::{Availability, Recall};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
 use crate::store::{Admission, Bot, Conversation, History, Store};
@@ -334,13 +335,14 @@ pub(crate) enum ConversationCommand {
     Settled {
         bot: Uuid,
         answer: Option<String>,
+        duties: Option<String>,
         streams: Vec<ReplySink>,
     },
 }
 
 pub(crate) async fn run_conversations(
     store: Store,
-    turns: mpsc::UnboundedSender<TurnRequest>,
+    turns: mpsc::UnboundedSender<AgentCommand>,
     wake: Wake,
     mut commands: mpsc::UnboundedReceiver<ConversationCommand>,
     recall: Recall,
@@ -371,7 +373,7 @@ pub(crate) async fn run_conversations(
                     }) => {
                         recall.history_changed();
                         turns
-                            .send(TurnRequest {
+                            .send(AgentCommand::Message(TurnRequest {
                                 bot,
                                 history,
                                 message_id,
@@ -379,7 +381,7 @@ pub(crate) async fn run_conversations(
                                 attachments,
                                 model,
                                 stream,
-                            })
+                            }))
                             .map_err(|_| UNAVAILABLE)
                             .map(|()| {
                                 live.insert(bot);
@@ -396,19 +398,29 @@ pub(crate) async fn run_conversations(
             ConversationCommand::Settled {
                 bot,
                 answer,
+                duties,
                 streams,
             } => {
                 let terminal = match answer {
-                    Some(text) => match store.commit_reply(bot, text).await {
-                        Ok(message) => {
-                            recall.history_changed();
-                            if streams.is_empty() {
-                                continue;
+                    Some(text) => {
+                        let prompt = duties
+                            .as_deref()
+                            .map(|text| duties::system_prompt(Some(text)));
+                        match store.commit_reply(bot, text, duties).await {
+                            Ok(message) => {
+                                if let Some(prompt) = prompt {
+                                    let _ = turns.send(AgentCommand::Duties { bot, prompt });
+                                    wake.wake();
+                                }
+                                recall.history_changed();
+                                if streams.is_empty() {
+                                    continue;
+                                }
+                                event("committed", message)
                             }
-                            event("committed", message)
+                            Err(error) => event("error", store_error(error).1),
                         }
-                        Err(error) => event("error", store_error(error).1),
-                    },
+                    }
                     None => event(
                         "error",
                         Problem::new(

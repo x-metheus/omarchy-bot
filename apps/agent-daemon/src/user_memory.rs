@@ -287,17 +287,7 @@ fn prepare(
 ) {
     for (mut call, input) in &mut calls {
         let source_text = input
-            .and_then(|input| {
-                let history = call.history.as_ref()?;
-                let message = history.messages().get(history.index_of(input.0)?)?;
-                let message::Message::User { content } = &**message else {
-                    return None;
-                };
-                let UserContent::Text(text) = content.first()? else {
-                    return None;
-                };
-                Some(text.text.as_str())
-            })
+            .and_then(|input| input.text(call.history.as_ref()?))
             .unwrap_or_default();
         if let Some(context) = current.context(source_text)
             && let Some(prompt) = &mut call.prompt

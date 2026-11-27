@@ -1,10 +1,11 @@
-use rig_core::completion::Message;
 use rig_harness::prelude::{
-    App, AppToolsExt, Component, Conversation, Decider, Decision, On, Query, SystemPrompt,
-    ToolCalled, ToolExecutionError, ToolOptions, ToolResult, UserContent,
+    App, AppToolsExt, CallOf, Component, Conversation, Decider, Decision, On, Query, SystemPrompt,
+    ToolCalled, ToolExecutionError, ToolOptions, ToolResult,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+
+use crate::agent::conversation::{ConversationTools, ModelUserInput};
 
 pub(crate) const SET_DUTIES: &str = "set_bot_duties";
 const MAX_DUTIES_BYTES: usize = 8192;
@@ -24,6 +25,10 @@ pub(crate) fn system_prompt(duties: Option<&str>) -> SystemPrompt {
 }
 
 pub(crate) fn register(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<ConversationTools>()
+        .root_only
+        .push(SET_DUTIES);
     app.add_open_tool(
         SET_DUTIES,
         "Set or replace this Bot's ongoing duties at the user's explicit request.",
@@ -49,7 +54,9 @@ pub(crate) struct DutyTurn {
 fn stage_update(
     called: On<ToolCalled<DutyArgs>>,
     mut decisions: Query<&mut Decision>,
-    mut turns: Query<(&Conversation, &mut DutyTurn)>,
+    inputs: Query<(&CallOf, &ModelUserInput)>,
+    conversations: Query<&Conversation>,
+    mut turns: Query<&mut DutyTurn>,
 ) {
     let Ok(mut decision) = decisions.get_mut(called.call) else {
         return;
@@ -60,13 +67,19 @@ fn stage_update(
 
     let duties = called.args.duties.trim();
     let evidence = called.args.evidence.trim();
-    let result = match turns.get_mut(called.agent) {
-        Ok((conversation, mut turn))
+    let input = inputs
+        .get(called.call)
+        .ok()
+        .and_then(|(&CallOf(turn), &input)| {
+            Some((turn, input.text(conversations.get(called.agent).ok()?)?))
+        });
+    let result = match input.and_then(|(turn, text)| Some((turns.get_mut(turn).ok()?, text))) {
+        Some((mut turn, text))
             if turn.replacement.is_none()
                 && !duties.is_empty()
                 && duties.len() <= MAX_DUTIES_BYTES
                 && !evidence.is_empty()
-                && current_user_text(conversation).is_some_and(|text| text.contains(evidence)) =>
+                && text.contains(evidence) =>
         {
             turn.replacement = Some(duties.to_owned());
             ToolResult::success("The duties will be saved with your completed reply.".into())
@@ -77,19 +90,4 @@ fn stage_update(
         )),
     };
     decision.decide(Decider::plugin(SET_DUTIES), result);
-}
-
-fn current_user_text(conversation: &Conversation) -> Option<&str> {
-    let entry = conversation
-        .entries()
-        .rev()
-        .find(|entry| entry.is_users_own())?;
-    let Message::User { content } = entry.message else {
-        return None;
-    };
-    // Rig's Inbox delivers the submitted text before the appended attachment parts.
-    match content.first() {
-        Some(UserContent::Text(text)) => Some(&text.text),
-        _ => None,
-    }
 }

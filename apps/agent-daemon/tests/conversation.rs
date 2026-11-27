@@ -201,7 +201,6 @@ impl ProviderCall {
         let messages: Vec<_> = self
             .chat_messages()
             .iter()
-            .filter(|message| message["role"] != "system")
             .map(|message| {
                 (
                     message["role"].as_str().unwrap(),

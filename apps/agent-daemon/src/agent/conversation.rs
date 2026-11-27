@@ -11,11 +11,17 @@ use uuid::Uuid;
 
 use crate::api::{ConversationCommand, event};
 use crate::attachments::Stored as StoredAttachment;
+use crate::duties::{self, DutyTurn};
 use crate::store::{Conversation as StoredConversation, Role};
 
 const DELEGATION_GUIDANCE: &str = "\n\nWhen you delegate independent work, acknowledge what is \
     underway and end your turn so you can respond to new messages. Share relevant results as \
     reports arrive, using earlier reports when they help answer the request.";
+
+pub(crate) enum AgentCommand {
+    Message(TurnRequest),
+    Duties { bot: Uuid, prompt: SystemPrompt },
+}
 
 pub(crate) struct TurnRequest {
     pub(crate) bot: Uuid,
@@ -59,8 +65,21 @@ pub(crate) struct UserMessageSource {
 }
 
 /// The authored input's Rig Conversation entry in this model request.
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub(crate) struct ModelUserInput(pub(crate) MessageId);
+
+impl ModelUserInput {
+    pub(crate) fn text(self, history: &rig_core::conversation::Conversation) -> Option<&str> {
+        let message = history.messages().get(history.index_of(self.0)?)?;
+        let Message::User { content } = &**message else {
+            return None;
+        };
+        let UserContent::Text(text) = content.first()? else {
+            return None;
+        };
+        Some(&text.text)
+    }
+}
 
 /// Tools explicitly offered to Bot Agents through Rig.
 #[derive(Resource)]
@@ -80,7 +99,7 @@ struct DeliveredUser {
 pub(crate) struct TurnDelivery {
     streams: Vec<ReplySink>,
     messages: Vec<DeliveredUser>,
-    source: Option<(EffectId, UserMessageSource)>,
+    source: Option<(EffectId, UserMessageSource, ModelUserInput)>,
 }
 
 impl TurnDelivery {
@@ -97,14 +116,14 @@ struct ModelDelivery {
 #[derive(Resource)]
 struct Conversations {
     roots: HashMap<Uuid, Entity>,
-    pending: mpsc::UnboundedReceiver<TurnRequest>,
+    pending: mpsc::UnboundedReceiver<AgentCommand>,
     outgoing: mpsc::UnboundedSender<ConversationCommand>,
     settled: Vec<Entity>,
 }
 
 pub(super) fn add(
     app: &mut App,
-    pending: mpsc::UnboundedReceiver<TurnRequest>,
+    pending: mpsc::UnboundedReceiver<AgentCommand>,
     outgoing: mpsc::UnboundedSender<ConversationCommand>,
 ) {
     let world = app.world_mut();
@@ -139,7 +158,16 @@ pub(super) fn add(
 fn deliver(world: &mut World) {
     world.resource_scope(|world, mut conversations: Mut<Conversations>| {
         let mut first = HashSet::new();
-        while let Ok(request) = conversations.pending.try_recv() {
+        while let Ok(command) = conversations.pending.try_recv() {
+            let request = match command {
+                AgentCommand::Message(request) => request,
+                AgentCommand::Duties { bot, prompt } => {
+                    if let Some(&agent) = conversations.roots.get(&bot) {
+                        world.entity_mut(agent).insert(prompt);
+                    }
+                    continue;
+                }
+            };
             let TurnRequest {
                 bot,
                 history,
@@ -165,6 +193,7 @@ fn deliver(world: &mut World) {
                     (
                         AgentId(bot.to_string()),
                         Name::new(history.bot.name),
+                        duties::system_prompt(history.bot.duties.as_deref()),
                         BotAgent(bot),
                         conversation,
                         model,
@@ -271,6 +300,7 @@ fn on_delivery(
             had_attachments,
         });
         delivery.streams.extend(stream);
+        turn.insert_if_new(DutyTurn::default());
     });
 }
 
@@ -298,9 +328,9 @@ fn on_model_request(
     call.insert(ModelDelivery {
         subscribers: delivery.streams.len(),
     });
-    delivery.source = source.map(|(_, source)| (effect.id(), source));
-    if let Some((entry, source)) = source {
-        call.insert((source, ModelUserInput(entry)));
+    delivery.source = source.map(|(entry, source)| (effect.id(), source, ModelUserInput(entry)));
+    if let Some((_, source, input)) = delivery.source {
+        call.insert((source, input));
     }
 }
 
@@ -313,10 +343,10 @@ fn on_tool_request(
     let Ok((&CallOf(turn), effect)) = calls.get(added.entity) else {
         return;
     };
-    if let Some((id, source)) = turns.get(turn).ok().and_then(|delivery| delivery.source)
+    if let Some((id, source, input)) = turns.get(turn).ok().and_then(|delivery| delivery.source)
         && effect.parent == Some(id)
     {
-        commands.entity(added.entity).insert(source);
+        commands.entity(added.entity).insert((source, input));
     }
 }
 
@@ -398,6 +428,7 @@ fn finish_turns(world: &mut World) {
                 }
                 _ => None,
             };
+            let duties = settled.take::<DutyTurn>().and_then(|turn| turn.replacement);
             let mut streams = settled
                 .take::<TurnDelivery>()
                 .map_or_else(Vec::new, |delivery| delivery.streams);
@@ -408,6 +439,7 @@ fn finish_turns(world: &mut World) {
                 let _ = conversations.outgoing.send(ConversationCommand::Settled {
                     bot,
                     answer,
+                    duties,
                     streams,
                 });
             }
