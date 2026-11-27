@@ -63,7 +63,7 @@ async fn forwards_text_and_image_through_chat_completions() {
     );
     let call = provider.next().await;
     call.assert_request(super::CHAT_PATH, VISION_MODEL, super::BOOTSTRAP_KEY);
-    let message = &call.body["messages"][0];
+    let message = &call.chat_messages()[0];
     assert_eq!(message["role"], "user");
     assert_eq!(
         message["content"][0],
@@ -176,7 +176,7 @@ async fn restores_attachment_ownership_and_reuses_only_authorized_references() {
         .await,
     );
     let call = provider.next().await;
-    let messages = call.body["messages"].as_array().unwrap();
+    let messages = call.chat_messages();
     assert_eq!(messages[0]["content"], "Keep these samples available.");
     let parts = messages.last().unwrap()["content"].as_array().unwrap();
     assert_eq!(
@@ -229,7 +229,7 @@ async fn warns_about_unavailable_and_unsupported_attachments_and_keeps_the_messa
     }
     let call = provider.next().await;
     assert_eq!(
-        call.body["messages"][0]["content"],
+        call.chat_messages()[0]["content"],
         json!([
             {"type": "text", "text": text.trim()}, {"type": "text", "text": TEXT}
         ])

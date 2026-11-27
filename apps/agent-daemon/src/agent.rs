@@ -11,6 +11,7 @@ use rig_harness::prelude::*;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::duties::{self, DutyTurn, SET_DUTIES};
 use crate::recall::{RecallScope, TOOL_NAME};
 use crate::store::{Conversation as StoredConversation, Role, Store};
 use crate::user_memory::{self, MemoryInput, REMEMBER_TOOL};
@@ -27,6 +28,7 @@ pub(crate) struct TurnRequest {
 
 pub(crate) struct TurnResult {
     pub(crate) answer: Option<String>,
+    pub(crate) duties: Option<String>,
     pub(crate) stream: Option<mpsc::Sender<Event>>,
 }
 
@@ -68,6 +70,7 @@ pub(crate) fn headless_app(
         .add_systems(PreUpdate, deliver)
         .add_systems(PostUpdate, (stream_deltas, finish_turns).chain());
     user_memory::install(&mut app, store);
+    duties::register(&mut app);
     app
 }
 
@@ -93,7 +96,9 @@ fn deliver(world: &mut World) {
                     Name::new(bot.name),
                     conversation,
                     request.model,
-                    ToolAccess::only([REMEMBER_TOOL, TOOL_NAME]),
+                    duties::system_prompt(bot.duties.as_deref()),
+                    ToolAccess::only([REMEMBER_TOOL, SET_DUTIES, TOOL_NAME]),
+                    DutyTurn::default(),
                     MemoryInput::new(bot.id, request.message_id, request.prompt.clone()),
                     scope,
                     Reply {
@@ -159,9 +164,11 @@ fn finish_turns(
             .entity(agent)
             .queue(move |mut agent: EntityWorldMut| {
                 if let Some(reply) = agent.take::<Reply>() {
+                    let duties = agent.take::<DutyTurn>().and_then(|turn| turn.replacement);
                     agent.despawn();
                     let _ = reply.finished.send(TurnResult {
                         answer,
+                        duties,
                         stream: reply.stream,
                     });
                 }
