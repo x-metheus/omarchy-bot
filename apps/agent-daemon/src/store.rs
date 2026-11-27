@@ -64,7 +64,7 @@ pub(crate) enum History {
 
 pub(crate) struct RestoredConversation {
     pub(crate) conversation: Conversation,
-    pub(crate) observation: Option<Observation>,
+    pub(crate) observation: Option<Box<Observation>>,
 }
 
 pub(crate) enum Admission {
@@ -263,7 +263,7 @@ impl Store {
                     };
                     Some(RestoredConversation {
                         conversation,
-                        observation: observations::load(&transaction, bot)?,
+                        observation: observations::load(&transaction, bot)?.map(Box::new),
                     })
                 }
                 History::Live => None,

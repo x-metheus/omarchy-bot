@@ -111,11 +111,10 @@ pub(super) fn install(app: &mut App, store: &Store) {
         .add_systems(AgentPass, fit_history.in_set(PrepareSystems::Fit));
 }
 
+type NewTurnCall = (Added<Admitted>, With<TurnCall>);
+
 fn fit_history(
-    mut calls: Query<
-        (&ForAgent, &CallOf, &Adapted, &mut ModelRequest),
-        (Added<Admitted>, With<TurnCall>),
-    >,
+    mut calls: Query<(&ForAgent, &CallOf, &Adapted, &mut ModelRequest), NewTurnCall>,
     turns: Query<&Turn>,
     mut bots: Query<(&BotAgent, &mut ObservationalHistory)>,
     store: Res<ObservationStore>,

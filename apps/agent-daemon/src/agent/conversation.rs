@@ -200,7 +200,8 @@ fn deliver(world: &mut World) {
             } = request;
             let agent = if let Some(restored) = history {
                 let mut history = restored.conversation;
-                let mut observation = ObservationalHistory::new(restored.observation);
+                let mut observation =
+                    ObservationalHistory::new(restored.observation.map(|observation| *observation));
                 let mut conversation = Conversation::default();
                 conversation.extend(history.messages.iter_mut().map(|message| {
                     let text = std::mem::take(&mut message.text);

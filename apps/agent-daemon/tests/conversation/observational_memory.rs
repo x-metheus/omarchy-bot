@@ -5,11 +5,10 @@ use serde_json::json;
 use tokio::time::timeout;
 
 use super::{
-    BOOTSTRAP_KEY, DEADLINE, Daemon, MODEL, Provider, ProviderCall, ReplyStream, bot_id,
-    chat_reply, http_client, recall_status, transcript,
+    BOOTSTRAP_KEY, DEADLINE, Daemon, MODEL, ObserverReplies, Provider, ProviderCall, ReplyStream,
+    bot_id, chat_reply, http_client, recall_status, transcript,
 };
 
-const OBSERVER: &str = "Summarize the committed Conversation";
 const CATALOG_ID: &str = "BUD-917-X";
 
 fn system_prompt(call: &ProviderCall) -> &str {
@@ -18,19 +17,15 @@ fn system_prompt(call: &ProviderCall) -> &str {
         .expect("Chat Completions system text block")
 }
 
-fn is_observation(call: &ProviderCall) -> bool {
-    system_prompt(call).starts_with(OBSERVER)
-}
-
 async fn observation_and_chat(provider: &mut Provider) -> (ProviderCall, ProviderCall) {
     let first = provider.next().await;
     let second = provider.next().await;
     assert_ne!(
-        is_observation(&first),
-        is_observation(&second),
+        first.is_observation(),
+        second.is_observation(),
         "expected one observer request and one chat request"
     );
-    if is_observation(&first) {
+    if first.is_observation() {
         (first, second)
     } else {
         (second, first)
@@ -74,7 +69,7 @@ async fn request_with_summary(
             let mut stream = ReplyStream::new(daemon.send(client, bot, "Continue").await);
             let chat = provider.next().await;
             assert!(
-                !is_observation(&chat),
+                !chat.is_observation(),
                 "a pending observation is single-flight per Bot"
             );
             if system_prompt(&chat).contains(summary) {
@@ -101,7 +96,7 @@ async fn recall_returns_the_original_after_observation_and_restart() {
 }
 
 async fn observe_committed_prefix(recall_model: Option<OsString>) {
-    let mut provider = Provider::start().await;
+    let mut provider = Provider::start_with_observers(ObserverReplies::Scripted).await;
     let directory = tempfile::tempdir().unwrap();
     let db = directory.path().join("daemon.sqlite3");
     let client = http_client();
@@ -215,7 +210,7 @@ async fn observe_committed_prefix(recall_model: Option<OsString>) {
 
 #[tokio::test]
 async fn bots_observe_independently_and_chat_continues_after_a_failed_observation() {
-    let mut provider = Provider::start().await;
+    let mut provider = Provider::start_with_observers(ObserverReplies::Scripted).await;
     let directory = tempfile::tempdir().unwrap();
     let client = http_client();
     let daemon = Daemon::start(&directory.path().join("daemon.sqlite3"), &provider).await;
@@ -264,7 +259,7 @@ async fn bots_observe_independently_and_chat_continues_after_a_failed_observatio
             let mut stream = ReplyStream::new(daemon.send(&client, first, "Check opal").await);
             let chat = loop {
                 let call = provider.next().await;
-                if !is_observation(&call) {
+                if !call.is_observation() {
                     break call;
                 }
                 assert!(retry.is_none(), "one observer can retry independently");

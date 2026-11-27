@@ -173,6 +173,21 @@ struct ProviderCall {
 }
 
 impl ProviderCall {
+    fn is_observation(&self) -> bool {
+        let system = if self.uri.path() == MESSAGES_PATH {
+            &self.body["system"][0]["text"]
+        } else {
+            let message = &self.body["messages"][0];
+            if message["role"] != "system" {
+                return false;
+            }
+            &message["content"][0]["text"]
+        };
+        system
+            .as_str()
+            .is_some_and(|text| text.starts_with("Summarize the committed Conversation"))
+    }
+
     fn assert_request(&self, path: &str, model: &str, key: &str) {
         assert_eq!(self.uri.path(), path);
         assert_eq!(self.body["stream"], true);
@@ -297,13 +312,23 @@ struct Provider {
     server: JoinHandle<()>,
 }
 
+#[derive(Clone, Copy)]
+enum ObserverReplies {
+    Automatic,
+    Scripted,
+}
+
 impl Provider {
     async fn start() -> Self {
+        Self::start_with_observers(ObserverReplies::Automatic).await
+    }
+
+    async fn start_with_observers(observers: ObserverReplies) -> Self {
         let (tx, calls) = mpsc::channel(8);
         let app = Router::new()
             .route("/v1/chat/completions", post(completion))
             .route("/v1/messages", post(completion))
-            .with_state(tx);
+            .with_state((tx, observers));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind scripted provider");
@@ -329,7 +354,7 @@ impl Drop for Provider {
 }
 
 async fn completion(
-    State(calls): State<mpsc::Sender<ProviderCall>>,
+    State((calls, observers)): State<(mpsc::Sender<ProviderCall>, ObserverReplies)>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     Json(body): Json<Value>,
@@ -343,15 +368,25 @@ async fn completion(
             .get("x-api-key")
             .is_some_and(|value| value == REJECTED_API_KEY);
     let (frames, rx) = mpsc::channel(8);
-    calls
-        .send(ProviderCall {
-            body,
-            uri,
-            headers,
-            frames,
-        })
-        .await
-        .unwrap();
+    let call = ProviderCall {
+        body,
+        uri,
+        headers,
+        frames,
+    };
+    if matches!(observers, ObserverReplies::Automatic) && call.is_observation() {
+        if !rejected {
+            let summary = "Fixture summary of older Conversation messages.";
+            if call.uri.path() == MESSAGES_PATH {
+                call.messages_reply(summary).await;
+            } else {
+                call.text(summary).await;
+                call.finish().await;
+            }
+        }
+    } else {
+        calls.send(call).await.unwrap();
+    }
     if rejected {
         let error = json!({
             "type": "error",
