@@ -39,7 +39,7 @@ pub(crate) fn router(
 ) -> Router {
     Router::new()
         .route("/bots", post(create_bot))
-        .route("/bots/{bot}", get(read_bot))
+        .route("/bots/{bot}", get(read_bot).patch(rename_bot))
         .route("/bots/{bot}/messages", post(send_message))
         .route("/bots/{bot}/attachments/{id}", get(read_attachment))
         .route("/recall/status", get(recall_status))
@@ -159,27 +159,51 @@ async fn write_settings(
 }
 
 #[derive(Deserialize)]
-struct CreateBot {
+struct BotName {
     name: String,
+}
+
+impl BotName {
+    fn into_name(self) -> Result<String, ApiError> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                Problem::new("empty_name", "Bot name must be nonempty"),
+            ));
+        }
+        if name.len() == self.name.len() {
+            Ok(self.name)
+        } else {
+            Ok(name.to_owned())
+        }
+    }
 }
 
 async fn create_bot(
     State(daemon): State<Daemon>,
-    Json(input): Json<CreateBot>,
+    Json(input): Json<BotName>,
 ) -> Result<(StatusCode, Json<Bot>), ApiError> {
-    let name = input.name.trim();
-    if name.is_empty() {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            Problem::new("empty_name", "Bot name must be nonempty"),
-        ));
-    }
     let bot = daemon
         .store
-        .create_bot(name.to_owned())
+        .create_bot(input.into_name()?)
         .await
         .map_err(store_error)?;
     Ok((StatusCode::CREATED, Json(bot)))
+}
+
+async fn rename_bot(
+    State(daemon): State<Daemon>,
+    Path(bot): Path<Uuid>,
+    Json(input): Json<BotName>,
+) -> Result<Json<Bot>, ApiError> {
+    daemon
+        .store
+        .rename_bot(bot, input.into_name()?)
+        .await
+        .map_err(store_error)?
+        .map(Json)
+        .ok_or(BOT_NOT_FOUND)
 }
 
 async fn read_bot(

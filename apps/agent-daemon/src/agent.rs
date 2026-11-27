@@ -47,5 +47,6 @@ pub(crate) fn headless_app(
     rig_harness::load::<SubagentsPlugin>(&mut app, "rig-basics", "");
     conversation::add(&mut app, pending, conversations);
     user_memory::install(&mut app, store);
+    duties::register(&mut app);
     app
 }
