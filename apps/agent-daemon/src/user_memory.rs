@@ -1,7 +1,8 @@
+mod management;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use crate::agent::conversation::{ConversationTools, ModelUserInput, UserMessageSource};
 use anyhow::Result;
 use bevy_tasks::AsyncComputeTaskPool;
 use rig_core::completion::Section;
@@ -10,9 +11,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::agent::conversation::{ConversationTools, ModelUserInput, UserMessageSource};
 use crate::store::{Role, Store as DaemonStore};
 
-pub(crate) use management::{FORGET_TOOL, INSPECT_TOOL, forget, inspect};
+pub(crate) use management::{forget, inspect};
 
 pub(crate) const REMEMBER_TOOL: &str = "remember_user_memory";
 const REPLY_LANGUAGE: &str = "preferences.reply_language";
@@ -165,7 +167,7 @@ pub(crate) fn remember(
     Ok(MemoryWrite::Applied)
 }
 
-fn source_text(db: &Connection, source: MemorySource) -> rusqlite::Result<Option<String>> {
+fn source_text(db: &Connection, source: UserMessageSource) -> rusqlite::Result<Option<String>> {
     db.query_row(
         "SELECT text FROM messages WHERE id = ?1 AND bot_id = ?2 AND role = ?3",
         params![source.message_id, source.bot.as_bytes(), Role::User as i64],
@@ -424,21 +426,11 @@ fn write_tool(
     ));
 }
 
-fn tool_source<A: Send + Sync + 'static>(
-    called: &ToolCalled<A>,
-    inputs: &Query<&MemoryInput>,
-) -> Option<MemorySource> {
-    inputs
-        .get(called.agent)
-        .ok()?
-        .calls
-        .get(&called.parent?)
-        .copied()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use uuid::Uuid;
 
     #[test]
     fn retrying_the_same_committed_inputs_after_reopening_keeps_the_key_forgotten() {
@@ -447,8 +439,8 @@ mod tests {
         let bot = Uuid::new_v4();
         let old = "Always use metric units.";
         let clear = "Forget my units preference.";
-        let proposed = MemorySource { bot, message_id: 1 };
-        let forgotten = MemorySource { bot, message_id: 2 };
+        let proposed = UserMessageSource { bot, message_id: 1 };
+        let forgotten = UserMessageSource { bot, message_id: 2 };
         {
             let mut db = Connection::open(&path).unwrap();
             db.execute_batch(

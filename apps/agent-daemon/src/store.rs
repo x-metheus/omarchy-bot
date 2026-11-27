@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::agent::conversation::UserMessageSource;
 use crate::attachments::{self, Metadata, Stored, Submission};
 use crate::settings::{Settings, SettingsStatus, SettingsUpdate, Update};
-use crate::user_memory::{self, CurrentMemory, Proposal, Remembered};
+use crate::user_memory::{self, CurrentMemory, MemoryWrite, Proposal};
 
 #[derive(Serialize)]
 pub(crate) struct Bot {
@@ -337,7 +337,7 @@ impl Store {
 
     pub(crate) async fn forget_memory(
         &self,
-        source: MemorySource,
+        source: UserMessageSource,
         key: String,
         evidence: String,
     ) -> Result<MemoryWrite> {

@@ -8,16 +8,18 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::{
-    CurrentMemory, MemoryInput, MemorySource, MemoryStore, MemoryWrite, source_text,
-    subject_matches_key, tool_source,
-};
+use super::{CurrentMemory, MemoryStore, MemoryWrite, source_text, subject_matches_key};
+use crate::agent::conversation::{ConversationTools, UserMessageSource};
 use crate::store::Role;
 
-pub(crate) const INSPECT_TOOL: &str = "inspect_user_memory";
-pub(crate) const FORGET_TOOL: &str = "forget_user_memory";
+const INSPECT_TOOL: &str = "inspect_user_memory";
+const FORGET_TOOL: &str = "forget_user_memory";
 
 pub(super) fn install(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<ConversationTools>()
+        .root_only
+        .extend([INSPECT_TOOL, FORGET_TOOL]);
     app.add_open_tool(
         INSPECT_TOOL,
         "When the user asks what you remember or where it came from, read the current shared \
@@ -55,7 +57,7 @@ struct Forget {
 pub(crate) fn forget(
     db: &mut Connection,
     current: &CurrentMemory,
-    source: MemorySource,
+    source: UserMessageSource,
     key: &str,
     evidence: &str,
 ) -> Result<MemoryWrite> {
@@ -158,14 +160,14 @@ fn inspect_tool(
 
 fn forget_tool(
     called: On<ToolCalled<Forget>>,
-    inputs: Query<&MemoryInput>,
+    inputs: Query<&UserMessageSource>,
     mut decisions: Query<&mut Decision>,
     store: Res<MemoryStore>,
     runtime: Res<TokioRuntime>,
     wake: Res<Wake>,
     mut commands: Commands,
 ) {
-    let Some(source) = tool_source(&called, &inputs) else {
+    let Ok(&source) = inputs.get(called.call) else {
         if let Ok(mut decision) = decisions.get_mut(called.call) {
             decision.decide(
                 Decider::plugin(FORGET_TOOL),
