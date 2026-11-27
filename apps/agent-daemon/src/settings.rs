@@ -1,7 +1,8 @@
 use std::{env, fs, str};
 
 use anyhow::{Context, Result, anyhow, ensure};
-use rig_core::catalog::ModelSpec;
+use rig_core::catalog::{Catalog, ModelSpec};
+use rig_core::completion::{Accepts, ReplayTarget};
 use rig_core::driver::{DynModel, Model};
 use rig_core::operation::Completion;
 use rig_core::providers::anthropic::AnthropicConfig;
@@ -97,13 +98,15 @@ struct Endpoints {
 
 impl Endpoints {
     fn connect(&self, selection: Selection, key: Secret) -> ConfiguredModel {
-        let model: DynModel<Completion> = match selection.provider {
+        let (model, accepts): (DynModel<Completion>, Accepts) = match selection.provider {
             Provider::OpenAi => {
                 let mut config = OpenAIConfig::new(key);
                 if let Some(url) = &self.openai {
                     config = config.with_base_url(url);
                 }
-                config.client().chat(&selection.model).into()
+                let model = config.client().chat(&selection.model);
+                let accepts = model.wire.accepts(&selection.model);
+                (model.into(), accepts)
             }
             Provider::Anthropic => {
                 let mut config = AnthropicConfig::new(key);
@@ -113,15 +116,17 @@ impl Endpoints {
                 let mut wire = config.completion(&selection.model);
                 // Rig supplies catalog limits. Messages requires a limit for gateway aliases too.
                 wire.default_max_tokens.get_or_insert(1024);
-                Model::new(wire, rig_reqwest::shared()).into()
+                let accepts = wire.accepts(&selection.model);
+                (Model::new(wire, rig_reqwest::shared()).into(), accepts)
             }
         };
         let provider =
             ProviderId::catalog(selection.provider.name()).expect("built-in Rig provider");
-        // Rig's bare spec disables tools. The configured provider wires support tool calls
-        // on gateway aliases, and catalog entries can declare a model's exception.
-        let spec = ModelSpec::new(provider, &selection.model)
-            .with_tools(model.spec().is_none_or(|spec| spec.tools));
+        let known = Catalog::builtin().get(provider, &selection.model);
+        // Rig's bare spec disables tools. Use the provider wire capabilities for gateway aliases.
+        let mut spec = ModelSpec::new(provider, &selection.model)
+            .with_tools(accepts.tools && known.as_ref().is_none_or(|known| known.spec.tools));
+        spec.input.image = known.map_or(accepts.user_images, |known| known.spec.input.image);
         let handler = ModelAdapter::<Completion>::new(spec.reference(), model);
         ConfiguredModel {
             selection,

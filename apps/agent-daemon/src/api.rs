@@ -20,6 +20,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::agent::TurnRequest;
+use crate::attachments::{Input as AttachmentInput, MAX_ATTACHMENTS};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
 use crate::store::{Admission, Bot, Conversation, Store};
 
@@ -41,6 +42,7 @@ pub(crate) fn router(
         .route("/bots", post(create_bot))
         .route("/bots/{bot}", get(read_bot))
         .route("/bots/{bot}/messages", post(send_message))
+        .route("/bots/{bot}/attachments/{id}", get(read_attachment))
         .merge(
             Router::new()
                 .route("/settings", get(read_settings).put(write_settings))
@@ -190,26 +192,83 @@ async fn read_bot(
         .ok_or(BOT_NOT_FOUND)
 }
 
+async fn read_attachment(
+    State(daemon): State<Daemon>,
+    Path((bot, id)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let attachment = daemon
+        .store
+        .attachment(bot, id)
+        .await
+        .map_err(store_error)?
+        .ok_or(ATTACHMENT_NOT_FOUND)?;
+    let content = attachment.content.ok_or(ApiError(
+        StatusCode::GONE,
+        Problem::new(
+            "attachment_unavailable",
+            "attachment content is unavailable",
+        ),
+    ))?;
+    let media_type = match attachment.metadata.media_type.as_str() {
+        "text/plain" => "text/plain; charset=utf-8",
+        media_type => media_type,
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, media_type),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        content,
+    )
+        .into_response())
+}
+
 #[derive(Deserialize)]
 struct SendMessage {
     text: String,
+    #[serde(default)]
+    attachments: Vec<AttachmentInput>,
 }
 
 async fn send_message(
     State(daemon): State<Daemon>,
     Path(bot): Path<Uuid>,
-    Json(input): Json<SendMessage>,
+    input: Result<Json<SendMessage>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let Json(input) = input.map_err(|error| {
+        ApiError(
+            error.status(),
+            Problem::new(
+                "invalid_message",
+                "expected message JSON with valid attachment entries",
+            ),
+        )
+    })?;
     if input.text.trim().is_empty() {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             Problem::new("empty_message", "message text must be nonempty"),
         ));
     }
+    if input.attachments.len() > MAX_ATTACHMENTS
+        || !input
+            .attachments
+            .iter()
+            .all(AttachmentInput::valid_metadata)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            Problem::new(
+                "invalid_attachments",
+                "expected at most eight attachments with valid metadata",
+            ),
+        ));
+    }
     let guard = ActiveTurn::acquire(&daemon.active, bot)?;
     let (events, stream) = mpsc::channel(64);
     let (accepted, admission) = oneshot::channel();
-    tokio::spawn(run_turn(daemon, guard, input.text, events, accepted));
+    tokio::spawn(run_turn(daemon, guard, input, events, accepted));
     admission.await.map_err(|_| UNAVAILABLE)??;
     Ok(Sse::new(
         ReceiverStream::new(stream).map(Ok::<_, Infallible>),
@@ -219,23 +278,45 @@ async fn send_message(
 async fn run_turn(
     daemon: Daemon,
     guard: ActiveTurn,
-    text: String,
+    input: SendMessage,
     stream: mpsc::Sender<Event>,
     accepted: oneshot::Sender<Result<(), ApiError>>,
 ) {
     let bot = guard.bot;
-    let admission = match daemon.store.accept_message(bot, text).await {
+    let SendMessage { text, attachments } = input;
+    let submissions = if attachments.is_empty() {
+        Vec::new()
+    } else {
+        match tokio::task::spawn_blocking(move || {
+            attachments
+                .into_iter()
+                .map(AttachmentInput::prepare)
+                .collect()
+        })
+        .await
+        {
+            Ok(submissions) => submissions,
+            Err(_) => {
+                drop(guard);
+                let _ = accepted.send(Err(UNAVAILABLE));
+                return;
+            }
+        }
+    };
+    let admission = match daemon.store.accept_message(bot, text, submissions).await {
         Ok(Admission::Accepted {
             history,
             message_id,
             prompt,
+            attachments,
             model,
-        }) => Ok((history, message_id, prompt, model)),
+        }) => Ok((history, message_id, prompt, attachments, model)),
         Ok(Admission::BotNotFound) => Err(BOT_NOT_FOUND),
+        Ok(Admission::AttachmentNotFound) => Err(ATTACHMENT_NOT_FOUND),
         Ok(Admission::Unconfigured) => Err(UNCONFIGURED),
         Err(error) => Err(store_error(error)),
     };
-    let (history, message_id, prompt, model) = match admission {
+    let (history, message_id, prompt, attachments, model) = match admission {
         Ok(turn) => turn,
         Err(error) => {
             drop(guard);
@@ -243,6 +324,15 @@ async fn run_turn(
             return;
         }
     };
+    let mut parts = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        match attachment.into_part(&model.spec) {
+            Ok(part) => parts.push(part),
+            Err(warning) => {
+                let _ = stream.try_send(event("attachment_warning", warning));
+            }
+        }
+    }
     let (finished, result) = oneshot::channel();
     if daemon
         .turns
@@ -251,6 +341,7 @@ async fn run_turn(
             message_id,
             model,
             prompt,
+            attachments: parts,
             stream,
             finished,
         })
@@ -350,6 +441,13 @@ impl IntoResponse for ApiError {
 const BOT_NOT_FOUND: ApiError = ApiError(
     StatusCode::NOT_FOUND,
     Problem::new("bot_not_found", "Bot not found"),
+);
+const ATTACHMENT_NOT_FOUND: ApiError = ApiError(
+    StatusCode::NOT_FOUND,
+    Problem::new(
+        "attachment_not_found",
+        "attachment is unavailable to this Conversation",
+    ),
 );
 const UNAVAILABLE: ApiError = ApiError(
     StatusCode::SERVICE_UNAVAILABLE,

@@ -110,6 +110,7 @@ Expect ordered `delta` events followed by `committed` for both replies. The foll
 | `POST /bots` with `{"name":"Lumen"}` | `201` with `id` and `name` |
 | `GET /bots/{id}` | `200` with `bot` and `messages`, oldest first |
 | `POST /bots/{id}/messages` with `{"text":"Hello"}` | `200` with a `text/event-stream` reply |
+| `GET /bots/{id}/attachments/{attachmentId}` | `200` with the stored bytes and media type |
 
 A successful message POST commits the user message before starting the model call. Each `delta` contains a JSON string. The terminal `committed` event contains the same `{id, role, text}` message returned by `GET` and is sent after the SQLite commit. A failed Turn ends with an `error` event containing `code` and `message`. Any deltas from that Turn are provisional. The committed user message remains in the Conversation.
 
@@ -130,6 +131,44 @@ Each model request receives the current reply language, time zone, and preferred
 Rig's request preparation stage records the eligible committed input against each model effect. A tool call resolves its originating effect, then the daemon verifies the source Bot, message ID, user role, and verbatim evidence against SQLite. When several deliveries share an Agent, request preparation must select the eligible authored input using the durable message identity carried through `Incoming` and `DeliveredAs`/`DeliveredIn`. The captured source remains stable for tool calls originating from that invocation.
 
 Issue #22 can use the stable keys, source lookup, and committed order for inspection and tombstones. Clear operations must publish to the same read snapshot after commit, and the ordering guard must continue to compare against the last operation even when the current value is absent.
+
+## Conversation attachments
+
+Include an optional `attachments` array in a message POST. The daemon associates entries with the committed message in array order. The `text` field remains required and stores the exact user-authored text used for UserMemory evidence. Attachment content enters the selected model's current Turn. A later Turn can include the content again by referencing its ID.
+
+```json
+{
+  "text": "Use the new note and the diagram I attached earlier.",
+  "attachments": [
+    {"type":"inline","name":"sample.txt","mediaType":"text/plain","content":"Sample material is cobalt."},
+    {"type":"reference","id":"e30e61e5-aaea-4840-a622-ebe5167d4df5"}
+  ]
+}
+```
+
+Send extracted plain UTF-8 text in `content` for `text/plain`, up to 64 KiB. For `image/png`, `image/jpeg`, `image/gif`, and `image/webp`, send standard padded base64 of a static image up to 1 MiB decoded and 2,048 pixels on either axis. The daemon verifies the format and decodes the image before storing its original bytes. The JSON request limit is 2 MiB with up to eight attachment entries. Use a file name as the label. Extract document text on the client before sending it. Both text and image content are shared with the configured model provider when used in a Turn.
+
+`GET /bots/{id}` returns an `attachments` array on each message with attachment records. Each record has `id`, `name`, `mediaType`, and `available`. Download available content from the attachment GET route. Both download and reference reuse require an existing association in the target Bot's Conversation on the connected daemon. Unknown IDs and IDs from another Bot return `404 attachment_not_found`. A malformed POST reference returns `422 invalid_message`. A rejected reference leaves the submission uncommitted.
+
+An admitted message with an unusable attachment emits an `attachment_warning` SSE event with `attachmentId`, `code`, and `message` before reply deltas. Missing, invalid, or over-limit content gives `attachment_unavailable`. An unsupported MIME type gives `attachment_format_unsupported`. These records are visible in the Conversation with `available: false`, and their content GET returns `410 attachment_unavailable`. A valid image for a text-only selected model gives `attachment_model_unsupported` and remains downloadable. The Agent can still use the message text and any usable attachments.
+
+OpenAI Chat Completions and Anthropic Messages accept text attachments as text parts. For image support, the daemon uses the pinned Rig catalog for known models, including `openai/gpt-4.1-mini` and `anthropic/claude-haiku-4-5`. For unlisted gateway aliases it uses Rig's provider wire capability rule. Select an alias the gateway documents as vision-capable. Provider failures appear as `turn_failed` and the committed message stays in the Conversation. [Rig model catalog](https://docs.rs/rig-core/0.47.1/rig_core/catalog/) · [OpenAI vision guide](https://developers.openai.com/api/docs/guides/images-vision/) · [Anthropic vision guide](https://platform.claude.com/docs/en/build-with-claude/vision)
+
+### Live attachment smoke
+
+Use a disposable daemon database, an authorized credential, and a vision-capable model that supports streaming on the selected endpoint. For an authorized Chat Completions gateway, set `OPENAI_BASE_URL` to its API root and select its vision-capable model ID in Settings or through `OMARCHY_AGENT_MODEL`. Start a fresh Bot as in the smoke test above. Put a neutral text sample that says `Calibration sample: cobalt.` in `sample.txt` and prepare a static red PNG named `pixel.png` within the stated limits. Run this with `curl` and `jq`.
+
+```sh
+jq -n --rawfile note sample.txt --arg image "$(base64 -w0 pixel.png)" '{
+  text: "Which calibration sample does the text name, and what color is the PNG?",
+  attachments: [
+    {type:"inline",name:"sample.txt",mediaType:"text/plain",content:$note},
+    {type:"inline",name:"pixel.png",mediaType:"image/png",content:$image}
+  ]
+}' | curl -fsSN "$base/bots/$bot/messages" -H 'Content-Type: application/json' --data-binary @-
+```
+
+Expect a committed reply identifying cobalt and red and a Conversation with both attachment IDs on the submitted message.
 
 ## Checks
 
