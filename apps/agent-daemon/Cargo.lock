@@ -2753,11 +2753,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.23.1",
  "bevy_ecs",
  "bevy_log",
  "bevy_tasks",
  "fastembed",
  "futures",
+ "image",
  "ort",
  "rayon",
  "reqwest",

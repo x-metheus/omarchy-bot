@@ -8,11 +8,13 @@ publish = false
 [dependencies]
 anyhow = "1"
 axum = "0.8"
+base64 = "0.23"
 bevy_ecs = { version = "=0.20.1", default-features = false }
 bevy_log = "=0.20.1"
 bevy_tasks = { version = "=0.20.1", default-features = false }
 fastembed = { version = "=4.9.1", default-features = false }
 futures = "0.3"
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 ort = { version = "=2.0.0-rc.9", default-features = false }
 rayon = "1"
 rig-core = { version = "=0.47.1", default-features = false, features = ["reqwest", "rustls"] }

@@ -10,7 +10,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::attachments::{self, Metadata, Stored, Submission};
 use crate::settings::{Settings, SettingsStatus, SettingsUpdate, Update};
+use crate::user_memory::{self, CurrentMemory, MemorySource, Proposal, Remembered};
 
 #[derive(Serialize)]
 pub(crate) struct Bot {
@@ -29,6 +31,8 @@ pub(crate) struct Message {
     pub(crate) id: i64,
     pub(crate) role: Role,
     pub(crate) text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<Metadata>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -50,10 +54,13 @@ impl FromSql for Role {
 
 pub(crate) enum Admission {
     BotNotFound,
+    AttachmentNotFound,
     Unconfigured,
     Accepted {
         history: Conversation,
+        message_id: i64,
         prompt: String,
+        attachments: Vec<Stored>,
         model: RigConnection,
     },
 }
@@ -64,7 +71,7 @@ struct Database {
 }
 
 #[derive(Clone)]
-pub(crate) struct Store(Arc<Mutex<Database>>);
+pub(crate) struct Store(Arc<Mutex<Database>>, CurrentMemory);
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
@@ -93,6 +100,30 @@ impl Store {
                      revision TEXT NOT NULL,
                      embedding BLOB NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS message_order (
+                     one INTEGER PRIMARY KEY CHECK (one = 1),
+                     high_water INTEGER NOT NULL
+                 );
+                 INSERT OR IGNORE INTO message_order
+                     SELECT 1, coalesce(max(id), 0) FROM messages;
+                 CREATE TRIGGER IF NOT EXISTS advance_message_order AFTER INSERT ON messages
+                 BEGIN
+                     UPDATE message_order SET high_water = max(high_water, NEW.id) WHERE one = 1;
+                 END;
+                 CREATE TABLE IF NOT EXISTS attachments (
+                     id BLOB PRIMARY KEY NOT NULL,
+                     name TEXT NOT NULL,
+                     media_type TEXT NOT NULL,
+                     content BLOB
+                 );
+                 CREATE TABLE IF NOT EXISTS message_attachments (
+                     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                     position INTEGER NOT NULL,
+                     attachment_id BLOB NOT NULL REFERENCES attachments(id),
+                     PRIMARY KEY (message_id, position)
+                 );
+                 CREATE INDEX IF NOT EXISTS message_attachments_by_attachment
+                     ON message_attachments(attachment_id);
                  CREATE TABLE IF NOT EXISTS provider_credentials (
                      provider TEXT PRIMARY KEY NOT NULL CHECK (provider IN ('openai', 'anthropic')),
                      sealed_key BLOB NOT NULL
@@ -106,10 +137,14 @@ impl Store {
             )
             .context("initialize SQLite database and acquire its daemon lock")?;
         let settings = Settings::load(&connection)?;
-        Ok(Self(Arc::new(Mutex::new(Database {
-            connection,
-            settings,
-        }))))
+        let user_memory = CurrentMemory::load(&connection)?;
+        Ok(Self(
+            Arc::new(Mutex::new(Database {
+                connection,
+                settings,
+            })),
+            user_memory,
+        ))
     }
 
     pub(crate) async fn settings(&self) -> Result<SettingsStatus> {
@@ -134,11 +169,39 @@ impl Store {
     }
 
     pub(crate) async fn conversation(&self, bot: Uuid) -> Result<Option<Conversation>> {
-        self.run(move |db| Ok(load_conversation(&db.connection, bot)?))
+        self.run(move |db| {
+            let Some(mut conversation) = load_conversation(&db.connection, bot)? else {
+                return Ok(None);
+            };
+            let mut messages = conversation.messages.iter_mut().peekable();
+            attachments::visit_conversation(&db.connection, bot, |message_id, attachment| {
+                while messages
+                    .next_if(|message| message.id < message_id)
+                    .is_some()
+                {}
+                if let Some(message) = messages
+                    .peek_mut()
+                    .filter(|message| message.id == message_id)
+                {
+                    message.attachments.push(attachment);
+                }
+            })?;
+            Ok(Some(conversation))
+        })
+        .await
+    }
+
+    pub(crate) async fn attachment(&self, bot: Uuid, id: Uuid) -> Result<Option<Stored>> {
+        self.run(move |db| Ok(attachments::for_bot(&db.connection, bot, id)?))
             .await
     }
 
-    pub(crate) async fn accept_message(&self, bot: Uuid, text: String) -> Result<Admission> {
+    pub(crate) async fn accept_message(
+        &self,
+        bot: Uuid,
+        text: String,
+        submissions: Vec<Submission>,
+    ) -> Result<Admission> {
         self.run(move |db| {
             let transaction = db.connection.transaction()?;
             let Some(history) = load_conversation(&transaction, bot)? else {
@@ -148,11 +211,33 @@ impl Store {
             let Some(model) = db.settings.connection() else {
                 return Ok(Admission::Unconfigured);
             };
-            insert_message(&transaction, bot, Role::User, &text)?;
+            // Resolve against committed history before inserting any associations for this message.
+            let mut attachments = Vec::with_capacity(submissions.len());
+            for submission in submissions {
+                let attachment = match submission {
+                    Submission::Inline(attachment) => {
+                        attachments::insert(&transaction, &attachment)?;
+                        attachment
+                    }
+                    Submission::Reference(id) => {
+                        let Some(attachment) = attachments::for_bot(&transaction, bot, id)? else {
+                            return Ok(Admission::AttachmentNotFound);
+                        };
+                        attachment
+                    }
+                };
+                attachments.push(attachment);
+            }
+            let message_id = insert_message(&transaction, bot, Role::User, &text)?;
+            for (position, attachment) in attachments.iter().enumerate() {
+                attachments::associate(&transaction, message_id, position, attachment.metadata.id)?;
+            }
             transaction.commit()?;
             Ok(Admission::Accepted {
                 history,
+                message_id,
                 prompt: text,
+                attachments,
                 model,
             })
         })
@@ -163,9 +248,28 @@ impl Store {
         self.run(move |db| {
             let role = Role::Assistant;
             let id = insert_message(&db.connection, bot, role, &text)?;
-            Ok(Message { id, role, text })
+            Ok(Message {
+                id,
+                role,
+                text,
+                attachments: Vec::new(),
+            })
         })
         .await
+    }
+
+    pub(crate) fn user_memory(&self) -> &CurrentMemory {
+        &self.1
+    }
+
+    pub(crate) async fn remember(
+        &self,
+        source: MemorySource,
+        proposal: Proposal,
+    ) -> Result<Remembered> {
+        let current = self.1.clone();
+        self.run(move |db| user_memory::remember(&mut db.connection, &current, source, proposal))
+            .await
     }
 
     async fn run<T: Send + 'static>(
@@ -198,6 +302,7 @@ fn load_conversation(connection: &Connection, id: Uuid) -> rusqlite::Result<Opti
                 id: row.get(0)?,
                 role: row.get(1)?,
                 text: row.get(2)?,
+                attachments: Vec::new(),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -213,9 +318,11 @@ fn insert_message(
     role: Role,
     text: &str,
 ) -> rusqlite::Result<i64> {
-    connection.execute(
-        "INSERT INTO messages (bot_id, role, text) VALUES (?1, ?2, ?3)",
+    connection.query_row(
+        "INSERT INTO messages (id, bot_id, role, text)
+         VALUES ((SELECT high_water + 1 FROM message_order WHERE one = 1), ?1, ?2, ?3)
+         RETURNING id",
         params![bot.as_bytes().as_slice(), role as i64, text],
-    )?;
-    Ok(connection.last_insert_rowid())
+        |row| row.get(0),
+    )
 }

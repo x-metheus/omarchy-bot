@@ -3,6 +3,7 @@ use std::path::Path;
 use axum::response::sse::Event;
 use bevy_log::LogPlugin;
 use rig_core::completion::Message;
+use rig_ecs::inbox::{Attachment, MessagePart};
 use rig_ecs::retry::RetryPolicy;
 use rig_harness::host::launcher::LauncherPlugin;
 use rig_harness::host::session::SessionPlugin;
@@ -11,12 +12,15 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::recall::{RecallScope, TOOL_NAME};
-use crate::store::{Conversation as StoredConversation, Role};
+use crate::store::{Conversation as StoredConversation, Role, Store};
+use crate::user_memory::{self, MemoryInput, REMEMBER_TOOL};
 
 pub(crate) struct TurnRequest {
     pub(crate) history: StoredConversation,
+    pub(crate) message_id: i64,
     pub(crate) model: Connection,
     pub(crate) prompt: String,
+    pub(crate) attachments: Vec<Attachment>,
     pub(crate) stream: mpsc::Sender<Event>,
     pub(crate) finished: oneshot::Sender<TurnResult>,
 }
@@ -41,6 +45,7 @@ pub(crate) fn headless_app(
     pending: mpsc::UnboundedReceiver<TurnRequest>,
     runtime: Handle,
     scratch: &Path,
+    store: &Store,
 ) -> App {
     // Provider diagnostics can include raw response bodies. Keep them inside Rig.
 
@@ -62,6 +67,7 @@ pub(crate) fn headless_app(
         .insert_resource(Turns { pending })
         .add_systems(PreUpdate, deliver)
         .add_systems(PostUpdate, (stream_deltas, finish_turns).chain());
+    user_memory::install(&mut app, store);
     app
 }
 
@@ -70,11 +76,7 @@ fn deliver(world: &mut World) {
         while let Ok(request) = turns.pending.try_recv() {
             let scope = RecallScope {
                 bot_id: request.history.bot.id,
-                through: request
-                    .history
-                    .messages
-                    .last()
-                    .map_or(0, |message| message.id),
+                through: request.message_id - 1,
             };
             let mut conversation = Conversation::default();
             for message in request.history.messages {
@@ -91,7 +93,8 @@ fn deliver(world: &mut World) {
                     Name::new(bot.name),
                     conversation,
                     request.model,
-                    ToolAccess::only([TOOL_NAME]),
+                    ToolAccess::only([REMEMBER_TOOL, TOOL_NAME]),
+                    MemoryInput::new(bot.id, request.message_id, request.prompt.clone()),
                     scope,
                     Reply {
                         stream: Some(request.stream),
@@ -100,7 +103,12 @@ fn deliver(world: &mut World) {
                 ),
             )
             .id();
-            world.trigger(Deliver::new(agent, request.prompt, DeliveryMode::Queue).literal());
+            let mut delivery = Deliver::new(agent, request.prompt, DeliveryMode::Queue).literal();
+            delivery
+                .message
+                .parts
+                .extend(request.attachments.into_iter().map(MessagePart::Attachment));
+            world.trigger(delivery);
         }
     });
 }
