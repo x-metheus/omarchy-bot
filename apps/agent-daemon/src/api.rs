@@ -33,12 +33,14 @@ pub(crate) fn router(
     store: Store,
     conversations: mpsc::UnboundedSender<ConversationCommand>,
     settings_token: Option<Digest>,
+    recall: Recall,
 ) -> Router {
     Router::new()
         .route("/bots", post(create_bot))
         .route("/bots/{bot}", get(read_bot))
         .route("/bots/{bot}/messages", post(send_message))
         .route("/bots/{bot}/attachments/{id}", get(read_attachment))
+        .route("/recall/status", get(recall_status))
         .merge(
             Router::new()
                 .route("/settings", get(read_settings).put(write_settings))
@@ -51,6 +53,10 @@ pub(crate) fn router(
             store,
             conversations,
         })
+}
+
+async fn recall_status(State(daemon): State<Daemon>) -> Json<Availability> {
+    Json(daemon.recall.availability())
 }
 
 async fn authorize_settings(

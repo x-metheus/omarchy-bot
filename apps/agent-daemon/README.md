@@ -111,6 +111,7 @@ Expect ordered `delta` events followed by `committed` for both replies. The foll
 | `GET /bots/{id}` | `200` with `bot` and `messages`, oldest first |
 | `POST /bots/{id}/messages` with `{"text":"Hello"}` | `200` with a `text/event-stream` reply |
 | `GET /bots/{id}/attachments/{attachmentId}` | `200` with the stored bytes and media type |
+| `GET /recall/status` | `200` with independent Recall model availability |
 
 A successful message POST commits the user message before starting the model call. Each `delta` contains a JSON string. The terminal `committed` event contains the same `{id, role, text}` message returned by `GET` and is sent after the SQLite commit. A failed Turn ends with an `error` event containing `code` and `message`. Any deltas from that Turn are provisional. The committed user message remains in the Conversation.
 
@@ -175,6 +176,50 @@ jq -n --rawfile note sample.txt --arg image "$(base64 -w0 pixel.png)" '{
 ```
 
 Expect a committed reply identifying cobalt and red and a Conversation with both attachment IDs on the submitted message.
+
+## Recall
+
+An Agent using a tool-capable chat model can call `recall` with a query. Recall searches committed user and assistant message text from the calling Bot before the current Turn. It returns up to five historical matches with `bot_id`, `message_id`, `role`, verbatim `text`, and the half-open UTF-8 range `[start_byte, end_byte)` in the original message. `message_id` is the global committed order and resolves against `GET /bots/{id}`. Each tool result labels its messages as `historical`. Recall evidence has no authority to update UserMemory or establish a current preference.
+
+The daemon embeds and indexes messages locally. Ordinary chat can run while Recall verifies the model or builds its index. A Recall call can catch up on its own Bot's pending messages. If the Agent chooses to use Recall, retrieved text is included in the configured chat provider's next request.
+
+### Offline provision
+
+The pinned model is Xenova's multilingual E5 small INT8 ONNX export at revision `761b726dd34fb83930e26aab4e9ac3899aa1fa78`. On a connected machine, run this from `apps/agent-daemon`, then copy the verified directory to the daemon host.
+
+```sh
+recall_dir=/path/to/recall-model
+hf download Xenova/multilingual-e5-small \
+  --revision 761b726dd34fb83930e26aab4e9ac3899aa1fa78 \
+  --local-dir "$recall_dir" \
+  onnx/model_int8.onnx config.json tokenizer.json special_tokens_map.json tokenizer_config.json
+recall_manifest="$PWD/recall-model.sha256"
+(cd "$recall_dir" && sha256sum -c "$recall_manifest")
+```
+
+Set `OMARCHY_AGENT_RECALL_MODEL_DIR` to the absolute directory before starting the daemon. At startup the daemon verifies the five fixed files against [recall-model.sha256](recall-model.sha256), loads them through Rig FastEmbed, and runs a CPU inference check. `GET /recall/status` reports `loading`, `ready`, or `unavailable` with `reason`. Unavailable reasons are `not_configured`, `model_missing`, `model_unreadable`, `verification_failed`, and `initialization_failed`. The model loads entirely from local files. After replacing missing or rejected files, restart the daemon to verify them again.
+
+The index uses FastEmbed 4.9.1 with the ONNX Runtime 1.20.0 CPU build, 384-dimensional normalized mean pooling, FastEmbed's 512-token limit, and one input per dynamic quantization batch. Queries use `query: ` and trimmed text. Passages use `passage: ` and verbatim text in windows of up to 480 UTF-8 bytes with 80 bytes of overlap, aligned to character boundaries. Exact case-insensitive identifier tokens containing digits take priority over cosine similarity. SQLite stores versioned vectors as derived data keyed to their original messages. Change the index version when changing artifacts or preprocessing so the daemon rebuilds affected rows from original Message History. [Model card](https://huggingface.co/intfloat/multilingual-e5-small) · [Pinned export](https://huggingface.co/Xenova/multilingual-e5-small/tree/761b726dd34fb83930e26aab4e9ac3899aa1fa78) · [Rig FastEmbed 0.47.1](https://docs.rs/rig-fastembed/0.47.1/rig_fastembed/)
+
+### CPU evaluation
+
+The [fixture](tests/fixtures/recall.json) uses 16 neutral passages and 14 labeled queries across English, Spanish, French, German, Portuguese, Chinese, Japanese, and mixed Chinese/English. Candidate runs used the pinned Rust Rig adapter and ONNX Runtime, one embedding at a time, on three logical CPUs on a Linux x86_64 Ryzen 9 7900X. Timings include local model loading and tokenization. Peak RSS is for the standalone probe. The table gives semantic ranks before exact identifier matching.
+
+| Candidate | Artifact bytes | Load | Index 16 | Query p50 / max | Peak RSS | Top 1 / 3 / 5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Xenova multilingual E5 small INT8 | 135,138,591 | 1.52 s | 37.1 ms | 1.9 / 2.4 ms | 806 MiB | 10 / 13 / 14 |
+| Xenova multilingual E5 small FP32 | 487,352,531 | 2.23 s | 85.5 ms | 4.2 / 5.4 ms | 1,545 MiB | 10 / 13 / 14 |
+| Qdrant multilingual MiniLM L12 v2 quantized | 252,138,706 | 1.67 s | Runtime error | — | — | — |
+
+INT8 matched FP32 on aggregate recall with 28% of the artifact bytes. It ranked the German-to-French match third and the Japanese-to-English match fifth, one position below FP32 for each. Both E5 models ranked bare `GDN-417-R` first and placed the near neighbor above `GDN-417-Q` when the identifier appeared in a sentence. The daemon prioritizes exact tokens. MiniLM loaded but failed first inference with a missing `encoder.layer.0.attention.output.LayerNorm.weight` input to `SkipLayerNormalization`. The CPU results are specific to the measured Linux host. [MiniLM candidate revision](https://huggingface.co/Qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q/tree/faf4aa4225822f3bc6376869cb1164e8e3feedd0)
+
+To exercise the real daemon and verified local model with a scripted provider on loopback, run from `apps/agent-daemon`.
+
+```sh
+OMARCHY_AGENT_RECALL_TEST_MODEL_DIR="$recall_dir" cargo test --locked -j 3 \
+  --test conversation recall_returns_original_messages_from_the_calling_bot_after_restart \
+  -- --ignored --exact
+```
 
 ## Checks
 

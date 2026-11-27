@@ -1,6 +1,7 @@
 mod agent;
 mod api;
 mod attachments;
+mod recall;
 mod settings;
 mod store;
 mod user_memory;
@@ -29,6 +30,11 @@ fn main() -> Result<AppExit> {
     let store = Store::open(&path)?;
 
     let runtime = Runtime::new().context("start HTTP runtime")?;
+    let recall = recall::Recall::start(
+        runtime.handle(),
+        env::var_os("OMARCHY_AGENT_RECALL_MODEL_DIR").map(PathBuf::from),
+        store.clone(),
+    );
     let scratch = tempfile::tempdir().context("create private Rig scratch directory")?;
     let (turns, pending) = mpsc::unbounded_channel();
     let (conversations, commands) = mpsc::unbounded_channel();
