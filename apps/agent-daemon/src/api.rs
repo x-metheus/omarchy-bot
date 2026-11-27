@@ -39,20 +39,43 @@ pub(crate) fn router(
     turns: mpsc::UnboundedSender<TurnRequest>,
     wake: Wake,
     settings_token: Option<Digest>,
+    conversation_token: Option<Digest>,
     recall: Recall,
 ) -> Router {
-    Router::new()
+    let conversations = Router::new()
         .route("/bots", post(create_bot))
         .route("/bots/{bot}", get(read_bot).patch(rename_bot))
         .route("/bots/{bot}/messages", post(send_message))
-        .route("/bots/{bot}/attachments/{id}", get(read_attachment))
+        .route("/bots/{bot}/attachments/{id}", get(read_attachment));
+    // Device authorization can replace this loopback guard at the Conversation boundary.
+    let conversations = if let Some(expected) = conversation_token {
+        conversations.route_layer(middleware::from_fn_with_state(
+            Bearer {
+                expected: Some(expected),
+                denied: Problem::new(
+                    "conversation_unauthorized",
+                    "a valid operator bearer token is required",
+                ),
+            },
+            authorize_bearer,
+        ))
+    } else {
+        conversations
+    };
+    conversations
         .route("/recall/status", get(recall_status))
         .merge(
             Router::new()
                 .route("/settings", get(read_settings).put(write_settings))
                 .route_layer(middleware::from_fn_with_state(
-                    settings_token,
-                    authorize_settings,
+                    Bearer {
+                        expected: settings_token,
+                        denied: Problem::new(
+                            "settings_unauthorized",
+                            "a valid Settings bearer token is required",
+                        ),
+                    },
+                    authorize_bearer,
                 )),
         )
         .with_state(Daemon {
@@ -68,11 +91,13 @@ async fn recall_status(State(daemon): State<Daemon>) -> Json<Availability> {
     Json(daemon.recall.availability())
 }
 
-async fn authorize_settings(
-    State(expected): State<Option<Digest>>,
-    request: Request,
-    next: Next,
-) -> Response {
+#[derive(Clone, Copy)]
+struct Bearer {
+    expected: Option<Digest>,
+    denied: Problem,
+}
+
+async fn authorize_bearer(State(auth): State<Bearer>, request: Request, next: Next) -> Response {
     let bearer = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -80,21 +105,14 @@ async fn authorize_settings(
         .and_then(|value| value.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
         .map(|(_, token)| token);
-    let authorized = expected.zip(bearer).is_some_and(|(expected, token)| {
+    let authorized = auth.expected.zip(bearer).is_some_and(|(expected, token)| {
         let provided = digest::digest(&digest::SHA256, token.as_bytes());
         bool::from(expected.as_ref().ct_eq(provided.as_ref()))
     });
     let mut response = if authorized {
         next.run(request).await
     } else {
-        let mut response = ApiError(
-            StatusCode::UNAUTHORIZED,
-            Problem::new(
-                "settings_unauthorized",
-                "a valid Settings bearer token is required",
-            ),
-        )
-        .into_response();
+        let mut response = ApiError(StatusCode::UNAUTHORIZED, auth.denied).into_response();
         response
             .headers_mut()
             .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
@@ -455,7 +473,7 @@ impl Drop for ActiveTurn {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 struct Problem {
     code: &'static str,
     message: &'static str,

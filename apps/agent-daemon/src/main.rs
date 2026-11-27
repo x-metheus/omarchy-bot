@@ -2,6 +2,7 @@ mod agent;
 mod api;
 mod attachments;
 mod duties;
+mod host_tools;
 mod recall;
 mod settings;
 mod store;
@@ -28,6 +29,14 @@ fn main() -> Result<AppExit> {
         .parse()
         .context("OMARCHY_AGENT_PORT must be a TCP port")?;
     let settings_token = settings::load_token()?;
+    let workspace = host_tools::WorkspaceRoot::from_env()?;
+    let conversation_token = workspace
+        .as_ref()
+        .map(|_| {
+            settings_token
+                .context("OMARCHY_AGENT_WORK_DIR requires OMARCHY_AGENT_SETTINGS_TOKEN_FILE")
+        })
+        .transpose()?;
     let store = Store::open(&path)?;
 
     let runtime = Runtime::new().context("start HTTP runtime")?;
@@ -41,11 +50,15 @@ fn main() -> Result<AppExit> {
     let mut app = agent::headless_app(pending, runtime.handle().clone(), scratch.path(), &store);
     app.insert_resource(recall.clone());
     recall::register(&mut app);
+    if let Some(workspace) = workspace {
+        host_tools::register(&mut app, workspace);
+    }
     let router = api::router(
         store,
         turns,
         app.world().resource::<Wake>().clone(),
         settings_token,
+        conversation_token,
         recall,
     );
     let listener = runtime

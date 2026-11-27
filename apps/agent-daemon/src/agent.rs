@@ -89,7 +89,13 @@ fn deliver(world: &mut World) {
                 });
             }
             let bot = request.history.bot;
-            let agent = spawn_root(
+            let work_dir = world
+                .get_resource::<crate::host_tools::WorkspaceRoot>()
+                .map(|workspace| WorkDir(workspace.0.clone()));
+            let host_tool_names = work_dir
+                .as_ref()
+                .map_or(&[][..], |_| &crate::host_tools::NAMES);
+            let mut agent = spawn_root(
                 world,
                 (
                     AgentId(bot.id.to_string()),
@@ -97,7 +103,11 @@ fn deliver(world: &mut World) {
                     conversation,
                     request.model,
                     duties::system_prompt(bot.duties.as_deref()),
-                    ToolAccess::only([REMEMBER_TOOL, SET_DUTIES, TOOL_NAME]),
+                    ToolAccess::only(
+                        [REMEMBER_TOOL, SET_DUTIES, TOOL_NAME]
+                            .into_iter()
+                            .chain(host_tool_names.iter().copied()),
+                    ),
                     DutyTurn::default(),
                     MemoryInput::new(bot.id, request.message_id, request.prompt.clone()),
                     scope,
@@ -106,8 +116,11 @@ fn deliver(world: &mut World) {
                         finished: request.finished,
                     },
                 ),
-            )
-            .id();
+            );
+            if let Some(dir) = work_dir {
+                agent.insert(dir);
+            }
+            let agent = agent.id();
             let mut delivery = Deliver::new(agent, request.prompt, DeliveryMode::Queue).literal();
             delivery
                 .message
