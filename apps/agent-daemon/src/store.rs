@@ -10,9 +10,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::agent::conversation::UserMessageSource;
 use crate::attachments::{self, Metadata, Stored, Submission};
 use crate::settings::{Settings, SettingsStatus, SettingsUpdate, Update};
-use crate::user_memory::{self, CurrentMemory, MemorySource, Proposal, Remembered};
+use crate::user_memory::{self, CurrentMemory, MemoryWrite, Proposal};
 
 #[derive(Serialize)]
 pub(crate) struct Bot {
@@ -29,7 +30,7 @@ pub(crate) struct Conversation {
 
 #[derive(Serialize)]
 pub(crate) struct Message {
-    id: i64,
+    pub(crate) id: i64,
     pub(crate) role: Role,
     pub(crate) text: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -53,14 +54,19 @@ impl FromSql for Role {
     }
 }
 
+pub(crate) enum History {
+    Restore,
+    Live,
+}
+
 pub(crate) enum Admission {
     BotNotFound,
     AttachmentNotFound,
     Unconfigured,
     Accepted {
-        history: Conversation,
+        history: Option<Conversation>,
         message_id: i64,
-        prompt: String,
+        text: String,
         attachments: Vec<Stored>,
         model: RigConnection,
     },
@@ -233,11 +239,18 @@ impl Store {
         bot: Uuid,
         text: String,
         submissions: Vec<Submission>,
+        history: History,
     ) -> Result<Admission> {
         self.run(move |db| {
             let transaction = db.connection.transaction()?;
-            let Some(history) = load_conversation(&transaction, bot)? else {
-                return Ok(Admission::BotNotFound);
+            let history = match history {
+                History::Restore => {
+                    let Some(history) = load_conversation(&transaction, bot)? else {
+                        return Ok(Admission::BotNotFound);
+                    };
+                    Some(history)
+                }
+                History::Live => None,
             };
             // Settings writes use this same lock and publish only after commit.
             let Some(model) = db.settings.connection() else {
@@ -268,7 +281,7 @@ impl Store {
             Ok(Admission::Accepted {
                 history,
                 message_id,
-                prompt: text,
+                text,
                 attachments,
                 model,
             })
@@ -309,12 +322,30 @@ impl Store {
 
     pub(crate) async fn remember(
         &self,
-        source: MemorySource,
+        source: UserMessageSource,
         proposal: Proposal,
-    ) -> Result<Remembered> {
+    ) -> Result<MemoryWrite> {
         let current = self.1.clone();
         self.run(move |db| user_memory::remember(&mut db.connection, &current, source, proposal))
             .await
+    }
+
+    pub(crate) async fn inspect_memory(&self, key: Option<String>) -> Result<serde_json::Value> {
+        self.run(move |db| user_memory::inspect(&db.connection, key.as_deref()))
+            .await
+    }
+
+    pub(crate) async fn forget_memory(
+        &self,
+        source: UserMessageSource,
+        key: String,
+        evidence: String,
+    ) -> Result<MemoryWrite> {
+        let current = self.1.clone();
+        self.run(move |db| {
+            user_memory::forget(&mut db.connection, &current, source, &key, &evidence)
+        })
+        .await
     }
 
     async fn run<T: Send + 'static>(

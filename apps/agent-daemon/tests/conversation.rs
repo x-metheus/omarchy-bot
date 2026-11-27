@@ -25,6 +25,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 #[path = "conversation/host_tools.rs"]
 mod host_tools;
+#[path = "conversation/source_recall.rs"]
+mod source_recall;
 #[path = "conversation/user_memory.rs"]
 mod user_memory;
 
@@ -233,6 +235,33 @@ impl ProviderCall {
     async fn finish(self) {
         self.chunk(json!({}), Some("stop")).await;
         self.frame("[DONE]").await;
+    }
+
+    async fn tools(self, calls: &[(&str, &str, Value)]) {
+        let calls: Vec<_> = (0..)
+            .zip(calls)
+            .map(|(index, (id, name, args))| {
+                json!({
+                    "index": index, "id": id, "type": "function",
+                    "function": { "name": name, "arguments": args.to_string() }
+                })
+            })
+            .collect();
+        self.chunk(json!({ "role": "assistant", "tool_calls": calls }), None)
+            .await;
+        self.chunk(json!({}), Some("tool_calls")).await;
+        self.frame("[DONE]").await;
+    }
+
+    fn last_message(&self) -> &Value {
+        self.body["messages"].as_array().unwrap().last().unwrap()
+    }
+
+    fn started_agent(&self) -> &str {
+        self.last_message()["content"]
+            .as_str()
+            .and_then(|text| text.split('`').nth(1))
+            .expect("Rig task returned an Agent ID")
     }
 
     async fn messages_reply(self, text: &str) {
@@ -682,7 +711,7 @@ async fn a_bot_streams_replies_and_keeps_one_conversation_across_restart() {
 }
 
 #[tokio::test]
-async fn a_disconnected_stream_keeps_its_turn_and_rejects_an_overlap() {
+async fn a_disconnected_stream_keeps_its_turn_and_accepts_an_overlap() {
     let mut provider = Provider::start().await;
     let directory = tempfile::tempdir().unwrap();
     let client = http_client();
@@ -695,30 +724,172 @@ async fn a_disconnected_stream_keeps_its_turn_and_rejects_an_overlap() {
     assert_eq!(stream.expect("delta").await, "Still ");
     drop(stream);
 
-    let overlapping = daemon.send(&client, id, "Should be rejected.").await;
-    assert_eq!(overlapping.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        overlapping.json::<Value>().await.unwrap()["code"],
-        "turn_in_progress"
-    );
+    let mut later = ReplyStream::new(daemon.send(&client, id, "One more thought.").await);
+    let mut other = ReplyStream::new(daemon.send(&client, id, "And another.").await);
     assert_eq!(
         transcript(&daemon.read(&client, id).await),
-        [("user", "Keep working.")]
+        [
+            ("user", "Keep working."),
+            ("user", "One more thought."),
+            ("user", "And another.")
+        ]
     );
 
     call.text("here.").await;
     call.finish().await;
-    timeout(DEADLINE, async {
+    let call = provider.next().await;
+    call.text("I read your messages.").await;
+    call.finish().await;
+    assert_eq!(later.expect("delta").await, "I read your messages.");
+    assert_eq!(other.expect("delta").await, "I read your messages.");
+    let committed = later.expect("committed").await;
+    assert_eq!(other.expect("committed").await, committed);
+    assert!(other.next().await.is_none());
+    assert!(later.next().await.is_none());
+    let history = daemon.read(&client, id).await;
+    assert_eq!(
+        transcript(&history),
+        [
+            ("user", "Keep working."),
+            ("user", "One more thought."),
+            ("user", "And another."),
+            ("assistant", "I read your messages.")
+        ]
+    );
+    assert_eq!(history["messages"][3], committed);
+}
+
+#[tokio::test]
+async fn independent_subagents_report_to_the_same_conversation_after_a_new_request() {
+    let mut provider = Provider::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let client = http_client();
+    let daemon = Daemon::start(&directory.path().join("conversation.sqlite3"), &provider).await;
+    let bot = daemon.create(&client).await;
+    let id = bot_id(&bot);
+    let other_bot = daemon.create(&client).await;
+    let mut started = ReplyStream::new(daemon.send(&client, id, "Check both tiles.").await);
+    let call = provider.next().await;
+    call.tools(&[
+        (
+            "t1",
+            "task",
+            json!({"description": "Check first tile", "prompt": "Inspect tile A."}),
+        ),
+        (
+            "t2",
+            "task",
+            json!({"description": "Check second tile", "prompt": "Inspect tile B."}),
+        ),
+    ])
+    .await;
+
+    let (mut root, mut first, mut second) = (None, None, None);
+    for _ in 0..3 {
+        let call = provider.next().await;
+        let last = call.last_message();
+        let slot = if last["role"] == "tool" {
+            &mut root
+        } else if last.to_string().contains("Inspect tile A.") {
+            &mut first
+        } else {
+            assert!(last.to_string().contains("Inspect tile B."), "{last}");
+            &mut second
+        };
+        assert!(slot.replace(call).is_none(), "duplicate scripted call");
+    }
+
+    // Each operation blocks in Rig's wait tool. The fixture holds the separate
+    // reader's output until after the unrelated request has completed.
+    let mut readers = Vec::new();
+    for (child, tile) in [(first.unwrap(), "A"), (second.unwrap(), "B")] {
+        let prompt = format!("Read swatch {tile}.");
+        child
+            .tools(&[(
+                "read",
+                "task",
+                json!({"description": "Read swatch", "prompt": prompt}),
+            )])
+            .await;
+        let one = provider.next().await;
+        let two = provider.next().await;
+        let (continued, reader) = if one.last_message()["role"] == "tool" {
+            (one, two)
+        } else {
+            (two, one)
+        };
+        assert!(reader.last_message().to_string().contains(&prompt));
+        let args = json!({"agent": continued.started_agent()});
+        continued.tools(&[("hold", "wait", args)]).await;
+        readers.push(reader);
+    }
+    chat_reply(root.unwrap(), &mut started, "Both checks are underway.").await;
+    assert!(started.next().await.is_none());
+
+    let mut unrelated = ReplyStream::new(daemon.send(&client, id, "What is 3 times 4?").await);
+    let call = provider.next().await;
+    assert_eq!(call.last_message()["content"], "What is 3 times 4?");
+    chat_reply(call, &mut unrelated, "12").await;
+    assert!(unrelated.next().await.is_none());
+
+    for (reader, (result, report, reply)) in readers.into_iter().zip([
+        (
+            "swatch-green",
+            "Tile A is green.",
+            "The first tile is green.",
+        ),
+        (
+            "swatch-violet",
+            "Tile B is violet.",
+            "Tile A is green and tile B is violet.",
+        ),
+    ]) {
+        reader.text(result).await;
+        reader.finish().await;
+        let child = provider.next().await;
+        assert!(child.last_message().to_string().contains(result));
+        child.text(report).await;
+        child.finish().await;
+        let root = provider.next().await;
+        assert!(root.last_message().to_string().contains(report));
+        if result == "swatch-violet" {
+            assert!(
+                root.body["messages"]
+                    .to_string()
+                    .contains("Tile A is green.")
+            );
+        }
+        root.text(reply).await;
+        root.finish().await;
+    }
+
+    let history = timeout(DEADLINE, async {
         loop {
-            let history = daemon.read(&client, id).await;
-            if transcript(&history) == [("user", "Keep working."), ("assistant", "Still here.")] {
-                break;
+            let conversation = daemon.read(&client, id).await;
+            if conversation["messages"].as_array().unwrap().len() >= 6 {
+                break conversation;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("disconnected reply commits to the same Conversation");
+    .expect("both detached reports reached the original Conversation");
+    assert_eq!(history["bot"], bot);
+    assert_eq!(
+        transcript(&history),
+        [
+            ("user", "Check both tiles."),
+            ("assistant", "Both checks are underway."),
+            ("user", "What is 3 times 4?"),
+            ("assistant", "12"),
+            ("assistant", "The first tile is green."),
+            ("assistant", "Tile A is green and tile B is violet.")
+        ]
+    );
+    assert_eq!(
+        daemon.read(&client, bot_id(&other_bot)).await["messages"],
+        json!([])
+    );
 }
 
 #[tokio::test]

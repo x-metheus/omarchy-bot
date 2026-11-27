@@ -1,6 +1,6 @@
 # Agent Daemon
 
-The standalone daemon runs a Rig 0.47.1 Agent for each active Bot Turn. The Bot ID also identifies its single Conversation. The HTTP listener binds to IPv4 loopback. Run one daemon per SQLite file.
+The standalone daemon hosts one Rig 0.47.1 root Agent per Bot Conversation. The Bot ID also identifies its single Conversation. The HTTP listener binds to IPv4 loopback. Run one daemon per SQLite file.
 
 ## Headless startup
 
@@ -48,7 +48,7 @@ Both methods return the same status shape. `active` is `null` until configured. 
 }
 ```
 
-A successful `PUT` commits the selection and any key replacement together. Invalid input or a failed write preserves the prior configuration. Writes and Turn admission share a lock. A Turn admitted after a successful write uses the new selection and key. An already admitted Turn keeps its original connection. The latest committed write determines the active selection.
+A successful `PUT` commits the selection and any key replacement together. Invalid input or a failed write preserves the prior configuration. Writes and message admission share a lock. An HTTP message starting a Turn uses the model and key captured at admission. Input delivered into a running Turn uses that Turn's connection. A Subagent inherits its parent's connection when spawned, and a report can wake the root using its existing connection. The latest committed write determines the active selection.
 
 | Provider | Default request URL | Operator base URL override |
 | --- | --- | --- |
@@ -120,13 +120,19 @@ Set duties by sending an explicit standing instruction such as “Your ongoing j
 
 A successful message POST commits the user message before starting the model call. Each `delta` contains a JSON string. The terminal `committed` event contains the same `{id, role, text}` message returned by `GET` and is sent after the SQLite commit. A failed Turn ends with an `error` event containing `code` and `message`. Any deltas from that Turn are provisional. The committed user message remains in the Conversation.
 
-A Bot accepts one Turn at a time. An overlapping POST receives `409` with `turn_in_progress` and adds no message. A Turn continues after its client disconnects. A client whose stream closes before a terminal event can use `GET` to read the committed state. On process restart, the daemon loads committed messages from SQLite and starts a fresh Turn on the next POST.
+A Bot accepts new messages while a Turn is running. Rig delivers them through the Inbox at the next model call. A POST stream starts receiving deltas when its input is delivered and closes after that Turn's `committed` or `error` event. When Rig delivers multiple inputs to the same Turn, their POST streams receive the same committed reply ID. A disconnect leaves the Turn running. Use `GET` to read committed history, including replies to background Subagent reports after the POST streams close.
+
+### Rig lifecycle
+
+The daemon restores a Bot's committed Conversation into its root Agent on the first POST after startup. Subsequent POSTs append the user message to SQLite before handing it to the root's Rig Inbox. The Inbox effect carries the Bot and durable user message ID, and Rig provides its `DeliveredAs` and `DeliveredIn` mapping when the message reaches the model. Model calls and the tools they produce carry the eligible source for that invocation. Subagent results enter the root Inbox with Rig's Agent author and are available to the root on its next model call.
+
+`SubagentsPlugin` owns delegation, messaging, and reports. The `task` tool instructs the root to end its Turn after dispatching asynchronous work, leaving it available for new requests. Turn settlement sends one reply to the ordered Conversation writer, which commits before notifying any attached POST streams. A report can start a Turn with no attached POST stream. SQLite preserves committed messages across a daemon restart. Live Rig Inbox entries and Subagents last for the daemon process.
 
 ## Daemon-host tools
 
 Set `OMARCHY_AGENT_WORK_DIR` to an existing absolute directory to enable `read`, `edit`, `write`, and `shell` on the daemon host. Provision `OMARCHY_AGENT_SETTINGS_TOKEN_FILE` before starting in this mode. Every Bot, Conversation, attachment, and message request then needs `Authorization: Bearer <token>`. The daemon returns `401 conversation_unauthorized` before admitting unauthorized work. Leave `OMARCHY_AGENT_WORK_DIR` unset for ordinary chat without host tools.
 
-`read` returns UTF-8 text or a supported PNG, JPEG, GIF, or WebP image. Images are sent to the selected model when its provider and model support image input. `edit` applies the requested replacements together. `write` creates a file or replaces a text version observed by the Agent in the current Turn. If the file changes after observation, read it again before replacing it. Text file operations resolve within the configured workspace.
+`read` returns UTF-8 text or a supported PNG, JPEG, GIF, or WebP image. Images are sent to the selected model when its provider and model support image input. `edit` applies the requested replacements together. `write` creates a file or replaces a text version observed by the calling Agent during the current daemon run. If the file changes after observation, read it again before replacing it. File tools resolve paths within the configured workspace.
 
 `shell` starts in the configured directory or a `cwd` within it. It uses `sh` on Linux and macOS and Windows PowerShell on Windows. It returns stdout and stderr with an exit status or a timeout when `timeout_secs` is reached. Commands run with the permissions of the daemon account. The starting directory limits where a command launches. Commands can access anything the daemon account can access. On Windows a timeout stops PowerShell itself, and a subprocess may continue.
 
@@ -138,6 +144,8 @@ Rig's per-call `CallPlace` and `Workspace` are the execution boundary for adding
 
 A Bot can save a fact or standing preference from its current user message. For example, say “Always reply in French,” “My time zone is Europe/Paris,” or “Please call me Áine.” The daemon verifies the proposal against the original committed text and shares the saved value with all Bots on that daemon. Use a direct first-person statement for facts, such as “Remember that my favorite tea is hojicha.” Ambiguous wording requires clarification. Use a model that supports tool calls when saving UserMemory.
 
+Ask any Bot “What do you remember about my units preference?” to inspect the current value. If the source is available, the Bot can cite its Conversation and quote your original statement. Say “Change my units preference to metric” to correct it, or “Forget my units preference” as its own message to clear it for every Bot. The original Conversation messages remain readable. A later explicit statement can establish the preference again.
+
 Each model request receives the current reply language, time zone, and preferred name when available. Other entries are selected by matching words from the current request against the entry's topic, with a limit of six. A current instruction such as “Reply in English this time” takes precedence for that request. Request context and tool traces do not become Conversation messages.
 
 ### Storage and provenance contract
@@ -146,9 +154,13 @@ Each model request receives the current reply language, time zone, and preferred
 
 `messages.id` is the global committed order. `message_order` keeps its SQLite high-water mark across restarts and source deletion. Message insertions allocate through the daemon Store, and the insertion trigger advances the high-water mark in the same transaction. The memory write updates SQLite only for a strictly newer `source_order`, then publishes the committed value to Rig's shared read snapshot.
 
-Rig's request preparation stage records the eligible committed input against each model effect. A tool call resolves its originating effect, then the daemon verifies the source Bot, message ID, user role, and verbatim evidence against SQLite. When several deliveries share an Agent, request preparation must select the eligible authored input using the durable message identity carried through `Incoming` and `DeliveredAs`/`DeliveredIn`. The captured source remains stable for tool calls originating from that invocation.
+When Rig builds a request, the daemon binds it to the most recent authored input delivered into that Turn and present in its model context. Tool calls carry the source of the model effect that produced them. The daemon verifies the source Bot, message ID, user role, and verbatim evidence against SQLite. Report-only Turns have no source for memory writes.
 
-Issue #22 can use the stable keys, source lookup, and committed order for inspection and tombstones. Clear operations must publish to the same read snapshot after commit, and the ordering guard must continue to compare against the last operation even when the current value is absent.
+`user_memory_forgotten` stores the last committed user message order for each forgotten key. A forget transaction removes the value and records its order, even if no value has been saved yet. A newer verified statement replaces the tombstone with a current value. Across both tables, the latest applicable user message wins. An equal order is a repeat and cannot change the state. The daemon holds the snapshot write lock across the commit and publication so model preparation sees the complete change.
+
+Inspection returns current values only. Available sources include the originating Bot ID and name, committed message ID, and verbatim evidence. The source is `null` when its original message is unavailable. A Bot's normal Conversation reads continue to return the original text.
+
+Model requests treat UserMemory as authoritative for standing preferences. When applicable, a forgotten key is accompanied by its committed order instead of its old value. Historical Recall results should carry their original committed message IDs. Observational Memory summaries should retain the committed order they cover. Earlier statements, summaries, Recall results, and prior tool receipts are historical context. Only a new, explicit authored user statement can restore a forgotten key.
 
 ## Conversation attachments
 
@@ -190,9 +202,11 @@ Expect a committed reply identifying cobalt and red and a Conversation with both
 
 ## Recall
 
-An Agent using a tool-capable chat model can call `recall` with a query. Recall searches committed user and assistant message text from the calling Bot before the current Turn. It returns up to five historical matches with `bot_id`, `message_id`, `role`, verbatim `text`, and the half-open UTF-8 range `[start_byte, end_byte)` in the original message. `message_id` is the global committed order and resolves against `GET /bots/{id}`. Each tool result labels its messages as `historical`. Recall evidence has no authority to update UserMemory or establish a current preference.
+An Agent using a tool-capable chat model can call `recall` with a query. Recall searches committed user and assistant text from the calling Bot before the first user message delivered to its current Turn. A report-only Turn searches the committed history at lookup. Recall returns up to five historical matches with `bot_id`, `message_id`, `role`, verbatim `text`, and the half-open UTF-8 range `[start_byte, end_byte)` in the original message. `message_id` is the global committed order and resolves against `GET /bots/{id}`. Each tool result labels its messages as `historical`. Recall evidence has no authority to update UserMemory or establish a current preference.
 
-The daemon embeds and indexes messages locally. Ordinary chat can run while Recall verifies the model or builds its index. A Recall call can catch up on its own Bot's pending messages. If the Agent chooses to use Recall, retrieved text is included in the configured chat provider's next request.
+When the user asks which other Bot discussed a specific earlier topic, the Agent can opt in with `recall` and `scope: "source_bot"`. This searches the owner's other Bots on the same daemon for messages committed before the current Turn. It returns up to three matching passages with the source Bot's current name and stable ID. Reference-code queries require an exact identifier match, and topic queries use a minimum semantic similarity. The Agent receives the passages in the same Turn and replies in the current Conversation.
+
+The daemon embeds and indexes messages locally. Ordinary chat can run while Recall verifies the model or builds its index. A Recall call can catch up on pending messages within its scope. If the Agent chooses to use Recall, retrieved text is included in the configured chat provider's next request.
 
 ### Offline provision
 
@@ -229,6 +243,9 @@ To exercise the real daemon and verified local model with a scripted provider on
 ```sh
 OMARCHY_AGENT_RECALL_TEST_MODEL_DIR="$recall_dir" cargo test --locked -j 3 \
   --test conversation recall_returns_original_messages_from_the_calling_bot_after_restart \
+  -- --ignored --exact
+OMARCHY_AGENT_RECALL_TEST_MODEL_DIR="$recall_dir" cargo test --locked -j 3 \
+  --test conversation source_recall::source_bot_recall_returns_matching_originals_in_the_current_conversation \
   -- --ignored --exact
 ```
 

@@ -47,20 +47,33 @@ fn main() -> Result<AppExit> {
     );
     let scratch = tempfile::tempdir().context("create private Rig scratch directory")?;
     let (turns, pending) = mpsc::unbounded_channel();
-    let mut app = agent::headless_app(pending, runtime.handle().clone(), scratch.path(), &store);
+    let (conversations, commands) = mpsc::unbounded_channel();
+    let mut app = agent::headless_app(
+        pending,
+        conversations.clone(),
+        runtime.handle().clone(),
+        scratch.path(),
+        &store,
+    );
     app.insert_resource(recall.clone());
     recall::register(&mut app);
     if let Some(workspace) = workspace {
         host_tools::register(&mut app, workspace);
     }
     let router = api::router(
+        store.clone(),
+        conversations,
+        settings_token,
+        conversation_token,
+        recall.clone(),
+    );
+    let conversation_loop = runtime.spawn(api::run_conversations(
         store,
         turns,
         app.world().resource::<Wake>().clone(),
-        settings_token,
-        conversation_token,
+        commands,
         recall,
-    );
+    ));
     let listener = runtime
         .block_on(TcpListener::bind(SocketAddrV4::new(
             Ipv4Addr::LOCALHOST,
@@ -72,6 +85,7 @@ fn main() -> Result<AppExit> {
     println!("LISTENING http://{address}");
     let exit = app.run();
     http.abort();
+    conversation_loop.abort();
     Ok(exit)
 }
 

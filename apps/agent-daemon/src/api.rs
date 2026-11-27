@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Request, State};
@@ -19,37 +18,35 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::agent::TurnRequest;
-use crate::attachments::{Input as AttachmentInput, MAX_ATTACHMENTS};
+use crate::agent::{AgentCommand, ReplySink, TurnRequest};
+use crate::attachments::{Input as AttachmentInput, MAX_ATTACHMENTS, Submission};
+use crate::duties;
 use crate::recall::{Availability, Recall};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
-use crate::store::{Admission, Bot, Conversation, Store};
+use crate::store::{Admission, Bot, Conversation, History, Store};
 
 #[derive(Clone)]
 struct Daemon {
     store: Store,
-    turns: mpsc::UnboundedSender<TurnRequest>,
-    wake: Wake,
-    active: Arc<Mutex<HashSet<Uuid>>>,
+    conversations: mpsc::UnboundedSender<ConversationCommand>,
     recall: Recall,
 }
 
 pub(crate) fn router(
     store: Store,
-    turns: mpsc::UnboundedSender<TurnRequest>,
-    wake: Wake,
+    conversations: mpsc::UnboundedSender<ConversationCommand>,
     settings_token: Option<Digest>,
     conversation_token: Option<Digest>,
     recall: Recall,
 ) -> Router {
-    let conversations = Router::new()
+    let conversation_routes = Router::new()
         .route("/bots", post(create_bot))
         .route("/bots/{bot}", get(read_bot).patch(rename_bot))
         .route("/bots/{bot}/messages", post(send_message))
         .route("/bots/{bot}/attachments/{id}", get(read_attachment));
     // Device authorization can replace this loopback guard at the Conversation boundary.
-    let conversations = if let Some(expected) = conversation_token {
-        conversations.route_layer(middleware::from_fn_with_state(
+    let conversation_routes = if let Some(expected) = conversation_token {
+        conversation_routes.route_layer(middleware::from_fn_with_state(
             Bearer {
                 expected: Some(expected),
                 denied: Problem::new(
@@ -60,9 +57,9 @@ pub(crate) fn router(
             authorize_bearer,
         ))
     } else {
-        conversations
+        conversation_routes
     };
-    conversations
+    conversation_routes
         .route("/recall/status", get(recall_status))
         .merge(
             Router::new()
@@ -80,9 +77,7 @@ pub(crate) fn router(
         )
         .with_state(Daemon {
             store,
-            turns,
-            wake,
-            active: Arc::default(),
+            conversations,
             recall,
         })
 }
@@ -316,161 +311,155 @@ async fn send_message(
             ),
         ));
     }
-    let guard = ActiveTurn::acquire(&daemon.active, bot)?;
-    let (events, stream) = mpsc::channel(64);
-    let (accepted, admission) = oneshot::channel();
-    tokio::spawn(run_turn(daemon, guard, input, events, accepted));
-    admission.await.map_err(|_| UNAVAILABLE)??;
-    Ok(Sse::new(
-        ReceiverStream::new(stream).map(Ok::<_, Infallible>),
-    ))
-}
-
-async fn run_turn(
-    daemon: Daemon,
-    guard: ActiveTurn,
-    input: SendMessage,
-    stream: mpsc::Sender<Event>,
-    accepted: oneshot::Sender<Result<(), ApiError>>,
-) {
-    let bot = guard.bot;
     let SendMessage { text, attachments } = input;
     let submissions = if attachments.is_empty() {
         Vec::new()
     } else {
-        match tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             attachments
                 .into_iter()
                 .map(AttachmentInput::prepare)
                 .collect()
         })
         .await
-        {
-            Ok(submissions) => submissions,
-            Err(_) => {
-                drop(guard);
-                let _ = accepted.send(Err(UNAVAILABLE));
-                return;
-            }
-        }
+        .map_err(|_| UNAVAILABLE)?
     };
-    let admission = match daemon.store.accept_message(bot, text, submissions).await {
-        Ok(Admission::Accepted {
-            history,
-            message_id,
-            prompt,
-            attachments,
-            model,
-        }) => Ok((history, message_id, prompt, attachments, model)),
-        Ok(Admission::BotNotFound) => Err(BOT_NOT_FOUND),
-        Ok(Admission::AttachmentNotFound) => Err(ATTACHMENT_NOT_FOUND),
-        Ok(Admission::Unconfigured) => Err(UNCONFIGURED),
-        Err(error) => Err(store_error(error)),
-    };
-    let (history, message_id, prompt, attachments, model) = match admission {
-        Ok(turn) => turn,
-        Err(error) => {
-            drop(guard);
-            let _ = accepted.send(Err(error));
-            return;
-        }
-    };
-    daemon.recall.history_changed();
-    let mut parts = Vec::with_capacity(attachments.len());
-    for attachment in attachments {
-        match attachment.into_part(&model.spec) {
-            Ok(part) => parts.push(part),
-            Err(warning) => {
-                let _ = stream.try_send(event("attachment_warning", warning));
-            }
-        }
-    }
-    let (finished, result) = oneshot::channel();
-    if daemon
-        .turns
-        .send(TurnRequest {
-            history,
-            message_id,
-            model,
-            prompt,
-            attachments: parts,
-            stream,
-            finished,
+    let (events, stream) = mpsc::channel(64);
+    let (accepted, admission) = oneshot::channel();
+    daemon
+        .conversations
+        .send(ConversationCommand::Message {
+            bot,
+            text,
+            submissions,
+            stream: ReplySink::new(events),
+            accepted,
         })
-        .is_err()
-    {
-        drop(guard);
-        let _ = accepted.send(Err(UNAVAILABLE));
-        return;
-    }
-    daemon.wake.wake();
-    let _ = accepted.send(Ok(()));
+        .map_err(|_| UNAVAILABLE)?;
+    admission.await.map_err(|_| UNAVAILABLE)??;
+    Ok(Sse::new(
+        ReceiverStream::new(stream).map(Ok::<_, Infallible>),
+    ))
+}
 
-    let Ok(result) = result.await else { return };
-    let terminal = match result.answer {
-        Some(text) => match daemon.store.commit_reply(bot, text, result.duties).await {
-            Ok(message) => {
-                daemon.recall.history_changed();
-                event("committed", message)
+pub(crate) enum ConversationCommand {
+    Message {
+        bot: Uuid,
+        text: String,
+        submissions: Vec<Submission>,
+        stream: ReplySink,
+        accepted: oneshot::Sender<Result<(), ApiError>>,
+    },
+    Settled {
+        bot: Uuid,
+        answer: Option<String>,
+        duties: Option<String>,
+        streams: Vec<ReplySink>,
+    },
+}
+
+pub(crate) async fn run_conversations(
+    store: Store,
+    turns: mpsc::UnboundedSender<AgentCommand>,
+    wake: Wake,
+    mut commands: mpsc::UnboundedReceiver<ConversationCommand>,
+    recall: Recall,
+) {
+    let mut live = HashSet::new();
+    // Keep SQLite admission and reply commits in order with their runtime handoff.
+    while let Some(command) = commands.recv().await {
+        match command {
+            ConversationCommand::Message {
+                bot,
+                text,
+                submissions,
+                stream,
+                accepted,
+            } => {
+                let history = if live.contains(&bot) {
+                    History::Live
+                } else {
+                    History::Restore
+                };
+                let admission = match store.accept_message(bot, text, submissions, history).await {
+                    Ok(Admission::Accepted {
+                        history,
+                        message_id,
+                        text,
+                        attachments,
+                        model,
+                    }) => {
+                        recall.history_changed();
+                        turns
+                            .send(AgentCommand::Message(TurnRequest {
+                                bot,
+                                history,
+                                message_id,
+                                text,
+                                attachments,
+                                model,
+                                stream,
+                            }))
+                            .map_err(|_| UNAVAILABLE)
+                            .map(|()| {
+                                live.insert(bot);
+                                wake.wake();
+                            })
+                    }
+                    Ok(Admission::BotNotFound) => Err(BOT_NOT_FOUND),
+                    Ok(Admission::AttachmentNotFound) => Err(ATTACHMENT_NOT_FOUND),
+                    Ok(Admission::Unconfigured) => Err(UNCONFIGURED),
+                    Err(error) => Err(store_error(error)),
+                };
+                let _ = accepted.send(admission);
             }
-            Err(error) => event("error", store_error(error).1),
-        },
-        None => event(
-            "error",
-            Problem::new(
-                "turn_failed",
-                "Rig did not complete a text reply; check the model and provider configuration",
-            ),
-        ),
-    };
-    // A client can send its next message as soon as it observes a terminal event.
-    drop(guard);
-    if let Some(stream) = result.stream {
-        let _ = stream.send(terminal).await;
+            ConversationCommand::Settled {
+                bot,
+                answer,
+                duties,
+                streams,
+            } => {
+                let terminal = match answer {
+                    Some(text) => {
+                        let prompt = duties
+                            .as_deref()
+                            .map(|text| duties::system_prompt(Some(text)));
+                        match store.commit_reply(bot, text, duties).await {
+                            Ok(message) => {
+                                if let Some(prompt) = prompt {
+                                    let _ = turns.send(AgentCommand::Duties { bot, prompt });
+                                    wake.wake();
+                                }
+                                recall.history_changed();
+                                if streams.is_empty() {
+                                    continue;
+                                }
+                                event("committed", message)
+                            }
+                            Err(error) => event("error", store_error(error).1),
+                        }
+                    }
+                    None => event(
+                        "error",
+                        Problem::new(
+                            "turn_failed",
+                            "Rig did not complete a text reply; check the model and provider configuration",
+                        ),
+                    ),
+                };
+                for mut stream in streams {
+                    stream.send(terminal.clone());
+                }
+            }
+        }
     }
 }
 
-fn event(name: &'static str, value: impl Serialize) -> Event {
+pub(crate) fn event(name: &'static str, value: impl Serialize) -> Event {
     Event::default()
         .event(name)
         .json_data(value)
         .expect("serialize reply event")
-}
-
-struct ActiveTurn {
-    active: Arc<Mutex<HashSet<Uuid>>>,
-    bot: Uuid,
-}
-
-impl ActiveTurn {
-    fn acquire(active: &Arc<Mutex<HashSet<Uuid>>>, bot: Uuid) -> Result<Self, ApiError> {
-        if !active
-            .lock()
-            .expect("turn admission lock poisoned")
-            .insert(bot)
-        {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                Problem::new(
-                    "turn_in_progress",
-                    "this Bot already has a Turn in progress",
-                ),
-            ));
-        }
-        Ok(Self {
-            active: active.clone(),
-            bot,
-        })
-    }
-}
-
-impl Drop for ActiveTurn {
-    fn drop(&mut self) {
-        self.active
-            .lock()
-            .expect("turn admission lock poisoned")
-            .remove(&self.bot);
-    }
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -485,7 +474,7 @@ impl Problem {
     }
 }
 
-struct ApiError(StatusCode, Problem);
+pub(crate) struct ApiError(StatusCode, Problem);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {

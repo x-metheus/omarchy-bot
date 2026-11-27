@@ -137,16 +137,8 @@ async fn host_tools_refuse_startup_without_a_provisioned_bearer() {
 }
 
 async fn tool(call: ProviderCall, index: usize, name: &str, args: Value) {
-    call.chunk(
-        json!({"role": "assistant", "tool_calls": [{
-            "index": 0, "id": format!("call_fixture_{index}"), "type": "function",
-            "function": {"name": name, "arguments": args.to_string()}
-        }]}),
-        None,
-    )
-    .await;
-    call.chunk(json!({}), Some("tool_calls")).await;
-    call.frame("[DONE]").await;
+    call.tools(&[(&format!("call_fixture_{index}"), name, args)])
+        .await;
 }
 
 fn latest_result(call: &ProviderCall) -> &str {

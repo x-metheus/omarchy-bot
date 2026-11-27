@@ -11,7 +11,9 @@ use rig_core::tool::Tool;
 use rig_harness::prelude::{App, AppPerCallExt, PerCallShell, Processes, Resource, ToolOptions};
 use rig_harness::rig_tools::{Edit, Read, Shell, Write};
 
-pub(crate) const NAMES: [&str; 4] = [Read::NAME, Edit::NAME, Write::NAME, Shell::NAME];
+use crate::agent::conversation::ConversationTools;
+
+const NAMES: [&str; 4] = [Read::NAME, Edit::NAME, Write::NAME, Shell::NAME];
 
 #[derive(Debug, Resource)]
 pub(crate) struct WorkspaceRoot(pub(crate) PathBuf);
@@ -48,4 +50,8 @@ pub(crate) fn register(app: &mut App, workspace: WorkspaceRoot) {
     #[cfg(windows)]
     let shell = windows::WindowsShell(shell);
     app.add_tool_per_call(shell, ToolOptions::default());
+    app.world_mut()
+        .resource_mut::<ConversationTools>()
+        .shared
+        .extend(NAMES);
 }
