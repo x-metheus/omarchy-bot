@@ -1,19 +1,25 @@
 # Omarchy Bot agent instructions
 
-This project uses [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) as its default development workflow.
+When a Matt Pocock skill applies to the task, follow its `SKILL.md` in the [installed skills directory](.agents/skills/).
 
-## Start each task
+## Agent skills
 
-1. Read [using-agent-skills](.agents/skills/using-agent-skills/SKILL.md), select the applicable workflows, and load their full instructions as needed. State which workflows you are using.
-2. Follow [the project development workflow](docs/development.md). Use [the documentation index and code map](docs/README.md) to find relevant source and tests.
-3. Inspect the working tree and preserve existing edits and deletions. Read the affected code, tests, and directory instructions. Web UI work also follows [apps/web/AGENTS.md](apps/web/AGENTS.md).
-4. State assumptions and acceptance criteria before non-trivial work. Reuse accepted specifications and decisions, and resolve material ambiguity before dependent work.
-5. Follow the selected skills' verification and explicit approval gates. User instructions take precedence; do not ask again for authorization already given for the same scope.
+### Issue tracker
 
-## Project documentation and completion
+Publish and fetch tickets and specifications in GitHub Issues for `x-metheus/omarchy-bot`. See the [issue tracker instructions](docs/agents/issue-tracker.md).
 
-Project documentation lives in `docs/`. The [project artifact locations](docs/development.md#project-artifacts) replace upstream default paths for specifications, plans, task checklists, and quality requirements. Read `docs/CONSTRAINTS.md` before writing code when it exists. Keep installed skill files and their shared resources in `.agents/` intact.
+### Triage labels
 
-Implement and verify small increments, review the result, and update the relevant documentation. Use the project's [verification commands](docs/development.md#stack-and-verification) and the [Definition of Done](.agents/references/definition-of-done.md). Do not weaken checks or hide failures; report verification evidence and remaining blockers honestly.
+Use the five default GitHub triage labels when classifying an issue. See the [triage label mapping](docs/agents/triage-labels.md).
 
-Keep changes focused and preserve other tasks' work. Skills describe the process; they do not grant permission to delegate work, change external systems, or publish changes. Commit, push, merge, or deploy when the user's request or an established authorized workflow includes that action.
+### Domain docs
+
+Use the shared root glossary and relevant architecture decisions when exploring the codebase. See the [domain documentation instructions](docs/agents/domain.md).
+
+## Project workflow
+
+- Inspect the working tree and preserve edits already in progress. Locate the relevant source and tests using the [project code map](docs/README.md#code-map).
+- Before implementation, consult the feature’s accepted specification in `docs/specs/`, its plan and checklist in `docs/tasks/`, and `docs/CONSTRAINTS.md` when present. Confirm any unresolved requirements that affect the work.
+- For changes in `apps/web/`, follow the [frontend instructions](apps/web/AGENTS.md).
+- Verify each change with focused tests and the applicable [Bun scripts](package.json). For documentation, check links, paths, commands, and the diff. Report the results and any blockers.
+- Commit, push, merge, or deploy when the user’s request or an authorized project workflow calls for it.
