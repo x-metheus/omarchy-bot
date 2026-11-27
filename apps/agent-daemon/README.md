@@ -107,10 +107,15 @@ Expect ordered `delta` events followed by `committed` for both replies. The foll
 
 | Request | Response |
 | --- | --- |
-| `POST /bots` with `{"name":"Lumen"}` | `201` with `id` and `name` |
+| `POST /bots` with `{"name":"Lumen"}` | `201` with the new Bot profile and `duties: null` |
 | `GET /bots/{id}` | `200` with `bot` and `messages`, oldest first |
+| `PATCH /bots/{id}` with `{"name":"Prism"}` | `200` with the renamed Bot profile |
 | `POST /bots/{id}/messages` with `{"text":"Hello"}` | `200` with a `text/event-stream` reply |
 | `GET /bots/{id}/attachments/{attachmentId}` | `200` with the stored bytes and media type |
+
+A Bot profile has `id`, `name`, and `duties`. Creating a Bot requires a nonempty name. Rename updates the name on the existing profile. The same ID opens the original Conversation before and after a restart.
+
+Set duties by sending an explicit standing instruction such as “Your ongoing job is to classify new color samples by their shade.” Send a later message to revise those duties. Use a model that supports tool calls. The Agent uses the latest user-authored message text as evidence. The daemon saves the proposed duties and the completed reply in the same transaction, then supplies the saved duties to the model on later Turns.
 
 A successful message POST commits the user message before starting the model call. Each `delta` contains a JSON string. The terminal `committed` event contains the same `{id, role, text}` message returned by `GET` and is sent after the SQLite commit. A failed Turn ends with an `error` event containing `code` and `message`. Any deltas from that Turn are provisional. The committed user message remains in the Conversation.
 

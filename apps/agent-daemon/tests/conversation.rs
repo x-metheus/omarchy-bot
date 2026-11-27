@@ -1,5 +1,7 @@
 #[path = "attachments/scenarios.rs"]
 mod attachments;
+#[path = "duties/scenarios.rs"]
+mod duties;
 
 use std::path::Path;
 use std::process::Stdio;
@@ -181,12 +183,19 @@ impl ProviderCall {
         }
     }
 
+    fn chat_messages(&self) -> &[Value] {
+        let messages = self.body["messages"]
+            .as_array()
+            .expect("Chat Completions messages");
+        assert_eq!(messages[0]["role"], "system");
+        &messages[1..]
+    }
+
     fn assert_messages(&self, expected: &[(&str, &str)]) {
         assert_eq!(self.body["stream"], true);
         assert_eq!(self.body["model"], MODEL);
-        let messages: Vec<_> = self.body["messages"]
-            .as_array()
-            .expect("Chat Completions messages")
+        let messages: Vec<_> = self
+            .chat_messages()
             .iter()
             .map(|message| {
                 (

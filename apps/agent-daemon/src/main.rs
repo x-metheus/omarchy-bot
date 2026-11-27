@@ -1,6 +1,7 @@
 mod agent;
 mod api;
 mod attachments;
+mod duties;
 mod settings;
 mod store;
 
