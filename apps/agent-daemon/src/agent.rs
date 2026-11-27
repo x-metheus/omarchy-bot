@@ -1,43 +1,24 @@
+pub(crate) mod conversation;
+
+pub(crate) use conversation::{ReplySink, TurnRequest};
+
 use std::path::Path;
 
-use axum::response::sse::Event;
 use bevy_log::LogPlugin;
-use rig_core::completion::Message;
+use rig_basics::subagents::SubagentsPlugin;
+use rig_core::catalog::{Catalog, Connector};
 use rig_ecs::retry::RetryPolicy;
 use rig_harness::host::launcher::LauncherPlugin;
 use rig_harness::host::session::SessionPlugin;
 use rig_harness::prelude::*;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-use crate::store::{Conversation as StoredConversation, Role};
-
-pub(crate) struct TurnRequest {
-    pub(crate) history: StoredConversation,
-    pub(crate) model: Connection,
-    pub(crate) prompt: String,
-    pub(crate) stream: mpsc::Sender<Event>,
-    pub(crate) finished: oneshot::Sender<TurnResult>,
-}
-
-pub(crate) struct TurnResult {
-    pub(crate) answer: Option<String>,
-    pub(crate) stream: Option<mpsc::Sender<Event>>,
-}
-
-#[derive(Component)]
-struct Reply {
-    stream: Option<mpsc::Sender<Event>>,
-    finished: oneshot::Sender<TurnResult>,
-}
-
-#[derive(Resource)]
-struct Turns {
-    pending: mpsc::UnboundedReceiver<TurnRequest>,
-}
+use crate::api::ConversationCommand;
 
 pub(crate) fn headless_app(
     pending: mpsc::UnboundedReceiver<TurnRequest>,
+    conversations: mpsc::UnboundedSender<ConversationCommand>,
     runtime: Handle,
     scratch: &Path,
 ) -> App {
@@ -58,95 +39,9 @@ pub(crate) fn headless_app(
             max_retries: 0,
             ..RetryPolicy::default()
         })
-        .insert_resource(Turns { pending })
-        .add_systems(PreUpdate, deliver)
-        .add_systems(PostUpdate, (stream_deltas, finish_turns).chain());
+        // Subagents inherit the parent's BYOK connection. There is no second catalog login.
+        .insert_resource(Models(Connector::new(Catalog::default())));
+    rig_harness::load::<SubagentsPlugin>(&mut app, "rig-basics", "");
+    conversation::add(&mut app, pending, conversations);
     app
-}
-
-fn deliver(world: &mut World) {
-    world.resource_scope(|world, mut turns: Mut<Turns>| {
-        while let Ok(request) = turns.pending.try_recv() {
-            let mut conversation = Conversation::default();
-            for message in request.history.messages {
-                conversation.push(match message.role {
-                    Role::User => Message::user(message.text),
-                    Role::Assistant => Message::assistant(message.text),
-                });
-            }
-            let bot = request.history.bot;
-            let agent = spawn_root(
-                world,
-                (
-                    AgentId(bot.id.to_string()),
-                    Name::new(bot.name),
-                    conversation,
-                    request.model,
-                    ToolAccess::only([]),
-                    Reply {
-                        stream: Some(request.stream),
-                        finished: request.finished,
-                    },
-                ),
-            )
-            .id();
-            world.trigger(Deliver::new(agent, request.prompt, DeliveryMode::Queue).literal());
-        }
-    });
-}
-
-fn stream_deltas(mut deltas: MessageReader<StreamDelta>, mut replies: Query<&mut Reply>) {
-    for delta in deltas.read() {
-        let (Some(agent), StreamEvent::Text { text, .. }) = (delta.agent, &delta.event) else {
-            continue;
-        };
-        let Ok(mut reply) = replies.get_mut(agent) else {
-            continue;
-        };
-        let Some(stream) = &reply.stream else {
-            continue;
-        };
-        // Stop streaming to an absent or stalled client. Rig keeps running and
-        // the client can read the committed Conversation on a new connection.
-        if let Ok(slot) = stream.try_reserve() {
-            slot.send(
-                Event::default()
-                    .event("delta")
-                    .json_data(text)
-                    .expect("serialize text delta"),
-            );
-        } else {
-            reply.stream = None;
-        }
-    }
-}
-
-fn finish_turns(
-    settled: Query<(&ForAgent, &TurnOutcome), Added<Settled>>,
-    replies: Query<(), With<Reply>>,
-    mut commands: Commands,
-) {
-    for (&ForAgent(agent), outcome) in &settled {
-        if !replies.contains(agent) {
-            continue;
-        }
-        let answer = match outcome {
-            TurnOutcome::Answered(Message::Assistant(message)) => {
-                let text = message.text();
-                (!text.trim().is_empty()).then_some(text)
-            }
-            _ => None,
-        };
-        commands
-            .entity(agent)
-            .queue(move |mut agent: EntityWorldMut| {
-                if let Some(reply) = agent.take::<Reply>() {
-                    agent.despawn();
-                    let _ = reply.finished.send(TurnResult {
-                        answer,
-                        stream: reply.stream,
-                    });
-                }
-            });
-    }
 }

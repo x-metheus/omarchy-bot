@@ -24,7 +24,7 @@ pub(crate) struct Conversation {
 
 #[derive(Serialize)]
 pub(crate) struct Message {
-    id: i64,
+    pub(crate) id: i64,
     pub(crate) role: Role,
     pub(crate) text: String,
 }
@@ -45,13 +45,17 @@ impl FromSql for Role {
         }
     }
 }
+pub(crate) enum History {
+    Restore,
+    Live,
+}
 
 pub(crate) enum Admission {
     BotNotFound,
     Unconfigured,
     Accepted {
-        history: Conversation,
-        prompt: String,
+        history: Option<Conversation>,
+        message: Message,
         model: RigConnection,
     },
 }
@@ -131,21 +135,33 @@ impl Store {
             .await
     }
 
-    pub(crate) async fn accept_message(&self, bot: Uuid, text: String) -> Result<Admission> {
+    pub(crate) async fn accept_message(
+        &self,
+        bot: Uuid,
+        text: String,
+        history: History,
+    ) -> Result<Admission> {
         self.run(move |db| {
             let transaction = db.connection.transaction()?;
-            let Some(history) = load_conversation(&transaction, bot)? else {
-                return Ok(Admission::BotNotFound);
+            let history = match history {
+                History::Restore => {
+                    let Some(history) = load_conversation(&transaction, bot)? else {
+                        return Ok(Admission::BotNotFound);
+                    };
+                    Some(history)
+                }
+                History::Live => None,
             };
             // Settings writes use this same lock and publish only after commit.
             let Some(model) = db.settings.connection() else {
                 return Ok(Admission::Unconfigured);
             };
-            insert_message(&transaction, bot, Role::User, &text)?;
+            let role = Role::User;
+            let id = insert_message(&transaction, bot, role, &text)?;
             transaction.commit()?;
             Ok(Admission::Accepted {
                 history,
-                prompt: text,
+                message: Message { id, role, text },
                 model,
             })
         })

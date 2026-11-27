@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Request, State};
@@ -19,22 +18,19 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::agent::TurnRequest;
+use crate::agent::{ReplySink, TurnRequest};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
-use crate::store::{Admission, Bot, Conversation, Store};
+use crate::store::{Admission, Bot, Conversation, History, Store};
 
 #[derive(Clone)]
 struct Daemon {
     store: Store,
-    turns: mpsc::UnboundedSender<TurnRequest>,
-    wake: Wake,
-    active: Arc<Mutex<HashSet<Uuid>>>,
+    conversations: mpsc::UnboundedSender<ConversationCommand>,
 }
 
 pub(crate) fn router(
     store: Store,
-    turns: mpsc::UnboundedSender<TurnRequest>,
-    wake: Wake,
+    conversations: mpsc::UnboundedSender<ConversationCommand>,
     settings_token: Option<Digest>,
 ) -> Router {
     Router::new()
@@ -51,9 +47,7 @@ pub(crate) fn router(
         )
         .with_state(Daemon {
             store,
-            turns,
-            wake,
-            active: Arc::default(),
+            conversations,
         })
 }
 
@@ -206,123 +200,113 @@ async fn send_message(
             Problem::new("empty_message", "message text must be nonempty"),
         ));
     }
-    let guard = ActiveTurn::acquire(&daemon.active, bot)?;
     let (events, stream) = mpsc::channel(64);
     let (accepted, admission) = oneshot::channel();
-    tokio::spawn(run_turn(daemon, guard, input.text, events, accepted));
+    daemon
+        .conversations
+        .send(ConversationCommand::Message {
+            bot,
+            text: input.text,
+            stream: ReplySink::new(events),
+            accepted,
+        })
+        .map_err(|_| UNAVAILABLE)?;
     admission.await.map_err(|_| UNAVAILABLE)??;
     Ok(Sse::new(
         ReceiverStream::new(stream).map(Ok::<_, Infallible>),
     ))
 }
 
-async fn run_turn(
-    daemon: Daemon,
-    guard: ActiveTurn,
-    text: String,
-    stream: mpsc::Sender<Event>,
-    accepted: oneshot::Sender<Result<(), ApiError>>,
-) {
-    let bot = guard.bot;
-    let admission = match daemon.store.accept_message(bot, text).await {
-        Ok(Admission::Accepted {
-            history,
-            prompt,
-            model,
-        }) => Ok((history, prompt, model)),
-        Ok(Admission::BotNotFound) => Err(BOT_NOT_FOUND),
-        Ok(Admission::Unconfigured) => Err(UNCONFIGURED),
-        Err(error) => Err(store_error(error)),
-    };
-    let (history, prompt, model) = match admission {
-        Ok(turn) => turn,
-        Err(error) => {
-            drop(guard);
-            let _ = accepted.send(Err(error));
-            return;
-        }
-    };
-    let (finished, result) = oneshot::channel();
-    if daemon
-        .turns
-        .send(TurnRequest {
-            history,
-            model,
-            prompt,
-            stream,
-            finished,
-        })
-        .is_err()
-    {
-        drop(guard);
-        let _ = accepted.send(Err(UNAVAILABLE));
-        return;
-    }
-    daemon.wake.wake();
-    let _ = accepted.send(Ok(()));
+pub(crate) enum ConversationCommand {
+    Message {
+        bot: Uuid,
+        text: String,
+        stream: ReplySink,
+        accepted: oneshot::Sender<Result<(), ApiError>>,
+    },
+    Settled {
+        bot: Uuid,
+        answer: Option<String>,
+        streams: Vec<ReplySink>,
+    },
+}
 
-    let Ok(result) = result.await else { return };
-    let terminal = match result.answer {
-        Some(text) => match daemon.store.commit_reply(bot, text).await {
-            Ok(message) => event("committed", message),
-            Err(error) => event("error", store_error(error).1),
-        },
-        None => event(
-            "error",
-            Problem::new(
-                "turn_failed",
-                "Rig did not complete a text reply; check the model and provider configuration",
-            ),
-        ),
-    };
-    // A client can send its next message as soon as it observes a terminal event.
-    drop(guard);
-    if let Some(stream) = result.stream {
-        let _ = stream.send(terminal).await;
+pub(crate) async fn run_conversations(
+    store: Store,
+    turns: mpsc::UnboundedSender<TurnRequest>,
+    wake: Wake,
+    mut commands: mpsc::UnboundedReceiver<ConversationCommand>,
+) {
+    let mut live = HashSet::new();
+    // Keep SQLite admission and reply commits in order with their runtime handoff.
+    while let Some(command) = commands.recv().await {
+        match command {
+            ConversationCommand::Message {
+                bot,
+                text,
+                stream,
+                accepted,
+            } => {
+                let history = if live.contains(&bot) {
+                    History::Live
+                } else {
+                    History::Restore
+                };
+                let admission = match store.accept_message(bot, text, history).await {
+                    Ok(Admission::Accepted {
+                        history,
+                        message,
+                        model,
+                    }) => turns
+                        .send(TurnRequest {
+                            bot,
+                            history,
+                            message,
+                            model,
+                            stream,
+                        })
+                        .map_err(|_| UNAVAILABLE)
+                        .map(|()| {
+                            live.insert(bot);
+                            wake.wake();
+                        }),
+                    Ok(Admission::BotNotFound) => Err(BOT_NOT_FOUND),
+                    Ok(Admission::Unconfigured) => Err(UNCONFIGURED),
+                    Err(error) => Err(store_error(error)),
+                };
+                let _ = accepted.send(admission);
+            }
+            ConversationCommand::Settled {
+                bot,
+                answer,
+                streams,
+            } => {
+                let terminal = match answer {
+                    Some(text) => match store.commit_reply(bot, text).await {
+                        Ok(message) => event("committed", message),
+                        Err(error) => event("error", store_error(error).1),
+                    },
+                    None => event(
+                        "error",
+                        Problem::new(
+                            "turn_failed",
+                            "Rig did not complete a text reply; check the model and provider configuration",
+                        ),
+                    ),
+                };
+                for mut stream in streams {
+                    stream.send(terminal.clone());
+                }
+            }
+        }
     }
 }
 
-fn event(name: &'static str, value: impl Serialize) -> Event {
+pub(crate) fn event(name: &'static str, value: impl Serialize) -> Event {
     Event::default()
         .event(name)
         .json_data(value)
         .expect("serialize reply event")
-}
-
-struct ActiveTurn {
-    active: Arc<Mutex<HashSet<Uuid>>>,
-    bot: Uuid,
-}
-
-impl ActiveTurn {
-    fn acquire(active: &Arc<Mutex<HashSet<Uuid>>>, bot: Uuid) -> Result<Self, ApiError> {
-        if !active
-            .lock()
-            .expect("turn admission lock poisoned")
-            .insert(bot)
-        {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                Problem::new(
-                    "turn_in_progress",
-                    "this Bot already has a Turn in progress",
-                ),
-            ));
-        }
-        Ok(Self {
-            active: active.clone(),
-            bot,
-        })
-    }
-}
-
-impl Drop for ActiveTurn {
-    fn drop(&mut self) {
-        self.active
-            .lock()
-            .expect("turn admission lock poisoned")
-            .remove(&self.bot);
-    }
 }
 
 #[derive(Serialize)]
@@ -337,7 +321,7 @@ impl Problem {
     }
 }
 
-struct ApiError(StatusCode, Problem);
+pub(crate) struct ApiError(StatusCode, Problem);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {

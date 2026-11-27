@@ -1,7 +1,7 @@
 use std::{env, fs, str};
 
 use anyhow::{Context, Result, anyhow, ensure};
-use rig_core::catalog::ModelSpec;
+use rig_core::catalog::{Catalog, ModelSpec};
 use rig_core::driver::{DynModel, Model};
 use rig_core::operation::Completion;
 use rig_core::providers::anthropic::AnthropicConfig;
@@ -118,7 +118,11 @@ impl Endpoints {
         };
         let provider =
             ProviderId::catalog(selection.provider.name()).expect("built-in Rig provider");
-        let spec = ModelSpec::new(provider, &selection.model);
+        let mut spec = ModelSpec::new(provider, &selection.model);
+        // Gateway aliases use the tool-capable Chat Completions and Messages protocols.
+        spec.tools = Catalog::builtin()
+            .resolve(&spec.reference())
+            .map_or(true, |model| model.spec.tools);
         let handler = ModelAdapter::<Completion>::new(spec.reference(), model);
         ConfiguredModel {
             selection,

@@ -1,6 +1,6 @@
 # Agent Daemon
 
-The standalone daemon runs a Rig 0.47.1 Agent for each active Bot Turn. The Bot ID also identifies its single Conversation. The HTTP listener binds to IPv4 loopback. Run one daemon per SQLite file.
+The standalone daemon hosts one Rig 0.47.1 root Agent per Bot Conversation. The Bot ID also identifies its single Conversation. The HTTP listener binds to IPv4 loopback. Run one daemon per SQLite file.
 
 ## Headless startup
 
@@ -48,7 +48,7 @@ Both methods return the same status shape. `active` is `null` until configured. 
 }
 ```
 
-A successful `PUT` commits the selection and any key replacement together. Invalid input or a failed write preserves the prior configuration. Writes and Turn admission share a lock. A Turn admitted after a successful write uses the new selection and key. An already admitted Turn keeps its original connection. The latest committed write determines the active selection.
+A successful `PUT` commits the selection and any key replacement together. Invalid input or a failed write preserves the prior configuration. Writes and message admission share a lock. An HTTP message starting a Turn uses the model and key captured at admission. Input delivered into a running Turn uses that Turn's connection. A Subagent inherits its parent's connection when spawned, and a report can wake the root using its existing connection. The latest committed write determines the active selection.
 
 | Provider | Default request URL | Operator base URL override |
 | --- | --- | --- |
@@ -113,7 +113,13 @@ Expect ordered `delta` events followed by `committed` for both replies. The foll
 
 A successful message POST commits the user message before starting the model call. Each `delta` contains a JSON string. The terminal `committed` event contains the same `{id, role, text}` message returned by `GET` and is sent after the SQLite commit. A failed Turn ends with an `error` event containing `code` and `message`. Any deltas from that Turn are provisional. The committed user message remains in the Conversation.
 
-A Bot accepts one Turn at a time. An overlapping POST receives `409` with `turn_in_progress` and adds no message. A Turn continues after its client disconnects. A client whose stream closes before a terminal event can use `GET` to read the committed state. On process restart, the daemon loads committed messages from SQLite and starts a fresh Turn on the next POST.
+A Bot accepts new messages while a Turn is running. Rig delivers them through the Inbox at the next model call. A POST stream starts receiving deltas when its input is delivered and closes after that Turn's `committed` or `error` event. When Rig delivers multiple inputs to the same Turn, their POST streams receive the same committed reply ID. A disconnect leaves the Turn running. Use `GET` to read committed history, including replies to background Subagent reports after the POST streams close.
+
+### Rig lifecycle
+
+The daemon restores a Bot's committed Conversation into its root Agent on the first POST after startup. Subsequent POSTs append the user message to SQLite before handing it to the root's Rig Inbox. The Inbox effect carries the Bot and durable user message ID, and Rig provides its `DeliveredAs` and `DeliveredIn` mapping when the message reaches the model. Model calls and the tools they produce carry the eligible source for that invocation. Subagent results enter the root Inbox with Rig's Agent author and are available to the root on its next model call.
+
+`SubagentsPlugin` owns delegation, messaging, and reports. The root is prompted to end its Turn after dispatching asynchronous work, leaving it available for new requests. Turn settlement sends one reply to the ordered Conversation writer, which commits before notifying any attached POST streams. A report can start a Turn with no attached POST stream. SQLite preserves committed messages across a daemon restart. Live Rig Inbox entries and Subagents last for the daemon process.
 
 ## Checks
 
