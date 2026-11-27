@@ -1,16 +1,8 @@
 use std::path::Path;
 
-use anyhow::{Result, anyhow};
 use axum::response::sse::Event;
 use bevy_log::LogPlugin;
-use rig_core::catalog::ModelSpec;
 use rig_core::completion::Message;
-use rig_core::operation::Completion;
-use rig_core::providers::openai::OpenAI;
-use rig_core::providers::registry::ProviderId;
-use rig_core::serve::ErasedHandler;
-use rig_core::serve::adapters::ModelAdapter;
-use rig_ecs::effects::Handler;
 use rig_ecs::retry::RetryPolicy;
 use rig_harness::host::launcher::LauncherPlugin;
 use rig_harness::host::session::SessionPlugin;
@@ -22,6 +14,7 @@ use crate::store::{Conversation as StoredConversation, Role};
 
 pub(crate) struct TurnRequest {
     pub(crate) history: StoredConversation,
+    pub(crate) model: Connection,
     pub(crate) prompt: String,
     pub(crate) stream: mpsc::Sender<Event>,
     pub(crate) finished: oneshot::Sender<TurnResult>,
@@ -41,27 +34,14 @@ struct Reply {
 #[derive(Resource)]
 struct Turns {
     pending: mpsc::UnboundedReceiver<TurnRequest>,
-    model: Connection,
 }
 
 pub(crate) fn headless_app(
-    model: String,
     pending: mpsc::UnboundedReceiver<TurnRequest>,
     runtime: Handle,
     scratch: &Path,
-) -> Result<App> {
+) -> App {
     // Provider diagnostics can include raw response bodies. Keep them inside Rig.
-    let client = OpenAI::from_env().map_err(|_| {
-        anyhow!("invalid OpenAI environment; check OPENAI_API_KEY and OPENAI_BASE_URL")
-    })?;
-    let provider = ProviderId::catalog("openai")
-        .ok_or_else(|| anyhow!("Rig OpenAI provider is unavailable"))?;
-    let spec = ModelSpec::new(provider, model.clone());
-    let handler = ModelAdapter::<Completion>::new(spec.reference(), client.chat(model));
-    let model = Connection {
-        spec: spec.into(),
-        handler: Handler(ErasedHandler::new(handler)),
-    };
 
     let mut app = App::new();
     app.insert_resource(TokioRuntime(runtime))
@@ -78,10 +58,10 @@ pub(crate) fn headless_app(
             max_retries: 0,
             ..RetryPolicy::default()
         })
-        .insert_resource(Turns { pending, model })
+        .insert_resource(Turns { pending })
         .add_systems(PreUpdate, deliver)
         .add_systems(PostUpdate, (stream_deltas, finish_turns).chain());
-    Ok(app)
+    app
 }
 
 fn deliver(world: &mut World) {
@@ -101,7 +81,7 @@ fn deliver(world: &mut World) {
                     AgentId(bot.id.to_string()),
                     Name::new(bot.name),
                     conversation,
-                    turns.model.clone(),
+                    request.model,
                     ToolAccess::only([]),
                     Reply {
                         stream: Some(request.stream),

@@ -2073,13 +2073,18 @@ dependencies = [
  "rig-core",
  "rig-ecs",
  "rig-harness",
+ "rig-reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "tokio",
  "tokio-stream",
+ "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

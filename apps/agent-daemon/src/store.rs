@@ -2,10 +2,13 @@ use std::path::{self, Path};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use rig_ecs::model::Connection as RigConnection;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
+
+use crate::settings::{Settings, SettingsStatus, SettingsUpdate, Update};
 
 #[derive(Serialize)]
 pub(crate) struct Bot {
@@ -43,8 +46,23 @@ impl FromSql for Role {
     }
 }
 
+pub(crate) enum Admission {
+    BotNotFound,
+    Unconfigured,
+    Accepted {
+        history: Conversation,
+        prompt: String,
+        model: RigConnection,
+    },
+}
+
+struct Database {
+    connection: Connection,
+    settings: Settings,
+}
+
 #[derive(Clone)]
-pub(crate) struct Store(Arc<Mutex<Connection>>);
+pub(crate) struct Store(Arc<Mutex<Database>>);
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
@@ -68,16 +86,38 @@ impl Store {
                      text TEXT NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS messages_by_bot ON messages(bot_id, id);
+                 CREATE TABLE IF NOT EXISTS provider_credentials (
+                     provider TEXT PRIMARY KEY NOT NULL CHECK (provider IN ('openai', 'anthropic')),
+                     sealed_key BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS model_settings (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     provider TEXT NOT NULL REFERENCES provider_credentials(provider),
+                     model TEXT NOT NULL
+                 );
                  COMMIT;",
             )
             .context("initialize SQLite database and acquire its daemon lock")?;
-        Ok(Self(Arc::new(Mutex::new(connection))))
+        let settings = Settings::load(&connection)?;
+        Ok(Self(Arc::new(Mutex::new(Database {
+            connection,
+            settings,
+        }))))
+    }
+
+    pub(crate) async fn settings(&self) -> Result<SettingsStatus> {
+        self.run(|db| Ok(db.settings.status())).await
+    }
+
+    pub(crate) async fn update_settings(&self, update: SettingsUpdate) -> Result<Update> {
+        self.run(move |db| db.settings.update(&mut db.connection, update))
+            .await
     }
 
     pub(crate) async fn create_bot(&self, name: String) -> Result<Bot> {
-        self.run(move |connection| {
+        self.run(move |db| {
             let id = Uuid::new_v4();
-            connection.execute(
+            db.connection.execute(
                 "INSERT INTO bots (id, name) VALUES (?1, ?2)",
                 params![id.as_bytes().as_slice(), name],
             )?;
@@ -87,31 +127,35 @@ impl Store {
     }
 
     pub(crate) async fn conversation(&self, bot: Uuid) -> Result<Option<Conversation>> {
-        self.run(move |connection| load_conversation(connection, bot))
+        self.run(move |db| Ok(load_conversation(&db.connection, bot)?))
             .await
     }
 
-    pub(crate) async fn accept_message(
-        &self,
-        bot: Uuid,
-        text: String,
-    ) -> Result<Option<(Conversation, String)>> {
-        self.run(move |connection| {
-            let transaction = connection.transaction()?;
+    pub(crate) async fn accept_message(&self, bot: Uuid, text: String) -> Result<Admission> {
+        self.run(move |db| {
+            let transaction = db.connection.transaction()?;
             let Some(history) = load_conversation(&transaction, bot)? else {
-                return Ok(None);
+                return Ok(Admission::BotNotFound);
+            };
+            // Settings writes use this same lock and publish only after commit.
+            let Some(model) = db.settings.connection() else {
+                return Ok(Admission::Unconfigured);
             };
             insert_message(&transaction, bot, Role::User, &text)?;
             transaction.commit()?;
-            Ok(Some((history, text)))
+            Ok(Admission::Accepted {
+                history,
+                prompt: text,
+                model,
+            })
         })
         .await
     }
 
     pub(crate) async fn commit_reply(&self, bot: Uuid, text: String) -> Result<Message> {
-        self.run(move |connection| {
+        self.run(move |db| {
             let role = Role::Assistant;
-            let id = insert_message(connection, bot, role, &text)?;
+            let id = insert_message(&db.connection, bot, role, &text)?;
             Ok(Message { id, role, text })
         })
         .await
@@ -119,13 +163,13 @@ impl Store {
 
     async fn run<T: Send + 'static>(
         &self,
-        operation: impl FnOnce(&mut Connection) -> rusqlite::Result<T> + Send + 'static,
+        operation: impl FnOnce(&mut Database) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let connection = self.0.clone();
-        Ok(tokio::task::spawn_blocking(move || {
-            operation(&mut connection.lock().expect("SQLite connection lock poisoned"))
+        let db = self.0.clone();
+        tokio::task::spawn_blocking(move || {
+            operation(&mut db.lock().expect("SQLite connection lock poisoned"))
         })
-        .await??)
+        .await?
     }
 }
 

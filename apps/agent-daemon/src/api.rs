@@ -2,21 +2,26 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rig_harness::prelude::Wake;
+use ring::digest::{self, Digest};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::agent::TurnRequest;
-use crate::store::{Bot, Conversation, Store};
+use crate::settings::{SettingsStatus, SettingsUpdate, Update};
+use crate::store::{Admission, Bot, Conversation, Store};
 
 #[derive(Clone)]
 struct Daemon {
@@ -30,17 +35,122 @@ pub(crate) fn router(
     store: Store,
     turns: mpsc::UnboundedSender<TurnRequest>,
     wake: Wake,
+    settings_token: Option<Digest>,
 ) -> Router {
     Router::new()
         .route("/bots", post(create_bot))
         .route("/bots/{bot}", get(read_bot))
         .route("/bots/{bot}/messages", post(send_message))
+        .merge(
+            Router::new()
+                .route("/settings", get(read_settings).put(write_settings))
+                .route_layer(middleware::from_fn_with_state(
+                    settings_token,
+                    authorize_settings,
+                )),
+        )
         .with_state(Daemon {
             store,
             turns,
             wake,
             active: Arc::default(),
         })
+}
+
+async fn authorize_settings(
+    State(expected): State<Option<Digest>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let bearer = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, token)| token);
+    let authorized = expected.zip(bearer).is_some_and(|(expected, token)| {
+        let provided = digest::digest(&digest::SHA256, token.as_bytes());
+        bool::from(expected.as_ref().ct_eq(provided.as_ref()))
+    });
+    let mut response = if authorized {
+        next.run(request).await
+    } else {
+        let mut response = ApiError(
+            StatusCode::UNAUTHORIZED,
+            Problem::new(
+                "settings_unauthorized",
+                "a valid Settings bearer token is required",
+            ),
+        )
+        .into_response();
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        response
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn read_settings(State(daemon): State<Daemon>) -> Result<Json<SettingsStatus>, ApiError> {
+    daemon
+        .store
+        .settings()
+        .await
+        .map(Json)
+        .map_err(|_| SETTINGS_STORAGE_FAILED)
+}
+
+async fn write_settings(
+    State(daemon): State<Daemon>,
+    input: Result<Json<SettingsUpdate>, JsonRejection>,
+) -> Result<Json<SettingsStatus>, ApiError> {
+    // JSON rejection details can contain submitted values.
+    let Json(input) = input.map_err(|error| {
+        ApiError(
+            error.status(),
+            Problem::new(
+                "invalid_settings",
+                "expected a Settings JSON object with provider, model, and optional apiKey",
+            ),
+        )
+    })?;
+    match daemon
+        .store
+        .update_settings(input)
+        .await
+        .map_err(|_| SETTINGS_STORAGE_FAILED)?
+    {
+        Update::Saved(status) => Ok(Json(status)),
+        Update::InvalidModel => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            Problem::new(
+                "invalid_model",
+                "model must be nonempty with no surrounding whitespace or control characters",
+            ),
+        )),
+        Update::InvalidKey => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            Problem::new(
+                "invalid_api_key",
+                "apiKey must be nonempty printable ASCII without whitespace",
+            ),
+        )),
+        Update::CredentialRequired => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            Problem::new("credential_required", "supply apiKey for this provider"),
+        )),
+        Update::MasterKeyRequired => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Problem::new(
+                "settings_read_only",
+                "the daemon requires a master key file to save Settings",
+            ),
+        )),
+    }
 }
 
 #[derive(Deserialize)]
@@ -114,14 +224,19 @@ async fn run_turn(
     accepted: oneshot::Sender<Result<(), ApiError>>,
 ) {
     let bot = guard.bot;
-    let history = daemon.store.accept_message(bot, text).await;
-    let (history, prompt) = match history {
-        Ok(Some(history)) => history,
-        other => {
-            let error = match other {
-                Err(error) => store_error(error),
-                _ => BOT_NOT_FOUND,
-            };
+    let admission = match daemon.store.accept_message(bot, text).await {
+        Ok(Admission::Accepted {
+            history,
+            prompt,
+            model,
+        }) => Ok((history, prompt, model)),
+        Ok(Admission::BotNotFound) => Err(BOT_NOT_FOUND),
+        Ok(Admission::Unconfigured) => Err(UNCONFIGURED),
+        Err(error) => Err(store_error(error)),
+    };
+    let (history, prompt, model) = match admission {
+        Ok(turn) => turn,
+        Err(error) => {
             drop(guard);
             let _ = accepted.send(Err(error));
             return;
@@ -132,6 +247,7 @@ async fn run_turn(
         .turns
         .send(TurnRequest {
             history,
+            model,
             prompt,
             stream,
             finished,
@@ -236,6 +352,20 @@ const BOT_NOT_FOUND: ApiError = ApiError(
 const UNAVAILABLE: ApiError = ApiError(
     StatusCode::SERVICE_UNAVAILABLE,
     Problem::new("agent_unavailable", "the Rig runtime is unavailable"),
+);
+const UNCONFIGURED: ApiError = ApiError(
+    StatusCode::SERVICE_UNAVAILABLE,
+    Problem::new(
+        "provider_unconfigured",
+        "configure a provider credential and model in daemon Settings before sending messages",
+    ),
+);
+const SETTINGS_STORAGE_FAILED: ApiError = ApiError(
+    StatusCode::INTERNAL_SERVER_ERROR,
+    Problem::new(
+        "settings_storage_failed",
+        "daemon Settings could not be stored or read",
+    ),
 );
 
 fn store_error(error: anyhow::Error) -> ApiError {

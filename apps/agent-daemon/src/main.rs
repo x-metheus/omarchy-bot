@@ -1,12 +1,13 @@
 mod agent;
 mod api;
+mod settings;
 mod store;
 
 use std::env;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use rig_harness::AppExit;
 use rig_harness::prelude::Wake;
 use tokio::net::TcpListener;
@@ -22,20 +23,18 @@ fn main() -> Result<AppExit> {
     let port = env_or("OMARCHY_AGENT_PORT", "8765")?
         .parse()
         .context("OMARCHY_AGENT_PORT must be a TCP port")?;
-    let model = env_or("OMARCHY_AGENT_MODEL", "gpt-4.1-mini")?;
-    ensure!(
-        !model.trim().is_empty(),
-        "OMARCHY_AGENT_MODEL must be nonempty"
-    );
+    let settings_token = settings::load_token()?;
+    let store = Store::open(&path)?;
 
     let runtime = Runtime::new().context("start HTTP runtime")?;
     let scratch = tempfile::tempdir().context("create private Rig scratch directory")?;
     let (turns, pending) = mpsc::unbounded_channel();
-    let mut app = agent::headless_app(model, pending, runtime.handle().clone(), scratch.path())?;
+    let mut app = agent::headless_app(pending, runtime.handle().clone(), scratch.path());
     let router = api::router(
-        Store::open(&path)?,
+        store,
         turns,
         app.world().resource::<Wake>().clone(),
+        settings_token,
     );
     let listener = runtime
         .block_on(TcpListener::bind(SocketAddrV4::new(
