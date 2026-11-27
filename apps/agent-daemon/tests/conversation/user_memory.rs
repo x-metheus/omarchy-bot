@@ -41,6 +41,198 @@ async fn user_memory_is_shared_across_bots_and_survives_restart() {
 }
 
 #[tokio::test]
+async fn user_memory_inspection_cites_the_current_source_across_bots() {
+    let mut provider = Provider::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let client = http_client();
+    let daemon = Daemon::start(&directory.path().join("memory.sqlite3"), &provider).await;
+    let writer = daemon.create(&client).await;
+    let reader = daemon.create(&client).await;
+    let writer = bot_id(&writer);
+    let reader = bot_id(&reader);
+    let key = "preferences.units";
+    let original = "Always use imperial units.";
+    let correction = "Change my units preference to metric.";
+
+    let mut stream = ReplyStream::new(daemon.send(&client, writer, original).await);
+    propose(provider.next().await, key, "imperial", original).await;
+    chat_reply(provider.next().await, &mut stream, "Saved.").await;
+
+    let mut stream = ReplyStream::new(daemon.send(&client, reader, correction).await);
+    propose(provider.next().await, key, "metric", correction).await;
+    let continued = provider.next().await;
+    assert_tool_result(&continued, "Saved UserMemory.");
+    chat_reply(continued, &mut stream, "Updated.").await;
+    let source = daemon.read(&client, reader).await;
+
+    let mut stream = ReplyStream::new(
+        daemon
+            .send(
+                &client,
+                writer,
+                "What do you remember about my units preference?",
+            )
+            .await,
+    );
+    let call = provider.next().await;
+    assert!(
+        call.body["tools"]
+            .to_string()
+            .contains("inspect_user_memory")
+    );
+    tool_call(call, "inspect_user_memory", json!({"key": key})).await;
+    let continued = provider.next().await;
+    assert_eq!(
+        inspection(&continued),
+        json!([{
+            "key": key,
+            "value": "metric",
+            "source": {
+                "bot_id": reader,
+                "bot_name": "Lumen",
+                "message_id": source["messages"][0]["id"],
+                "evidence": correction,
+            },
+        }])
+    );
+    chat_reply(
+        continued,
+        &mut stream,
+        "You asked for metric units in Lumen.",
+    )
+    .await;
+    assert_eq!(
+        daemon.read(&client, writer).await["messages"][0]["text"],
+        original
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn user_memory_forgetting_survives_delayed_writes_and_restart() {
+    let mut provider = Provider::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("memory.sqlite3");
+    let client = http_client();
+    let daemon = Daemon::start(&db, &provider).await;
+    let writer = daemon.create(&client).await;
+    let reader = daemon.create(&client).await;
+    let clearer = daemon.create(&client).await;
+    let writer = bot_id(&writer);
+    let reader = bot_id(&reader);
+    let clearer = bot_id(&clearer);
+    let key = "profile.preferred_name";
+    let original = "Call me Élodie.";
+    let delayed = "Call me Rowan.";
+    let clear = "Could you forget my preferred name?";
+
+    let mut stream = ReplyStream::new(daemon.send(&client, writer, original).await);
+    propose(provider.next().await, key, "Élodie", original).await;
+    chat_reply(provider.next().await, &mut stream, "Saved Élodie.").await;
+
+    let mut delayed_reply = ReplyStream::new(daemon.send(&client, reader, delayed).await);
+    let held = provider.next().await;
+    let mut stream = ReplyStream::new(daemon.send(&client, clearer, clear).await);
+    let call = provider.next().await;
+    assert!(
+        call.body["tools"]
+            .to_string()
+            .contains("forget_user_memory")
+    );
+    assert!(system_prompt(&call).contains("Élodie"));
+    forget(call, key, clear).await;
+    let continued = provider.next().await;
+    assert_tool_result(&continued, "Forgot UserMemory.");
+    let clear_order = daemon.read(&client, clearer).await["messages"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let marker = json!({key: clear_order}).to_string();
+    assert!(system_prompt(&continued).contains(&marker));
+    assert!(!system_prompt(&continued).contains("Élodie"));
+    chat_reply(continued, &mut stream, "I forgot your preferred name.").await;
+
+    propose_all(held, &[(key, "Rowan", delayed), (key, "Rowan", delayed)]).await;
+    let continued = provider.next().await;
+    assert_eq!(
+        continued.body["messages"]
+            .to_string()
+            .matches("An equal or newer user statement")
+            .count(),
+        2
+    );
+    assert!(system_prompt(&continued).contains(&marker));
+    assert!(!system_prompt(&continued).contains("Rowan"));
+    chat_reply(
+        continued,
+        &mut delayed_reply,
+        "The newer change took precedence.",
+    )
+    .await;
+    daemon.stop().await;
+
+    let daemon = Daemon::start(&db, &provider).await;
+    let history = daemon.read(&client, writer).await;
+    assert_eq!(history["messages"][0]["text"], original);
+    assert_eq!(history["messages"][1]["text"], "Saved Élodie.");
+    let mut stream = ReplyStream::new(
+        daemon
+            .send(&client, writer, "What do you remember about me?")
+            .await,
+    );
+    let call = provider.next().await;
+    let context = system_prompt(&call);
+    assert!(context.contains(&marker));
+    assert!(context.contains("historical"));
+    assert!(!context.contains("Élodie"));
+    propose(call, key, "Élodie", original).await;
+    let continued = provider.next().await;
+    assert_tool_result(&continued, "UserMemory was not written");
+    tool_call(continued, "inspect_user_memory", json!({})).await;
+    let continued = provider.next().await;
+    assert_eq!(inspection(&continued), json!([]));
+    chat_reply(continued, &mut stream, "I have no current UserMemory.").await;
+
+    let mut delayed_clear = ReplyStream::new(daemon.send(&client, clearer, clear).await);
+    let held = provider.next().await;
+    let later = "Please call me Dana.";
+    let mut stream = ReplyStream::new(daemon.send(&client, reader, later).await);
+    propose(provider.next().await, key, "Dana", later).await;
+    let continued = provider.next().await;
+    assert_tool_result(&continued, "Saved UserMemory.");
+    assert!(system_prompt(&continued).contains("Dana"));
+    assert!(!system_prompt(&continued).contains(&marker));
+    chat_reply(continued, &mut stream, "Saved.").await;
+
+    forget(held, key, clear).await;
+    let continued = provider.next().await;
+    assert_tool_result(&continued, "An equal or newer user statement");
+    assert!(system_prompt(&continued).contains("Dana"));
+    chat_reply(
+        continued,
+        &mut delayed_clear,
+        "Your newer preference took precedence.",
+    )
+    .await;
+
+    let mut stream = ReplyStream::new(
+        daemon
+            .send(&client, clearer, "What did I ask earlier?")
+            .await,
+    );
+    forget(provider.next().await, key, clear).await;
+    let continued = provider.next().await;
+    assert_tool_result(&continued, "UserMemory was not forgotten");
+    assert!(system_prompt(&continued).contains("Dana"));
+    chat_reply(
+        continued,
+        &mut stream,
+        "Your current preference is unchanged.",
+    )
+    .await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn user_memory_verifies_authored_evidence_and_treats_defaults_as_defaults() {
     let mut provider = Provider::start().await;
     let directory = tempfile::tempdir().unwrap();
@@ -261,7 +453,25 @@ async fn user_memory_source_order_survives_existing_history_and_deletion() {
     let mut stream = ReplyStream::new(daemon.send(&client, bot_id(&reader), "Hello.").await);
     let call = provider.next().await;
     assert!(system_prompt(&call).contains("Rowan"));
-    chat_reply(call, &mut stream, "Hello, Rowan.").await;
+    tool_call(
+        call,
+        "inspect_user_memory",
+        json!({"key": "profile.preferred_name"}),
+    )
+    .await;
+    let continued = provider.next().await;
+    assert_eq!(
+        inspection(&continued),
+        json!([{
+            "key": "profile.preferred_name", "value": "Rowan", "source": null,
+        }])
+    );
+    chat_reply(
+        continued,
+        &mut stream,
+        "I remember Rowan. Its original source is unavailable.",
+    )
+    .await;
     let history = daemon.read(&client, bot_id(&reader)).await;
     assert!(history["messages"][0]["id"].as_i64().unwrap() > last_id);
     daemon.stop().await;
@@ -322,6 +532,42 @@ async fn propose_all(call: ProviderCall, proposals: &[(&str, &str, &str)]) {
         .await;
     call.chunk(json!({}), Some("tool_calls")).await;
     call.frame("[DONE]").await;
+}
+
+async fn tool_call(call: ProviderCall, name: &str, args: serde_json::Value) {
+    call.chunk(
+        json!({"role": "assistant", "tool_calls": [{
+            "index": 0,
+            "id": "call_memory_operation",
+            "type": "function",
+            "function": {"name": name, "arguments": args.to_string()},
+        }]}),
+        None,
+    )
+    .await;
+    call.chunk(json!({}), Some("tool_calls")).await;
+    call.frame("[DONE]").await;
+}
+
+async fn forget(call: ProviderCall, key: &str, evidence: &str) {
+    tool_call(
+        call,
+        "forget_user_memory",
+        json!({"key": key, "evidence": evidence}),
+    )
+    .await;
+}
+
+fn inspection(call: &ProviderCall) -> serde_json::Value {
+    let result = call.body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "tool")
+        .expect("Rig returns an inspection result");
+    serde_json::from_str(result["content"].as_str().expect("inspect result text"))
+        .expect("inspect result is JSON")
 }
 
 fn assert_tool_result(call: &ProviderCall, expected: &str) {

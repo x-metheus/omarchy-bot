@@ -132,6 +132,8 @@ The daemon restores a Bot's committed Conversation into its root Agent on the fi
 
 A Bot can save a fact or standing preference from its current user message. For example, say “Always reply in French,” “My time zone is Europe/Paris,” or “Please call me Áine.” The daemon verifies the proposal against the original committed text and shares the saved value with all Bots on that daemon. Use a direct first-person statement for facts, such as “Remember that my favorite tea is hojicha.” Ambiguous wording requires clarification. Use a model that supports tool calls when saving UserMemory.
 
+Ask any Bot “What do you remember about my units preference?” to inspect the current value. If the source is available, the Bot can cite its Conversation and quote your original statement. Say “Change my units preference to metric” to correct it, or “Forget my units preference” as its own message to clear it for every Bot. The original Conversation messages remain readable. A later explicit statement can establish the preference again.
+
 Each model request receives the current reply language, time zone, and preferred name when available. Other entries are selected by matching words from the current request against the entry's topic, with a limit of six. A current instruction such as “Reply in English this time” takes precedence for that request. Request context and tool traces do not become Conversation messages.
 
 ### Storage and provenance contract
@@ -142,7 +144,11 @@ Each model request receives the current reply language, time zone, and preferred
 
 When Rig builds a request, the daemon binds it to the most recent authored input delivered into that Turn and present in its model context. Tool calls carry the source of the model effect that produced them. The daemon verifies the source Bot, message ID, user role, and verbatim evidence against SQLite. Report-only Turns have no source for memory writes.
 
-Issue #22 can use the stable keys, source lookup, and committed order for inspection and tombstones. Clear operations must publish to the same read snapshot after commit, and the ordering guard must continue to compare against the last operation even when the current value is absent.
+`user_memory_forgotten` stores the last committed user message order for each forgotten key. A forget transaction removes the value and records its order, even if no value has been saved yet. A newer verified statement replaces the tombstone with a current value. Across both tables, the latest applicable user message wins. An equal order is a repeat and cannot change the state. The daemon holds the snapshot write lock across the commit and publication so model preparation sees the complete change.
+
+Inspection returns current values only. Available sources include the originating Bot ID and name, committed message ID, and verbatim evidence. The source is `null` when its original message is unavailable. A Bot's normal Conversation reads continue to return the original text.
+
+Model requests treat UserMemory as authoritative for standing preferences. When applicable, a forgotten key is accompanied by its committed order instead of its old value. Historical Recall results should carry their original committed message IDs. Observational Memory summaries should retain the committed order they cover. Earlier statements, summaries, Recall results, and prior tool receipts are historical context. Only a new, explicit authored user statement can restore a forgotten key.
 
 ## Conversation attachments
 
