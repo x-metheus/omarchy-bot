@@ -115,11 +115,11 @@ pub(crate) fn inspect(db: &Connection, key: Option<&str>) -> Result<Value> {
             let key: String = row.get(0)?;
             let value: String = row.get(1)?;
             let bot_id = row.get_ref(2)?.as_blob().ok().and_then(|id| Uuid::from_slice(id).ok());
-            let bot_name: Option<String> = row.get(3)?;
+            let bot_name = row.get_ref(3)?.as_str().ok();
             let message_id: Option<i64> = row.get(4)?;
-            let text: Option<String> = row.get(5)?;
+            let text = row.get_ref(5)?.as_str().ok();
             let range = row.get::<_, usize>(6)?..row.get::<_, usize>(7)?;
-            let evidence = text.as_deref().and_then(|text| text.get(range));
+            let evidence = text.and_then(|text| text.get(range));
             let source = match (bot_id, bot_name, message_id, evidence) {
                 (Some(bot_id), Some(bot_name), Some(message_id), Some(evidence)) => {
                     Some(json!({"bot_id": bot_id, "bot_name": bot_name, "message_id": message_id, "evidence": evidence}))

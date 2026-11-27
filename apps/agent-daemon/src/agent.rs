@@ -93,7 +93,7 @@ fn deliver(world: &mut World) {
                     Name::new(bot.name),
                     conversation,
                     request.model,
-                    ToolAccess::only([REMEMBER_TOOL, TOOL_NAME]),
+                    ToolAccess::only([REMEMBER_TOOL, INSPECT_TOOL, FORGET_TOOL, TOOL_NAME]),
                     MemoryInput::new(bot.id, request.message_id, request.prompt.clone()),
                     scope,
                     Reply {

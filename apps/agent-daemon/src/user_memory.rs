@@ -471,7 +471,6 @@ mod tests {
     fn retrying_the_same_committed_inputs_after_reopening_keeps_the_key_forgotten() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("memory.sqlite3");
-        drop(DaemonStore::open(&path).unwrap());
         let bot = Uuid::new_v4();
         let old = "Always use metric units.";
         let clear = "Forget my units preference.";
@@ -479,6 +478,12 @@ mod tests {
         let forgotten = MemorySource { bot, message_id: 2 };
         {
             let mut db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE bots (id BLOB PRIMARY KEY, name TEXT NOT NULL);
+                 CREATE TABLE messages (id INTEGER PRIMARY KEY, bot_id BLOB NOT NULL,
+                     role INTEGER NOT NULL, text TEXT NOT NULL);",
+            )
+            .unwrap();
             db.execute("INSERT INTO bots VALUES (?1, 'Lumen')", [bot.as_bytes()])
                 .unwrap();
             db.execute(
