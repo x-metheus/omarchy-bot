@@ -1,3 +1,5 @@
+mod events;
+
 use std::collections::HashSet;
 use std::convert::Infallible;
 
@@ -42,6 +44,7 @@ pub(crate) fn router(
         .route("/bots", post(create_bot))
         .route("/bots/{bot}", get(read_bot).patch(rename_bot))
         .route("/bots/{bot}/messages", post(send_message))
+        .route("/bots/{bot}/events", get(events::read))
         .route("/bots/{bot}/attachments/{id}", get(read_attachment))
         .route("/recall/status", get(recall_status))
         .merge(
@@ -332,6 +335,12 @@ pub(crate) enum ConversationCommand {
         stream: ReplySink,
         accepted: oneshot::Sender<Result<(), ApiError>>,
     },
+    Event {
+        bot: Uuid,
+        name: &'static str,
+        data: serde_json::Value,
+        streams: Vec<ReplySink>,
+    },
     Settled {
         bot: Uuid,
         answer: Option<String>,
@@ -395,6 +404,20 @@ pub(crate) async fn run_conversations(
                 };
                 let _ = accepted.send(admission);
             }
+            ConversationCommand::Event {
+                bot,
+                name,
+                data,
+                streams,
+            } => {
+                let event = match store.record_event(bot, name, data).await {
+                    Ok(record) => record.sse(),
+                    Err(error) => event("error", store_error(error).1),
+                };
+                for stream in streams {
+                    stream.send(event.clone());
+                }
+            }
             ConversationCommand::Settled {
                 bot,
                 answer,
@@ -407,29 +430,29 @@ pub(crate) async fn run_conversations(
                             .as_deref()
                             .map(|text| duties::system_prompt(Some(text)));
                         match store.commit_reply(bot, text, duties).await {
-                            Ok(message) => {
+                            Ok(record) => {
                                 if let Some(prompt) = prompt {
                                     let _ = turns.send(AgentCommand::Duties { bot, prompt });
                                     wake.wake();
                                 }
                                 recall.history_changed();
-                                if streams.is_empty() {
-                                    continue;
-                                }
-                                event("committed", message)
+                                record.sse()
                             }
                             Err(error) => event("error", store_error(error).1),
                         }
                     }
-                    None => event(
-                        "error",
-                        Problem::new(
+                    None => {
+                        let problem = Problem::new(
                             "turn_failed",
                             "Rig did not complete a text reply; check the model and provider configuration",
-                        ),
-                    ),
+                        );
+                        match store.record_event(bot, "error", problem).await {
+                            Ok(record) => record.sse(),
+                            Err(error) => event("error", store_error(error).1),
+                        }
+                    }
                 };
-                for mut stream in streams {
+                for stream in streams {
                     stream.send(terminal.clone());
                 }
             }
@@ -437,7 +460,7 @@ pub(crate) async fn run_conversations(
     }
 }
 
-pub(crate) fn event(name: &'static str, value: impl Serialize) -> Event {
+fn event(name: &'static str, value: impl Serialize) -> Event {
     Event::default()
         .event(name)
         .json_data(value)

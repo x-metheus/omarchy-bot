@@ -1,4 +1,7 @@
+mod events;
 mod recall_index;
+
+pub(crate) use events::ConversationEvent;
 
 use std::path::{self, Path};
 use std::sync::{Arc, Mutex};
@@ -8,6 +11,7 @@ use rig_ecs::model::Connection as RigConnection;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::agent::conversation::UserMessageSource;
@@ -78,7 +82,7 @@ struct Database {
 }
 
 #[derive(Clone)]
-pub(crate) struct Store(Arc<Mutex<Database>>, CurrentMemory);
+pub(crate) struct Store(Arc<Mutex<Database>>, CurrentMemory, watch::Sender<()>);
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
@@ -155,6 +159,7 @@ impl Store {
                 .execute("ALTER TABLE bots ADD COLUMN duties TEXT", [])
                 .context("add duties to existing Bot profiles")?;
         }
+        events::initialize(&connection).context("initialize Conversation event storage")?;
         connection
             .execute_batch("COMMIT")
             .context("commit SQLite schema")?;
@@ -166,6 +171,7 @@ impl Store {
                 settings,
             })),
             user_memory,
+            watch::Sender::new(()),
         ))
     }
 
@@ -294,8 +300,8 @@ impl Store {
         bot: Uuid,
         text: String,
         duties: Option<String>,
-    ) -> Result<Message> {
-        self.run(move |db| {
+    ) -> Result<ConversationEvent> {
+        let event = self.run(move |db| {
             let role = Role::Assistant;
             let transaction = db.connection.transaction()?;
             let id = insert_message(&transaction, bot, role, &text)?;
@@ -305,15 +311,24 @@ impl Store {
                     params![bot.as_bytes().as_slice(), duties],
                 )?;
             }
-            transaction.commit()?;
-            Ok(Message {
+            let message = Message {
                 id,
                 role,
                 text,
                 attachments: Vec::new(),
-            })
+            };
+            let event = events::append(
+                &transaction,
+                bot,
+                "committed",
+                serde_json::to_string(&message)?,
+            )?;
+            transaction.commit()?;
+            Ok(event)
         })
-        .await
+        .await?;
+        self.events_changed();
+        Ok(event)
     }
 
     pub(crate) fn user_memory(&self) -> &CurrentMemory {

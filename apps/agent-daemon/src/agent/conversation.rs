@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::response::sse::Event;
 use rig_basics::subagents::{MESSAGE, SpawnedAgent, TASK, WAIT};
@@ -9,7 +9,7 @@ use rig_harness::prelude::*;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::api::{ConversationCommand, event};
+use crate::api::ConversationCommand;
 use crate::attachments::Stored as StoredAttachment;
 use crate::duties::{self, DutyTurn};
 use crate::store::{Conversation as StoredConversation, Role};
@@ -34,21 +34,21 @@ pub(crate) struct TurnRequest {
 }
 
 /// A subscriber may fall behind or disconnect without holding up Rig or SQLite.
-#[derive(Component)]
-pub(crate) struct ReplySink(Option<mpsc::Sender<Event>>);
+#[derive(Clone, Component)]
+pub(crate) struct ReplySink(Arc<Mutex<Option<mpsc::Sender<Event>>>>);
 
 impl ReplySink {
     pub(crate) fn new(stream: mpsc::Sender<Event>) -> Self {
-        Self(Some(stream))
+        Self(Arc::new(Mutex::new(Some(stream))))
     }
 
-    pub(crate) fn send(&mut self, event: Event) {
-        if self
-            .0
+    pub(crate) fn send(&self, event: Event) {
+        let mut stream = self.0.lock().expect("reply sink lock poisoned");
+        if stream
             .as_ref()
-            .is_some_and(|stream| stream.try_send(event).is_err())
+            .is_some_and(|sender| sender.try_send(event).is_err())
         {
-            self.0 = None;
+            *stream = None;
         }
     }
 }
@@ -220,14 +220,20 @@ fn deliver(world: &mut World) {
                 agent
             };
             let mut incoming = Incoming::new(text, DeliveryMode::Steer).literal();
-            let mut stream = stream;
             let connection = world
                 .get::<Connection>(agent)
                 .expect("a Bot has its admitted connection");
             for attachment in attachments {
                 match attachment.into_part(&connection.spec) {
                     Ok(part) => incoming.parts.push(MessagePart::Attachment(part)),
-                    Err(warning) => stream.send(event("attachment_warning", warning)),
+                    Err(warning) => {
+                        let _ = conversations.outgoing.send(ConversationCommand::Event {
+                            bot,
+                            name: "attachment_warning",
+                            data: serde_json::to_value(warning).expect("serialize attachment warning"),
+                            streams: vec![stream.clone()],
+                        });
+                    }
                 }
             }
             world.spawn((
@@ -388,25 +394,34 @@ fn on_settled(
 
 fn stream_deltas(
     mut deltas: MessageReader<StreamDelta>,
-    calls: Query<(&CallOf, &ModelDelivery)>,
-    mut turns: Query<&mut TurnDelivery>,
+    calls: Query<(&CallOf, &ForAgent, Option<&ModelDelivery>), With<TurnCall>>,
+    roots: Query<&BotAgent>,
+    turns: Query<&TurnDelivery>,
+    conversations: Res<Conversations>,
 ) {
     for delta in deltas.read() {
-        let (StreamEvent::Text { text, .. }, Ok((&CallOf(turn), delivery))) =
+        let (StreamEvent::Text { text, .. }, Ok((&CallOf(turn), &ForAgent(agent), delivery))) =
             (&delta.event, calls.get(delta.effect))
         else {
             continue;
         };
-        let Ok(mut turn) = turns.get_mut(turn) else {
+        let Ok(&BotAgent(bot)) = roots.get(agent) else {
             continue;
         };
-        let subscribers = &mut turn.streams[..delivery.subscribers];
-        if !subscribers.is_empty() {
-            let delta = event("delta", text);
-            for subscriber in subscribers {
-                subscriber.send(delta.clone());
-            }
-        }
+        let streams = delivery
+            .and_then(|delivery| {
+                turns
+                    .get(turn)
+                    .ok()
+                    .map(|turn| turn.streams[..delivery.subscribers].to_vec())
+            })
+            .unwrap_or_default();
+        let _ = conversations.outgoing.send(ConversationCommand::Event {
+            bot,
+            name: "delta",
+            data: serde_json::Value::String(text.clone()),
+            streams,
+        });
     }
 }
 
