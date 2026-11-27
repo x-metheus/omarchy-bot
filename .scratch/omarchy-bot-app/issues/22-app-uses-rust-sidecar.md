@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+Architecture: ADR 0015.
 
 - [x] Linux AppImage smoke runs one approved `local.run` end to end with the Rust Sidecar
 - [x] macOS dmg and Windows NSIS CI jobs build and bundle the Rust Sidecar; the Windows install check passes

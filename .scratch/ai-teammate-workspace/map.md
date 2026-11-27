@@ -6,12 +6,12 @@
 
 - [Feature specification](./spec.md)
 - [Superseding ordered transcript specification](../ordered-rich-transcript/spec.md)
-- [Accepted workspace design](../../docs/workspace-redesign.md)
-- [Bot and Agent decision](../../docs/adr/0002-user-created-bots-reference-agents.md)
-- [Ordered transcript decision](../../docs/adr/0007-preserve-ordered-agent-blocks.md)
-- [Workspace language](../../docs/contexts/workspace/CONTEXT.md)
-- [Agent integration language](../../docs/contexts/agent-integration/CONTEXT.md)
-- [Computer control language](../../docs/contexts/computer-control/CONTEXT.md)
+- [Accepted workspace design](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md)
+- Bot and Agent decision (ADR 0002)
+- Ordered transcript decision (ADR 0007)
+- [Workspace language](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/contexts/workspace/CONTEXT.md)
+- [Agent integration language](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/contexts/agent-integration/CONTEXT.md)
+- [Computer control language](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/contexts/computer-control/CONTEXT.md)
 
 The specification and accepted design define product behavior. Context documents define canonical terms. ADRs record durable trade-offs. Resolved tickets record the delivered slices and must not override those authorities.
 

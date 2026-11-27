@@ -2,7 +2,7 @@
 
 **Status:** ready-for-agent
 
-Architecture sources: [ADR 0013](../../docs/adr/0013-run-a-standalone-linux-service.md) (standalone Service, install-only Omarchy plugin), [ADR 0014](../../docs/adr/0014-require-paired-device-tokens.md) (paired device tokens, supersedes ADR 0004), [Computer ADR 0011](../../docs/contexts/computer-control/adr/0011-bundle-one-sway-bot-computer.md) (one bundled Sway Bot Computer, tabbed layout). ADR 0009, Computer ADR 0009, ADR 0010, and the Local Sidecar / This Device rules of ADR 0011 remain in force.
+Architecture sources: ADR 0013 (standalone Service, install-only Omarchy plugin), ADR 0014 (paired device tokens, supersedes ADR 0004), Computer ADR 0011 (one bundled Sway Bot Computer, tabbed layout). ADR 0009, Computer ADR 0009, ADR 0010, and the Local Sidecar / This Device rules of ADR 0011 remain in force.
 
 ## Problem Statement
 

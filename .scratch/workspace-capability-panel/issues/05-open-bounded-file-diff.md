@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-> **Superseded on 2026-09-05:** [ADR 0009](../../../docs/adr/0009-share-work-files-isolate-bot-screens.md) removes Changes, including this file-diff capability. This ticket is fully retired as a current instruction: no still-valid product requirement remains. The historical delivery below does not authorize retaining a review or artifact panel; removal is still an [implementation gap](../../../docs/workspace-redesign.md#implementation-gaps-in-the-2026-09-05-revision). Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#capability-panel-specification).
+> **Superseded on 2026-09-05:** ADR 0009 removes Changes, including this file-diff capability. This ticket is fully retired as a current instruction: no still-valid product requirement remains. The historical delivery below does not authorize retaining a review or artifact panel; removal is still an [implementation gap](https://github.com/x-metheus/omarchy-bot/blob/cddced5d11497f201d0d62dd94e6c8893fa2f08f/docs/workspace-redesign.md#implementation-gaps-in-the-2026-09-05-revision). Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#capability-panel-specification).
 
 - [x] Selecting a file row opens a readable detail view within the capability panel without introducing an editor or IDE tree.
 - [x] The detail API accepts only a repository-relative path present in the current Bot/Thread summary and revalidates Thread ownership.

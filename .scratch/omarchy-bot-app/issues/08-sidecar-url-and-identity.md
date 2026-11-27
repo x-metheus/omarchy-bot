@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015.
 
 - [x] The Sidecar connects to `ws` and `wss` Service URLs and authenticates with `access_token`
 - [x] Registration without valid `os` and `shell` is rejected

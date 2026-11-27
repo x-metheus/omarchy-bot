@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015.
 
 - [ ] Notarized dmgs for arm64 and x64 open without Gatekeeper warnings
 - [x] darwin Sidecar binaries pass the Local Sidecar suite on a macOS CI runner
@@ -22,7 +22,7 @@ Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/
 
 Ticket 11 remains a publication dependency. The callable workflow emits separate `macos-app-aarch64` / `macos-app-x64` Actions artifacts containing dmgs, checksums and (when requested) signed `.app.tar.gz` updater payloads; missing requested signing material fails closed. Ticket 11 owns GitHub Release publication, the runtime updater and manifest entries `darwin-aarch64` / `darwin-x86_64`. See [the release contract](../../../scripts/macos-app/README.md). Its work has not been merged into this branch.
 
-The [WKWebView checklist](../../../docs/release/macos-wkwebview-checklist.md) exists and defines per-architecture run records. **Native run: not run** (no macOS runner/real Mac or Apple credentials in this session). Gatekeeper first-open, both native Sidecar suites and Rust builds, Keychain/deep links, WKWebView projection/input/⌘/local.run, and publication/updater entries remain unverified. All acceptance checkboxes stay unchecked until their complete observed criteria pass; macOS is not yet marked supported.
+The [WKWebView checklist](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/release/macos-wkwebview-checklist.md) exists and defines per-architecture run records. **Native run: not run** (no macOS runner/real Mac or Apple credentials in this session). Gatekeeper first-open, both native Sidecar suites and Rust builds, Keychain/deep links, WKWebView projection/input/⌘/local.run, and publication/updater entries remain unverified. All acceptance checkboxes stay unchecked until their complete observed criteria pass; macOS is not yet marked supported.
 
 Linux-feasible verification so far: native-shell behavioral test first failed on the hardcoded Linux platform, then passed (1 test, 8 assertions). Focused `bun test apps/sidecar tests/integration/native-shell.test.ts tests/integration/local-sidecar-process.test.ts`: **19 pass, 7 platform skips, 0 fail**. `bun run typecheck` and `bun run lint:boundaries` passed. Both darwin Sidecars cross-compiled with Bun 1.4.4; `file` reports arm64 and x86_64 Mach-O executables (compile evidence only). `bash -n` passed; five assert-based invocations of the real build entrypoint confirmed fail-closed credential/mode/host guards without mocking signing tools. Portable actionlint 1.7.12 accepted both workflows; Ajv validated the actual Tauri 2.12.5 schema for base config and updater-artifact overlay, and the entitlement plist parsed successfully. No source-text/wiring assertion tests were added.
 

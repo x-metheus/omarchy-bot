@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-> **Application-profile note:** the per-Bot config/state/cache line below is historical fixture/runtime packaging, not a current product requirement to manage browser profiles, Cookies, or logins. [ADR 0009](../../../docs/adr/0009-share-work-files-isolate-bot-screens.md) leaves those to Agents and applications. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
+> **Application-profile note:** the per-Bot config/state/cache line below is historical fixture/runtime packaging, not a current product requirement to manage browser profiles, Cookies, or logins. ADR 0009 leaves those to Agents and applications. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
 
 - [x] A selectable Cage runtime launches in a private mode-0700 runtime with a pure headless backend and no dependency on the host Wayland display, full Omarchy session, or global activation environment.
 - [x] The selected 1080p or 720p profile creates an explicit output whose logical geometry, video geometry, scale, and geometry generation match the public Bot Screen contract.

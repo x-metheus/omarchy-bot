@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md). Origin: PR #10 code review (Spec (b), Standards judgement call on `shell.js`).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015. Origin: PR #10 code review (Spec (b), Standards judgement call on `shell.js`).
 
 - [x] The injected native script installs the `shell` adapter and nothing else: no global `fetch` replacement and no document-wide click handler
 - [x] Attachment download is a `shell` capability. If the spec and ADR 0015 list the capabilities, they are updated to say so; otherwise it is removed and attachments use a path the spec already allows

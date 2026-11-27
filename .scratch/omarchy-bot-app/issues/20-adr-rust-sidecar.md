@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md), [ADR 0011](../../../docs/adr/0011-local-sidecar-only-off-host.md). Decided with the user in conversation on 2026-10-29.
+Architecture: ADR 0015, ADR 0011. Decided with the user in conversation on 2026-10-29.
 
 - [x] ADR 0015 (and ADR 0011 wherever it describes the Sidecar's implementation language or packaging) records the Rust Sidecar, the unchanged contract, the separate-process choice, and why it is not in-process
 - [x] The ADR names how the protocol types stay in sync across TypeScript and Rust

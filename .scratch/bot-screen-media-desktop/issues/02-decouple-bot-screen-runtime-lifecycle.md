@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-> **Historical prefactor:** preserving nested-Hyprland behavior was the then-current runtime. Current compositor is [ADR 0008](../../../docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md). Do not restore Hyprland as production. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
+> **Historical prefactor:** preserving nested-Hyprland behavior was the then-current runtime. Current compositor is Computer ADR 0008. Do not restore Hyprland as production. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
 
 - [x] Bot Screen callers continue to provision, observe, input, recover, and stop Screens through Bot-owned lifecycle and operation results rather than compositor commands or process identifiers.
 - [x] The current nested-Hyprland implementation still reaches ready state, captures the correct output, accepts existing helper input, and tears down completely.

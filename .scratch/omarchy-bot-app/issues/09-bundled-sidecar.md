@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015.
 
 - [x] The compiled linux-x64 binary passes the Local Sidecar integration suite
 - [x] No Sidecar starts when the Service is on the same machine

@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015.
 
 - [x] On macOS, ⌘C/⌘V/⌘ shortcuts arrive in the Bot Screen as Ctrl shortcuts
 - [x] On macOS, ⌥ arrives as Super

@@ -91,16 +91,16 @@ async function systemctl(args: string[], env: NodeJS.ProcessEnv): Promise<void> 
   if (result.exitCode !== 0) throw new Error(result.stderr || `systemctl ${args.join(" ")} failed (${result.exitCode})`);
 }
 
-/** The removed host-browser setting (Computer ADR 0013); install, update and reconfigure reject it. */
+/** Install, update and reconfigure reject the former host-browser setting. */
 export const REMOVED_BROWSER_SETTING = "OMARCHY_BOT_BROWSER";
 
 export function removedBrowserSettingError(env: NodeJS.ProcessEnv): string | undefined {
   return env[REMOVED_BROWSER_SETTING]
-    ? `${REMOVED_BROWSER_SETTING} was removed: every Bot uses the bundled browser pack and never a host browser (docs/contexts/computer-control/adr/0013-bots-use-only-the-pack-browser.md). Unset it and retry.`
+    ? `${REMOVED_BROWSER_SETTING} was removed. Every Bot uses the bundled browser pack. Unset ${REMOVED_BROWSER_SETTING} and retry.`
     : undefined;
 }
 
-/** A unit written before ADR 0013 still sets the removed setting and is rewritten on update. */
+/** Update rewrites older units that still set the host-browser override. */
 export function unitHasRemovedBrowserSetting(layout: Layout): boolean {
   try { return readFileSync(layout.unitPath, "utf8").includes(`${REMOVED_BROWSER_SETTING}=`); } catch { return false; }
 }

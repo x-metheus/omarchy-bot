@@ -2,7 +2,7 @@
 
 **Status:** ready-for-agent
 
-Architecture sources: [ADR 0015](../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md) (Omarchy Bot is the only Bot Client), which amends [ADR 0010](../../docs/adr/0010-reuse-web-client-in-tauri.md), [ADR 0011](../../docs/adr/0011-local-sidecar-only-off-host.md), [ADR 0013](../../docs/adr/0013-run-a-standalone-linux-service.md), and [ADR 0014](../../docs/adr/0014-require-paired-device-tokens.md). ADR 0009, Computer ADR 0011, and the This Device rules of ADR 0011 remain in force.
+Architecture sources: ADR 0015 (Omarchy Bot is the only Bot Client), which amends ADR 0010, ADR 0011, ADR 0013, and ADR 0014. ADR 0009, Computer ADR 0011, and the This Device rules of ADR 0011 remain in force.
 
 ## Problem Statement
 

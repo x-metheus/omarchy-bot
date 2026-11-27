@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015.
 
 - [x] No dictation routes, DTOs, events, or configuration remain in the Service or protocol
 - [x] The composer has no microphone button and settings have no voice section

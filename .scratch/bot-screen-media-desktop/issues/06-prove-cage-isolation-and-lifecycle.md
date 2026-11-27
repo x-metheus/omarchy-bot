@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-> **Evidence correction, 2026-09-05:** the recorded two-Cage smoke checks sibling-screen images/input and lifecycle cleanup, but does not directly assert host top-bar or shortcut usability. The historical completion claims below must not be used as current Host Session acceptance. Follow [the required host/resource evidence](../../../docs/workspace-redesign.md#required-host-safety-and-resource-evidence); [ADR 0009](../../../docs/adr/0009-share-work-files-isolate-bot-screens.md) also supersedes application-profile policy and limits deletion to plugin-owned state. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
+> **Evidence correction, 2026-09-05:** the recorded two-Cage smoke checks sibling-screen images/input and lifecycle cleanup, but does not directly assert host top-bar or shortcut usability. The historical completion claims below must not be used as current Host Session acceptance. Follow [the required host/resource evidence](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#required-host-safety-and-resource-evidence); ADR 0009 also supersedes application-profile policy and limits deletion to plugin-owned state. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
 
 - [x] Two concurrent Cage Bot Screens display distinct pixels and maintain independent application state, focus, cursor, keyboard state, and per-Bot profiles.
 - [x] Pointer motion, click, drag, scroll, keys, shortcuts, and paste addressed to Bot A do not affect Bot B or move/input the Shared Screen.

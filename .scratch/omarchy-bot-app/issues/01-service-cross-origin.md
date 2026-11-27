@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015.
 
 - [x] CORS preflight from each allowlisted origin succeeds without a token and returns the allowed methods and headers
 - [x] Actual requests from an allowlisted origin still require a device token and return 401 without one

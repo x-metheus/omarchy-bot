@@ -13,7 +13,7 @@ Find out from evidence, not guesswork, why the UI process exits: an `app.exit`/r
 
 **Status:** needs-info
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015.
 
 - [ ] A packaged-AppImage reproduction, in the repository's Linux app container smoke harness, shows the app exiting when a dialog closes. The cause is identified with evidence (exit code, logs, or a backtrace) and recorded in Comments
 - [x] Fixed: the packaged WebKitGTK smoke opens and closes each dialog, including the expanded Bot Screen view, by its close button, Esc, and backdrop click where supported, and the app stays running with its window responsive

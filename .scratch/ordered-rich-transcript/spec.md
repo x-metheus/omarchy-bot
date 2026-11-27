@@ -95,7 +95,7 @@ Native Events remain a typed fidelity boundary after common semantics are normal
 
 ## Further Notes
 
-- This specification supersedes the transcript Activity decisions in `docs/workspace-redesign.md` section 9, stories 60–62 of `.scratch/ai-teammate-workspace/spec.md`, and the Activity-specific acceptance criteria in its resolved ticket 02. Those documents remain historical evidence of the previous implementation.
+- This specification supersedes the transcript Activity decisions in [workspace-redesign.md](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md) section 9, stories 60–62 of `.scratch/ai-teammate-workspace/spec.md`, and the Activity-specific acceptance criteria in its resolved ticket 02. Those documents remain historical evidence of the previous implementation.
 - `Activity` is not retained as a transcript term. **Bot Activity** continues to mean only whether a Bot has an Active Turn.
 - Astryx 0.5.2 provides `Markdown` and `ChatToolCalls` but no Thinking or Agent-event primitive. Thinking disclosure is composed from ordinary Astryx primitives.
 - The accepted direct-load image policy can trigger blind HTTP(S) GET requests to public, private, loopback, or link-local hosts when a Thread is opened. Same-origin protections prevent response reading but do not prevent the request; this is an explicit accepted product boundary.

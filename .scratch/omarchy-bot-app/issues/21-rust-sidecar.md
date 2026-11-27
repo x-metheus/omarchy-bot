@@ -14,7 +14,7 @@ The existing black-box Sidecar integration and compiled-binary suites run agains
 
 **Status:** resolved
 
-Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+Architecture: ADR 0015.
 
 - [x] The Local Sidecar integration suites pass against the Rust binary on Linux x64 (locally, in the container)
 - [x] The same suites pass on the macOS (arm64, x64) and Windows x64 CI runners

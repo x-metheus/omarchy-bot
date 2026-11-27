@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md). Origin: PR #10 code review (Spec (a), stories 30–31).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015. Origin: PR #10 code review (Spec (a), stories 30–31).
 
 - [x] Native MCP authorization emits the same completion event shape as provider accounts; the dialog updates without a manual check
 - [x] Provider- or user-side failure emits a failed event with a reason

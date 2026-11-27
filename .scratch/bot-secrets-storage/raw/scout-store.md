@@ -15,7 +15,7 @@ Read-only map, gathered with `git show`/`git diff`/`git grep` against `main...t3
 10. `apps/daemon/src/api/http.ts`, `bootstrap/main.ts` — `GET /api/secrets/status` → `{ backend: "keychain" | "file" }`; `SecretService` gets `secretsBackend`.
 11. `packages/protocol/src/api.ts` (`stage` gains `"secrets"`, `removed.secrets` default 0), `packages/api-client/src/index.ts` (`secretStorageStatus()`).
 12. `apps/web/src/components/SettingsDialog.tsx` (+55) — Settings banner quoting the backend from `/api/secrets/status`.
-13. `docs/tasks/bot-runtime/todo.md` (**Task 22**, lines ~319-341) — the decision record that constrains the backend choice.
+13. **Bot runtime Task 22** recorded the constraints on the backend choice at the time of this review.
 
 ## 1. Purpose per file (one paragraph each)
 
@@ -156,7 +156,7 @@ env: { ...options?.env, ...variables },
 No `TODO`/`FIXME`/`HACK`/`XXX` markers exist anywhere under `apps/daemon/src/modules/runtime/` on the branch (`git grep` returns nothing). The decision is recorded in prose instead:
 
 - `secrets.ts:40-41`: `/** The caller supplies the resolved Service data directory and can inject a keychain backend. */` + `// The OS backend and its runtime wiring are deferred to the next slice.`
-- The only references to OS tooling are in `docs/tasks/bot-runtime/todo.md` Task 22 (branch version):
+- The branch’s Task 22 described the pending choice of OS tooling.
 
 > "Keychain access needs a library or each platform's command-line tool: choosing a library is an ask-first dependency decision."
 > "...Tests with a fake keychain backend, plus one manual run on Linux Secret Service (still manual, pending the backend decision)."

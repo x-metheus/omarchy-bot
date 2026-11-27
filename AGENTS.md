@@ -19,7 +19,7 @@ Use the shared root glossary and relevant architecture decisions when exploring 
 ## Project workflow
 
 - Inspect the working tree and preserve edits already in progress. Locate the relevant source and tests using the [project code map](docs/README.md#code-map).
-- Before implementation, consult the feature’s accepted specification in `docs/specs/`, its plan and checklist in `docs/tasks/`, and `docs/CONSTRAINTS.md` when present. Confirm any unresolved requirements that affect the work.
+- Before implementation, read the relevant GitHub spec or ticket and any linked specification in `docs/specs/`. Consult `docs/CONSTRAINTS.md` when present. Confirm any unresolved requirements that affect the work.
 - For changes in `apps/web/`, follow the [frontend instructions](apps/web/AGENTS.md).
 - Verify each change with focused tests and the applicable [Bun scripts](package.json). For documentation, check links, paths, commands, and the diff. Report the results and any blockers.
 - Commit, push, merge, or deploy when the user’s request or an authorized project workflow calls for it.

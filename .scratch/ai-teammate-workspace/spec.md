@@ -4,26 +4,26 @@
 
 Status: completed
 
-> **Current model:** [System ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md) and the [product boundary](../../docs/workspace-redesign.md#shared-workspace-and-plugin-boundary) clarify one Shared Workspace for all Bots, independent on-demand Bot Desktop Sessions, and native application ownership. The single-Shared-Screen passages below describe the earlier implementation, not the current desktop design. “Workspace” in this spec's title refers to the conversation product; it does not make the plugin checkout the Bot working directory. The Out of Scope line that excludes a Tauri client is superseded by [ADR 0010](../../docs/adr/0010-reuse-web-client-in-tauri.md) (reuse Web UI; no native scaffolding now). Requirement homes: [requirement map](../shared-workspace-desktop-boundary/requirement-map.md#ai-teammate-workspace-specification).
+> **Current model:** System ADR 0009 and the [product boundary](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#shared-workspace-and-plugin-boundary) clarify one Shared Workspace for all Bots, independent on-demand Bot Desktop Sessions, and native application ownership. The single-Shared-Screen passages below describe the earlier implementation, not the current desktop design. “Workspace” in this spec's title refers to the conversation product; it does not make the plugin checkout the Bot working directory. The Out of Scope line that excludes a Tauri client is superseded by ADR 0010 (reuse Web UI; no native scaffolding now). Requirement homes: [requirement map](../shared-workspace-desktop-boundary/requirement-map.md#ai-teammate-workspace-specification).
 
 ## Requirement map (2026-09-05)
 
 Still-valid (use the current homes):
 
-- User-created Bots; immutable Agent; many Bots per Agent → [workspace-redesign Bot and Agent](../../docs/workspace-redesign.md#bot-and-agent); [ADR 0002](../../docs/adr/0002-user-created-bots-reference-agents.md).
-- Sidebar, Header, Composer, drafts, attachments, dictation, steering → [workspace-redesign §§2–8](../../docs/workspace-redesign.md#2-information-architecture).
-- Native Agent capabilities and inventory → [workspace-redesign Native Agent](../../docs/workspace-redesign.md#native-agent-behavior); [agents-integration](../../docs/agents-integration.md).
-- Migration/provenance → [workspace-redesign Migration](../../docs/workspace-redesign.md#migration-boundary).
-- Computer glyph; contextual Takeover; no lease UI → [workspace-redesign Computer](../../docs/workspace-redesign.md#10-computer); [ADR 0003](../../docs/adr/0003-hold-takeover-at-computer-tool-boundary.md).
-- Accessibility, themes, Astryx → [workspace-redesign visual system](../../docs/workspace-redesign.md#12-visual-system).
+- User-created Bots; immutable Agent; many Bots per Agent → [workspace-redesign Bot and Agent](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#bot-and-agent); ADR 0002.
+- Sidebar, Header, Composer, drafts, attachments, dictation, steering → [workspace-redesign §§2–8](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#2-information-architecture).
+- Native Agent capabilities and inventory → [workspace-redesign Native Agent](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#native-agent-behavior); [agents-integration](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/agents-integration.md).
+- Migration/provenance → [workspace-redesign Migration](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#migration-boundary).
+- Computer glyph; contextual Takeover; no lease UI → [workspace-redesign Computer](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#10-computer); ADR 0003.
+- Accessibility, themes, Astryx → [workspace-redesign visual system](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#12-visual-system).
 
 Retired or already superseded:
 
-- Stories 12–15 archive/restore → [bot-activity-lifecycle](../bot-activity-lifecycle/spec.md); [ADR 0006](../../docs/adr/0006-bot-deletion-is-local-only.md).
-- Stories 60–62 compact Activity → [ordered-rich-transcript](../ordered-rich-transcript/spec.md); [ADR 0007](../../docs/adr/0007-preserve-ordered-agent-blocks.md).
+- Stories 12–15 archive/restore → [bot-activity-lifecycle](../bot-activity-lifecycle/spec.md); ADR 0006.
+- Stories 60–62 compact Activity → [ordered-rich-transcript](../ordered-rich-transcript/spec.md); ADR 0007.
 - Stories 77–83 Shared Screen serialization and emergency control → per-Bot Screens in ADR 0008/0009; [parent spec](../shared-workspace-desktop-boundary/spec.md) stories 40, 61.
 - Out of scope “independent per-Bot Screens” → historical exclusion; now required by ADR 0009.
-- Out of scope “Tauri client” as a permanent exclusion → [ADR 0010](../../docs/adr/0010-reuse-web-client-in-tauri.md).
+- Out of scope “Tauri client” as a permanent exclusion → ADR 0010.
 
 ## Problem Statement
 

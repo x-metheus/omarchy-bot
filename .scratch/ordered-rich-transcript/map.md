@@ -5,11 +5,11 @@
 ## Authority
 
 - [Feature specification](./spec.md)
-- [Ordered transcript ADR](../../docs/adr/0007-preserve-ordered-agent-blocks.md)
-- [Accepted workspace design](../../docs/workspace-redesign.md)
-- [Agent adapter contract](../../docs/agents-integration.md)
-- [Workspace language](../../docs/contexts/workspace/CONTEXT.md)
-- [Agent Integration language](../../docs/contexts/agent-integration/CONTEXT.md)
+- Ordered transcript ADR 0007
+- [Accepted workspace design](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md)
+- [Agent adapter contract](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/agents-integration.md)
+- [Workspace language](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/contexts/workspace/CONTEXT.md)
+- [Agent Integration language](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/contexts/agent-integration/CONTEXT.md)
 
 The feature specification defines product behaviour. Context documents define canonical terms. The ADR records the durable cross-context boundary. Historical Activity tickets describe the implementation they delivered but do not override this effort.
 

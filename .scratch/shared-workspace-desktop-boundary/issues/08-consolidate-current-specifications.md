@@ -32,7 +32,7 @@ Tickets 01–07 remain open implementation work. This ticket only consolidates d
 
 ## Answer
 
-Current authority is unchanged: [the parent specification](../spec.md), [the product boundary](../../../docs/workspace-redesign.md#shared-workspace-and-plugin-boundary), [ADR 0009](../../../docs/adr/0009-share-work-files-isolate-bot-screens.md), [ADR 0010](../../../docs/adr/0010-reuse-web-client-in-tauri.md), [CONTEXT-MAP](../../../CONTEXT-MAP.md), and the three glossaries. Pending Shared Workspace default, Changes removal, Screen startup, host-safety, resource evidence, and human acceptance remain unmet. No runtime code, tests, host config, or Tauri scaffold was changed.
+Current authority is unchanged: [the parent specification](../spec.md), [the product boundary](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#shared-workspace-and-plugin-boundary), ADR 0009, ADR 0010, [CONTEXT-MAP](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/CONTEXT-MAP.md), and the three glossaries. Pending Shared Workspace default, Changes removal, Screen startup, host-safety, resource evidence, and human acceptance remain unmet. No runtime code, tests, host config, or Tauri scaffold was changed.
 
 Full document → home / retired / evidence accounting: [requirement-map.md](../requirement-map.md).
 
@@ -43,7 +43,7 @@ Full document → home / retired / evidence accounting: [requirement-map.md](../
 - Single Shared Screen serialization (ai-teammate stories 77–83; Computer ADR 0004/0005 bodies). Current model is on-demand Cage with per-Bot input.
 - Per-Bot browser/profile/Cookie/login policy as a desktop requirement.
 - Four-stream capacity and sibling-only smoke as Host Session or normal-use-cost acceptance. [capacity-report.json](../../bot-screen-media-desktop/capacity-report.json) and feasibility research remain historical evidence.
-- Research note recommending implementation of Changes (`docs/research/github-open-issues-implementation-details.md`).
+- Research note recommending implementation of Changes ([github-open-issues-implementation-details.md](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/research/github-open-issues-implementation-details.md)).
 
 **Nothing deleted.** Tracked `.scratch` specs and the capacity report stay in git. Old specs were not assumed safely disposable; they now carry requirement maps instead of competing as active contracts.
 

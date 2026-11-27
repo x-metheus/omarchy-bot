@@ -91,7 +91,7 @@ This spec delivers the daemon device channel, same-host skip, `local` Agent tool
 
 ## Implementation Decisions
 
-- System [ADR 0011](../../docs/adr/0011-local-sidecar-only-off-host.md) is the architecture source of truth. [ADR 0010](../../docs/adr/0010-reuse-web-client-in-tauri.md) still forbids a second business-logic client and moving execution into the viewer. [ADR 0004](../../docs/adr/0004-defer-web-control-transport-security.md) still forbids treating a reachable unauthenticated listener as pairing. [ADR 0003](../../docs/contexts/agent-integration/adr/0003-preserve-native-agent-capabilities.md) still forbids filtering or proxying native Agent tools to invent laptop execution.
+- System ADR 0011 is the architecture source of truth. ADR 0010 still forbids a second business-logic client and moving execution into the viewer. ADR 0004 still forbids treating a reachable unauthenticated listener as pairing. Agent integration ADR 0003 still forbids filtering or proxying native Agent tools to invent laptop execution.
 - The plugin daemon remains the only SQLite writer, Agent supervisor, Computer Broker, and Bot Computer owner. Omarchy Bot is a Bot Client. The Local Sidecar is neither.
 - Same-host means the Bot Client’s daemon connection is the plugin daemon on this machine (loopback to this instance is the v1 detector). Off-host means any other connection. The skip rule is “connected to this plugin daemon,” not “this OS is Omarchy.”
 - Conversation and projection keep current REST plus `/api/events` plus projection control/RFB WebSockets. Do not introduce gRPC, QUIC, or Tauri IPC as the business protocol.
@@ -136,7 +136,7 @@ This spec delivers the daemon device channel, same-host skip, `local` Agent tool
 
 ## Further Notes
 
-- Originating decisions: conversation on abandoning a browser-only local executor; [ADR 0010](../../docs/adr/0010-reuse-web-client-in-tauri.md); [ADR 0011](../../docs/adr/0011-local-sidecar-only-off-host.md).
+- Originating decisions: conversation on abandoning a browser-only local executor; ADR 0010; ADR 0011.
 - Grok’s documented split is the product analogy only: hosted computer stays on, local execution is desktop-app commands/files/transfer with Ask every time. Do not copy unverified Grok transports.
 - “Viewer” means Omarchy Bot (or the Web client) on the plugin host shows Threads and Bot Screens and does not register a Sidecar. It does not mean the Host Session is projected.
 - Test seam confirmed with the user: public daemon plus fixture Sidecar; no Tauri in this spec’s automated proof.

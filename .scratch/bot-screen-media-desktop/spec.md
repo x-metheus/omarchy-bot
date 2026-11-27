@@ -2,14 +2,14 @@
 
 Status: ready-for-agent
 
-> **Scope correction accepted 2026-09-05:** [System ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md) and the [current product model](../../docs/workspace-redesign.md#shared-workspace-and-plugin-boundary) govern desktop ownership, on-demand session lifetime, Shared Workspace files, and resource acceptance. This spec and its tickets are historical where they prescribe application-profile policy, imply viewer lifetime owns background work, or treat the capacity gate as sufficient host-safety/normal-use-cost evidence. The pure-headless Cage choice and independent per-Bot input remain in force; browser profiles, Cookies, and login sharing are outside the plugin desktop scope. The sentence below that nested Hyprland remains production until Cage passes is historical: Cage cutover is recorded in ticket 08 and [ADR 0008](../../docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md). Requirement homes: [requirement map](../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
+> **Scope correction accepted 2026-09-05:** System ADR 0009 and the [current product model](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#shared-workspace-and-plugin-boundary) govern desktop ownership, on-demand session lifetime, Shared Workspace files, and resource acceptance. This spec and its tickets are historical where they prescribe application-profile policy, imply viewer lifetime owns background work, or treat the capacity gate as sufficient host-safety/normal-use-cost evidence. The pure-headless Cage choice and independent per-Bot input remain in force; browser profiles, Cookies, and login sharing are outside the plugin desktop scope. The sentence below that nested Hyprland remains production until Cage passes is historical: Cage cutover is recorded in ticket 08 and Computer ADR 0008. Requirement homes: [requirement map](../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
 
 ## Requirement map (2026-09-05)
 
 Still-valid (use the current homes):
 
-- Cage sole compositor; pure-headless; no dual runtime → [ADR 0008](../../docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md).
-- PNG Preview, H.264 Web Control, HTTP snapshot fallback → ADR 0008; [workspace-redesign Computer](../../docs/workspace-redesign.md#10-computer); [parent spec](../shared-workspace-desktop-boundary/spec.md) stories 57–59, 65.
+- Cage sole compositor; pure-headless; no dual runtime → Computer ADR 0008.
+- PNG Preview, H.264 Web Control, HTTP snapshot fallback → ADR 0008; [workspace-redesign Computer](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#10-computer); [parent spec](../shared-workspace-desktop-boundary/spec.md) stories 57–59, 65.
 - Neutral persistent Bot Desktop; application exit is not Screen death → workspace-redesign Computer; parent stories 42–43.
 - Stop expanded encoding when unused; Agent screenshots without a viewer → ADR 0009; parent stories 56, 60.
 - Independent per-Bot input; viewer switch does not destroy the session → ADR 0009; parent stories 40, 51–55.
@@ -18,7 +18,7 @@ Retired or historical evidence only:
 
 - “Nested Hyprland remains the production runtime until Cage passes” → historical. Current compositor is ADR 0008.
 - Per-Bot browser/profile/Cookie/login policy → ADR 0009; story 20 already marked superseded.
-- Four-Screen active-stream gate as normal-use cost or Host Session proof → [capacity-report.json](capacity-report.json); current acceptance is [required host/resource evidence](../../docs/workspace-redesign.md#required-host-safety-and-resource-evidence).
+- Four-Screen active-stream gate as normal-use cost or Host Session proof → [capacity-report.json](capacity-report.json); current acceptance is [required host/resource evidence](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#required-host-safety-and-resource-evidence).
 - JPEG/H.264/wayvnc/Cage prototype numbers in Further Notes → keep with their stated limits; not current acceptance.
 
 ## Problem Statement
@@ -58,7 +58,7 @@ Nested Hyprland remains the production runtime until the Cage implementation pas
 17. As a user interacting with an application dialog, I want transient windows to remain visible and controllable, so that authentication and confirmation flows work on the lightweight desktop.
 18. As a user, I want closing an application to leave the Bot Screen ready, so that one application process is not mistaken for the Screen's lifecycle.
 19. As a user, I want a failed application to be distinguishable from a failed Bot Screen, so that I receive an accurate recovery state.
-20. **Superseded application-state requirement:** per-Bot browser/Electron profile policy is not a desktop responsibility under [ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md). Desktop endpoint routing and plugin-owned runtime remain independent; this revision neither chooses shared versus separate logins nor authorizes changing existing application data.
+20. **Superseded application-state requirement:** per-Bot browser/Electron profile policy is not a desktop responsibility under ADR 0009. Desktop endpoint routing and plugin-owned runtime remain independent; this revision neither chooses shared versus separate logins nor authorizes changing existing application data.
 21. As a user running multiple Bots, I want their desktops, video, focus, cursor, keyboard, and application processes to remain independent, so that they can operate concurrently.
 22. As a user, I want actions addressed to Bot A to leave Bot B and the Shared Screen unchanged, so that a lighter compositor does not weaken routing isolation.
 23. As a user deleting a Bot, I want its desktop, encoder, helper, worker, sockets, and plugin-owned runtime removed before deletion completes, while Shared Workspace files and application-owned data remain outside this cleanup boundary.

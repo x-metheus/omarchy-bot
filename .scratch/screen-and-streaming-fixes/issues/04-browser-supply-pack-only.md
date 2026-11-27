@@ -4,7 +4,7 @@ Type: task
 Status: resolved
 Blocked by: None
 
-Decision: [Computer ADR 0013](../../../docs/contexts/computer-control/adr/0013-bots-use-only-the-pack-browser.md). It is committed on branch `fix/integration` at `f867e42`; read it in your worktree. The user's rule is: **every Bot uses the bundled browser and never controls a host browser**. The host opt-in is removed.
+Computer ADR 0013 was recorded on branch `fix/integration` in `f867e42`. The user's rule is: **every Bot uses the bundled browser and never controls a host browser**. The host opt-in is removed.
 
 **What to build:** Make one deep **Browser Supply** module in `apps/daemon/src/modules/computer/` the only place that answers:
 - how to launch the pack browser (argv and flags, `--remote-debugging-pipe`, `--new-window`)

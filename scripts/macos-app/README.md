@@ -1,6 +1,6 @@
 # macOS dmg release
 
-On a native Apple Silicon or Intel Mac with Xcode command line tools, Bun 1.4.4 and Rust 1.93.1, install Tauri CLI 2.12.4 into the worktree (never a global Cargo directory):
+On a native Apple Silicon or Intel Mac, install the Xcode command line tools and the Bun and Rust versions pinned in the [macOS build workflow](../../.github/workflows/macos-app.yml). Install Tauri CLI 2.12.4 into the worktree.
 
 ```sh
 export CARGO_HOME="$PWD/.lane/macos-app/cargo"
@@ -37,4 +37,4 @@ Build failure publishes nothing. Rerun failed jobs to reuse successful Actions a
 
 ## Support gate
 
-Complete [the WKWebView checklist](../../docs/release/macos-wkwebview-checklist.md) on **both** architectures and record the runs under ticket 14 before marking macOS supported. Tauri has no macOS WebDriver, so the manual WKWebView run is required; Linux WebKitGTK and Chromium results do not replace it. Distribution also requires Apple credentials and ticket 11 publication. Until those native checks and publication pass, this branch supplies the implementation and CI gate only.
+Complete the [WKWebView checklist](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/release/macos-wkwebview-checklist.md) on **both** architectures. Record the runs under [macOS release acceptance](../../.scratch/omarchy-bot-app/issues/14-macos-release.md#comments) before marking macOS supported. Tauri has no macOS WebDriver, so the manual WKWebView run is required; Linux WebKitGTK and Chromium results do not replace it. Distribution also requires Apple credentials and ticket 11 publication. Until those native checks and publication pass, this branch supplies the implementation and CI gate only.

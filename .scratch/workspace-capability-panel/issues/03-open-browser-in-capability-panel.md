@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-> **Current boundary:** [ADR 0009](../../../docs/adr/0009-share-work-files-isolate-bot-screens.md) removes Changes but retains the Computer Surface. The “Browser” tab label is historical pairing with Changes; it is not plugin ownership of browser profiles, Cookies, or logins. Still-valid homes: Computer Surface, Bot Settings exclusivity, narrow one-panel, and projection cleanup → [workspace-redesign Computer](../../../docs/workspace-redesign.md#10-computer) and [parent spec](../../shared-workspace-desktop-boundary/spec.md) stories 29, 31–32, 51–65. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#capability-panel-specification).
+> **Current boundary:** ADR 0009 removes Changes but retains the Computer Surface. The “Browser” tab label is historical pairing with Changes; it is not plugin ownership of browser profiles, Cookies, or logins. Still-valid homes: Computer Surface, Bot Settings exclusivity, narrow one-panel, and projection cleanup → [workspace-redesign Computer](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#10-computer) and [parent spec](../../shared-workspace-desktop-boundary/spec.md) stories 29, 31–32, 51–65. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#capability-panel-specification).
 
 - [x] The workspace right region has explicit closed, Bot Settings, and capabilities modes, with only one mode rendered at a time.
 - [x] Capability mode owns an active tab state and can host the extracted Computer Surface content under Browser.

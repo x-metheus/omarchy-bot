@@ -4,11 +4,11 @@
 
 ## Authority
 
-- [Computer ADR 0010 — runtime owns input; retire the computer worker](../../docs/contexts/computer-control/adr/0010-daemon-owns-bot-computer-input.md)
-- [System ADR 0012 — publisher contract only grows](../../docs/adr/0012-publisher-contract-is-additive.md)
-- [ADR 0011 — Local Sidecar only off host](../../docs/adr/0011-local-sidecar-only-off-host.md)
-- [Computer ADR 0009 — one Sway Bot Computer](../../docs/contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md)
-- Glossaries: [Workspace](../../docs/contexts/workspace/CONTEXT.md) (incl. **This Device**), [Agent Integration](../../docs/contexts/agent-integration/CONTEXT.md), [Computer Control](../../docs/contexts/computer-control/CONTEXT.md)
+- Computer ADR 0010 — runtime owns input; retire the computer worker
+- System ADR 0012 — publisher contract only grows
+- ADR 0011 — Local Sidecar only off host
+- Computer ADR 0009 — one Sway Bot Computer
+- Glossaries: [Workspace](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/contexts/workspace/CONTEXT.md) (incl. **This Device**), [Agent Integration](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/contexts/agent-integration/CONTEXT.md), [Computer Control](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/contexts/computer-control/CONTEXT.md)
 
 Origin: architecture review and grilling session on 2026-10-22. Each ticket records the decisions taken there; do not re-litigate them.
 

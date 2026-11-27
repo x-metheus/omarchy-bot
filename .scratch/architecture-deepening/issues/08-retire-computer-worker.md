@@ -4,7 +4,7 @@
 **Status:** resolved
 **Blocked by:** 07
 
-**What to build:** Implement [Computer ADR 0010](../../../docs/contexts/computer-control/adr/0010-daemon-owns-bot-computer-input.md): delete `workers/computer` (worker + MCP client), `Supervisor.startComputerWorker`/`stopComputerWorker`, the runtime spawn sites, the `computerWorker` readiness field and the `computer-worker-exited` outcome. Remove the `notify` action from the `computer` tool (`packages/domain/src/computer.ts`, `workers/pi/src/computer-tool.ts`).
+**What to build:** Implement Computer ADR 0010: delete `workers/computer` (worker + MCP client), `Supervisor.startComputerWorker`/`stopComputerWorker`, the runtime spawn sites, the `computerWorker` readiness field and the `computer-worker-exited` outcome. Remove the `notify` action from the `computer` tool (`packages/domain/src/computer.ts`, `workers/pi/src/computer-tool.ts`).
 
 - [x] `workers/pi/src/computer-tool.ts` derives its action union from `packages/domain` instead of hand-copying it.
 - [x] Input authority validated at the lease only (not four layers).

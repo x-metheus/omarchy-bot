@@ -734,7 +734,8 @@ test.each(["install", "update", "reconfigure"])("%s rejects the removed OMARCHY_
     const result = await cli(setup, [command, ...(command === "reconfigure" ? [] : setup.archiveArgs)]);
     expect(result.code).toBe(2);
     expect(result.stderr).toContain("OMARCHY_BOT_BROWSER was removed");
-    expect(result.stderr).toContain("adr/0013-bots-use-only-the-pack-browser.md");
+    expect(result.stderr).toContain("Every Bot uses the bundled browser pack.");
+    expect(result.stderr).toContain("Unset OMARCHY_BOT_BROWSER and retry.");
   }
   expect(existsSync(setup.layout.runtimeDir)).toBe(false);
   expect(recorded(setup.env.SYSTEMCTL_CALLS!)).toEqual([]);

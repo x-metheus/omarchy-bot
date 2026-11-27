@@ -1,6 +1,6 @@
 # Bot runtime on Pi core
 
-> **Superseded** on 2026-11-10 by [docs/specs/bot-runtime.md](../../docs/specs/bot-runtime.md) and [ADR 0016](../../docs/adr/0016-build-bots-on-pi-durable.md). Kept for history.
+> **Superseded** on 2026-11-10 by [docs/specs/bot-runtime.md](../../docs/specs/bot-runtime.md) and [ADR 0016](../../docs/agents/adr/0016-build-bots-on-pi-durable.md). Kept for history.
 
 Status: ready-for-agent
 
@@ -185,7 +185,7 @@ Implementation must amend these explicitly, through a new system ADR:
 
 - **ADR 0002:** each Bot references an Agent, and several Bots may use one.
 - **Agent Integration context and ADR 0003:** preserving native Agent prompts, capabilities, and approval behavior.
-- **`docs/agents-integration.md`:** the adapter inventory, and Agents becoming selectable through conformance.
+- **[agents-integration.md](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/agents-integration.md):** the adapter inventory, and Agents becoming selectable through conformance.
 - **ADR 0006:** deletion semantics are written around Agent-owned Native Sessions. App-owned sessions can now really be deleted, which is better for users, and memory deletion depends on it. It also says Shared Workspace files survive deletion, and private folders are now the exception.
 - **ADR 0009 and the Workspace glossary:** Shared Workspace files are common to all Bots, and "Per-Bot workspace" is a term to avoid. Add **Private Folder** as a part of the Shared Workspace.
 - **Product boundary and README:** the product model and support statements.

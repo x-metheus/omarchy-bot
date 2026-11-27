@@ -11,7 +11,7 @@
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md). Origin: PR #10 code review (Spec (c), Standards judgement call on the CA store).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015. Origin: PR #10 code review (Spec (c), Standards judgement call on the CA store).
 
 - [x] Unpaired CSP permits only what the pairing exchange needs. A test asserts that the generated policy refuses a non-loopback `http:` origin and an arbitrary `https:` origin that was not the pairing target. If arbitrary HTTPS pairing targets make a static policy impossible, record the narrowest workable policy and why
 - [x] The packaged app shows a startup error when the native shell is absent; a test proves the memory shell is only selected explicitly

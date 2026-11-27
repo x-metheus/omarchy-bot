@@ -6,7 +6,7 @@ This is not a “done” claim. Automated and real-runtime evidence are recorded
 
 ## Accepted design
 
-Unchanged: [parent spec](spec.md), [product boundary](../../docs/workspace-redesign.md#shared-workspace-and-plugin-boundary), [ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md), [ADR 0010](../../docs/adr/0010-reuse-web-client-in-tauri.md), [requirement map](requirement-map.md).
+Unchanged: [parent spec](spec.md), [product boundary](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#shared-workspace-and-plugin-boundary), ADR 0009, ADR 0010, [requirement map](requirement-map.md).
 
 ## Implemented behavior
 

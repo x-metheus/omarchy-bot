@@ -8,7 +8,7 @@ Recommended mechanism (the agent may choose another if it records why): the Serv
 
 **Status:** resolved
 
-Spec: [Omarchy Bot app](../spec.md). Architecture: [ADR 0015](../../../docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md), [ADR 0011](../../../docs/adr/0011-local-sidecar-only-off-host.md). Origin: PR #10 code review (Spec (a), Standards hard violation 2).
+Spec: [Omarchy Bot app](../spec.md). Architecture: ADR 0015, ADR 0011. Origin: PR #10 code review (Spec (a), Standards hard violation 2).
 
 - [x] A remote Service reached through a loopback SSH tunnel starts the Sidecar; an approved `local.run` runs on the client machine (integration test with two distinct host identities over loopback transport)
 - [x] A same-machine Service reached through loopback **or** a non-loopback address starts no Sidecar

@@ -6,7 +6,7 @@
 
 **What to build:** Type the daemon ↔ publisher contract once and split `apps/daemon/src/modules/plugins/plugins.ts` (971 lines) into deeper modules: provider accounts (OAuth, tokens, identity, scopes), catalog client, Service bundle provisioning, Skill install, driven by one operation table.
 
-Decisions (settled, see [system ADR 0012](../../../docs/adr/0012-publisher-contract-is-additive.md)):
+Decisions (settled, see system ADR 0012):
 - `PublisherContract` request/response schemas live in `packages/protocol`, used by `apps/site/server/plugins.ts` and the daemon. Publisher is additive-only; daemons ignore unknown fields. Site imports the package, not relative paths.
 - One operation table (action name + body schema + handler + explicit HTTP path) drives both `apps/daemon/src/api/pluginRoutes.ts` and the `manage_plugins` Agent tool; the duplicated 20-action enum goes away.
 - Integration tests run the real `handlePluginCloudRequest` in-process, stubbing only provider token endpoints and `skills.sh`; delete the hand-written publisher stub (`plugin-services.test.ts:56-84`).

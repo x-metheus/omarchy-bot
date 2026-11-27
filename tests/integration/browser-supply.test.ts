@@ -432,6 +432,6 @@ test("the removed host-browser setting only produces an ignored notice", () => {
   expect(ignoredBrowserSelectionNotice({})).toBeUndefined();
   expect(ignoredBrowserSelectionNotice({ OMARCHY_BOT_BROWSER: "" })).toBeUndefined();
   expect(ignoredBrowserSelectionNotice({ OMARCHY_BOT_BROWSER: "host" })).toBe(
-    "OMARCHY_BOT_BROWSER is ignored: every Bot uses the bundled browser pack (Computer ADR 0013).",
+    "OMARCHY_BOT_BROWSER is ignored. Every Bot uses the bundled browser pack.",
   );
 });

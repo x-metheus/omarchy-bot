@@ -63,7 +63,7 @@ Build the Bot runtime on `@earendil-works/pi-ai`, `@earendil-works/pi-durable`, 
 
 - **One app session module** is the only code that imports `pi-durable`. The worker protocol, Service, and clients do not see its types, so an API change touches one place.
 - **pi-durable storage** lives in the Service's SQLite database under a `pi_` table prefix. The Service stays the owner of Bots, Threads, and transcripts.
-- **Memory is owned by the app**, as specified in [the memory spec](../specs/bot-memory.md). Recall goes in through `beforeRequest`, which changes only that one request. Learning runs as durable tasks started from `afterRun`.
+- **Memory is owned by the app**, as specified in [the memory spec](../../specs/bot-memory.md). Recall goes in through `beforeRequest`, which changes only that one request. Learning runs as durable tasks started from `afterRun`.
 - **Proactive features are owned by the app** and built on durable tasks: recurring check-ins (sleep until the next cron time, then submit), follow-ups and reminders (`sleepUntil`), watchers (a poll, sleep, poll loop), and ask-before-act (`beforeTool` plus an app approval flow). Notification delivery to clients is the app's.
 - **Tools come as app extensions**: computer, browser, web, Bot mail, Local Sidecar, plugins, and MCP through `pi-mcp`. The pi-durable coding tools are not installed.
 - **Models** come through `pi-ai` with an app secret store in the OS keychain. Users add providers by protocol: OpenAI-compatible or Anthropic Messages, plus a base URL and key. Built-in `pi-ai` providers are also available. No provider gets special-case code.
@@ -114,8 +114,8 @@ A failed check is solved within pi-durable, through a workaround in the runtime 
 
 ## Consequences
 
-- `.scratch/bot-runtime/spec.md`, which targeted `pi-agent-core` 0.84.4, is replaced by [the runtime spec](../specs/bot-runtime.md).
-- [The memory spec](../specs/bot-memory.md) keeps its design. Its recall and learning hooks map to `beforeRequest` and `afterRun`.
+- `.scratch/bot-runtime/spec.md`, which targeted `pi-agent-core` 0.84.4, is replaced by [the runtime spec](../../specs/bot-runtime.md).
+- [The memory spec](../../specs/bot-memory.md) keeps its design. Its recall and learning hooks map to `beforeRequest` and `afterRun`.
 - New specs are needed for:
   - proactive Bots: check-ins, follow-ups, watchers, notifications, and ask-before-act
   - the restructure into one Bot service with desktop and mobile clients, cross-platform computer use, and the rename

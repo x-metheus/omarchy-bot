@@ -2,24 +2,24 @@
 
 Status: resolved
 
-> **Scope correction accepted 2026-09-05:** [System ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md) and the [current product boundary](../../docs/workspace-redesign.md#shared-workspace-and-plugin-boundary) supersede this spec's Changes capability, Git-backed workspace assumptions, and daemon-cwd fallback. Remove Changes rather than restoring its UI/API/tests or replacing it with a review/artifact panel. The Computer Surface and unrelated Composer improvements remain; the body, tickets, and delivery results below record the historical implementation, not authority to reintroduce Changes. Removal has landed in tickets 02 and 09 of the Shared Workspace correction; this notice is not authority to reintroduce Changes. Requirement homes: [requirement map](../shared-workspace-desktop-boundary/requirement-map.md#capability-panel-specification).
+> **Scope correction accepted 2026-09-05:** System ADR 0009 and the [current product boundary](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#shared-workspace-and-plugin-boundary) supersede this spec's Changes capability, Git-backed workspace assumptions, and daemon-cwd fallback. Remove Changes rather than restoring its UI/API/tests or replacing it with a review/artifact panel. The Computer Surface and unrelated Composer improvements remain; the body, tickets, and delivery results below record the historical implementation, not authority to reintroduce Changes. Removal has landed in tickets 02 and 09 of the Shared Workspace correction; this notice is not authority to reintroduce Changes. Requirement homes: [requirement map](../shared-workspace-desktop-boundary/requirement-map.md#capability-panel-specification).
 
 ## Requirement map (2026-09-05)
 
 Still-valid (use the current homes, not this spec's body as the instruction):
 
-- Composer dock stories 1–13, 46 → [workspace-redesign Composer and Voice](../../docs/workspace-redesign.md#7-composer); [parent spec](../shared-workspace-desktop-boundary/spec.md) stories 30, 33.
-- Right-region exclusivity, closed-by-default, narrow one-panel: stories 14, 17, 19 → [workspace-redesign IA / Bot Settings](../../docs/workspace-redesign.md#2-information-architecture); parent stories 31–32.
-- Computer Surface through the Computer entry: stories 16, 39–42 → [workspace-redesign Computer](../../docs/workspace-redesign.md#10-computer); parent stories 29, 51–65.
-- Astryx-only, no Board/Tailwind: story 46 → [workspace-redesign visual system](../../docs/workspace-redesign.md#12-visual-system); [technology-selection](../../docs/technology-selection.md).
-- Cage/H.264 remains; do not revive nested Hyprland → [ADR 0008](../../docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md), ADR 0009.
+- Composer dock stories 1–13, 46 → [workspace-redesign Composer and Voice](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#7-composer); [parent spec](../shared-workspace-desktop-boundary/spec.md) stories 30, 33.
+- Right-region exclusivity, closed-by-default, narrow one-panel: stories 14, 17, 19 → [workspace-redesign IA / Bot Settings](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#2-information-architecture); parent stories 31–32.
+- Computer Surface through the Computer entry: stories 16, 39–42 → [workspace-redesign Computer](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#10-computer); parent stories 29, 51–65.
+- Astryx-only, no Board/Tailwind: story 46 → [workspace-redesign visual system](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#12-visual-system); [technology-selection](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/technology-selection.md).
+- Cage/H.264 remains; do not revive nested Hyprland → Computer ADR 0008, ADR 0009.
 
 Retired (not instructions to preserve or reintroduce):
 
 - Changes tab, Git summary/detail, daemon-cwd fallback, polling, authorship language: stories 15, 20–38, 43, 47–48.
 - “Browser” as a capability-tab label that pairs Changes with Computer. The Computer Surface itself is retained.
 
-The Answer below records historical delivery. Changes removal remains an [implementation gap](../../docs/workspace-redesign.md#implementation-gaps-in-the-2026-09-05-revision).
+The Answer below records historical delivery. Changes removal remains an [implementation gap](https://github.com/x-metheus/omarchy-bot/blob/cddced5d11497f201d0d62dd94e6c8893fa2f08f/docs/workspace-redesign.md#implementation-gaps-in-the-2026-09-05-revision).
 
 ## Problem Statement
 

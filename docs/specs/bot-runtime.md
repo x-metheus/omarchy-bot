@@ -2,7 +2,7 @@
 
 Status: approved 2026-11-10, amended 2026-11-24 and 2026-11-25 (see [Changes](#changes))
 
-Decision record: [ADR 0016](../adr/0016-build-bots-on-pi-durable.md)
+Decision record: [ADR 0016](../agents/adr/0016-build-bots-on-pi-durable.md)
 Replaces: the earlier draft written for `pi-agent-core` 0.84.4. Its Web and Workspaces rules are copied into this spec, so this spec stands alone.
 
 > The [prototype](#prototype) ran on 2026-11-12 and passed. Its findings are folded into this spec.

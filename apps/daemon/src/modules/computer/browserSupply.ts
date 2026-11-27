@@ -177,7 +177,7 @@ function withPackDefaults(source: string): string {
 /** The daemon's one-line notice for the removed host-browser setting. */
 export function ignoredBrowserSelectionNotice(environment: Record<string, string | undefined>): string | undefined {
   return environment.OMARCHY_BOT_BROWSER
-    ? "OMARCHY_BOT_BROWSER is ignored: every Bot uses the bundled browser pack (Computer ADR 0013)."
+    ? "OMARCHY_BOT_BROWSER is ignored. Every Bot uses the bundled browser pack."
     : undefined;
 }
 

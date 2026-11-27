@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-> **Historical.** Ticket 12 removed the expanded H.264 / ffmpeg / RTP / video-track path. The four-stream row and checked-in approval remain H.264-era measurement evidence, not current Host Session or normal-use-cost acceptance. Follow [required host/resource evidence](../../../docs/workspace-redesign.md#required-host-safety-and-resource-evidence). Report: [capacity-report.json](../capacity-report.json). Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
+> **Historical.** Ticket 12 removed the expanded H.264 / ffmpeg / RTP / video-track path. The four-stream row and checked-in approval remain H.264-era measurement evidence, not current Host Session or normal-use-cost acceptance. Follow [required host/resource evidence](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/workspace-redesign.md#required-host-safety-and-resource-evidence). Report: [capacity-report.json](../capacity-report.json). Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
 
 - [x] The final-stack harness exercises the production daemon, real Cage runtime, long-lived capture/encoder, actual WebRTC peer, built web client, and browser decode/paint/canvas readback rather than a synthetic codec loop.
 - [x] The matrix covers 1, 2, 4, and 8 concurrent 1080p Bot Screens plus the selectable 720p fallback using sustained phases comparable to the checked-in approval.

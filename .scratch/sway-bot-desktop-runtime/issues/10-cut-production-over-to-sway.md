@@ -26,7 +26,7 @@ Live leftover Cage trees are processes whose `XDG_RUNTIME_DIR` is a Bot Screen g
 
 Rollout: architecture selection true, conformance pass true, production cutover true, Cage removal false, human acceptance pending.
 
-**Files:** `apps/daemon/src/bootstrap/main.ts`, `apps/daemon/src/modules/computer/swayBotScreenRuntime.ts`, `apps/daemon/src/modules/computer/leftoverCage.ts`, `apps/daemon/src/modules/computer/botDesktopRollout.ts`, `apps/daemon/src/bootstrap/config.ts`, `docs/contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md`, `.scratch/sway-bot-desktop-runtime/rollout-status.md`, `tests/integration/computer.test.ts`, `tests/integration/bot-screen-sway-cutover.test.ts`. Cage adapter files were not deleted.
+**Files:** `apps/daemon/src/bootstrap/main.ts`, `apps/daemon/src/modules/computer/swayBotScreenRuntime.ts`, `apps/daemon/src/modules/computer/leftoverCage.ts`, `apps/daemon/src/modules/computer/botDesktopRollout.ts`, `apps/daemon/src/bootstrap/config.ts`, Computer ADR 0009, `.scratch/sway-bot-desktop-runtime/rollout-status.md`, `tests/integration/computer.test.ts`, `tests/integration/bot-screen-sway-cutover.test.ts`. Cage adapter files were not deleted.
 
 **Tests:**
 - `missing Sway reports Screen unavailable without falling back to another desktop`

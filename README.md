@@ -27,7 +27,7 @@ Omarchy Bot's headless Service owns the Bots, Threads, Agents, Shared Workspace,
 | **Hand work to another Bot** | Durable, asynchronous 1:1 mail creates a target-owned Thread without forwarding the source conversation. |
 
 > [!IMPORTANT]
-> **Current support:** the Service runs on **x86_64 Linux** with or without a desktop. Install paths are the Omarchy plugin, the generic `install` command, and the container image ([ADR 0013](docs/adr/0013-run-a-standalone-linux-service.md)). The runtime archive ships the Bot Computer bundle and fonts, and installers install the separate browser pack by default; the configured distribution matrix runs in CI. **Not supported:** arm64, macOS, and Windows Service Hosts, including a VM-hosted Bot Computer. **Pi** is the current Agent backend. Other Agents require an adapter and a passing versioned conformance inventory before becoming selectable. The Linux Omarchy Bot application builds as an x86_64 AppImage; see [Linux application](#linux-application). [Windows x64](#windows-application-preview) has NSIS preview build and smoke automation; support still requires its real WebView2 run and signing. Other client platforms require their own packaged WebView checks.
+> **Current support:** the Service runs on **x86_64 Linux** with or without a desktop. Install paths are the Omarchy plugin, the generic `install` command, and the [container image](#container-on-a-headless-linux-host). The runtime archive ships the Bot Computer bundle and fonts, and installers install the separate browser pack by default; the configured distribution matrix runs in CI. **Not supported:** arm64, macOS, and Windows Service Hosts, including a VM-hosted Bot Computer. The Service runs Bots in-process on [pi-durable](docs/specs/bot-runtime.md). The Linux Omarchy Bot application builds as an x86_64 AppImage; see [Linux application](#linux-application). [Windows x64](#windows-application-preview) has NSIS preview build and smoke automation; support still requires its real WebView2 run and signing. Other client platforms require their own packaged WebView checks.
 
 ## Installation
 
@@ -83,7 +83,7 @@ A host without a systemd user manager cannot use `install`; start the Service wi
 
 The runtime archive contains no browser. `install` and `update` install the browser pack by default on every Service Host, and it is the only browser any Bot uses. Every host therefore runs the same pinned Chrome for Testing build: Agent control needs one known version with launch flags the Service owns, and nothing depends on what the host installed. The daemon launches that browser with `--remote-debugging-pipe`, so the `browser` tool can read the same visible window's accessibility tree and act on it over a private inherited pipe; no TCP debugging port is opened and the browser window stays on the Bot Screen. By default the pack comes from `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<version>/`, inferred from the runtime archive's file name; a local runtime archive without that name needs an explicit `--browser-pack <file-or-https-url>`: a local archive with its adjacent `.sha256` sidecar, or an HTTPS URL whose archive and `.sha256` are both downloaded. `--no-browser-pack` skips the pack entirely. The adjacent `<source>.sha256` sidecar is verified before anything is written, and a mismatch aborts before the unit is installed. The pin an `update` targets is the one in the runtime archive it installs, while `install` reusing an installed Service keeps that runtime's pin. `update` replaces the pack only when the installed pin differs from the target release or the installation is incomplete, and it keeps an unchanged pin only while the installed `browser --version` succeeds, so a same-pin pack that no longer runs is repaired instead of preserved. A repair reuses the release recorded when the runtime was installed; an installation older than that record needs an explicit `--browser-pack`. The pack is extracted to `~/.local/share/omarchy-bot/runtime/browser/`, never onto the host, and `uninstall` removes it with `runtime/`.
 
-The Service never starts, adopts, or controls a browser installed on the host, and no setting changes that ([Computer ADR 0013](docs/contexts/computer-control/adr/0013-bots-use-only-the-pack-browser.md)). The former `OMARCHY_BOT_BROWSER` opt-in is removed: `install`, `update` and `reconfigure` reject it with exit 2, `update` rewrites a unit that still sets it, and the daemon logs that it is ignored. Inside the Bot Computer, `http`, `https` and `text/html` default to the pack, `BROWSER` names it, and common host browser commands (`brave`, `chromium`, `google-chrome`, `firefox`, …) resolve to Service shims that open the pack; `open_app` for another browser is refused with a pointer to `open_url` and the `browser` tool. Chrome for Testing ships no Widevine module, so DRM-protected video does not play in Bot Screens. Chromium also reports `navigator.webdriver` for the `--remote-debugging-pipe` switch that Agent browser control requires, so some sites can recognize the Bot browser; the Service does not spoof or hide that signal, and such sites may need a human Takeover.
+The Service never starts, adopts, or controls a browser installed on the host, and always uses the bundled browser pack. The former `OMARCHY_BOT_BROWSER` opt-in is removed: `install`, `update` and `reconfigure` reject it with exit 2, `update` rewrites a unit that still sets it, and the daemon logs that it is ignored. Inside the Bot Computer, `http`, `https` and `text/html` default to the pack, `BROWSER` names it, and common host browser commands (`brave`, `chromium`, `google-chrome`, `firefox`, …) resolve to Service shims that open the pack; `open_app` for another browser is refused with a pointer to `open_url` and the `browser` tool. Chrome for Testing ships no Widevine module, so DRM-protected video does not play in Bot Screens. Chromium also reports `navigator.webdriver` for the `--remote-debugging-pipe` switch that Agent browser control requires, so some sites can recognize the Bot browser; the Service does not spoof or hide that signal, and such sites may need a human Takeover.
 
 The generated unit records `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `OMARCHY_BOT_HOST`, `OMARCHY_BOT_PORT`, `PATH`, `XDG_RUNTIME_DIR`, and, when configured, `OMARCHY_BOT_TLS_CERT`, `OMARCHY_BOT_TLS_KEY`, and `OMARCHY_BOT_TRUSTED_PROXY`. TLS and proxy settings come from `--tls-cert`/`--tls-key`/`--trusted-proxy` flags or those variables in the installing environment. `install`/`update` leave an existing unit alone unless a TLS flag or one of those three variables is supplied, or the unit still sets the removed host-browser variable, in which case they rewrite the unit and restart it instead of only starting it; [Remote access](#remote-access) documents the exact TLS rules. Writing the unit also saves the connection settings to `<dataDir>/service.json` (mode 0600, no host secret) so later CLI commands reach the installed address and scheme.
 
@@ -123,11 +123,7 @@ The Service runs as UID/GID 1000. The single named volume contains its database,
 
 Use one running container per state volume. On startup the entrypoint clears Chromium's three transient singleton links, whose hostname and temporary socket refer to the previous container; browser profile data remains on the volume.
 
-Before creating a Bot with the real Pi Agent, configure Pi's provider credentials in the persisted home; credentials alone leave a fresh Agent `unconfigured`. Readiness also requires an authentic passing Pi conformance record for the image's exact Agent version, which the Service reads from `<dataDir>/conformance/pi-<version>.json`. A paired `GET /api/agents` reports the Pi entry's `version` field. No supported command writes such a record into a production Service or the container's state volume, so this remains a provisioning gap.
-
-`bun test tests/conformance/pi.test.ts` is a verification run, not a provisioner: it runs the ten-step suite against the matching runtime revision and Pi version in a private child process with its own fixture `HOME`, XDG directories and temporary directory, copies only Pi's credential and model configuration into that fixture, and removes the fixture — including the readiness record and native sessions it creates — when the run ends. It writes nothing to the user's home, so it leaves no record to install. Never create a success record manually or reuse the scripted worker's test record.
-
-For an existing Service, a paired `POST /api/agents/pi/recheck` reruns the probe; once a record is present, confirm `GET /api/agents` reports Pi `ready`. The image includes the production worker only. Its offline acceptance test mounts a separate scripted worker and proves container wiring rather than real provider authentication or model conformance.
+After pairing the app, open **Settings → Providers** and add a provider to make its models available to Bots. The Service stores provider credentials in its own secret store. See [Models and providers](docs/specs/bot-runtime.md#models-and-providers).
 
 `--shm-size=512m` gives Chromium sufficient shared memory. Chromium's namespace sandbox needs a host that permits unprivileged user namespaces and Docker's `--security-opt seccomp=unconfined`; this relaxes Docker's syscall filtering, so run the Service only with trusted Agent workloads. The browser's own sandbox remains enabled. The image never uses `--privileged`, mounts a desktop socket, or requires a host graphical session.
 
@@ -135,7 +131,7 @@ For remote HTTPS, set `OMARCHY_BOT_HOST` to the interface address you mean (use 
 
 The local health probe sends no credentials and checks liveness only. With HTTPS it skips certificate identity validation so operator-managed self-signed certificates and certificates for the external DNS name still work; validate public TLS separately from container health.
 
-Maintainers can run the real, offline acceptance test with `OMARCHY_BOT_CONTAINER_IMAGE=omarchy-bot:local bun test tests/integration/container-image.test.ts`. It mounts the scripted worker as a test fixture, pairs a client, creates a Bot and Thread, opens a real Bot Screen/browser, then recreates and restarts the container with the same volume and checks browser localStorage, conversations, and the paired token. It removes its private containers and volume on completion.
+Maintainers can run the real, offline acceptance test with `OMARCHY_BOT_CONTAINER_IMAGE=omarchy-bot:local bun test tests/integration/container-image.test.ts`. It pairs a client, creates a Bot and Thread, opens a real Bot Screen/browser, then recreates and restarts the container with the same volume and checks browser localStorage, conversations, and the paired token. It removes its private containers and volume on completion.
 
 ## Service CLI
 
@@ -183,8 +179,8 @@ CLI environment: `HOME`, `OMARCHY_BOT_HOME`, `OMARCHY_BOT_STATE`, `XDG_CONFIG_HO
                                 |
                        Service (Bun + SQLite)
                       /         |          \
-                 Threads     Agent workers  Computer Broker
-                 SQLite         Pi                |
+                 Threads     Bot runtime    Computer Broker
+                 SQLite      pi-durable           |
                                       One private Bot Computer
                                       Shared Sway + app profile
                                          /               \
@@ -214,21 +210,21 @@ Focus the Composer and use dictation on your own device. The operating system ty
 
 ## Status
 
-The current implementation includes a Bun daemon, React web client, SQLite persistence, and isolated Agent workers. Shared Sway runtime, routed Screens, shared application state, and selected-view projection are implemented.
+The React web client connects to a Bun daemon that hosts the Bot runtime and persists conversations in SQLite. Shared Sway runtime, routed Screens, shared application state, and selected-view projection are implemented.
 
-**Host Session acceptance remains open.** Automated real-Sway conformance covers two routed Screens, shared profile/runtime markers, Agent control, projection, URL reuse, deletion/reprovision, and host environment isolation. It does not prove the user's top bar, shortcuts, or ordinary physical-input experience. See the [runtime decision and evidence](docs/contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md).
+**Host Session acceptance remains open.** Automated real-Sway conformance covers two routed Screens, shared profile/runtime markers, Agent control, projection, URL reuse, deletion/reprovision, and host environment isolation. It does not prove the user's top bar, shortcuts, or ordinary physical-input experience. See the [Sway conformance test](tests/integration/bot-screen-sway-conformance.test.ts).
 
-Omarchy Bot at `apps/omarchy-bot` embeds the production Web UI in a thin Tauri 2 shell for Linux, macOS, and Windows. Execution stays in the Linux Service ([ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md), [ADR 0015](docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md)). Its packaged WebKitGTK smoke suite covers pairing, persistence, network policy, the event stream, Screen Projection, and Takeover. macOS WKWebView acceptance uses its native release checklist; Windows WebView2 acceptance uses the separate preview runner suite. Chromium tests remain shared UI coverage.
+Omarchy Bot at `apps/omarchy-bot` embeds the production Web UI in a thin Tauri 2 shell for Linux, macOS, and Windows. The Linux Service hosts the Bot runtime. Its packaged WebKitGTK smoke suite covers pairing, persistence, network policy, the event stream, Screen Projection, and Takeover. macOS WKWebView acceptance uses its native release checklist; Windows WebView2 acceptance uses the separate preview runner suite. Chromium tests remain shared UI coverage.
 
-The Local Sidecar connects outbound using `OMARCHY_BOT_SERVICE_URL` (`ws://…` or `wss://…`), `OMARCHY_BOT_DEVICE_ID` (`dev_<32hex>`), `OMARCHY_BOT_DEVICE_TOKEN` (the Paired Device token), and `OMARCHY_BOT_SIDECAR_ROOT`; `OMARCHY_BOT_HOSTNAME` is optional. TLS uses the operating system's trusted certificates, with no certificate bypass. Registration requires its OS (`linux`, `macos`, `windows`) and shell (`posix-sh`, `powershell-5.1`); the roster and each Turn's `local` tool description carry the sender's identity. Linux and macOS execute POSIX `sh` commands with process-group teardown; Windows executes Windows PowerShell 5.1 commands assigned to a Job Object before user code runs. Cancel and timeout terminate the command tree on every OS. File operations and search refuse `.ssh`, `.gnupg`, `.aws`, and `.config`; macOS additionally refuses `Library/Keychains`, `Library/Accounts`, and `Library/Application Support/com.apple.TCC`, while Windows additionally refuses Credentials, Protect, Vault, and Crypto under both `AppData/Local/Microsoft` and `AppData/Roaming/Microsoft`. Windows checks ignore case and expand existing NTFS short aliases, including ancestors of new write destinations. Screenshot, pointer, and compositor requests remain refused on every OS. The client tags each send with its Sidecar identity so the Service resolves **This Device** only from that Turn's sender; untagged, unknown, and offline senders never borrow another Sidecar. See [ADR 0015](docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md) and [the device identity contract](docs/adr/0011-local-sidecar-only-off-host.md#client-side-device-identity).
+The Local Sidecar connects outbound using `OMARCHY_BOT_SERVICE_URL` (`ws://…` or `wss://…`), `OMARCHY_BOT_DEVICE_ID` (`dev_<32hex>`), `OMARCHY_BOT_DEVICE_TOKEN` (the Paired Device token), and `OMARCHY_BOT_SIDECAR_ROOT`; `OMARCHY_BOT_HOSTNAME` is optional. TLS uses the operating system's trusted certificates, with no certificate bypass. Registration requires its OS (`linux`, `macos`, `windows`) and shell (`posix-sh`, `powershell-5.1`); the roster and each Turn's `local` tool description carry the sender's identity. Linux and macOS execute POSIX `sh` commands with process-group teardown; Windows executes Windows PowerShell 5.1 commands assigned to a Job Object before user code runs. Cancel and timeout terminate the command tree on every OS. File operations and search refuse `.ssh`, `.gnupg`, `.aws`, and `.config`; macOS additionally refuses `Library/Keychains`, `Library/Accounts`, and `Library/Application Support/com.apple.TCC`, while Windows additionally refuses Credentials, Protect, Vault, and Crypto under both `AppData/Local/Microsoft` and `AppData/Roaming/Microsoft`. Windows checks ignore case and expand existing NTFS short aliases, including ancestors of new write destinations. Screenshot, pointer, and compositor requests remain refused on every OS. The client tags each send with its Sidecar identity so the Service resolves **This Device** only from that Turn's sender; untagged, unknown, and offline senders never borrow another Sidecar. See the [Local Sidecar dispatch checks](tests/integration/local-sidecar-dispatch.test.ts).
 
-The Web UI reads native capabilities through one seven-capability `shell` interface: Service connection (including startup notices and certificate diagnosis), pairing intake, system browser, attachment downloads, updates, Local Sidecar, and key mapping. The app installs only its native adapter before the Web bundle loads; the shared UI owns notices and explicit link actions. The Vite harness and Chromium tests use the memory adapter. The Linux app compares its machine identity with the authenticated Service host identity: a persisted per-install salt and SHA-256 digest, never the raw machine ID. Same-machine Services start no Sidecar over either loopback or LAN/HTTPS; a different machine reached through a loopback SSH tunnel starts one. macOS and Windows are always different machines because Service Hosts are Linux. A failed identity check starts no Sidecar and shows why local actions are unavailable; fix the connection or machine identity and reopen the app to retry. Both Linux processes read `/etc/machine-id`, falling back to `/var/lib/dbus/machine-id`; `OMARCHY_BOT_MACHINE_ID_FILE` overrides that file for isolated tests. Off-host, the app starts its bundled compiled Sidecar with a cryptographically generated, persisted `dev_<32hex>` identity. Every send carries that identity while the Sidecar is registered, so the Service resolves **This Device** to the same install. Approval cards show the exact command or path; Always/Never policies live in the install's app-local data and survive restart and re-pairing. Quit, unpair, re-pair and child disconnection stop the Sidecar; the Service fails pending local jobs. The native updater checks the app release channel, verifies signed artifacts and their advertised version, and restarts through the same shell interface. See [ADR 0015](docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md) and [ADR 0011](docs/adr/0011-local-sidecar-only-off-host.md#client-side-device-identity).
+The Web UI reads native capabilities through one seven-capability `shell` interface: Service connection (including startup notices and certificate diagnosis), pairing intake, system browser, attachment downloads, updates, Local Sidecar, and key mapping. The app installs only its native adapter before the Web bundle loads; the shared UI owns notices and explicit link actions. The Vite harness and Chromium tests use the memory adapter. The Linux app compares its machine identity with the authenticated Service host identity: a persisted per-install salt and SHA-256 digest, never the raw machine ID. Same-machine Services start no Sidecar over either loopback or LAN/HTTPS; a different machine reached through a loopback SSH tunnel starts one. macOS and Windows are always different machines because Service Hosts are Linux. A failed identity check starts no Sidecar and shows why local actions are unavailable; fix the connection or machine identity and reopen the app to retry. Both Linux processes read `/etc/machine-id`, falling back to `/var/lib/dbus/machine-id`; `OMARCHY_BOT_MACHINE_ID_FILE` overrides that file for isolated tests. Off-host, the app starts its bundled compiled Sidecar with a cryptographically generated, persisted `dev_<32hex>` identity. Every send carries that identity while the Sidecar is registered, so the Service resolves **This Device** to the same install. Approval cards show the exact command or path; Always/Never policies live in the install's app-local data and survive restart and re-pairing. Quit, unpair, re-pair and child disconnection stop the Sidecar; the Service fails pending local jobs. The native updater checks the app release channel, verifies signed artifacts and their advertised version, and restarts through the same shell interface. See the [same-host Sidecar checks](tests/integration/local-sidecar-same-host.test.ts).
 
 On macOS, Web Control maps ⌘ to Ctrl and ⌥ to Super. Settings → Keyboard → “Send ⌘ as Super” changes Command for this device; Option still sends Super. The shell stores the preference independently of the paired Service, so unpairing does not reset it. The Vite memory shell detects the browser platform and persists the preference in that harness origin’s localStorage; the native app adapter owns its install’s storage. Linux and Windows keep their existing key handling. ⌘V and Ctrl+V retain the local plain-text paste path rather than forwarding a remote V key.
 
 ## Development
 
-Development follows [Agent Skills](docs/development.md): choose the applicable workflow through `using-agent-skills`, define and approve feature specifications when required, plan the work, implement and verify small increments, then review and document the result. [Project documentation](docs/README.md) includes the code map; the [development guide](docs/development.md#skill-resources-and-maintenance) records the installed skills and shared references.
+Start with the [project instructions](AGENTS.md). The [development guide](docs/development.md) maps tasks to installed skills and verification commands. Use the [code map](docs/README.md#code-map) to locate the affected source and tests.
 
 From a local checkout:
 
@@ -395,7 +391,7 @@ The publisher exchanges codes and refresh tokens but does not persist accounts.
 Installed Skills and stdio MCP servers are trusted local code, not a sandbox.
 The existing plugin Tool Call bridge manages inventory and configuration; it is
 not a second MCP runtime. See the [native plugin specification](.scratch/shared-plugins-native-discovery/spec.md)
-and [adapter boundary](docs/agents-integration.md#native-plugin-discovery-and-runtime).
+and the runtime specification for [Skills](docs/specs/bot-runtime.md#prompt-and-skills) and [MCP](docs/specs/bot-runtime.md#mcp).
 Acceptance exercised Pi SDK 0.84.4 with `pi-mcp-adapter@2.33.0`, real stdio and
 HTTP tools, controlled native PKCE authorization, packaged daemon startup and
 Creator execution, and desktop/narrow Chromium. Codex 0.154.0 discovered the same
@@ -403,10 +399,7 @@ shared Skill files and custom MCP configuration. Live provider consent/business
 access, native Claude/Codex model authoring, and Tauri/WebView compatibility remain
 unverified; see the [acceptance record](.scratch/shared-plugins-native-discovery/issues/16-installed-plugin-upgrade-and-recovery.md).
 
-The composer uses Astryx's native slash-trigger menu. The pinned
-`@astryxdesign/core@0.5.2` patch removes the unsupported `aria-multiline` attribute
-when that input is a combobox; Bun applies it during installation, and runtime
-archives include the patch. Reassess it when upgrading Astryx.
+The composer uses Astryx's native slash-trigger menu. The [web package manifest](apps/web/package.json) pins the component library version.
 
 The Message input is a combobox while Skill commands are available, and a
 textbox for multiword drafts, offline Agents, and active Turns. End-to-end tests
@@ -457,7 +450,7 @@ accounts before presenting these connectors as publicly available.
 | **Bash and `flock`** | `scripts/serve.sh` and the Omarchy plugin entry script |
 | **systemd user manager** | `install`, `start`, `stop`, and `uninstall`, plus the manager socket `$XDG_RUNTIME_DIR/systemd/private`; `status` needs the `systemctl` binary and reads a stopped manager as `inactive` |
 | **`curl` and `unzip`** | Omarchy plugin runtime download and container image asset preparation |
-| **Configured Pi installation** | Real Agent execution and Pi conformance |
+| **Model provider configured in Settings** | Bot Turns that call a model |
 | **Docker** | Building the container image and running its conformance |
 | **Network during `install`/`update`** | Downloads the checksum-verified browser pack (Chrome for Testing plus its libraries) unless `--no-browser-pack` is passed; the Bot Computer never downloads at run time, and fonts ship inside the runtime archive |
 
@@ -539,10 +532,10 @@ reduced-motion case asserts the product's static working avatar before capture.
 Review snapshot differences before updating; browser and system-font changes can
 still affect raster output.
 
-Real Pi conformance makes model calls and requires a configured Agent. It runs in a private child process with fixture `HOME`/XDG directories, temporary copies of Pi's credential and model configuration, and removes the fixture — record and native sessions included — on completion. It needs the same prepared Sway bundle, font directory, and browser pack as the portable-browser run below, provided through `OMARCHY_BOT_SWAY_BUNDLE_DIR`, `OMARCHY_BOT_FONT_DIR`, and `OMARCHY_BOT_BROWSER_PACK_DIR` (or the individual binary overrides); its final step opens a loopback form in the pack browser, snapshots it, fills it by Element Ref, and reads the submitted receipt back:
+The runtime integration tests exercise Bot Turns, transcript ordering, and events with a fixture model provider.
 
 ```bash
-bun test tests/conformance/pi.test.ts
+bun test tests/integration/runtime-parity.test.ts
 ```
 
 Real portable-browser conformance runs one private Sway Bot Computer on a fixture host with no browser on `PATH` and no visible host desktop entries, captures a Latin/Chinese/Japanese/Korean page from two Screens, and asserts real glyphs rather than empty boxes, one shared browser profile, and no snap launch. A fake host `brave` and its desktop entry are present and must never run. It needs a prepared Sway bundle, a prepared font directory, and an installed browser pack (pointed at with `OMARCHY_BOT_BROWSER_PACK_DIR`), and skips without the flag. Prepare all three once (the bundle build needs Docker; the pack build downloads the pinned Chrome for Testing and library inputs over HTTPS):
@@ -623,7 +616,7 @@ Mail does not forward the source Thread, Native Session, memory, attachments, or
 “Local” describes the application and its storage, not a promise of offline inference. Model connectivity depends on the configured Agent and provider.
 
 > [!WARNING]
-> **Every control request needs a Paired Device.** Every `/api/` control route and every WebSocket upgrade — projection, RFB, and the Sidecar device channel — requires a device token, including on loopback. The unauthenticated exceptions are `GET /api/health`, `POST /api/pairing/exchange` (a one-time code), and the provider `GET /api/plugins/oauth/callback` (guarded by single-use OAuth state). Pairing-code issue and Paired Device listing/revocation need either an authenticated Paired Device token or, from the Service Host's loopback peer, the Service Host secret from `<state>/pairing-host-secret`. Binding a non-loopback address requires your TLS certificate or a declared TLS-terminating proxy; otherwise startup fails. Private Wayland sockets are neither remote authentication nor an adversarial security sandbox. See [ADR 0015](docs/adr/0015-omarchy-bot-app-is-the-only-bot-client.md).
+> **Every control request needs a Paired Device.** Every `/api/` control route and every WebSocket upgrade — projection, RFB, and the Sidecar device channel — requires a device token, including on loopback. The unauthenticated exceptions are `GET /api/health`, `POST /api/pairing/exchange` (a one-time code), and the provider `GET /api/plugins/oauth/callback` (guarded by single-use OAuth state). Pairing-code issue and Paired Device listing/revocation need either an authenticated Paired Device token or, from the Service Host's loopback peer, the Service Host secret from `<state>/pairing-host-secret`. Binding a non-loopback address requires your TLS certificate or a declared TLS-terminating proxy; otherwise startup fails. Private Wayland sockets are neither remote authentication nor an adversarial security sandbox. See the [device pairing checks](tests/integration/device-pairing.test.ts).
 
 ## Remote access
 
@@ -648,7 +641,7 @@ Three supported paths reach a Service from another machine. All three require a 
 
   Because the installed setting persists in `<dataDir>/service.json`, `pair`, `devices`, `revoke`, the `install`/`update`/`reconfigure` health wait, and `doctor` then call the `https://` origin, and `status` prints it. A self-signed certificate is accepted only when the connection targets a loopback address; connecting to a remote host address requires a certificate that verifies normally. Redirects are refused. Manage the Service from the Service Host, or reach it over the SSH tunnel or VPN path above.
 
-Pairing is required in every case. [ADR 0014](docs/adr/0014-require-paired-device-tokens.md) supersedes the [earlier transport decision](docs/adr/0004-defer-web-control-transport-security.md); [ADR 0013](docs/adr/0013-run-a-standalone-linux-service.md) records the standalone Service these paths reach.
+Pair the client with the Service after establishing the connection.
 
 Projection protocol v3 uses one WebSocket for PNG preview and Broker-authorized control/input, plus a separate bidirectional RFB WebSocket consumed by bundled noVNC 1.7 in view-only mode. WayVNC remote input and clipboard are disabled. `/api/computer/snapshot` remains a read-only fallback. There is no separate WebRTC/UDP listener. Every one of these connections requires the device token.
 
@@ -672,32 +665,30 @@ apps/
   web/                     React conversation workspace
   daemon/                  Service API, persistence, orchestration
   cli/                     Install, unit, pairing, device, status, doctor, update, uninstall commands
-workers/
-  pi/                      Pi SDK adapter
+  omarchy-bot/             Native Tauri application
+  sidecar-rust/            Local Sidecar
 packages/
   domain/                  Domain types and state transitions
   protocol/                REST and WebSocket schemas
-  agent-contract/          Daemon / Agent worker protocol
+  agent-contract/          Tool and Sidecar contracts
   api-client/              Typed client
   omarchy-plugin/          Install-only Omarchy plugin package
 scripts/                   Plugin runtime packaging
-tests/                     Unit, integration, E2E, and conformance checks
-docs/                      Product design, ADRs, research, inventories
+tests/                     Unit, integration, and E2E checks
+docs/                      Development guides, specifications, ADRs, and research
 ```
 
-The daemon is the only SQLite writer. Agent SDKs and native protocols run behind isolated workers. The browser talks only to the daemon.
+The daemon owns SQLite and runs Bot conversations through pi-durable. The web client uses the Service API.
 
 ## Development sources
 
 | Start here | What it defines |
 | :--- | :--- |
 | [Project documentation](docs/README.md) | Documentation entry point and code and test routing |
-| [Development workflow](docs/development.md) | Agent Skills workflow, project artifact locations, verification commands, and skill maintenance |
+| [Development workflow](docs/development.md) | Skill selection, project records, and verification commands |
 | [Agent instructions](AGENTS.md) | Starting instructions for coding agents |
-| [Workflow router](.agents/skills/using-agent-skills/SKILL.md) | Which development skills apply to a task |
-| [Definition of Done](.agents/references/definition-of-done.md) | Shared completion criteria, applied with the project's commands and task requirements |
-
-Feature specifications, plans, task checklists, quality requirements, and architecture decisions live in `docs/`, using the [project artifact locations](docs/development.md#project-artifacts).
+| [Issue tracker](docs/agents/issue-tracker.md) | Publishing specifications and tickets in GitHub Issues |
+| [Domain documentation](docs/agents/domain.md) | Project terminology and architecture decisions |
 
 ## License
 
