@@ -18,6 +18,7 @@ use crate::user_memory::{self, CurrentMemory, MemorySource, Proposal, Remembered
 pub(crate) struct Bot {
     pub(crate) id: Uuid,
     pub(crate) name: String,
+    pub(crate) duties: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -86,7 +87,8 @@ impl Store {
                  BEGIN EXCLUSIVE;
                  CREATE TABLE IF NOT EXISTS bots (
                      id BLOB PRIMARY KEY NOT NULL,
-                     name TEXT NOT NULL
+                     name TEXT NOT NULL,
+                     duties TEXT
                  );
                  CREATE TABLE IF NOT EXISTS messages (
                      id INTEGER PRIMARY KEY,
@@ -132,10 +134,24 @@ impl Store {
                      id INTEGER PRIMARY KEY CHECK (id = 1),
                      provider TEXT NOT NULL REFERENCES provider_credentials(provider),
                      model TEXT NOT NULL
-                 );
-                 COMMIT;",
+                 );",
             )
             .context("initialize SQLite database and acquire its daemon lock")?;
+        let has_duties = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name = 'duties')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .context("inspect Bot profile schema")?;
+        if !has_duties {
+            connection
+                .execute("ALTER TABLE bots ADD COLUMN duties TEXT", [])
+                .context("add duties to existing Bot profiles")?;
+        }
+        connection
+            .execute_batch("COMMIT")
+            .context("commit SQLite schema")?;
         let settings = Settings::load(&connection)?;
         let user_memory = CurrentMemory::load(&connection)?;
         Ok(Self(
@@ -163,7 +179,23 @@ impl Store {
                 "INSERT INTO bots (id, name) VALUES (?1, ?2)",
                 params![id.as_bytes().as_slice(), name],
             )?;
-            Ok(Bot { id, name })
+            Ok(Bot {
+                id,
+                name,
+                duties: None,
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn rename_bot(&self, id: Uuid, name: String) -> Result<Option<Bot>> {
+        self.run(move |db| {
+            let duties = db.connection.query_row(
+                "UPDATE bots SET name = ?2 WHERE id = ?1 RETURNING duties",
+                params![id.as_bytes().as_slice(), name],
+                |row| row.get(0),
+            );
+            Ok(duties.optional()?.map(|duties| Bot { id, name, duties }))
         })
         .await
     }
@@ -244,10 +276,23 @@ impl Store {
         .await
     }
 
-    pub(crate) async fn commit_reply(&self, bot: Uuid, text: String) -> Result<Message> {
+    pub(crate) async fn commit_reply(
+        &self,
+        bot: Uuid,
+        text: String,
+        duties: Option<String>,
+    ) -> Result<Message> {
         self.run(move |db| {
             let role = Role::Assistant;
-            let id = insert_message(&db.connection, bot, role, &text)?;
+            let transaction = db.connection.transaction()?;
+            let id = insert_message(&transaction, bot, role, &text)?;
+            if let Some(duties) = duties {
+                transaction.execute(
+                    "UPDATE bots SET duties = ?2 WHERE id = ?1",
+                    params![bot.as_bytes().as_slice(), duties],
+                )?;
+            }
+            transaction.commit()?;
             Ok(Message {
                 id,
                 role,
@@ -286,10 +331,12 @@ impl Store {
 
 fn load_conversation(connection: &Connection, id: Uuid) -> rusqlite::Result<Option<Conversation>> {
     let key = id.as_bytes().as_slice();
-    let Some(name) = connection
-        .query_row("SELECT name FROM bots WHERE id = ?1", [key], |row| {
-            row.get(0)
-        })
+    let Some((name, duties)) = connection
+        .query_row(
+            "SELECT name, duties FROM bots WHERE id = ?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .optional()?
     else {
         return Ok(None);
@@ -307,7 +354,7 @@ fn load_conversation(connection: &Connection, id: Uuid) -> rusqlite::Result<Opti
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Some(Conversation {
-        bot: Bot { id, name },
+        bot: Bot { id, name, duties },
         messages,
     }))
 }
