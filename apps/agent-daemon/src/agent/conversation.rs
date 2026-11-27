@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::api::{ConversationCommand, event};
 use crate::attachments::Stored as StoredAttachment;
 use crate::duties::{self, DutyTurn};
+use crate::host_tools::WorkspaceRoot;
 use crate::store::{RestoredConversation, Role};
 
 use super::observational_memory::ObservationalHistory;
@@ -91,7 +92,7 @@ impl ModelUserInput {
 /// Tools explicitly offered to Bot Agents through Rig.
 #[derive(Resource)]
 pub(crate) struct ConversationTools {
-    shared: Vec<&'static str>,
+    pub(crate) shared: Vec<&'static str>,
     pub(crate) root_only: Vec<&'static str>,
 }
 
@@ -214,7 +215,10 @@ fn deliver(world: &mut World) {
                 let tools = world.resource::<ConversationTools>();
                 let tools = ToolAccess::only(tools.shared.iter().chain(&tools.root_only).copied());
                 let choice = ModelChoice(model.spec.reference());
-                let agent = spawn_root(
+                let work_dir = world
+                    .get_resource::<WorkspaceRoot>()
+                    .map(|workspace| WorkDir(workspace.0.clone()));
+                let mut agent = spawn_root(
                     world,
                     (
                         AgentId(bot.to_string()),
@@ -227,8 +231,11 @@ fn deliver(world: &mut World) {
                         choice,
                         tools,
                     ),
-                )
-                .id();
+                );
+                if let Some(dir) = work_dir {
+                    agent.insert(dir);
+                }
+                let agent = agent.id();
                 conversations.roots.insert(bot, agent);
                 first.insert(bot);
                 agent

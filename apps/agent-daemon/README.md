@@ -134,6 +134,18 @@ As a Bot approaches its selected model's history budget, the daemon starts a sep
 
 The daemon uses the pinned Rig catalog's input limits. It estimates space for the prompt, tools and current Turn, and reserves room for the reply. Model aliases without catalog limits use an 8,192-token input estimate. While an observation is pending or after it fails, the Agent can continue with recent history that fits and any previously saved observation. The active Turn, including its tool calls and results, stays intact. The observer uses the selected chat provider and receives committed message text from that Bot as historical data.
 
+## Daemon-host tools
+
+Set `OMARCHY_AGENT_WORK_DIR` to an existing absolute directory to enable `read`, `edit`, `write`, and `shell` on the daemon host. Provision `OMARCHY_AGENT_SETTINGS_TOKEN_FILE` before starting in this mode. Every Bot, Conversation, attachment, and message request then needs `Authorization: Bearer <token>`. The daemon returns `401 conversation_unauthorized` before admitting unauthorized work. Leave `OMARCHY_AGENT_WORK_DIR` unset for ordinary chat without host tools.
+
+`read` returns UTF-8 text or a supported PNG, JPEG, GIF, or WebP image. Images are sent to the selected model when its provider and model support image input. `edit` applies the requested replacements together. `write` creates a file or replaces a text version observed by the calling Agent during the current daemon run. If the file changes after observation, read it again before replacing it. File tools resolve paths within the configured workspace.
+
+`shell` starts in the configured directory or a `cwd` within it. It uses `sh` on Linux and macOS and Windows PowerShell on Windows. It returns stdout and stderr with an exit status or a timeout when `timeout_secs` is reached. Commands run with the permissions of the daemon account. The starting directory limits where a command launches. Commands can access anything the daemon account can access. On Windows a timeout stops PowerShell itself, and a subprocess may continue.
+
+Run `cargo test --locked -j 3 --test conversation host_tools` from `apps/agent-daemon` on each supported host. The tests use a disposable workspace and scripted loopback providers.
+
+Rig's per-call `CallPlace` and `Workspace` are the execution boundary for adding authorized desktop tooling. The HTTP Conversation router is the authentication boundary for paired-device access.
+
 ## Shared UserMemory
 
 A Bot can save a fact or standing preference from its current user message. For example, say “Always reply in French,” “My time zone is Europe/Paris,” or “Please call me Áine.” The daemon verifies the proposal against the original committed text and shares the saved value with all Bots on that daemon. Use a direct first-person statement for facts, such as “Remember that my favorite tea is hojicha.” Ambiguous wording requires clarification. Use a model that supports tool calls when saving UserMemory.

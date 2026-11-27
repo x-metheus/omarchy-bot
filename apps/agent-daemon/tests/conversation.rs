@@ -23,12 +23,12 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "conversation/host_tools.rs"]
+mod host_tools;
 #[path = "conversation/observational_memory.rs"]
 mod observational_memory;
-
 #[path = "conversation/source_recall.rs"]
 mod source_recall;
-
 #[path = "conversation/user_memory.rs"]
 mod user_memory;
 
@@ -56,6 +56,7 @@ impl Daemon {
             .env_remove("OMARCHY_AGENT_MASTER_KEY_FILE")
             .env_remove("OMARCHY_AGENT_SETTINGS_TOKEN_FILE")
             .env_remove("OMARCHY_AGENT_RECALL_MODEL_DIR")
+            .env_remove("OMARCHY_AGENT_WORK_DIR")
             .env("OPENAI_BASE_URL", format!("{}/v1", provider.url))
             .env("ANTHROPIC_BASE_URL", &provider.url)
             .env("NO_PROXY", "127.0.0.1")
