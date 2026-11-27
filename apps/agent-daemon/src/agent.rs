@@ -11,6 +11,7 @@ use rig_harness::prelude::*;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::recall::{RecallScope, TOOL_NAME};
 use crate::store::{Conversation as StoredConversation, Role, Store};
 use crate::user_memory::{self, FORGET_TOOL, INSPECT_TOOL, MemoryInput, REMEMBER_TOOL};
 
@@ -73,6 +74,10 @@ pub(crate) fn headless_app(
 fn deliver(world: &mut World) {
     world.resource_scope(|world, mut turns: Mut<Turns>| {
         while let Ok(request) = turns.pending.try_recv() {
+            let scope = RecallScope {
+                bot_id: request.history.bot.id,
+                through: request.message_id - 1,
+            };
             let mut conversation = Conversation::default();
             for message in request.history.messages {
                 conversation.push(match message.role {
@@ -88,8 +93,9 @@ fn deliver(world: &mut World) {
                     Name::new(bot.name),
                     conversation,
                     request.model,
-                    ToolAccess::only([REMEMBER_TOOL, INSPECT_TOOL, FORGET_TOOL]),
+                    ToolAccess::only([REMEMBER_TOOL, TOOL_NAME]),
                     MemoryInput::new(bot.id, request.message_id, request.prompt.clone()),
+                    scope,
                     Reply {
                         stream: Some(request.stream),
                         finished: request.finished,
