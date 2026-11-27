@@ -1,7 +1,8 @@
 use std::{env, fs, str};
 
 use anyhow::{Context, Result, anyhow, ensure};
-use rig_core::catalog::ModelSpec;
+use rig_core::catalog::{Catalog, ModelSpec};
+use rig_core::completion::ReplayTarget;
 use rig_core::driver::{DynModel, Model};
 use rig_core::operation::Completion;
 use rig_core::providers::anthropic::AnthropicConfig;
@@ -97,13 +98,15 @@ struct Endpoints {
 
 impl Endpoints {
     fn connect(&self, selection: Selection, key: Secret) -> ConfiguredModel {
-        let model: DynModel<Completion> = match selection.provider {
+        let (model, reads_images): (DynModel<Completion>, bool) = match selection.provider {
             Provider::OpenAi => {
                 let mut config = OpenAIConfig::new(key);
                 if let Some(url) = &self.openai {
                     config = config.with_base_url(url);
                 }
-                config.client().chat(&selection.model).into()
+                let model = config.client().chat(&selection.model);
+                let reads_images = model.wire.accepts(&selection.model).user_images;
+                (model.into(), reads_images)
             }
             Provider::Anthropic => {
                 let mut config = AnthropicConfig::new(key);
@@ -113,12 +116,16 @@ impl Endpoints {
                 let mut wire = config.completion(&selection.model);
                 // Rig supplies catalog limits. Messages requires a limit for gateway aliases too.
                 wire.default_max_tokens.get_or_insert(1024);
-                Model::new(wire, rig_reqwest::shared()).into()
+                let reads_images = wire.accepts(&selection.model).user_images;
+                (Model::new(wire, rig_reqwest::shared()).into(), reads_images)
             }
         };
         let provider =
             ProviderId::catalog(selection.provider.name()).expect("built-in Rig provider");
-        let spec = ModelSpec::new(provider, &selection.model);
+        let mut spec = ModelSpec::new(provider, &selection.model);
+        spec.input.image = Catalog::builtin()
+            .get(provider, &selection.model)
+            .map_or(reads_images, |known| known.spec.input.image);
         let handler = ModelAdapter::<Completion>::new(spec.reference(), model);
         ConfiguredModel {
             selection,

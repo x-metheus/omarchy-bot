@@ -1,3 +1,6 @@
+#[path = "attachments/scenarios.rs"]
+mod attachments;
+
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;

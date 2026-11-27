@@ -3,6 +3,7 @@ use std::path::Path;
 use axum::response::sse::Event;
 use bevy_log::LogPlugin;
 use rig_core::completion::Message;
+use rig_ecs::inbox::{Attachment, MessagePart};
 use rig_ecs::retry::RetryPolicy;
 use rig_harness::host::launcher::LauncherPlugin;
 use rig_harness::host::session::SessionPlugin;
@@ -16,6 +17,7 @@ pub(crate) struct TurnRequest {
     pub(crate) history: StoredConversation,
     pub(crate) model: Connection,
     pub(crate) prompt: String,
+    pub(crate) attachments: Vec<Attachment>,
     pub(crate) stream: mpsc::Sender<Event>,
     pub(crate) finished: oneshot::Sender<TurnResult>,
 }
@@ -90,7 +92,12 @@ fn deliver(world: &mut World) {
                 ),
             )
             .id();
-            world.trigger(Deliver::new(agent, request.prompt, DeliveryMode::Queue).literal());
+            let mut delivery = Deliver::new(agent, request.prompt, DeliveryMode::Queue).literal();
+            delivery
+                .message
+                .parts
+                .extend(request.attachments.into_iter().map(MessagePart::Attachment));
+            world.trigger(delivery);
         }
     });
 }

@@ -8,8 +8,10 @@ publish = false
 [dependencies]
 anyhow = "1"
 axum = "0.8"
+base64 = "0.23"
 bevy_ecs = { version = "=0.20.1", default-features = false }
 bevy_log = "=0.20.1"
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 rig-core = { version = "=0.47.1", default-features = false, features = ["reqwest", "rustls"] }
 rig-ecs = "=0.47.1"
 rig-harness = "=0.47.1"
