@@ -128,6 +128,12 @@ The daemon restores a Bot's committed Conversation into its root Agent on the fi
 
 `SubagentsPlugin` owns delegation, messaging, and reports. The `task` tool instructs the root to end its Turn after dispatching asynchronous work, leaving it available for new requests. Turn settlement sends one reply to the ordered Conversation writer, which commits before notifying any attached POST streams. A report can start a Turn with no attached POST stream. SQLite preserves committed messages across a daemon restart. Live Rig Inbox entries and Subagents last for the daemon process.
 
+## Observational Memory
+
+As a Bot approaches its selected model's history budget, the daemon starts a separate model request to summarize an older prefix of committed messages. Each Bot has one observation in SQLite with the exact committed message ID it covers. Later requests can include that historical summary with recent original messages. The Conversation returned by `GET /bots/{id}` and the original text available to Recall remain complete.
+
+The daemon uses the pinned Rig catalog's input limits. It estimates space for the prompt, tools and current Turn, and reserves room for the reply. Model aliases without catalog limits use an 8,192-token input estimate. While an observation is pending or after it fails, the Agent can continue with recent history that fits and any previously saved observation. The active Turn, including its tool calls and results, stays intact. The observer uses the selected chat provider and receives committed message text from that Bot as historical data.
+
 ## Shared UserMemory
 
 A Bot can save a fact or standing preference from its current user message. For example, say “Always reply in French,” “My time zone is Europe/Paris,” or “Please call me Áine.” The daemon verifies the proposal against the original committed text and shares the saved value with all Bots on that daemon. Use a direct first-person statement for facts, such as “Remember that my favorite tea is hojicha.” Ambiguous wording requires clarification. Use a model that supports tool calls when saving UserMemory.

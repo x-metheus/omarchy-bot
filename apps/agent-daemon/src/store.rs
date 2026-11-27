@@ -1,3 +1,4 @@
+mod observations;
 mod recall_index;
 
 use std::path::{self, Path};
@@ -14,6 +15,8 @@ use crate::agent::conversation::UserMessageSource;
 use crate::attachments::{self, Metadata, Stored, Submission};
 use crate::settings::{Settings, SettingsStatus, SettingsUpdate, Update};
 use crate::user_memory::{self, CurrentMemory, MemoryWrite, Proposal};
+
+pub(crate) use observations::{OBSERVATION_MESSAGE_OVERHEAD, Observation};
 
 #[derive(Serialize)]
 pub(crate) struct Bot {
@@ -59,12 +62,17 @@ pub(crate) enum History {
     Live,
 }
 
+pub(crate) struct RestoredConversation {
+    pub(crate) conversation: Conversation,
+    pub(crate) observation: Option<Observation>,
+}
+
 pub(crate) enum Admission {
     BotNotFound,
     AttachmentNotFound,
     Unconfigured,
     Accepted {
-        history: Option<Conversation>,
+        history: Option<RestoredConversation>,
         message_id: i64,
         text: String,
         attachments: Vec<Stored>,
@@ -103,6 +111,11 @@ impl Store {
                      text TEXT NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS messages_by_bot ON messages(bot_id, id);
+                 CREATE TABLE IF NOT EXISTS observations (
+                     bot_id BLOB PRIMARY KEY NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                     through INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                     summary TEXT NOT NULL
+                 );
                  CREATE TABLE IF NOT EXISTS recall_vectors (
                      message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
                      revision TEXT NOT NULL,
@@ -245,10 +258,13 @@ impl Store {
             let transaction = db.connection.transaction()?;
             let history = match history {
                 History::Restore => {
-                    let Some(history) = load_conversation(&transaction, bot)? else {
+                    let Some(conversation) = load_conversation(&transaction, bot)? else {
                         return Ok(Admission::BotNotFound);
                     };
-                    Some(history)
+                    Some(RestoredConversation {
+                        conversation,
+                        observation: observations::load(&transaction, bot)?,
+                    })
                 }
                 History::Live => None,
             };

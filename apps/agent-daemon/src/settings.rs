@@ -126,7 +126,14 @@ impl Endpoints {
         // Rig's bare spec disables tools. Use the provider wire capabilities for gateway aliases.
         let mut spec = ModelSpec::new(provider, &selection.model)
             .with_tools(accepts.tools && known.as_ref().is_none_or(|known| known.spec.tools));
-        spec.input.image = known.map_or(accepts.user_images, |known| known.spec.input.image);
+        spec.input.image = known
+            .as_ref()
+            .map_or(accepts.user_images, |known| known.spec.input.image);
+        if let Some(known) = known {
+            spec.context_window = known.spec.context_window;
+            spec.max_input_tokens = known.spec.max_input_tokens;
+            spec.max_output_tokens = known.spec.max_output_tokens;
+        }
         let handler = ModelAdapter::<Completion>::new(spec.reference(), model);
         ConfiguredModel {
             selection,

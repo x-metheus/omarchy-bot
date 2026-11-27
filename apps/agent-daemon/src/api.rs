@@ -9,6 +9,7 @@ use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use rig_core::conversation::MessageId;
 use rig_harness::prelude::Wake;
 use ring::digest::{self, Digest};
 use serde::{Deserialize, Serialize};
@@ -335,6 +336,7 @@ pub(crate) enum ConversationCommand {
     Settled {
         bot: Uuid,
         answer: Option<String>,
+        reply: Option<MessageId>,
         duties: Option<String>,
         streams: Vec<ReplySink>,
     },
@@ -398,6 +400,7 @@ pub(crate) async fn run_conversations(
             ConversationCommand::Settled {
                 bot,
                 answer,
+                reply,
                 duties,
                 streams,
             } => {
@@ -408,10 +411,13 @@ pub(crate) async fn run_conversations(
                             .map(|text| duties::system_prompt(Some(text)));
                         match store.commit_reply(bot, text, duties).await {
                             Ok(message) => {
-                                if let Some(prompt) = prompt {
-                                    let _ = turns.send(AgentCommand::Duties { bot, prompt });
-                                    wake.wake();
-                                }
+                                let _ = turns.send(AgentCommand::ReplyCommitted {
+                                    bot,
+                                    entry: reply,
+                                    message_id: message.id,
+                                    prompt,
+                                });
+                                wake.wake();
                                 recall.history_changed();
                                 if streams.is_empty() {
                                     continue;

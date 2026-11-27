@@ -12,7 +12,9 @@ use uuid::Uuid;
 use crate::api::{ConversationCommand, event};
 use crate::attachments::Stored as StoredAttachment;
 use crate::duties::{self, DutyTurn};
-use crate::store::{Conversation as StoredConversation, Role};
+use crate::store::{RestoredConversation, Role};
+
+use super::observational_memory::ObservationalHistory;
 
 const DELEGATION_GUIDANCE: &str = "\n\nWhen you delegate independent work, acknowledge what is \
     underway and end your turn so you can respond to new messages. Share relevant results as \
@@ -20,12 +22,17 @@ const DELEGATION_GUIDANCE: &str = "\n\nWhen you delegate independent work, ackno
 
 pub(crate) enum AgentCommand {
     Message(TurnRequest),
-    Duties { bot: Uuid, prompt: SystemPrompt },
+    ReplyCommitted {
+        bot: Uuid,
+        entry: Option<MessageId>,
+        message_id: i64,
+        prompt: Option<SystemPrompt>,
+    },
 }
 
 pub(crate) struct TurnRequest {
     pub(crate) bot: Uuid,
-    pub(crate) history: Option<StoredConversation>,
+    pub(crate) history: Option<RestoredConversation>,
     pub(crate) message_id: i64,
     pub(crate) text: String,
     pub(crate) attachments: Vec<StoredAttachment>,
@@ -161,9 +168,22 @@ fn deliver(world: &mut World) {
         while let Ok(command) = conversations.pending.try_recv() {
             let request = match command {
                 AgentCommand::Message(request) => request,
-                AgentCommand::Duties { bot, prompt } => {
+                AgentCommand::ReplyCommitted {
+                    bot,
+                    entry,
+                    message_id,
+                    prompt,
+                } => {
                     if let Some(&agent) = conversations.roots.get(&bot) {
-                        world.entity_mut(agent).insert(prompt);
+                        let mut root = world.entity_mut(agent);
+                        if let Some(entry) = entry {
+                            root.get_mut::<ObservationalHistory>()
+                                .expect("a Bot root has its committed history mapping")
+                                .committed(entry, message_id);
+                        }
+                        if let Some(prompt) = prompt {
+                            root.insert(prompt);
+                        }
                     }
                     continue;
                 }
@@ -177,14 +197,20 @@ fn deliver(world: &mut World) {
                 model,
                 stream,
             } = request;
-            let agent = if let Some(history) = history {
+            let agent = if let Some(restored) = history {
+                let mut history = restored.conversation;
+                let mut observation = ObservationalHistory::new(restored.observation);
                 let mut conversation = Conversation::default();
-                conversation.extend(history.messages.into_iter().map(
-                    |message| match message.role {
-                        Role::User => Message::user(message.text),
-                        Role::Assistant => Message::assistant(message.text),
-                    },
-                ));
+                conversation.extend(history.messages.iter_mut().map(|message| {
+                    let text = std::mem::take(&mut message.text);
+                    match message.role {
+                        Role::User => Message::user(text),
+                        Role::Assistant => Message::assistant(text),
+                    }
+                }));
+                for (entry, original) in conversation.entries().zip(history.messages) {
+                    observation.committed(entry.id, original.id);
+                }
                 let tools = world.resource::<ConversationTools>();
                 let tools = ToolAccess::only(tools.shared.iter().chain(&tools.root_only).copied());
                 let choice = ModelChoice(model.spec.reference());
@@ -196,6 +222,7 @@ fn deliver(world: &mut World) {
                         duties::system_prompt(history.bot.duties.as_deref()),
                         BotAgent(bot),
                         conversation,
+                        observation,
                         model,
                         choice,
                         tools,
@@ -270,6 +297,9 @@ fn on_delivery(
     let entity = delivered.entity;
     commands.queue(move |world: &mut World| {
         let stream = world.entity_mut(entity).take::<ReplySink>();
+        if let Some(mut observation) = world.get_mut::<ObservationalHistory>(agent) {
+            observation.committed(entry, source.message_id);
+        }
         let conversation = world
             .get::<Conversation>(agent)
             .expect("the addressed Agent owns a Conversation");
@@ -420,6 +450,17 @@ fn finish_turns(world: &mut World) {
             let Some(&BotAgent(bot)) = world.get::<BotAgent>(agent) else {
                 continue;
             };
+            let reply = world.get::<Turn>(settled).and_then(|turn| {
+                let conversation = world.get::<Conversation>(agent)?;
+                let (_, record) = conversation
+                    .turns()
+                    .rev()
+                    .find(|(_, record)| record.index == turn.index)?;
+                match record.end {
+                    Some(TurnEnd::Answered { answer }) => answer,
+                    _ => None,
+                }
+            });
             let mut settled = world.entity_mut(settled);
             let answer = match settled.get::<TurnOutcome>() {
                 Some(TurnOutcome::Answered(Message::Assistant(message))) => {
@@ -439,6 +480,7 @@ fn finish_turns(world: &mut World) {
                 let _ = conversations.outgoing.send(ConversationCommand::Settled {
                     bot,
                     answer,
+                    reply,
                     duties,
                     streams,
                 });
