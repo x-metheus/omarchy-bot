@@ -32,6 +32,9 @@ mod source_recall;
 #[path = "conversation/user_memory.rs"]
 mod user_memory;
 
+#[path = "conversation/work_control.rs"]
+mod work_control;
+
 const DEADLINE: Duration = Duration::from_secs(15);
 const MODEL: &str = "scripted-model";
 

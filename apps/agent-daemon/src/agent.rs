@@ -1,5 +1,6 @@
 pub(crate) mod conversation;
 mod recovery;
+mod work_control;
 
 pub(crate) use conversation::{AgentCommand, ReplySink, TurnRequest};
 
@@ -49,6 +50,7 @@ pub(crate) fn headless_app(
     rig_harness::load::<SubagentsPlugin>(&mut app, "rig-basics", "");
     recovery::register(&mut app, store, conversations.clone());
     conversation::add(&mut app, pending, conversations);
+    work_control::install(&mut app);
     user_memory::install(&mut app, store);
     duties::register(&mut app);
     app
