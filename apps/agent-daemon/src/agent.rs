@@ -21,6 +21,7 @@ pub(crate) fn headless_app(
     conversations: mpsc::UnboundedSender<ConversationCommand>,
     runtime: Handle,
     scratch: &Path,
+    store: &Store,
 ) -> App {
     // Provider diagnostics can include raw response bodies. Keep them inside Rig.
 

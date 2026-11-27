@@ -1,7 +1,9 @@
 mod agent;
 mod api;
+mod attachments;
 mod settings;
 mod store;
+mod user_memory;
 
 use std::env;
 use std::net::{Ipv4Addr, SocketAddrV4};

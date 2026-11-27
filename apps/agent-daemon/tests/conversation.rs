@@ -1,3 +1,6 @@
+#[path = "attachments/scenarios.rs"]
+mod attachments;
+
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -17,6 +20,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
+
+#[path = "conversation/user_memory.rs"]
+mod user_memory;
 
 const DEADLINE: Duration = Duration::from_secs(15);
 const MODEL: &str = "scripted-model";

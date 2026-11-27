@@ -37,6 +37,7 @@ pub(crate) fn router(
         .route("/bots", post(create_bot))
         .route("/bots/{bot}", get(read_bot))
         .route("/bots/{bot}/messages", post(send_message))
+        .route("/bots/{bot}/attachments/{id}", get(read_attachment))
         .merge(
             Router::new()
                 .route("/settings", get(read_settings).put(write_settings))
@@ -184,16 +185,59 @@ async fn read_bot(
         .ok_or(BOT_NOT_FOUND)
 }
 
+async fn read_attachment(
+    State(daemon): State<Daemon>,
+    Path((bot, id)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let attachment = daemon
+        .store
+        .attachment(bot, id)
+        .await
+        .map_err(store_error)?
+        .ok_or(ATTACHMENT_NOT_FOUND)?;
+    let content = attachment.content.ok_or(ApiError(
+        StatusCode::GONE,
+        Problem::new(
+            "attachment_unavailable",
+            "attachment content is unavailable",
+        ),
+    ))?;
+    let media_type = match attachment.metadata.media_type.as_str() {
+        "text/plain" => "text/plain; charset=utf-8",
+        media_type => media_type,
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, media_type),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        content,
+    )
+        .into_response())
+}
+
 #[derive(Deserialize)]
 struct SendMessage {
     text: String,
+    #[serde(default)]
+    attachments: Vec<AttachmentInput>,
 }
 
 async fn send_message(
     State(daemon): State<Daemon>,
     Path(bot): Path<Uuid>,
-    Json(input): Json<SendMessage>,
+    input: Result<Json<SendMessage>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let Json(input) = input.map_err(|error| {
+        ApiError(
+            error.status(),
+            Problem::new(
+                "invalid_message",
+                "expected message JSON with valid attachment entries",
+            ),
+        )
+    })?;
     if input.text.trim().is_empty() {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -332,6 +376,13 @@ impl IntoResponse for ApiError {
 const BOT_NOT_FOUND: ApiError = ApiError(
     StatusCode::NOT_FOUND,
     Problem::new("bot_not_found", "Bot not found"),
+);
+const ATTACHMENT_NOT_FOUND: ApiError = ApiError(
+    StatusCode::NOT_FOUND,
+    Problem::new(
+        "attachment_not_found",
+        "attachment is unavailable to this Conversation",
+    ),
 );
 const UNAVAILABLE: ApiError = ApiError(
     StatusCode::SERVICE_UNAVAILABLE,

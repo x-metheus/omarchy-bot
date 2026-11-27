@@ -97,13 +97,15 @@ struct Endpoints {
 
 impl Endpoints {
     fn connect(&self, selection: Selection, key: Secret) -> ConfiguredModel {
-        let model: DynModel<Completion> = match selection.provider {
+        let (model, accepts): (DynModel<Completion>, Accepts) = match selection.provider {
             Provider::OpenAi => {
                 let mut config = OpenAIConfig::new(key);
                 if let Some(url) = &self.openai {
                     config = config.with_base_url(url);
                 }
-                config.client().chat(&selection.model).into()
+                let model = config.client().chat(&selection.model);
+                let accepts = model.wire.accepts(&selection.model);
+                (model.into(), accepts)
             }
             Provider::Anthropic => {
                 let mut config = AnthropicConfig::new(key);
@@ -113,7 +115,8 @@ impl Endpoints {
                 let mut wire = config.completion(&selection.model);
                 // Rig supplies catalog limits. Messages requires a limit for gateway aliases too.
                 wire.default_max_tokens.get_or_insert(1024);
-                Model::new(wire, rig_reqwest::shared()).into()
+                let accepts = wire.accepts(&selection.model);
+                (Model::new(wire, rig_reqwest::shared()).into(), accepts)
             }
         };
         let provider =
