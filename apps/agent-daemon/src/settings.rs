@@ -122,12 +122,11 @@ impl Endpoints {
         };
         let provider =
             ProviderId::catalog(selection.provider.name()).expect("built-in Rig provider");
-        let mut spec = ModelSpec::new(provider, &selection.model);
         let known = Catalog::builtin().get(provider, &selection.model);
-        spec.input.image = known
-            .as_ref()
-            .map_or(accepts.user_images, |known| known.spec.input.image);
-        spec.tools = accepts.tools && known.is_none_or(|known| known.spec.tools);
+        // Rig's bare spec disables tools. Use the provider wire capabilities for gateway aliases.
+        let mut spec = ModelSpec::new(provider, &selection.model)
+            .with_tools(accepts.tools && known.as_ref().is_none_or(|known| known.spec.tools));
+        spec.input.image = known.map_or(accepts.user_images, |known| known.spec.input.image);
         let handler = ModelAdapter::<Completion>::new(spec.reference(), model);
         ConfiguredModel {
             selection,

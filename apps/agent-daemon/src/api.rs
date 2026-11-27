@@ -330,16 +330,17 @@ async fn run_turn(
     let admission = match daemon.store.accept_message(bot, text, submissions).await {
         Ok(Admission::Accepted {
             history,
+            message_id,
             prompt,
             attachments,
             model,
-        }) => Ok((history, prompt, attachments, model)),
+        }) => Ok((history, message_id, prompt, attachments, model)),
         Ok(Admission::BotNotFound) => Err(BOT_NOT_FOUND),
         Ok(Admission::AttachmentNotFound) => Err(ATTACHMENT_NOT_FOUND),
         Ok(Admission::Unconfigured) => Err(UNCONFIGURED),
         Err(error) => Err(store_error(error)),
     };
-    let (history, prompt, attachments, model) = match admission {
+    let (history, message_id, prompt, attachments, model) = match admission {
         Ok(turn) => turn,
         Err(error) => {
             drop(guard);
@@ -361,6 +362,7 @@ async fn run_turn(
         .turns
         .send(TurnRequest {
             history,
+            message_id,
             model,
             prompt,
             attachments: parts,

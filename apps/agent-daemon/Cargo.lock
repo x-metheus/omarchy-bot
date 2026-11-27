@@ -2185,6 +2185,7 @@ dependencies = [
  "base64",
  "bevy_ecs",
  "bevy_log",
+ "bevy_tasks",
  "image",
  "reqwest",
  "rig-core",

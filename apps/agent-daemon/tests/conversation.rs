@@ -23,6 +23,9 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "conversation/user_memory.rs"]
+mod user_memory;
+
 const DEADLINE: Duration = Duration::from_secs(15);
 const MODEL: &str = "scripted-model";
 
