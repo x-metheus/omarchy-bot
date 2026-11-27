@@ -45,12 +45,15 @@ fn main() -> Result<AppExit> {
         scratch.path(),
         &store,
     );
-    let router = api::router(store.clone(), conversations, settings_token);
+    app.insert_resource(recall.clone());
+    recall::register(&mut app);
+    let router = api::router(store.clone(), conversations, settings_token, recall.clone());
     let conversation_loop = runtime.spawn(api::run_conversations(
         store,
         turns,
         app.world().resource::<Wake>().clone(),
         commands,
+        recall,
     ));
     let listener = runtime
         .block_on(TcpListener::bind(SocketAddrV4::new(

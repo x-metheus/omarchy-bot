@@ -77,10 +77,16 @@ struct DeliveredUser {
 }
 
 #[derive(Component, Default)]
-struct TurnDelivery {
+pub(crate) struct TurnDelivery {
     streams: Vec<ReplySink>,
     messages: Vec<DeliveredUser>,
     source: Option<(EffectId, UserMessageSource)>,
+}
+
+impl TurnDelivery {
+    pub(crate) fn first_user(&self) -> Option<UserMessageSource> {
+        self.messages.first().map(|user| user.source)
+    }
 }
 
 #[derive(Component)]

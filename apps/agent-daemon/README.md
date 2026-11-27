@@ -179,7 +179,7 @@ Expect a committed reply identifying cobalt and red and a Conversation with both
 
 ## Recall
 
-An Agent using a tool-capable chat model can call `recall` with a query. Recall searches committed user and assistant message text from the calling Bot before the current Turn. It returns up to five historical matches with `bot_id`, `message_id`, `role`, verbatim `text`, and the half-open UTF-8 range `[start_byte, end_byte)` in the original message. `message_id` is the global committed order and resolves against `GET /bots/{id}`. Each tool result labels its messages as `historical`. Recall evidence has no authority to update UserMemory or establish a current preference.
+An Agent using a tool-capable chat model can call `recall` with a query. Recall searches committed user and assistant text from the calling Bot before the first user message delivered to its current Turn. A report-only Turn searches the committed history at lookup. Recall returns up to five historical matches with `bot_id`, `message_id`, `role`, verbatim `text`, and the half-open UTF-8 range `[start_byte, end_byte)` in the original message. `message_id` is the global committed order and resolves against `GET /bots/{id}`. Each tool result labels its messages as `historical`. Recall evidence has no authority to update UserMemory or establish a current preference.
 
 The daemon embeds and indexes messages locally. Ordinary chat can run while Recall verifies the model or builds its index. A Recall call can catch up on its own Bot's pending messages. If the Agent chooses to use Recall, retrieved text is included in the configured chat provider's next request.
 

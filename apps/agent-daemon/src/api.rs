@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::agent::{ReplySink, TurnRequest};
 use crate::attachments::{Input as AttachmentInput, MAX_ATTACHMENTS, Submission};
+use crate::recall::{Availability, Recall};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
 use crate::store::{Admission, Bot, Conversation, History, Store};
 
@@ -27,6 +28,7 @@ use crate::store::{Admission, Bot, Conversation, History, Store};
 struct Daemon {
     store: Store,
     conversations: mpsc::UnboundedSender<ConversationCommand>,
+    recall: Recall,
 }
 
 pub(crate) fn router(
@@ -52,6 +54,7 @@ pub(crate) fn router(
         .with_state(Daemon {
             store,
             conversations,
+            recall,
         })
 }
 
@@ -316,6 +319,7 @@ pub(crate) async fn run_conversations(
     turns: mpsc::UnboundedSender<TurnRequest>,
     wake: Wake,
     mut commands: mpsc::UnboundedReceiver<ConversationCommand>,
+    recall: Recall,
 ) {
     let mut live = HashSet::new();
     // Keep SQLite admission and reply commits in order with their runtime handoff.
@@ -340,21 +344,24 @@ pub(crate) async fn run_conversations(
                         text,
                         attachments,
                         model,
-                    }) => turns
-                        .send(TurnRequest {
-                            bot,
-                            history,
-                            message_id,
-                            text,
-                            attachments,
-                            model,
-                            stream,
-                        })
-                        .map_err(|_| UNAVAILABLE)
-                        .map(|()| {
-                            live.insert(bot);
-                            wake.wake();
-                        }),
+                    }) => {
+                        recall.history_changed();
+                        turns
+                            .send(TurnRequest {
+                                bot,
+                                history,
+                                message_id,
+                                text,
+                                attachments,
+                                model,
+                                stream,
+                            })
+                            .map_err(|_| UNAVAILABLE)
+                            .map(|()| {
+                                live.insert(bot);
+                                wake.wake();
+                            })
+                    }
                     Ok(Admission::BotNotFound) => Err(BOT_NOT_FOUND),
                     Ok(Admission::AttachmentNotFound) => Err(ATTACHMENT_NOT_FOUND),
                     Ok(Admission::Unconfigured) => Err(UNCONFIGURED),
@@ -369,7 +376,13 @@ pub(crate) async fn run_conversations(
             } => {
                 let terminal = match answer {
                     Some(text) => match store.commit_reply(bot, text).await {
-                        Ok(message) => event("committed", message),
+                        Ok(message) => {
+                            recall.history_changed();
+                            if streams.is_empty() {
+                                continue;
+                            }
+                            event("committed", message)
+                        }
                         Err(error) => event("error", store_error(error).1),
                     },
                     None => event(
