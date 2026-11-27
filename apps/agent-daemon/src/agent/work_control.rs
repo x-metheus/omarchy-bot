@@ -150,7 +150,7 @@ fn stop_work(
         .into_iter()
         .flat_map(Spawned::iter)
         .filter_map(|child| tasks.get(child).ok())
-        .filter(|(_, id, _, ..)| id.0 == wanted || id.short() == wanted);
+        .filter(|(_, id, ..)| id.0 == wanted || id.short() == wanted);
     let result = match (from_user, targets.next(), targets.next()) {
         (true, Some((target, _, title, lifecycle, active)), None)
             if activity(lifecycle, active).is_some() =>
