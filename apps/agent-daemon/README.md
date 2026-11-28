@@ -77,7 +77,7 @@ A successful `PUT` commits the selection and any key replacement together. Inval
 
 Set overrides in the daemon environment before startup. Use a trusted endpoint that implements the selected protocol and use HTTPS for network deployments. Rig supplies Anthropic output limits for known models. The daemon supplies a 1,024-token limit for Messages aliases without a Rig default.
 
-For existing headless deployments, `OPENAI_API_KEY` and `OMARCHY_AGENT_MODEL` optionally bootstrap OpenAI Chat Completions. The default bootstrap model is `gpt-4.1-mini`. A saved selection takes precedence. The environment key stays in the host bootstrap and does not count as a stored Settings credential.
+For headless deployments, `OPENAI_API_KEY` and `OMARCHY_AGENT_MODEL` optionally bootstrap OpenAI Chat Completions. The default bootstrap model is `gpt-4.1-mini`. A saved selection takes precedence. The environment key stays in the host bootstrap and does not count as a stored Settings credential.
 
 ## Live smoke for both protocols
 
@@ -150,13 +150,13 @@ A successful message POST commits the user message before starting the model cal
 
 A Bot accepts new messages while a Turn is running. Rig delivers them through the Inbox at the next model call. A POST stream starts receiving deltas when its input is delivered and closes after that Turn's `committed` or `error` event. When Rig delivers multiple inputs to the same Turn, their POST streams receive the same committed reply ID. A disconnect leaves the Turn running.
 
-Read `/bots/{id}/events` to subscribe to the entire Conversation, including detached replies after the POST streams close. Save the last processed SSE `id` and pass it as `Last-Event-ID` on reconnect. IDs are increasing and remain stable across restart. The daemon replays later events for that Bot and then follows live updates on the same connection. Reply events use the same IDs on the POST and Conversation streams. The history endpoint includes committed messages from before event recording was available.
+Read `/bots/{id}/events` to subscribe to the entire Conversation, including detached replies after the POST streams close. Save the last processed SSE `id` and pass it as `Last-Event-ID` on reconnect. IDs are increasing and remain stable across restart. The daemon replays later events for that Bot and then follows live updates on the same connection. Reply events use the same IDs on the POST and Conversation streams. Use `GET /bots/{id}` to load the complete committed Message History.
 
 The Conversation stream also emits `work` events with `messageId` and `status`. A request can be `queued`, `running`, `waiting` for a delegated report, `completed`, `failed`, or `interrupted`. On restart, the daemon resumes queued inputs with the current model and credential. If configuration is missing, queued work reports `reason: "provider_unconfigured"` and resumes when Settings are saved.
 
 `tool` events contain a stable `id`, the tool `name`, and a sanitized `status`. Each `running` event is followed by `completed`, `failed`, `cancelled`, or, after restart, `interrupted`. Tool arguments and results stay out of the feed.
 
-Previously running or delegated work becomes `interrupted`. Its original message and any committed replies are available in Message History. An explicit retry reuses the original message and attachments with current Settings. Interrupted instructions stay out of restored model input until that retry. Interrupted Rig tool calls and Subagents are discarded on restart.
+Previously running or delegated work becomes `interrupted`. Its original message and any committed replies are available in Message History. Choose **Retry interrupted work** in the desktop Conversation to reuse the original message and attachments with current Settings. Interrupted instructions stay out of restored model input until that retry. Interrupted Rig tool calls and Subagents are discarded on restart.
 
 ### Rig lifecycle
 

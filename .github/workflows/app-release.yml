@@ -17,7 +17,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Validate independent app version
+      - name: Validate app release tag
         id: version
         shell: bash
         run: |
@@ -123,7 +123,6 @@ jobs:
           bun tools/release/app-release.ts .lane/release-assets
           printf '%s\n' \
             "Omarchy Bot ${APP_VERSION} for Linux x86_64, macOS Apple Silicon and Intel, and Windows x64." \
-            'App versions are independent of Service runtime versions.' \
             '' \
             'Includes the desktop installers, macOS updater payloads, standalone Agent Daemon archives with pinned Recall assets, checksums, updater signatures, and one complete latest.json.' \
             'Windows is an unsigned preview and may show SmartScreen warnings. The release requires the complete packaged WebView2 suite; macOS support additionally requires the recorded WKWebView checklist on both architectures.' \
@@ -160,7 +159,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Service runtime releases share the repository, never the app channel.
           releases=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[] | select(.tag_name == "app-latest") | .id')
           if [[ -n $releases ]]; then
             gh release download app-latest --pattern latest.json --dir .lane/current-release
@@ -177,7 +175,7 @@ jobs:
           else
             gh release create app-latest .lane/release-assets/latest.json \
               --target "$GITHUB_SHA" --prerelease --latest=false --title 'Omarchy Bot updater channel' \
-              --notes 'Complete Linux, macOS and Windows app updater manifest; artifact URLs point to immutable app-vX.Y.Z releases. Separate from Service runtime releases.'
+              --notes 'Complete Linux, macOS and Windows app updater manifest with artifact URLs pinned to immutable app-vX.Y.Z releases.'
           fi
           gh release download app-latest --pattern latest.json --dir .lane/promoted-release
           cmp .lane/release-assets/latest.json .lane/promoted-release/latest.json
