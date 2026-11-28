@@ -58,6 +58,7 @@ async function open(): Promise<void> {
   await wd("POST", `/session/${session}/timeouts`, { script: 120_000 });
   const pairing = await wd("POST", `/session/${session}/execute/sync`, {
     script: "const service = window.__OMARCHY_BOT_SHELL__.service; return { origin: service.baseUrl(), paired: Boolean(service.deviceToken()) };",
+    args: [],
   });
   assert.deepEqual(pairing, { origin: daemonOrigin, paired: true });
 }
