@@ -18,7 +18,7 @@ Omarchy Bot is a Tauri desktop app. It pairs with a standalone Rust Agent Daemon
 
 ## Installation
 
-Choose the desktop package for your platform from the [releases](https://github.com/x-metheus/omarchy-bot/releases). The desktop can start its local daemon or attach to an existing instance. Use the [Agent Daemon guide](apps/agent-daemon/README.md#headless-startup) to run the daemon on its own.
+Use the development setup below to run the app from source. The desktop can start its local daemon or attach to an existing instance. For standalone setup, see the [Agent Daemon guide](apps/agent-daemon/README.md#headless-startup). Desktop installers and standalone archives are tracked in the [first release checklist](https://github.com/x-metheus/omarchy-bot/issues/31).
 
 On first launch, connect to an Agent Daemon with its address and one-time pairing code. The desktop stores its credential in the OS keychain. Provision a model in desktop Settings after pairing. For a remote connection, use a private HTTPS endpoint such as [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve).
 
@@ -44,27 +44,9 @@ Run `cargo test --workspace --locked` from the repository root for the native wo
 
 Native lifecycle logs are stored in `~/.local/share/com.omarchy.bot/logs/omarchy-bot.log` on Linux (or under `XDG_DATA_HOME`), `~/Library/Logs/com.omarchy.bot/omarchy-bot.log` on macOS, and `%LOCALAPPDATA%\com.omarchy.bot\logs\omarchy-bot.log` on Windows.
 
-### Legacy public site
+### Public site
 
-The public product site lives in `apps/site`, separate from the local Bot Client.
-It remains a Vite + TypeScript frontend with native CSS. The full-viewport pixel
-field, Omarchy wordmark artwork, and 22 named palettes are adapted from
-[the Omarchy website](https://github.com/omacom/omarchy-site/tree/47711270650b9c78c7bfa996cdd0b6050c79566f),
-with Matte Black as the default. The Canvas renderer shares the wordmark's grid,
-supports pointer glow and click stamps, pauses when offscreen or hidden, and
-honors reduced motion and an explicit pause control. Product screenshots remain
-below the first screen. Radio and etch-effect integrations are not included.
-The hero extends the original 81-by-19 artwork with matching BOT lettering on a
-117-by-19 grid, shared by Canvas and the no-JavaScript SVG fallback.
-Upstream-derived portions are attributed separately in
-[`apps/site/public/UPSTREAM-NOTICE.txt`](apps/site/public/UPSTREAM-NOTICE.txt)
-and are not relicensed under this project's MIT license. JetBrains Mono and
-Geist are self-hosted with their font licenses in `apps/site/public/fonts`.
-
-The public pages make no daemon connections or model calls. Product screenshots
-use illustrative data. The same Vercel project includes server-side plugin OAuth
-and Skills catalog routes. Default Skills access is ready to use; service
-authorization still requires publisher configuration.
+The public site lives in `apps/site`. It uses Vite, TypeScript, and CSS. The pixel artwork, themes, and fonts carry their upstream attribution and licenses. [Website credits](apps/site/public/UPSTREAM-NOTICE.txt)
 
 ```bash
 cd apps/site
@@ -77,9 +59,8 @@ For Vercel, import the repository and set **Root Directory** to `apps/site`.
 The site has its own Bun lockfile and publisher contract. `apps/site/vercel.json`
 sets the pinned Bun install and build commands, static output directory, and
 response headers. Deployment requires a signed-in Vercel account.
-The production hostname supplied by Vercel generates canonical and social-image
-URLs; set `SITE_URL` to the final HTTPS origin when using a custom domain.
-Vite previews the public pages only; OAuth and catalog functions run on Vercel.
+For a custom domain, set `SITE_URL` to its HTTPS origin for canonical URLs.
+Vite previews the public pages. The publisher endpoints run on Vercel.
 
 ## Releases
 
