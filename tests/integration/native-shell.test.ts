@@ -27,7 +27,11 @@ function install(platform: string, initial: Record<string, unknown> = {}, fetche
     queueMicrotask, URL, Request, Uint8Array, AbortSignal,
   });
   const source = readFileSync(new URL("../../apps/omarchy-bot/src-tauri/src/shell.js", import.meta.url), "utf8");
-  vm.runInContext(`(${source})(${JSON.stringify({ platform, connection: null, defaults: { serviceUrl: "http://127.0.0.1:7321", metaSendsSuperKey: "omarchy-bot.meta-sends-super" }, ...initial })})`, context);
+  vm.runInContext(`(${source})(${JSON.stringify({
+    platform, connection: null, localDaemon: { baseUrl: "http://127.0.0.1:8765", autostart: false },
+    defaults: { serviceUrl: "http://127.0.0.1:7321", metaSendsSuperKey: "omarchy-bot.meta-sends-super" },
+    ...initial,
+  })})`, context);
   return { shell: context.window.__OMARCHY_BOT_SHELL__ as Shell, window: context.window, calls };
 }
 
@@ -58,10 +62,20 @@ test("native attachment saves authenticated bytes and returns the Downloads coll
     return new Response("report bytes");
   }) as typeof fetch;
   const { shell, calls } = install("linux", { connection: { baseUrl: "https://service.example", token: "private-token" } }, fetcher);
-  expect(await shell.attachments.save("/api/attachments/att_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "report.txt")).toBe("/home/test/Downloads/1-report.txt");
-  expect(requests).toEqual([{ url: "https://service.example/api/attachments/att_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", options: { headers: { authorization: "Bearer private-token" }, redirect: "error" } }]);
-  expect(calls.find(call => call.command === "save_attachment")?.args).toEqual({ filename: "report.txt", bytes: Array.from(new TextEncoder().encode("report bytes")) });
-  await expect(shell.attachments.save("https://foreign.example/api/attachments/att_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "report.txt")).rejects.toThrow("paired Service");
+  const paths = [
+    "/api/attachments/att_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "/bots/ab193370-7814-45b9-9f33-6af3cf97818b/attachments/e30e61e5-aaea-4840-a622-ebe5167d4df5",
+  ];
+  for (const path of paths) {
+    expect(await shell.attachments.save(path, "report.txt")).toBe("/home/test/Downloads/1-report.txt");
+    await expect(shell.attachments.save(`https://foreign.example${path}`, "report.txt")).rejects.toThrow("paired Service");
+  }
+  expect(requests).toEqual(paths.map(path => ({ url: `https://service.example${path}`,
+    options: { headers: { authorization: "Bearer private-token" }, redirect: "error", cache: "no-store" },
+  })));
+  expect(calls.filter(call => call.command === "save_attachment").map(call => call.args)).toEqual(paths.map(() => ({
+    filename: "report.txt", bytes: Array.from(new TextEncoder().encode("report bytes")),
+  })));
   await expect(shell.browser.open("https://service.example/file?access_token=private-token")).rejects.toThrow("authenticated Service link");
   expect(calls.filter(call => call.command === "open_browser")).toEqual([]);
   await shell.browser.open("https://example.com/docs");

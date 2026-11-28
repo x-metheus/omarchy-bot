@@ -1,8 +1,9 @@
+import { AttachmentSelectionError, maxMessageBytes, prepareAttachment, type AgentAttachment, type DraftAttachment } from "./agentAttachments.ts";
 import { deviceRevoked } from "./pairing.ts";
 import { getShell } from "./shell.ts";
 
 export interface AgentBot { id: string; name: string; duties: string | null }
-export interface AgentMessage { id: number; role: "user" | "assistant"; text: string }
+export interface AgentMessage { id: number; role: "user" | "assistant"; text: string; attachments?: AgentAttachment[] }
 export interface AgentConversation { bot: AgentBot; messages: AgentMessage[] }
 export type WorkStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "interrupted";
 export interface AgentWork { messageId: number; status: WorkStatus; reason?: string }
@@ -36,6 +37,7 @@ async function json<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 const botPath = (id: string) => `/bots/${encodeURIComponent(id)}`;
+const attachmentPath = (botId: string, id: string) => `${botPath(botId)}/attachments/${encodeURIComponent(id)}`;
 
 export const agentDaemon = {
   bots: (signal?: AbortSignal) => json<AgentBot[]>("/bots", signal ? { signal } : {}),
@@ -43,10 +45,31 @@ export const agentDaemon = {
   conversation: (id: string, signal?: AbortSignal) => json<AgentConversation>(botPath(id), signal ? { signal } : {}),
   rename: (id: string, name: string) => json<AgentBot>(botPath(id), { method: "PATCH", body: JSON.stringify({ name }) }),
   async remove(id: string) { await request(botPath(id), { method: "DELETE" }); },
-  async send(id: string, text: string) {
-    const response = await request(`${botPath(id)}/messages`, { method: "POST", body: JSON.stringify({ text }) });
+  async send(id: string, text: string, selected: readonly DraftAttachment[]) {
+    let body: string;
+    if (selected.length) {
+      const service = getShell().service;
+      const origin = service.baseUrl();
+      const token = service.deviceToken();
+      const attachments = await Promise.all(selected.map(prepareAttachment));
+      if (service.baseUrl() !== origin || service.deviceToken() !== token) {
+        throw new AttachmentSelectionError("The daemon connection changed. Reopen the Conversation before sending.");
+      }
+      body = JSON.stringify({ text, attachments });
+      if (new TextEncoder().encode(body).length > maxMessageBytes) {
+        throw new AttachmentSelectionError("The message and attachments exceed 2 MiB. Remove an attachment and try again.");
+      }
+    } else {
+      body = JSON.stringify({ text });
+    }
+    const response = await request(`${botPath(id)}/messages`, { method: "POST", body });
     // The per-Bot feed already carries these replies and stays open across submissions.
     void response.body?.cancel().catch(() => undefined);
+  },
+  attachment: (botId: string, id: string, signal: AbortSignal) => request(attachmentPath(botId, id), { signal }),
+  saveAttachment(botId: string, id: string, filename: string) {
+    const shell = getShell();
+    return shell.attachments.save(`${shell.service.baseUrl()}${attachmentPath(botId, id)}`, filename);
   },
   async retry(id: string, messageId: number) { await request(`${botPath(id)}/work/${messageId}/retry`, { method: "POST" }); },
   settings: () => json<AgentSettings>("/settings"),

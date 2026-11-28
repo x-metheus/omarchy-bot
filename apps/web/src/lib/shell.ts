@@ -130,10 +130,11 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
     } },
     attachments: { async save(value: string, filename: string) {
       const url = new URL(value, baseUrl);
-      if (!token || url.origin !== baseUrl || !/^\/api\/attachments\/att_[0-9a-f]{32}$/.test(url.pathname) || url.search || url.hash || url.username || url.password) {
+      const allowedPath = /^(?:\/api\/attachments\/att_[0-9a-f]{32}|\/bots\/[0-9a-f-]{36}\/attachments\/[0-9a-f-]{36})$/;
+      if (!token || url.origin !== baseUrl || !allowedPath.test(url.pathname) || url.search || url.hash || url.username || url.password) {
         throw new Error("Attachments must come from the paired Service.");
       }
-      const response = await fetch(url.href, { headers: { authorization: `Bearer ${token}` }, redirect: "error" });
+      const response = await fetch(url.href, { headers: { authorization: `Bearer ${token}` }, redirect: "error", cache: "no-store" });
       if (!response.ok) throw new Error("The attachment could not be downloaded. Check the Service connection and try again.");
       const objectUrl = URL.createObjectURL(await response.blob());
       try {

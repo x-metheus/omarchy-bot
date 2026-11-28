@@ -87,10 +87,11 @@ function installNativeShell(initial) {
     } },
     attachments: { async save(value, filename) {
       const url = new URL(value, connection?.baseUrl ?? initial.defaults.serviceUrl);
-      if (!connection?.token || url.origin !== connection.baseUrl || !/^\/api\/attachments\/att_[0-9a-f]{32}$/.test(url.pathname) || url.search || url.hash || url.username || url.password) {
+      const allowedPath = /^(?:\/api\/attachments\/att_[0-9a-f]{32}|\/bots\/[0-9a-f-]{36}\/attachments\/[0-9a-f-]{36})$/;
+      if (!connection?.token || url.origin !== connection.baseUrl || !allowedPath.test(url.pathname) || url.search || url.hash || url.username || url.password) {
         throw new Error("Attachments must come from the paired Service.");
       }
-      const response = await window.fetch(url.href, { headers: { authorization: `Bearer ${connection.token}` }, redirect: "error" });
+      const response = await window.fetch(url.href, { headers: { authorization: `Bearer ${connection.token}` }, redirect: "error", cache: "no-store" });
       if (!response.ok) throw new Error("The attachment could not be downloaded. Check the Service connection and try again.");
       return invoke("save_attachment", { filename, bytes: Array.from(new Uint8Array(await response.arrayBuffer())) });
     } },

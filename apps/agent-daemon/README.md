@@ -223,6 +223,8 @@ Model requests treat UserMemory as authoritative for standing preferences. When 
 
 ## Conversation attachments
 
+In the Desktop Conversation, choose **Attach files** or drop files into the composer, then send a message. Desktop reads the selected files and submits bounded UTF-8 text or supported static image content. Source paths stay on the Desktop, and submitted content stays available to the daemon after the client disconnects. Open an attachment in history to view or save the submitted content. The Conversation cannot open the original file, including after reconnecting. Use **Reuse** to attach available content from the same Bot's Conversation to a new message. The daemon checks access when it accepts the message.
+
 Include an optional `attachments` array in a message POST. The daemon associates entries with the committed message in array order. The `text` field remains required and stores the exact user-authored text used for UserMemory evidence. Attachment content enters the selected model's current Turn. A later Turn can include the content again by referencing its ID.
 
 ```json

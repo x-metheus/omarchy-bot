@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { chromium, expect as browserExpect, type Browser } from "@playwright/test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,11 @@ const instruction = `Your ongoing job is to ${duties[0]?.toLowerCase()}${duties.
 const hold = "Hold the neutral swatch check.";
 const firstKey = "desktop-provider-initial";
 const secondKey = "desktop-provider-rotated";
+const sampleText = "Calibration sample: cobalt.\n";
+const samplePng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+const inspectSample = "Inspect the attached calibration samples.";
+const reuseSample = "Use the saved text sample again.";
+const sampleReply = "Received the calibration samples.";
 
 function providerChunk(delta: object, finish: string | null = null) {
   return `data: ${JSON.stringify({ id: "chatcmpl-fixture", object: "chat.completion.chunk", created: 1,
@@ -40,12 +45,21 @@ test.skipIf(!daemonBinary)("desktop pairs, manages a Conversation, rotates Setti
   const origin = `http://127.0.0.1:${port}`;
   const calls: { key: string | null; model: string; text: string }[] = [];
   let holds = 0;
+  let firstAttachmentInput: unknown;
+  let reusedAttachmentInput: unknown;
+  const releaseSample = Promise.withResolvers<void>();
   const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
-    const { model, messages } = await request.json() as { model: string; messages: { role: string; content: string }[] };
+    const { model, messages } = await request.json() as { model: string; messages: { role: string; content: unknown }[] };
     const authored = messages.findLast(message => message.role === "user")?.content ?? "";
     const text = typeof authored === "string" ? authored : JSON.stringify(authored);
     calls.push({ key: request.headers.get("authorization"), model, text });
     const headers = { "content-type": "text/event-stream" };
+    if (text.includes(inspectSample)) {
+      firstAttachmentInput = authored;
+      await releaseSample.promise;
+      return new Response(providerChunk({ role: "assistant", content: sampleReply }) + providerChunk({}, "stop") + "data: [DONE]\n\n", { headers });
+    }
+    if (text.includes(reuseSample)) reusedAttachmentInput = authored;
     if (text.includes(hold) && ++holds === 1) {
       return new Response(new ReadableStream({ start(controller) {
         controller.enqueue(new TextEncoder().encode(providerChunk({ role: "assistant", content: "Checking the swatch…" })));
@@ -91,8 +105,9 @@ test.skipIf(!daemonBinary)("desktop pairs, manages a Conversation, rotates Setti
     const bridgeScript = bridge.outputs[0];
     if (!bridgeScript) throw new Error("development shell bridge was not built");
     browser = await chromium.launch();
-    const page = await browser.newPage();
-    await page.addInitScript({ content: await bridgeScript.text() });
+    const context = await browser.newContext();
+    await context.addInitScript({ content: await bridgeScript.text() });
+    let page = await context.newPage();
     await page.goto(web, { waitUntil: "domcontentloaded" });
     await browserExpect(page.getByRole("heading", { name: "Connect to an Agent Daemon" })).toBeVisible();
     await page.getByRole("textbox", { name: "Pairing code" }).fill(code);
@@ -153,6 +168,88 @@ test.skipIf(!daemonBinary)("desktop pairs, manages a Conversation, rotates Setti
     await browserExpect(page.getByRole("heading", { name: "Prism", exact: true })).toBeVisible();
     await browserExpect(page.getByText(hold, { exact: true })).toHaveCount(1);
     await browserExpect(page.getByText("The swatch is amber.", { exact: true })).toHaveCount(1);
+
+    const sourcePath = join(profile, "sample.txt");
+    await writeFile(sourcePath, sampleText);
+    const imagePath = join(profile, "pixel.png");
+    await writeFile(imagePath, Buffer.from(samplePng, "base64"));
+    const attach = page.getByRole("button", { name: "Attach files", exact: true });
+    await browserExpect(attach).toBeVisible({ timeout: 3_000 });
+    const [choice] = await Promise.all([page.waitForEvent("filechooser"), attach.click()]);
+    await choice.setFiles(sourcePath);
+    await page.getByRole("region", { name: "Message composer" }).drop({ files: imagePath });
+    await browserExpect(page.getByRole("button", { name: "Remove sample.txt" })).toBeVisible();
+    await browserExpect(page.getByRole("button", { name: "Remove pixel.png" })).toBeVisible();
+    await page.locator("[contenteditable=true]").fill(inspectSample);
+    const admitted = page.waitForResponse(response => response.url() === `${origin}/bots/${bot}/messages` && response.request().method() === "POST");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    const submission = await admitted;
+    expect(submission.status()).toBe(200);
+    const requestHeaders = await submission.request().allHeaders();
+    expect(requestHeaders["content-type"]).toBe("application/json");
+    const deviceHeaders = { Authorization: requestHeaders.authorization!, "Content-Type": "application/json" };
+    expect(deviceHeaders.Authorization).toMatch(/^Bearer /);
+    expect(deviceHeaders.Authorization).not.toBe(headers.Authorization);
+    expect(submission.request().postDataJSON()).toEqual({ text: inspectSample, attachments: [
+      { type: "inline", name: "sample.txt", mediaType: "text/plain", content: sampleText },
+      { type: "inline", name: "pixel.png", mediaType: "image/png", content: samplePng },
+    ] });
+    await page.close();
+    try {
+      await browserExpect.poll(() => firstAttachmentInput, { timeout: 5_000 }).toEqual([
+        { type: "text", text: inspectSample }, { type: "text", text: sampleText },
+        { type: "image_url", image_url: { url: `data:image/png;base64,${samplePng}`, detail: "auto" } },
+      ]);
+      expect(await readFile(sourcePath, "utf8")).toBe(sampleText);
+      expect(await readFile(imagePath, "base64")).toBe(samplePng);
+      await rename(sourcePath, join(profile, "moved-sample.txt"));
+    } finally { releaseSample.resolve(); }
+    const history = () => fetch(`${origin}/bots/${bot}`, { headers: deviceHeaders }).then(response => response.json()) as Promise<{
+      messages: { text: string; attachments?: { id: string; name: string; mediaType: string; available: boolean }[] }[];
+    }>;
+    await browserExpect.poll(async () => (await history()).messages.some(message => message.text === sampleReply)).toBe(true);
+    const stored = (await history()).messages.find(message => message.text === inspectSample)?.attachments;
+    expect(stored).toEqual([
+      { id: expect.any(String), name: "sample.txt", mediaType: "text/plain", available: true },
+      { id: expect.any(String), name: "pixel.png", mediaType: "image/png", available: true },
+    ]);
+    const attachment = stored?.[0];
+
+    page = await context.newPage();
+    await page.goto(web, { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "View sample.txt" }).click();
+    const note = page.getByRole("dialog", { name: "sample.txt" });
+    await browserExpect(note.getByText(sampleText.trim(), { exact: true })).toBeVisible();
+    await browserExpect(note.getByText("Original file unavailable in Conversation.")).toBeVisible();
+    const downloading = page.waitForEvent("download");
+    await note.getByRole("button", { name: "Save submitted content" }).click();
+    const download = await downloading;
+    expect(download.suggestedFilename()).toBe("sample.txt");
+    expect(await readFile(await download.path(), "utf8")).toBe(sampleText);
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "View pixel.png" }).click();
+    const image = page.getByRole("dialog", { name: "pixel.png" }).getByRole("img", { name: "pixel.png" });
+    await browserExpect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBe(1);
+    await page.keyboard.press("Escape");
+
+    await page.getByRole("button", { name: "Reuse sample.txt" }).click();
+    await page.locator("[contenteditable=true]").fill(reuseSample);
+    const reused = page.waitForResponse(response => response.url() === `${origin}/bots/${bot}/messages` && response.request().method() === "POST");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    const reusedSubmission = await reused;
+    expect(reusedSubmission.status()).toBe(200);
+    expect(reusedSubmission.request().postDataJSON()).toEqual({ text: reuseSample, attachments: [{ type: "reference", id: attachment?.id }] });
+    await browserExpect.poll(() => reusedAttachmentInput).toEqual([
+      { type: "text", text: reuseSample }, { type: "text", text: sampleText },
+    ]);
+    const other = await fetch(`${origin}/bots`, { method: "POST", headers: deviceHeaders, body: JSON.stringify({ name: "Other Bot" }) }).then(response => response.json()) as { id: string };
+    const forbidden = await fetch(`${origin}/bots/${other.id}/messages`, { method: "POST", headers: deviceHeaders,
+      body: JSON.stringify({ text: reuseSample, attachments: [{ type: "reference", id: attachment?.id }] }) });
+    expect(forbidden.status).toBe(404);
+    expect(await forbidden.json()).toMatchObject({ code: "attachment_not_found" });
+    expect((await fetch(`${origin}/bots/${other.id}`, { headers: deviceHeaders }).then(response => response.json())).messages).toEqual([]);
+    expect((await fetch(`${origin}/bots/${other.id}`, { method: "DELETE", headers: deviceHeaders })).status).toBe(204);
+
     await page.getByRole("button", { name: "Delete Bot", exact: true }).click();
     await page.getByRole("button", { name: "Delete Bot permanently" }).click();
     await browserExpect(page.getByText("Create a Bot to start a Conversation.")).toBeVisible();
@@ -161,6 +258,7 @@ test.skipIf(!daemonBinary)("desktop pairs, manages a Conversation, rotates Setti
     }
     expect(await fetch(`${origin}/bots`, { headers }).then(response => response.json())).toEqual([]);
   } finally {
+    releaseSample.resolve();
     await browser?.close();
     staticUi?.stop(true);
     daemon.kill();

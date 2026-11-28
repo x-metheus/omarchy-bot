@@ -569,6 +569,7 @@ fn main() {
             let script = format!("({})({});", include_str!("shell.js"), initial);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Omarchy Bot").inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)
+                .disable_drag_drop_handler()
                 .initialization_script(script)
                 .on_navigation(|url| url.username().is_empty() && url.password().is_none() && url.port().is_none()
                     && matches!((url.scheme(), url.host_str()), ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost"))))
