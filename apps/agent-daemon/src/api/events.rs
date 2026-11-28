@@ -1,16 +1,22 @@
 //! Per-Bot SSE replay. SQLite remains the source of truth when subscribers fall behind.
 
 use std::convert::Infallible;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use futures::stream;
+use tokio::time::{Instant, timeout_at};
 use uuid::Uuid;
 
 use super::{ApiError, BOT_NOT_FOUND, Daemon, Problem, store_error};
 use crate::store::ConversationEvent;
+
+// WebKitGTK can hold the tail of an SSE burst until the next network read.
+// Send a comment in a separate write after the burst, then resume the idle heartbeat.
+const BURST_FLUSH_DELAY: Duration = Duration::from_millis(100);
 
 pub(super) async fn read(
     State(daemon): State<Daemon>,
@@ -42,8 +48,8 @@ pub(super) async fn read(
     }
     let page = Vec::<ConversationEvent>::new().into_iter();
     let events = stream::unfold(
-        (store, changes, deletions, after, page),
-        move |(store, mut changes, mut deletions, mut after, mut page)| async move {
+        (store, changes, deletions, after, page, None),
+        move |(store, mut changes, mut deletions, mut after, mut page, mut flush_at)| async move {
             loop {
                 let current_deletions = *changes.borrow();
                 if current_deletions != deletions {
@@ -54,13 +60,25 @@ pub(super) async fn read(
                 }
                 if let Some(event) = page.next() {
                     after = event.id;
+                    flush_at = Some(Instant::now() + BURST_FLUSH_DELAY);
                     return Some((
                         Ok::<_, Infallible>(event.sse()),
-                        (store, changes, deletions, after, page),
+                        (store, changes, deletions, after, page, flush_at),
                     ));
                 }
                 match store.events_after(bot, after).await {
-                    Ok(events) if events.is_empty() => changes.changed().await.ok()?,
+                    Ok(events) if events.is_empty() => match flush_at {
+                        Some(deadline) => match timeout_at(deadline, changes.changed()).await {
+                            Ok(changed) => changed.ok()?,
+                            Err(_) => {
+                                return Some((
+                                    Ok(Event::DEFAULT_KEEP_ALIVE),
+                                    (store, changes, deletions, after, page, None),
+                                ));
+                            }
+                        },
+                        None => changes.changed().await.ok()?,
+                    },
                     Ok(events) => page = events.into_iter(),
                     Err(error) => {
                         store_error(error);

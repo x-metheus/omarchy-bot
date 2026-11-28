@@ -2,19 +2,18 @@ import { useRef, useState, type ReactNode } from "react";
 import { ArrowUpIcon, BotIcon, CheckIcon, CircleAlertIcon, ClockIcon, FileIcon, FileTextIcon, FolderOpenIcon, ImageIcon, PaperclipIcon, RefreshCwIcon, ServerIcon, WrenchIcon, XIcon } from "@/components/icons";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Attachment, AttachmentAction, AttachmentActions, AttachmentContent, AttachmentDescription, AttachmentGroup, AttachmentMedia, AttachmentTitle } from "@/components/ui/attachment";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
 import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker";
-import { Message, MessageAvatar, MessageContent, MessageHeader } from "@/components/ui/message";
+import { Message, MessageContent } from "@/components/ui/message";
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/components/ui/message-scroller";
 import { Spinner } from "@/components/ui/spinner";
 import { Trace, TraceDescription, TraceIcon, TraceLine, TraceTitle } from "@/components/ui/trace";
 import { attachmentAccept, isAttachmentImage, type AgentAttachment } from "../lib/agentAttachments.ts";
-import type { AgentBot, AgentWork, ToolProgress } from "../lib/agentDaemon.ts";
+import type { AgentBot, AgentMessage, AgentWork, ToolProgress } from "../lib/agentDaemon.ts";
 import { mapToolStatusToTrace, useConversationSession, type ConversationFeed } from "../lib/conversationSession.ts";
 import { AgentAttachmentPreview } from "./AgentAttachmentPreview.tsx";
 import { AssistantMarkdown } from "./AssistantMarkdown.tsx";
@@ -45,6 +44,7 @@ export function AgentConversationView({ bot, feed, onMissing }: {
   const [viewing, setViewing] = useState<AgentAttachment>();
   const picker = useRef<HTMLInputElement>(null);
   const { messages, delta, visibleTools, connection, composerDisabled, attachments, desktop } = session;
+  const working = [...session.work.values()].some(work => work.status === "running");
   const readyForMessage = !composerDisabled && session.draft.trim().length > 0;
   const duties = session.bot ? session.bot.duties : bot.duties;
   const DesktopIcon = desktop?.kind === "directory" ? FolderOpenIcon : FileIcon;
@@ -72,10 +72,9 @@ export function AgentConversationView({ bot, feed, onMissing }: {
               </p>}
             </MessageScrollerItem>}
             {messages.map(message => {
-              const fromUser = message.role === "user";
               const work = session.work.get(message.id);
               return <MessageScrollerItem key={message.id} messageId={String(message.id)}>
-                <ConversationMessage sender={fromUser ? "You" : bot.name} user={fromUser} text={message.text}>
+                <ConversationMessage role={message.role} text={message.text}>
                   {Boolean(message.attachments?.length) && <AttachmentGroup className="max-w-full">
                     {message.attachments?.map((attachment, position) => <Attachment key={`${attachment.id}:${position}`} size="sm">
                       <AttachmentMedia variant="icon">{isAttachmentImage(attachment.mediaType) ? <ImageIcon /> : <FileTextIcon />}</AttachmentMedia>
@@ -90,15 +89,20 @@ export function AgentConversationView({ bot, feed, onMissing }: {
                       </AttachmentActions>
                     </Attachment>)}
                   </AttachmentGroup>}
-                  {work && work.status !== "completed" && <WorkNotice work={work} retry={() => void session.retry(message.id)} />}
+                  {work && work.status !== "running" && work.status !== "completed" &&
+                    <WorkNotice work={work} retry={() => void session.retry(message.id)} />}
                 </ConversationMessage>
               </MessageScrollerItem>;
             })}
             {visibleTools.length > 0 && <MessageScrollerItem messageId="tool-activity">
               <Trace aria-label="Tool activity">{visibleTools.map(tool => <ToolActivity key={tool.id} tool={tool} />)}</Trace>
             </MessageScrollerItem>}
-            {delta && <MessageScrollerItem messageId="streaming-reply">
-              <ConversationMessage sender={bot.name} text={delta} />
+            {(delta || working) && <MessageScrollerItem messageId="streaming-reply" className="flex flex-col gap-2">
+              {delta && <ConversationMessage role="assistant" text={delta} />}
+              {working && <Marker role="status">
+                <MarkerIcon><Spinner /></MarkerIcon>
+                <MarkerContent>{workLabel.running}</MarkerContent>
+              </Marker>}
             </MessageScrollerItem>}
           </MessageScrollerContent>
         </MessageScrollerViewport>
@@ -175,15 +179,14 @@ export function AgentConversationView({ bot, feed, onMissing }: {
   </section>;
 }
 
-function ConversationMessage({ sender, text, user = false, children }: {
-  sender: string; text: string; user?: boolean; children?: ReactNode;
-}) {
-  return <Message align={user ? "end" : "start"}>
-    {!user && <MessageAvatar><Avatar><AvatarFallback><BotIcon className="size-4" aria-hidden="true" /></AvatarFallback></Avatar></MessageAvatar>}
+function ConversationMessage({ role, text, children }: Pick<AgentMessage, "role" | "text"> & { children?: ReactNode }) {
+  const fromUser = role === "user";
+  const align = fromUser ? "end" : "start";
+
+  return <Message align={align} role="group" aria-label={fromUser ? "User message" : "Bot message"}>
     <MessageContent>
-      <MessageHeader>{sender}</MessageHeader>
-      <Bubble variant={user ? "secondary" : "ghost"}>
-        <BubbleContent>{user ? <p className="whitespace-pre-wrap">{text}</p> : <AssistantMarkdown text={text} />}</BubbleContent>
+      <Bubble align={align} variant={fromUser ? "secondary" : "outline"} className="group-data-[align=start]/message:max-w-full">
+        <BubbleContent>{fromUser ? <p className="whitespace-pre-wrap">{text}</p> : <AssistantMarkdown text={text} />}</BubbleContent>
       </Bubble>
       {children}
     </MessageContent>
@@ -192,7 +195,7 @@ function ConversationMessage({ sender, text, user = false, children }: {
 
 function WorkNotice({ work, retry }: { work: AgentWork; retry: () => void }) {
   return <Marker>
-    <MarkerIcon>{work.status === "running" ? <Spinner /> : work.status === "failed" || work.status === "interrupted" ? <CircleAlertIcon /> : <ClockIcon />}</MarkerIcon>
+    <MarkerIcon>{work.status === "failed" || work.status === "interrupted" ? <CircleAlertIcon /> : <ClockIcon />}</MarkerIcon>
     <MarkerContent>{work.reason === "provider_unconfigured" ? "Queued until a model is configured" : workLabel[work.status]}</MarkerContent>
     {work.status === "interrupted" && <Button size="xs" variant="outline" onClick={retry}>
       <RefreshCwIcon data-icon="inline-start" /> Retry interrupted work

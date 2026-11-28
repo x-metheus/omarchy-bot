@@ -7,7 +7,7 @@ The published implementation specification is tracked in [GitHub issue #36](http
 ## Settings page
 
 - Keep **Settings** at the bottom of the App sidebar. Open Settings in the main content area. Selecting a Bot returns to its Conversation. Preserve the selected Bot, unsent chat draft, and draft attachments while Settings is open.
-- Put the existing local daemon launch preference in **General**. In **Providers**, show the current provider and model. One menu offers OpenAI, Anthropic, saved Provider Configurations, and **Add custom provider**. Choosing a menu option opens its settings. Use **Set as current** to activate a saved configuration.
+- Put the existing local daemon launch preference in **General**. In **Providers**, show configured providers in compact rows. Show the model in the same row and mark the active provider with **Current**. The list starts empty on a fresh daemon. Open **Add provider** with the plus button and choose OpenAI, Anthropic, or **Custom provider**. Adding and editing open dialogs. Use **Set as current** to activate a saved custom configuration.
 - The custom provider form contains a display name, **Base URL**, an optional **API key**, and a searchable **Provider Model** selector. The Base URL is the API root, for example `https://example.com/v1`. It must be reachable from the connected daemon host. For a remote daemon, loopback refers to that host. Discovery and configuration writes use the existing Settings authorization and HTTP(S) URL validation.
 
 ## Model discovery

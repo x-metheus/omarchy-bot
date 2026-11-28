@@ -1,27 +1,18 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { CircleAlertIcon, CpuIcon, MonitorIcon, MoonIcon, RefreshCwIcon, SunIcon } from "@/components/icons";
+import { CircleAlertIcon, MonitorIcon, MoonIcon, SunIcon } from "@/components/icons";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Separator } from "@/components/ui/separator";
-import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { agentDaemon } from "../../lib/agentDaemon.ts";
 import { isColorMode, useAppearance } from "../../lib/appearance.tsx";
 import type { LocalDaemonController } from "../../lib/localDaemon.ts";
 import { ProviderSettings } from "./ProviderSettings.tsx";
 
-const providerLabels = { openai: "OpenAI", anthropic: "Anthropic", custom: "Custom OpenAI-compatible" };
-
 export function AgentDaemonSettings({ baseUrl, local }: { baseUrl: string; local: LocalDaemonController }) {
-  const settings = useQuery({ queryKey: ["agent-settings", baseUrl], queryFn: agentDaemon.settings });
   const [launchError, setLaunchError] = useState("");
   const [saving, setSaving] = useState(false);
   const { mode, setMode } = useAppearance();
-  const active = settings.data?.active;
 
   async function changeAutostart(enabled: boolean) {
     setLaunchError("");
@@ -54,26 +45,7 @@ export function AgentDaemonSettings({ baseUrl, local }: { baseUrl: string; local
         </FieldGroup>
       </section>
       <Separator />
-      <section aria-labelledby="settings-providers" className="flex flex-col gap-4">
-        <h2 id="settings-providers" className="text-lg font-semibold tracking-tight">Providers</h2>
-        {settings.isPending && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /> Loading daemon Settings…</p>}
-        {settings.isError && <>
-          <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>Could not read daemon Settings.</AlertDescription></Alert>
-          <Button variant="outline" className="self-start" disabled={settings.isFetching} onClick={() => void settings.refetch()}>
-            <RefreshCwIcon data-icon="inline-start" /> Try again
-          </Button>
-        </>}
-        {settings.data && <>
-          <Card size="sm">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2"><CpuIcon className="size-4" aria-hidden="true" /> Current model</CardTitle>
-              {active && <CardDescription>{active.name ?? providerLabels[active.provider]}</CardDescription>}
-            </CardHeader>
-            <CardContent className="text-sm wrap-anywhere">{active?.model ?? "No model configured."}</CardContent>
-          </Card>
-          <ProviderSettings baseUrl={baseUrl} settings={settings.data} />
-        </>}
-      </section>
+      <ProviderSettings baseUrl={baseUrl} />
     </div>
   </div>;
 }

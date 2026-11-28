@@ -44,8 +44,21 @@ const provider = Bun.serve({ hostname: "127.0.0.1", port: app ? 18443 : 0, async
     } else if (input.includes("Read the attachment")) assert.ok(input.includes(readMarker), "provider received the attached text");
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: `smoke_${tool.name}`, type: "function", function: tool }] }
       : { role: "assistant", content: reply };
-    return new Response(chunk(delta) + chunk({}, tool ? "tool_calls" : "stop") + "data: [DONE]\n\n",
-      { headers: { "content-type": "text/event-stream" } });
+    const end = chunk({}, tool ? "tool_calls" : "stop") + "data: [DONE]\n\n";
+    const headers = { "content-type": "text/event-stream" };
+    if (input.includes(marker) && !tool) {
+      const bytes = new TextEncoder();
+      const midpoint = Math.floor(reply.length / 2);
+      return new Response(new ReadableStream({
+        async start(stream) {
+          stream.enqueue(bytes.encode(chunk({ role: "assistant", content: reply.slice(0, midpoint) })));
+          await Bun.sleep(300);
+          stream.enqueue(bytes.encode(chunk({ content: reply.slice(midpoint) }) + end));
+          stream.close();
+        },
+      }), { headers });
+    }
+    return new Response(chunk(delta) + end, { headers });
   } catch (error) {
     failures.push(String(error));
     return new Response("fixture rejected request", { status: 500 });
@@ -230,7 +243,9 @@ try {
     pass("Packaged WebView honors disabled launch, autostarts bundled daemon and attaches to it after pairing and reopen");
     await click("Settings");
     await visible("Start the local daemon on launch");
-    await visible("Providers");
+    await visible("No providers configured.");
+    await click("Add provider");
+    await click("OpenAI");
     await field("Model ID", settings.model);
     await field("API key", key);
     await click("Save daemon Settings");
@@ -246,6 +261,10 @@ try {
     };
     await send(marker);
     await visible("The swatch is cobalt.");
+    await until("Working indicator clears after the reply", () => script(`
+      return ![...document.querySelectorAll('[role="log"] [data-slot="marker-content"]')]
+        .some(status => status.textContent.trim() === 'Working');
+    `), 3000);
     await input('input[type="file"]', looseFile);
     await control("Remove sample.txt");
     await input(composer, "Read the attachment");

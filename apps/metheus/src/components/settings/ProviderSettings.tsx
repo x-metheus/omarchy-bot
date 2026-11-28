@@ -1,153 +1,225 @@
-import { useState } from "react";
-import { CheckIcon, CircleAlertIcon, KeyRoundIcon, PencilIcon, RefreshCwIcon, SaveIcon } from "@/components/icons";
+import { useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { CheckIcon, CircleAlertIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, SaveIcon } from "@/components/icons";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "@/components/ui/combobox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Empty, EmptyDescription, EmptyHeader } from "@/components/ui/empty";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { useProviderModelDiscovery, type ProviderConnectionDraft } from "../../lib/providerDiscovery.ts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  agentDaemon, DaemonError, type AgentSettings, type ProviderConfiguration, type ProviderConfigurations, type ProviderConnection,
+  agentDaemon, DaemonError, type Provider, type ProviderConfiguration, type ProviderConfigurations, type ProviderConnection,
 } from "../../lib/agentDaemon.ts";
 
-type Feedback = { status: "success" | "error"; message: string };
-const addProvider = "add-provider";
+const builtInProviders = { openai: "OpenAI", anthropic: "Anthropic" } satisfies Record<Provider, string>;
+const builtInProviderIds = Object.keys(builtInProviders) as Provider[];
 
-export function ProviderSettings({ baseUrl, settings }: { baseUrl: string; settings: AgentSettings }) {
+type Feedback = { status: "success" | "error"; message: string };
+type ProviderEditor = { kind: "built-in"; provider: Provider } | { kind: "custom"; configuration?: ProviderConfiguration };
+
+export function ProviderSettings({ baseUrl }: { baseUrl: string }) {
   const queryClient = useQueryClient();
-  const queryKey = ["provider-configurations", baseUrl];
-  const providers = useQuery({ queryKey, queryFn: ({ signal }) => agentDaemon.providerConfigurations(signal) });
-  const [selection, setSelection] = useState<string>();
-  const [editor, setEditor] = useState<ProviderConfiguration>();
+  const settingsKey = ["agent-settings", baseUrl];
+  const providersKey = ["provider-configurations", baseUrl];
+  const settingsQuery = useQuery({ queryKey: settingsKey, queryFn: agentDaemon.settings });
+  const settings = settingsQuery.data;
+  const providers = useQuery({
+    queryKey: providersKey,
+    queryFn: ({ signal }) => agentDaemon.providerConfigurations(signal),
+    enabled: settings !== undefined,
+  });
+  const [editor, setEditor] = useState<ProviderEditor>();
   const [feedback, setFeedback] = useState<Feedback>();
   const [busy, setBusy] = useState(false);
 
-  const current = settings.active?.provider === "custom" ? providers.data?.currentId : settings.active?.provider ?? "openai";
-  const selected = selection ?? current ?? undefined;
-  const configuration = providers.data?.configurations.find(config => config.id === selected);
-  const creating = selected === addProvider;
-  const disabled = !settings.writable || busy;
+  const active = settings?.active;
+  const configurations = providers.data?.configurations ?? [];
+  const currentCustomId = providers.data?.currentId;
+  const showCurrentCustomSummary = active?.provider === "custom" && !configurations.some(config => config.id === currentCustomId);
+  const configuredBuiltIns = builtInProviderIds.filter(provider => active?.provider === provider || settings?.storedCredentials[provider]);
+  const addableBuiltIns = builtInProviderIds.filter(provider => !configuredBuiltIns.includes(provider));
+  const hasProviders = configuredBuiltIns.length > 0 || configurations.length > 0 || showCurrentCustomSummary;
+  const canAddCustom = !!providers.data;
+  const writable = settings?.writable ?? false;
+  const disabled = !writable || busy;
 
-  function select(value: string | null | undefined) {
-    setSelection(value ?? undefined);
-    setEditor(undefined);
+  function openEditor(next: ProviderEditor) {
     setFeedback(undefined);
+    setEditor(next);
+  }
+
+  function closeEditor() {
+    if (busy) return;
+    setFeedback(undefined);
+    setEditor(undefined);
   }
 
   async function applyConfigurations(saved: ProviderConfigurations) {
-    await queryClient.cancelQueries({ queryKey });
-    queryClient.setQueryData(queryKey, saved);
-    await queryClient.invalidateQueries({ queryKey: ["agent-settings", baseUrl] });
+    await queryClient.cancelQueries({ queryKey: providersKey });
+    queryClient.setQueryData(providersKey, saved);
+    await queryClient.invalidateQueries({ queryKey: settingsKey });
   }
 
   async function update(action: () => Promise<void>, message: string) {
-    if (disabled) return false;
+    if (disabled) return;
     setBusy(true);
     setFeedback(undefined);
     try {
       await action();
+      setEditor(undefined);
       setFeedback({ status: "success", message });
-      return true;
     } catch (error) {
       if (error instanceof DaemonError && error.status === 409) {
         await Promise.all([
-          queryClient.invalidateQueries({ queryKey }),
-          queryClient.invalidateQueries({ queryKey: ["agent-settings", baseUrl] }),
+          queryClient.invalidateQueries({ queryKey: providersKey }),
+          queryClient.invalidateQueries({ queryKey: settingsKey }),
         ]);
         setFeedback({ status: "error", message: "This configuration changed. Cancel and reopen the editor to load the latest version." });
       } else {
         setFeedback({ status: "error", message: error instanceof DaemonError ? error.message : "Could not update the Provider Configuration." });
       }
-      return false;
     } finally {
       setBusy(false);
     }
   }
 
-  const options = [
-    { label: "OpenAI", value: "openai" },
-    { label: "Anthropic", value: "anthropic" },
-    ...(providers.data?.configurations.map(config => ({
-      label: config.name, value: config.id,
-    })) ?? []),
-    ...(providers.data ? [{ label: "Add custom provider…", value: addProvider, disabled: !settings.writable }] : []),
-  ];
+  const notice = feedback && <Alert variant={feedback.status === "error" ? "destructive" : "default"} role={feedback.status === "error" ? "alert" : "status"}>
+    {feedback.status === "error" ? <CircleAlertIcon /> : <CheckIcon />}<AlertDescription>{feedback.message}</AlertDescription>
+  </Alert>;
 
-  return <div className="flex flex-col gap-4">
-    <Field data-disabled={busy}>
-      <FieldLabel htmlFor="provider">Provider</FieldLabel>
-      <Select items={options} value={selected ?? null} onValueChange={select} disabled={busy}>
-        <SelectTrigger id="provider" className="w-full"><SelectValue placeholder="Choose a provider" /></SelectTrigger>
-        <SelectContent><SelectGroup>{options.map(option => <SelectItem key={option.value} value={option.value}
-          disabled={option.value === addProvider && !settings.writable}>{option.label}</SelectItem>)}</SelectGroup></SelectContent>
-      </Select>
-    </Field>
-    {!settings.writable && <Alert><CircleAlertIcon /><AlertDescription>The daemon operator must enable writable Settings.</AlertDescription></Alert>}
-    {feedback && <Alert variant={feedback.status === "error" ? "destructive" : "default"} role={feedback.status === "error" ? "alert" : "status"}>
-      {feedback.status === "error" ? <CircleAlertIcon /> : <CheckIcon />}<AlertDescription>{feedback.message}</AlertDescription>
-    </Alert>}
-    {providers.isPending && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /> Loading Provider Configurations…</p>}
-    {providers.isError && <div className="flex flex-col items-start gap-2">
-      <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>{providers.error instanceof DaemonError && providers.error.status === 404
-        ? "Update the Agent Daemon to use custom providers."
-        : "Could not load saved Provider Configurations."}</AlertDescription></Alert>
-      <Button variant="outline" disabled={providers.isFetching} onClick={() => void providers.refetch()}><RefreshCwIcon data-icon="inline-start" /> Retry loading providers</Button>
-    </div>}
-    {(selected === "openai" || selected === "anthropic") && <ModelForm key={selected}
-      modelId={settings.active?.provider === selected ? settings.active.model : ""}
-      keyStored={settings.storedCredentials[selected]} disabled={disabled} saving={busy}
-      save={(model, apiKey) => update(async () => {
-        const saved = await agentDaemon.saveSettings({ provider: selected, model, ...(apiKey ? { apiKey } : {}) });
-        queryClient.setQueryData(["agent-settings", baseUrl], saved);
-        void queryClient.invalidateQueries({ queryKey });
-      }, "Daemon Settings saved.")} />}
-    {(creating || editor) && <ProviderForm key={selected} configuration={editor} disabled={disabled}
-      close={() => select(creating ? undefined : selected)}
-      save={(connection, name, model) => {
-        void update(async () => {
-          const saved = await agentDaemon.saveProviderConfiguration({ ...connection, name, model }, editor);
-          await applyConfigurations(saved);
-          if (creating) setSelection(undefined);
-          setEditor(undefined);
-        }, "Provider Configuration saved.");
-      }} />}
-    {configuration && !editor && <div className="flex flex-col gap-3">
-      <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
-        <dt className="text-muted-foreground">Base URL</dt><dd className="wrap-anywhere">{configuration.baseUrl}</dd>
-        <dt className="text-muted-foreground">Model</dt><dd className="wrap-anywhere">{configuration.model}</dd>
-        <dt className="text-muted-foreground">API key</dt><dd>{configuration.hasApiKey ? "Configured" : "None"}</dd>
-      </dl>
-      <div className="flex flex-wrap gap-2">
-        <Button variant="outline" disabled={disabled} onClick={() => { setFeedback(undefined); setEditor(configuration); }}><PencilIcon data-icon="inline-start" /> Edit</Button>
-        {configuration.id !== providers.data?.currentId && <Button disabled={disabled} onClick={() => void update(async () => {
-          await applyConfigurations(await agentDaemon.activateProviderConfiguration(configuration.id));
-        }, "Current Provider Configuration updated.")}>
-          {busy ? <Spinner data-icon="inline-start" /> : <CheckIcon data-icon="inline-start" />} Set as current
-        </Button>}
-      </div>
-    </div>}
-  </div>;
+  return <section aria-labelledby="settings-providers" className="flex flex-col gap-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h2 id="settings-providers" className="text-lg font-semibold tracking-tight">Providers</h2>
+      {writable && (canAddCustom || addableBuiltIns.length > 0) && <DropdownMenu>
+        <DropdownMenuTrigger disabled={busy} render={<Button variant="outline" size="icon-sm" aria-label="Add provider" title="Add provider" />}>
+          <PlusIcon />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="min-w-44">
+          <DropdownMenuGroup>
+            {addableBuiltIns.map(provider => <DropdownMenuItem key={provider} onClick={() => openEditor({ kind: "built-in", provider })}>
+              {builtInProviders[provider]}
+            </DropdownMenuItem>)}
+            {canAddCustom && <DropdownMenuItem onClick={() => openEditor({ kind: "custom" })}>Custom provider</DropdownMenuItem>}
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>}
+    </div>
+    {settingsQuery.isPending && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /> Loading daemon Settings…</p>}
+    {settingsQuery.isError && <>
+      <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>Could not read daemon Settings.</AlertDescription></Alert>
+      <Button variant="outline" className="self-start" disabled={settingsQuery.isFetching} onClick={() => void settingsQuery.refetch()}>
+        <RefreshCwIcon data-icon="inline-start" /> Try again
+      </Button>
+    </>}
+    {settings && <>
+      {!writable && <Alert><CircleAlertIcon /><AlertDescription>The daemon operator must enable writable Settings.</AlertDescription></Alert>}
+      {!editor && notice}
+      {hasProviders ? <ul role="list" className="divide-y divide-border rounded-xl border">
+        {configuredBuiltIns.map(provider => {
+          const name = builtInProviders[provider];
+          const current = !currentCustomId && active?.provider === provider;
+          const action = current ? "Edit" : "Configure";
+          return <ProviderRow key={provider} name={name} model={current ? active.model : undefined} current={current}>
+            {writable && <Button variant="ghost" size="sm" disabled={busy} aria-label={`${action} ${name}`}
+              onClick={() => openEditor({ kind: "built-in", provider })}>{action}</Button>}
+          </ProviderRow>;
+        })}
+        {showCurrentCustomSummary && <ProviderRow name={active.name ?? "Custom OpenAI-compatible"} model={active.model} current />}
+        {configurations.map(configuration => {
+          const current = configuration.id === currentCustomId;
+          return <ProviderRow key={configuration.id} name={configuration.name} model={configuration.model} current={current}>
+            <Button variant="ghost" size="sm" disabled={busy} aria-label={`${writable ? "Edit" : "Details for"} ${configuration.name}`}
+              onClick={() => openEditor({ kind: "custom", configuration })}>{writable ? "Edit" : "Details"}</Button>
+            {!current && writable && <Button variant="outline" size="sm" disabled={busy} aria-label={`Set as current (${configuration.name})`}
+              onClick={() => void update(async () => {
+                await applyConfigurations(await agentDaemon.activateProviderConfiguration(configuration.id));
+              }, "Current Provider Configuration updated.")}>Set as current</Button>}
+          </ProviderRow>;
+        })}
+      </ul> : providers.isSuccess && <Empty className="rounded-xl border p-4">
+        <EmptyHeader><EmptyDescription>No providers configured.</EmptyDescription></EmptyHeader>
+      </Empty>}
+      {providers.isPending && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /> Loading Provider Configurations…</p>}
+      {providers.isError && <>
+        <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>{providers.error instanceof DaemonError && providers.error.status === 404
+          ? "Update the Agent Daemon to use custom providers."
+          : "Could not load saved Provider Configurations."}</AlertDescription></Alert>
+        <Button variant="outline" className="self-start" disabled={providers.isFetching} onClick={() => void providers.refetch()}>
+          <RefreshCwIcon data-icon="inline-start" /> Retry loading providers
+        </Button>
+      </>}
+      {editor && <Dialog open onOpenChange={open => { if (!open) closeEditor(); }}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg" showCloseButton={!busy}>
+          <DialogHeader className="pr-7">
+            <DialogTitle className="wrap-anywhere">{editor.kind === "built-in" ? builtInProviders[editor.provider]
+              : editor.configuration ? editor.configuration.name : "Add custom provider"}</DialogTitle>
+            {editor.kind === "built-in" && active?.provider !== editor.provider && <DialogDescription>
+              Saving makes this the current provider for all Bots on this Agent Daemon.
+            </DialogDescription>}
+          </DialogHeader>
+          {notice}
+          {editor.kind === "built-in" ? <ModelForm
+            modelId={active?.provider === editor.provider ? active.model : ""}
+            keyStored={settings.storedCredentials[editor.provider]} disabled={disabled} saving={busy} close={closeEditor}
+            save={(model, apiKey) => void update(async () => {
+              const saved = await agentDaemon.saveSettings({ provider: editor.provider, model, ...(apiKey ? { apiKey } : {}) });
+              await Promise.all([
+                queryClient.cancelQueries({ queryKey: settingsKey }),
+                queryClient.cancelQueries({ queryKey: providersKey }),
+              ]);
+              queryClient.setQueryData(settingsKey, saved);
+              queryClient.setQueryData<ProviderConfigurations>(providersKey, previous => previous && { ...previous, currentId: null });
+              void queryClient.invalidateQueries({ queryKey: providersKey });
+            }, "Daemon Settings saved.")} /> : writable ? <ProviderForm
+            configuration={editor.configuration} disabled={disabled} saving={busy} close={closeEditor}
+            save={(connection, name, model) => void update(async () => {
+              const saved = await agentDaemon.saveProviderConfiguration({ ...connection, name, model }, editor.configuration);
+              await applyConfigurations(saved);
+            }, "Provider Configuration saved.")} /> : editor.configuration && <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-2">
+              <dt className="text-muted-foreground">Base URL</dt><dd className="wrap-anywhere">{editor.configuration.baseUrl}</dd>
+              <dt className="text-muted-foreground">API key</dt><dd>{editor.configuration.hasApiKey ? "Configured" : "None"}</dd>
+            </dl>}
+        </DialogContent>
+      </Dialog>}
+    </>}
+  </section>;
 }
 
-function ModelForm({ modelId, keyStored, disabled, saving, save }: {
+function ProviderRow({ name, model, current, children }: { name: string; model: string | undefined; current: boolean; children?: ReactNode }) {
+  return <li className="flex min-h-14 flex-wrap items-center justify-between gap-x-4 gap-y-2 px-3 py-2.5 text-sm sm:px-4">
+    <div className="min-w-0 flex-[1_1_10rem]">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="min-w-0 font-medium wrap-anywhere">{name}</span>
+        {current && <Badge variant="secondary">Current</Badge>}
+      </div>
+      {model && <p className="text-xs text-muted-foreground wrap-anywhere">{model}</p>}
+    </div>
+    {children && <div className="flex flex-wrap items-center gap-1">{children}</div>}
+  </li>;
+}
+
+function ModelForm({ modelId, keyStored, disabled, saving, close, save }: {
   modelId: string;
   keyStored: boolean;
   disabled: boolean;
   saving: boolean;
-  save: (model: string, apiKey: string) => Promise<boolean>;
+  close: () => void;
+  save: (model: string, apiKey: string) => void;
 }) {
   const [model, setModel] = useState(modelId);
   const [apiKey, setApiKey] = useState("");
   const canSave = !disabled && !!model.trim() && (keyStored || !!apiKey);
 
-  return <form onSubmit={async event => {
+  return <form onSubmit={event => {
     event.preventDefault();
-    if (canSave && await save(model.trim(), apiKey)) setApiKey("");
+    if (canSave) save(model.trim(), apiKey);
   }}>
-    <FieldGroup>
+    <FieldGroup className="gap-4">
       <Field data-disabled={disabled}>
         <FieldLabel htmlFor="builtin-model">Model ID</FieldLabel>
         <Input id="builtin-model" value={model} onChange={event => setModel(event.target.value)} required disabled={disabled} />
@@ -158,16 +230,20 @@ function ModelForm({ modelId, keyStored, disabled, saving, save }: {
           value={apiKey} onChange={event => setApiKey(event.target.value)} required={!keyStored} disabled={disabled} />
         <FieldDescription id="builtin-key-help">{keyStored ? "Leave blank to use the stored key." : "The Agent Daemon stores this key."}</FieldDescription>
       </Field>
-      <Button type="submit" className="self-start" disabled={!canSave}>
-        {saving ? <Spinner data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />} Save daemon Settings
-      </Button>
+      <DialogFooter>
+        <Button variant="outline" disabled={saving} onClick={close}>Cancel</Button>
+        <Button type="submit" disabled={!canSave}>
+          {saving ? <Spinner data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />} Save daemon Settings
+        </Button>
+      </DialogFooter>
     </FieldGroup>
   </form>;
 }
 
-function ProviderForm({ configuration, disabled, close, save }: {
+function ProviderForm({ configuration, disabled, saving, close, save }: {
   configuration: ProviderConfiguration | undefined;
   disabled: boolean;
+  saving: boolean;
   close: () => void;
   save: (connection: ProviderConnection, name: string, model: string) => void;
 }) {
@@ -190,8 +266,7 @@ function ProviderForm({ configuration, disabled, close, save }: {
       save({ baseUrl, authentication, ...(apiKey ? { apiKey } : {}) }, name.trim(), model);
     }
   }}>
-    <FieldGroup>
-      {configuration && <h3 className="text-sm font-semibold">Edit {configuration.name}</h3>}
+    <FieldGroup className="gap-4">
       <Field data-disabled={disabled}>
         <FieldLabel htmlFor="custom-name">Provider name</FieldLabel>
         <Input id="custom-name" value={name} onChange={event => setName(event.target.value)} required disabled={disabled} />
@@ -225,15 +300,17 @@ function ProviderForm({ configuration, disabled, close, save }: {
         </Combobox>
         {loading && <FieldDescription role="status" className="flex items-center gap-2"><Spinner /> Loading models…</FieldDescription>}
         {result && "models" in result && models.length === 0 && <FieldDescription role="status">No models were returned by the provider.</FieldDescription>}
-      </Field>
-      {error && <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>{error}</AlertDescription></Alert>}
-      <div className="flex flex-wrap gap-2">
-        <Button variant="outline" disabled={disabled || !ready || loading} onClick={() => setConnection(previous => ({ ...previous }))}>
+        <Button variant="outline" size="sm" className="self-start" disabled={disabled || !ready || loading} onClick={() => setConnection(previous => ({ ...previous }))}>
           <RefreshCwIcon data-icon="inline-start" /> Refresh models
         </Button>
-        <Button type="submit" disabled={!canSave}><SaveIcon data-icon="inline-start" /> Save Provider Configuration</Button>
-        <Button variant="ghost" disabled={disabled} onClick={close}>Cancel</Button>
-      </div>
+      </Field>
+      {error && <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>{error}</AlertDescription></Alert>}
+      <DialogFooter>
+        <Button variant="outline" disabled={saving} onClick={close}>Cancel</Button>
+        <Button type="submit" disabled={!canSave}>
+          {saving ? <Spinner data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />} Save Provider Configuration
+        </Button>
+      </DialogFooter>
     </FieldGroup>
   </form>;
 }
