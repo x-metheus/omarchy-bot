@@ -2,7 +2,7 @@
 set -euo pipefail
 bash /src/scripts/linux-app/prepare-bundler.sh
 if [[ ! -d node_modules ]]; then bun install --frozen-lockfile; fi
-bun scripts/build-sidecar.ts
+bun scripts/build-agent-daemon.ts
 config=$(bun scripts/linux-app/build-config.ts)
 version=$(bun -e 'console.log(JSON.parse(process.argv[1]).version)' "$config")
 cd apps/omarchy-bot

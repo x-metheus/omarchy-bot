@@ -15,6 +15,8 @@ const payloads = [
   "omarchy-bot_1.2.3_x64-unsigned-preview-setup.exe",
 ];
 const installers = ["omarchy-bot_1.2.3_aarch64.dmg", "omarchy-bot_1.2.3_x64.dmg"];
+const daemonArchives = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
+  .map(target => `omarchy-agent-daemon_1.2.3_${target}.tar.gz`);
 
 test("release CLI prepares one complete four-platform manifest and refuses incomplete or inconsistent assets", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "app-release-"));
@@ -28,7 +30,7 @@ test("release CLI prepares one complete four-platform manifest and refuses incom
     return { code: await child.exited, error };
   };
   try {
-    for (const name of [...payloads, ...installers]) {
+    for (const name of [...payloads, ...installers, ...daemonArchives]) {
       await Bun.write(path.join(directory, name), `fixture ${name}`);
       const hash = new Bun.CryptoHasher("sha256").update(await Bun.file(path.join(directory, name)).arrayBuffer()).digest("hex");
       await Bun.write(path.join(directory, `${name}.sha256`), `${hash}  ${name}\n`);
@@ -53,6 +55,9 @@ test("release CLI prepares one complete four-platform manifest and refuses incom
     await Bun.write(path.join(directory, installers[0]!), "tampered dmg");
     expect((await run()).code).not.toBe(0);
     await Bun.write(path.join(directory, installers[0]!), `fixture ${installers[0]}`);
+    await Bun.write(path.join(directory, daemonArchives[0]!), "tampered daemon archive");
+    expect((await run()).code).not.toBe(0);
+    await Bun.write(path.join(directory, daemonArchives[0]!), `fixture ${daemonArchives[0]}`);
     await Bun.write(path.join(directory, `${payloads[1]}.sig`), signature("1.2.2"));
     expect((await run()).code).not.toBe(0);
     await Bun.write(path.join(directory, `${payloads[1]}.sig`), signature());

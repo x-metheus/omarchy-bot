@@ -350,7 +350,7 @@ fn main() {
         .manage(ShellState { origin, connection: connection.clone(), keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None) })
         .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, agent_daemon::ensure_local_daemon, agent_daemon::set_daemon_autostart, agent_daemon::local_daemon_pairing_code, desktop_tools::choose_desktop_path])
         .setup(move |app| {
-            let daemon = LocalDaemon::new(app.path().app_local_data_dir()?.join("agent-daemon"));
+            let daemon = LocalDaemon::new(app.path().app_local_data_dir()?.join("agent-daemon"), app.path().resource_dir().ok());
             let local = serde_json::json!({ "baseUrl": daemon.origin(), "autostart": daemon.autostart().unwrap_or(false) });
             app.manage(daemon);
             let revoked = if connection.is_none() {

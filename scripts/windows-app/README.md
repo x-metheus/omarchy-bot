@@ -1,12 +1,12 @@
 # Windows x64 preview
 
-Windows is a preview until the packaged WebView2 suite passes and Authenticode signing is available. Static configuration and Chromium tests do not establish Windows support. The application embeds the shared Web UI; the Service and Bot Computer still run on Linux. Windows commands run through the bundled Rust Sidecar using Windows PowerShell 5.1, without WSL or Git Bash.
+Windows x64 builds a preview NSIS installer and a standalone Agent Daemon archive with verified Recall files. The desktop uses WebView2 and runs authorized desktop tools through its Tauri executor.
 
 The compiled Sidecar process suite checks that a successfully launched application survives normal PowerShell completion, with root and descendant PIDs recorded before the result is accepted. It also checks command-tree cancellation, readable diagnostics, credential-directory refusal and authenticated TLS through the shipped executable. Run that suite on Windows to verify Job Objects, handle inheritance and temporary-file cleanup; Linux results do not establish Windows behavior.
 
 ## Build and install checks
 
-Use a disposable Windows x64 account with PowerShell 7, Bun 1.4.5, Rust 1.93.1 MSVC, Visual Studio C++ build tools, WebView2 and network access for Tauri's NSIS toolchain. The frozen Bun install provides the pinned Tauri CLI. From the repository root:
+Use a disposable Windows x64 account with PowerShell 7, Bun 1.4.5, Rust 1.97.1 MSVC, Visual Studio C++ build tools, WebView2, and network access for Tauri's NSIS toolchain and the pinned model. The frozen Bun install supplies the Tauri CLI.
 
 ```powershell
 bun install --frozen-lockfile
@@ -16,37 +16,23 @@ bun install --frozen-lockfile
 
 Build output and Cargo caches remain in `.lane/windows-app`; installers and checksums go to `.lane/dist`. The stable product name, version and `com.omarchy.bot` identity remain independent of preview labeling, preserving upgrade identity. Unsigned installers have `unsigned-preview` in their filename and preview bundle metadata. `WINDOWS_CERTIFICATE_THUMBPRINT` optionally enables an already-provisioned account's Authenticode certificate; the script fails if the resulting signature is invalid. No certificate is installed by these scripts. Updater signatures are separate and required for release builds even when Authenticode is absent.
 
-NSIS uses a per-user install and registers `HKCU\Software\Classes\omarchy-bot`. The install smoke verifies its protocol marker, installed executable and `%1` argument, the bundled Rust Sidecar, and removal of the scheme during silent uninstall. It refuses an account with an existing app scheme. `-InstallOnly` is deliberately a separate check and provides no WebView acceptance evidence.
+NSIS uses a per-user install and registers `HKCU\Software\Classes\omarchy-bot`. The install smoke verifies the protocol marker, installed executable, `%1` argument, bundled Agent Daemon and Recall files, and scheme removal during silent uninstall. It requires a disposable account without an existing app scheme. `-InstallOnly` verifies the installation boundary.
 
-Windows stores the connection in Credential Manager at `service-connection.com.omarchy.bot`, username `service-connection`. Linux continues to use Secret Service. The Windows smoke reads Credential Manager directly, compares the actual token against WebView localStorage, and verifies restart persistence. Credentials are captured privately and never written to evidence logs. Windows TLS diagnostics use Schannel's certificate chain and hostname validation; the smoke requires an untrusted HTTPS endpoint and asserts the visible certificate error. No trust bypass is used by the app.
+Windows stores the daemon connection in Credential Manager at `agent-daemon-connection.com.omarchy.bot`. The packaged WebView2 smoke checks that the app attaches to its local daemon and retains pairing after reopen. Credentials stay out of evidence logs.
 
 ## Full real WebView2 smoke
 
-`.github/workflows/windows-webview-smoke.yml` is a manual/reusable workflow, not a pull-request workflow. Set up the protected `windows-smoke` environment with approval restricted to trusted refs, then provide:
-
-| Configuration | Required value |
-| --- | --- |
-| Runner | One dedicated, disposable Linux x64 runner labeled `windows-smoke-service`, Docker available; only one runner with this label so cleanup uses the same checkout |
-| `WINDOWS_SMOKE_HOST_SECRET` secret | Random pairing-host secret dedicated to this disposable fixture |
-| `WINDOWS_SMOKE_SERVICE_ORIGIN` variable | Publicly trusted HTTPS origin reverse-proxied to that runner's `127.0.0.1:7431`; proxy HTTP and WebSocket upgrades without buffering, connect from loopback |
-| `WINDOWS_SMOKE_UNTRUSTED_ORIGIN` variable | Reachable HTTPS origin/port to the runner's `7432`, retaining the fixture's untrusted certificate (TCP passthrough, no terminating trusted TLS) |
-| Windows runner | `windows-2022`, WebView2 runtime and Edge installed; workflow downloads the Edge-matching WebDriver and privately installs tauri-driver 2.1.0 |
-
-The workflow starts real disposable Linux Services, the checksum-pinned Sway runtime, browser pack, fonts and X11 color fixture inside the ticket 07 container. Only the Agent worker is scripted to issue deterministic tool requests; Service HTTP/WebSockets, projection, input and Sidecar execution are real. No host compositor, display, home or session bus is mounted. The protected runner must be externally reachable through the pre-provisioned HTTPS proxy; the workflow never edits DNS, firewall, certificates or host services. The untrusted port must be reachable by the Windows runner. Only pairing issuance uses the host secret; the app uses its real exchanged device token. Protect and restrict network access to this test environment.
-
-The Service fixture uses Docker host networking on the dedicated Linux runner so pairing-host authorization sees the proxy's loopback peer. The app still pairs to the external HTTPS origin, which starts its off-host Sidecar; the harness reconstructs that configured public origin from the real issued code. A Docker bridge proxy peer would fail the Service's same-host issuance check. The fixture does not relax production pairing authorization or CORS.
-
-Never expose the self-hosted runner to untrusted fork/PR code or use `pull_request_target`. Use a dedicated runner checkout and ephemeral account; stop/remove leftovers after a force-cancelled job (the container name is `omarchy-windows-smoke-<GITHUB_RUN_ID>`). Normal success/failure invokes cleanup. GitHub job cancellation can prevent any cleanup job from running. Provisioning this remote runner/proxy is an explicit external prerequisite, not an automatic skip. Missing URLs, secret, driver, Service or any assertion fails the full smoke. The ordinary PR workflow builds and checks NSIS only.
+The [manual and reusable workflow](../../.github/workflows/windows-webview-smoke.yml) builds and installs the real NSIS package, then drives its WebView2 using tauri-driver and the matching Edge WebDriver. The runner supplies a scripted loopback model endpoint. The actual desktop and standalone daemon exercise launch, pairing, provider Settings, Conversation messages, attachments, and offline Recall. No off-host fixture is required.
 
 The harness sets `OMARCHY_BOT_SMOKE_DIR` for native application-directory isolation in addition to WebView2's user-data folder. Windows Known Folder APIs do not honor `APPDATA` environment overrides by themselves; use the native smoke directory seam when executing on a developer checkout, and retain the disposable Windows account requirement for Credential Manager and URL-scheme registration.
 
-For an already-running private Linux fixture, set the four smoke variables (`WINDOWS_SMOKE_X11_FIXTURE=/src/.lane/windows-app/x11-fixture`) then run `./scripts/windows-app/smoke.ps1`. It launches the installed executable under tauri-driver with private WebView2/local application data. It covers cold URL-scheme pairing, forwarding into the same running process/window, Credential Manager and token absence, the event stream delivering a Bot reply, actual magenta Sway pixels, pointer turning them cyan, keyboard turning them yellow, and an exact approved PowerShell `local.run` whose output and outgoing `dev_` tag match the real registered Windows Sidecar. Screenshots, artifact hash, installer/uninstaller assertions and concise results are uploaded. A partial result never reports the full suite successful.
+Install tauri-driver 2.1.0 and a matching Edge WebDriver, put both on `PATH`, and run `./scripts/windows-app/smoke.ps1` in the disposable account. The workflow uploads the installed test results, screenshot, and driver logs. Verify desktop tool approval, execution, and denial from the installed app with a disposable local file and directory in a separate native acceptance run.
 
 ## Cross-platform release
 
 An `app-vX.Y.Z` tag runs `app-release.yml`, which calls `windows-app-release.yml` to require the matching stable version and run the complete packaged WebView2 gate. Windows builds and smoke must succeed alongside Linux and both macOS architectures before the publication job runs. The Windows workflow can also be dispatched on the matching tag to validate release artifacts; it never independently publishes or alters a manifest. Its concurrency groups differ from the caller, avoiding a reusable-workflow deadlock.
 
-`windows-webview-smoke.yml` separates the native build from execution: release compilation selects the protected `app-release` environment for `TAURI_UPDATER_PUBKEY` and Tauri private key/password; the Service fixture and WebView2 jobs retain `windows-smoke` for their URLs and pairing-host secret. Only the build step receives updater signing secrets. The signed NSIS bytes and build metadata are uploaded as `windows-app-build`, downloaded under `.lane` on the smoke runner, and installed after rebasing the recorded installer path. No private keys, keychains or smoke credentials are uploaded. The same artifact is downloaded by publication; no second Windows build occurs.
+Release compilation uses the protected `app-release` environment for the updater public key and signing credentials. The Windows smoke job downloads the build artifact and installs those same NSIS bytes. Publication uses that installer and the verified standalone archive from `windows-app-build`.
 
 Set `TAURI_UPDATER_PUBKEY` and `TAURI_SIGNING_PRIVATE_KEY` / optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in `app-release`. The same key is used on Linux, both macOS architectures and Windows. Protect both environments for trusted release refs. `build.ps1 -Release` embeds `APP_VERSION`, public key and `https://github.com/<owner>/<repo>/releases/download/app-latest/latest.json`, enables Tauri updater generation, and requires the installer `.exe.sig`. Tauri 2's NSIS updater payload is the installer `.exe` itself; there is no invented zip payload. Installers are `omarchy-bot_<version>_x64-unsigned-preview-setup.exe`, with sibling `.sig` and `.sha256`. Authenticode remains independent; the local build script supports an already-provisioned certificate thumbprint, while CI currently produces unsigned previews.
 

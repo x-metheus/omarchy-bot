@@ -10,8 +10,6 @@ on:
         type: string
         default: ''
     secrets:
-      WINDOWS_SMOKE_HOST_SECRET:
-        required: false
       TAURI_SIGNING_PRIVATE_KEY:
         required: false
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
@@ -19,7 +17,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: windows-real-service-smoke
+  group: windows-agent-release-smoke
   cancel-in-progress: false
 jobs:
   build:
@@ -36,7 +34,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.5
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: dtolnay/rust-toolchain@1.97.1
       - run: bun install --frozen-lockfile
       - name: Build packaged Windows application
         shell: pwsh
@@ -52,38 +50,18 @@ jobs:
             .lane/dist/*
             .lane/windows-app/build-result.json
           if-no-files-found: error
-  service:
-    # Dedicated disposable runner; never run untrusted PR code here.
-    runs-on: [self-hosted, linux, x64, windows-smoke-service]
-    environment: windows-smoke
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.5
-      - run: bun install --frozen-lockfile
-      - name: Start real disposable Service and Sway fixture
-        env:
-          WINDOWS_SMOKE_HOST_SECRET: ${{ secrets.WINDOWS_SMOKE_HOST_SECRET }}
-        run: bash scripts/windows-app/linux-service.sh
   webview2:
-    needs: [service, build]
+    needs: build
     runs-on: windows-2022
-    environment: windows-smoke
     timeout-minutes: 90
     env:
-      WINDOWS_SMOKE_SERVICE_ORIGIN: ${{ vars.WINDOWS_SMOKE_SERVICE_ORIGIN }}
-      WINDOWS_SMOKE_UNTRUSTED_ORIGIN: ${{ vars.WINDOWS_SMOKE_UNTRUSTED_ORIGIN }}
-      WINDOWS_SMOKE_X11_FIXTURE: /src/.lane/windows-app/x11-fixture
-      WINDOWS_SMOKE_HOST_SECRET: ${{ secrets.WINDOWS_SMOKE_HOST_SECRET }}
       CARGO_HOME: ${{ github.workspace }}/.lane/windows-app/cargo
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.5
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: dtolnay/rust-toolchain@1.97.1
       - run: bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
@@ -106,7 +84,7 @@ jobs:
           Invoke-WebRequest "https://msedgedriver.microsoft.com/$version/edgedriver_win64.zip" -OutFile .lane/windows-app/edgedriver.zip
           Expand-Archive .lane/windows-app/edgedriver.zip .lane/windows-app/tools/bin -Force
           "$pwd/.lane/windows-app/tools/bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
-      - name: Run complete installed WebView2 suite
+      - name: Run installed Agent Daemon and WebView2 smoke
         shell: pwsh
         run: ./scripts/windows-app/smoke.ps1
       - uses: actions/upload-artifact@v4
@@ -117,19 +95,4 @@ jobs:
             .lane/dist/*
             .lane/windows-app/build-result.json
             .lane/windows-app/evidence/
-          if-no-files-found: error
-  cleanup:
-    needs: [service, webview2]
-    if: always()
-    runs-on: [self-hosted, linux, x64, windows-smoke-service]
-    environment: windows-smoke
-    timeout-minutes: 10
-    steps:
-      - name: Stop only this run's disposable Service
-        run: bash scripts/windows-app/linux-service.sh stop
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: windows-linux-service-evidence
-          path: .lane/windows-app/evidence/
           if-no-files-found: error

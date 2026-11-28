@@ -10,10 +10,13 @@ try {
   $env:CARGO_HOME = "$lane/cargo"
   $env:CARGO_TARGET_DIR = "$lane/target"
   if (-not (Test-Path node_modules)) { & bun install --frozen-lockfile; if ($LASTEXITCODE) { throw 'bun install failed' } }
-  & bun scripts/build-sidecar.ts
-  if ($LASTEXITCODE) { throw 'Sidecar build failed' }
   $version = (Get-Content apps/omarchy-bot/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-  $overlay = @{ bundle = @{ createUpdaterArtifacts = $false; shortDescription = 'Omarchy Bot Windows unsigned preview' } }
+  $overlay = @{ bundle = @{
+    createUpdaterArtifacts = $false
+    shortDescription = 'Omarchy Bot Windows unsigned preview'
+    externalBin = @('binaries/omarchy-agent-daemon')
+    resources = @{ 'binaries/recall-model/' = 'recall-model/' }
+  } }
   if ($Release) {
     if ($env:APP_VERSION -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'APP_VERSION must match app-vX.Y.Z.' }
     foreach ($name in @('TAURI_SIGNING_PRIVATE_KEY','TAURI_UPDATER_PUBKEY','TAURI_UPDATER_ENDPOINT')) {
@@ -30,6 +33,9 @@ try {
     $overlay.bundle.shortDescription = 'Omarchy Bot Windows signed build'
     $overlay.bundle.windows = @{ certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT; digestAlgorithm = 'sha256'; timestampUrl = 'http://timestamp.digicert.com' }
   }
+  $env:APP_VERSION = $version
+  & bun scripts/build-agent-daemon.ts
+  if ($LASTEXITCODE) { throw 'Agent Daemon build failed' }
   $config = "$lane/build-config.json"
   $overlay | ConvertTo-Json -Depth 10 | Set-Content $config -Encoding utf8
   Push-Location apps/omarchy-bot

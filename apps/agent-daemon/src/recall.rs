@@ -1,5 +1,3 @@
-use std::fs::{self, File};
-use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -16,7 +14,6 @@ use rig_harness::prelude::{
     App, AppToolsExt, CallOf, Commands, On, Query, Res, Resource, Running, Scope, TokioRuntime,
     ToolCalled, ToolOptions, Touches, Wake,
 };
-use ring::digest::{self, SHA256};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -25,6 +22,7 @@ use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use crate::agent::conversation::{BotAgent, ConversationTools, TurnDelivery};
+use crate::recall_assets::{self, ModelLocation};
 use crate::store::{Role, Store};
 
 pub(crate) const TOOL_NAME: &str = "recall";
@@ -32,7 +30,6 @@ pub(crate) const DIMENSIONS: usize = 384;
 const PASSAGE_BYTES: usize = 480;
 const PASSAGE_OVERLAP: usize = 80;
 const MAX_QUERY_BYTES: usize = 4_096;
-const ARTIFACTS: &str = include_str!("../recall-model.sha256");
 
 #[derive(Clone, Copy)]
 pub(crate) struct RecallScope {
@@ -86,6 +83,7 @@ pub(crate) enum Unavailable {
     ModelUnreadable,
     VerificationFailed,
     InitializationFailed,
+    DownloadFailed,
 }
 
 #[derive(Clone, Resource)]
@@ -99,19 +97,17 @@ struct RecallInner {
 }
 
 impl Recall {
-    pub(crate) fn start(runtime: &Handle, directory: Option<PathBuf>, store: Store) -> Self {
+    pub(crate) fn start(runtime: &Handle, location: Option<ModelLocation>, store: Store) -> Self {
         let recall = Self(Arc::new(RecallInner {
             model: OnceLock::new(),
             store,
             inference: Mutex::default(),
             changes: Notify::new(),
         }));
-        if let Some(directory) = directory {
+        if let Some(location) = location {
             let recall = recall.clone();
             runtime.spawn(async move {
-                let loaded = tokio::task::spawn_blocking(move || load_model(&directory))
-                    .await
-                    .unwrap_or(Err(Unavailable::InitializationFailed));
+                let loaded = ensure_model(location.directory, location.download).await;
                 let ready = loaded.is_ok();
                 let _ = recall.0.model.set(loaded);
                 if ready {
@@ -359,13 +355,41 @@ impl Encoder {
     }
 }
 
+pub(crate) async fn prepare_model(directory: PathBuf, download: bool) -> Result<(), Unavailable> {
+    ensure_model(directory, download).await.map(drop)
+}
+
+async fn ensure_model(directory: PathBuf, download: bool) -> Result<Encoder, Unavailable> {
+    let staged = if download
+        && !tokio::fs::try_exists(&directory)
+            .await
+            .map_err(recall_assets::file_error)?
+    {
+        Some(recall_assets::download(&directory).await?)
+    } else {
+        None
+    };
+    tokio::task::spawn_blocking(move || {
+        let source = staged
+            .as_ref()
+            .map_or(directory.as_path(), |stage| stage.path());
+        let model = load_model(source)?;
+        if let Some(staged) = staged {
+            std::fs::rename(staged.path(), &directory).map_err(recall_assets::file_error)?;
+        }
+        Ok(model)
+    })
+    .await
+    .unwrap_or(Err(Unavailable::InitializationFailed))
+}
+
 fn load_model(directory: &Path) -> Result<Encoder, Unavailable> {
-    let onnx = verified_file(directory, "onnx/model_int8.onnx", 118_054_593)?;
+    let onnx = recall_assets::ONNX.read(directory)?;
     let tokenizer = TokenizerFiles {
-        tokenizer_file: verified_file(directory, "tokenizer.json", 17_082_730)?,
-        config_file: verified_file(directory, "config.json", 658)?,
-        special_tokens_map_file: verified_file(directory, "special_tokens_map.json", 167)?,
-        tokenizer_config_file: verified_file(directory, "tokenizer_config.json", 443)?,
+        tokenizer_file: recall_assets::TOKENIZER.read(directory)?,
+        config_file: recall_assets::CONFIG.read(directory)?,
+        special_tokens_map_file: recall_assets::SPECIAL_TOKENS.read(directory)?,
+        tokenizer_config_file: recall_assets::TOKENIZER_CONFIG.read(directory)?,
     };
 
     // FastEmbed's per-session default follows host CPU count. Use a bounded
@@ -397,40 +421,4 @@ fn load_model(directory: &Path) -> Result<Encoder, Unavailable> {
         .embed("query: ", "Recall model check")
         .map_err(|_| Unavailable::InitializationFailed)?;
     Ok(encoder)
-}
-
-fn verified_file(directory: &Path, name: &str, size: u64) -> Result<Vec<u8>, Unavailable> {
-    let path = directory.join(name);
-    let metadata = fs::metadata(&path).map_err(file_error)?;
-    if !metadata.is_file() || metadata.len() != size {
-        return Err(Unavailable::VerificationFailed);
-    }
-    let mut bytes = Vec::with_capacity(size as usize);
-    File::open(path)
-        .map_err(file_error)?
-        .take(size + 1)
-        .read_to_end(&mut bytes)
-        .map_err(file_error)?;
-    let expected = ARTIFACTS
-        .lines()
-        .filter_map(|line| line.split_once("  "))
-        .find_map(|(hash, file)| (file == name).then_some(hash))
-        .expect("every Recall artifact has a pinned digest");
-    let hash = digest::digest(&SHA256, &bytes);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let actual = hash
-        .as_ref()
-        .iter()
-        .flat_map(|byte| [HEX[(byte >> 4) as usize], HEX[(byte & 15) as usize]]);
-    if !actual.eq(expected.bytes()) {
-        return Err(Unavailable::VerificationFailed);
-    }
-    Ok(bytes)
-}
-
-fn file_error(error: io::Error) -> Unavailable {
-    match error.kind() {
-        io::ErrorKind::NotFound => Unavailable::ModelMissing,
-        _ => Unavailable::ModelUnreadable,
-    }
 }
