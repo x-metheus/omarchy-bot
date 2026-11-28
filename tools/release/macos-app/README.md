@@ -1,10 +1,9 @@
 # macOS dmg release
 
-On a native Apple Silicon or Intel Mac, install the Xcode command line tools and the Bun and Rust versions pinned in the [macOS build workflow](../../.github/workflows/macos-app.yml). The frozen Bun install provides the pinned Tauri CLI.
+On a native Apple Silicon or Intel Mac, install the Xcode command line tools and the Bun and Rust versions pinned in the [macOS build workflow](../../../.github/workflows/macos-app.yml). Run the builder from the repository root. It installs the locked release tools and desktop dependencies, including the pinned Tauri CLI.
 
 ```sh
-bun install --frozen-lockfile
-bash scripts/build-macos-app.sh --unsigned
+bash tools/release/build-macos-app.sh --unsigned
 ```
 
 The desktop application and bundled Agent Daemon require macOS 13.0 or later and build with Rust 1.97.1.
@@ -13,11 +12,11 @@ The builder verifies the pinned Recall model and emits the desktop dmg and stand
 
 The merged `src-tauri/Info.plist` permits plaintext HTTP for `localhost`, IPv4 loopback `127.0.0.0/8`, and IPv6 `::1` in App Transport Security. Verify those forms on the native checklist, particularly macOS 14+ numeric-IP behavior.
 
-For distribution, run `bash scripts/build-macos-app.sh --signed`. Supply `APPLE_SIGNING_IDENTITY` as a **Developer ID Application** identity, `APPLE_ID`, the app-specific `APPLE_PASSWORD`, and `APPLE_TEAM_ID`. Local signing uses the installed identity; CI additionally requires the base64 `.p12` `APPLE_CERTIFICATE` and its `APPLE_CERTIFICATE_PASSWORD`, which Tauri imports into a temporary build keychain. Missing credentials, failed signing, failed notarization or failed Gatekeeper/stapler assessment stop the job. This path deliberately supports one notarization credential method (Apple ID) rather than ambiguous partial alternatives. Never add credentials to the repository or evidence. See [Tauri signing prerequisites](https://v2.tauri.app/distribute/sign/macos/).
+For distribution, run `bash tools/release/build-macos-app.sh --signed`. Supply `APPLE_SIGNING_IDENTITY` as a **Developer ID Application** identity, `APPLE_ID`, the app-specific `APPLE_PASSWORD`, and `APPLE_TEAM_ID`. Local signing uses the installed identity; CI additionally requires the base64 `.p12` `APPLE_CERTIFICATE` and its `APPLE_CERTIFICATE_PASSWORD`, which Tauri imports into a temporary build keychain. Missing credentials, failed signing, failed notarization or failed Gatekeeper/stapler assessment stop the job. This path deliberately supports one notarization credential method (Apple ID) rather than ambiguous partial alternatives. Never add credentials to the repository or evidence. See [Tauri signing prerequisites](https://v2.tauri.app/distribute/sign/macos/).
 
 Tauri signs the app and the embedded Agent Daemon with hardened runtime and notarizes and staples the app. The script also notarizes and staples the dmg, verifies both executable signatures, and assesses the application and outer download.
 
-The [macOS workflow](../../.github/workflows/macos-app.yml) runs natively on `macos-15` (Apple Silicon) and `macos-15-intel` (Intel).
+The [macOS workflow](../../../.github/workflows/macos-app.yml) runs natively on `macos-15` (Apple Silicon) and `macos-15-intel` (Intel).
 
 ## Cross-platform publication
 

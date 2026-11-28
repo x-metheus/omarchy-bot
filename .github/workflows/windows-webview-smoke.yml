@@ -35,14 +35,13 @@ jobs:
         with:
           bun-version: 1.4.5
       - uses: dtolnay/rust-toolchain@1.97.1
-      - run: bun install --frozen-lockfile
       - name: Build packaged Windows application
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           RELEASE_BUILD: ${{ inputs.release }}
-        run: ./scripts/windows-app/build.ps1 -Release:($env:RELEASE_BUILD -eq 'true')
+        run: ./tools/release/windows-app/build.ps1 -Release:($env:RELEASE_BUILD -eq 'true')
       - uses: actions/upload-artifact@v4
         with:
           name: windows-app-build
@@ -62,7 +61,7 @@ jobs:
         with:
           bun-version: 1.4.5
       - uses: dtolnay/rust-toolchain@1.97.1
-      - run: bun install --frozen-lockfile
+      - run: bun install --cwd tools/release --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: windows-app-build
@@ -86,7 +85,7 @@ jobs:
           "$pwd/.lane/windows-app/tools/bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
       - name: Run installed Agent Daemon and WebView2 smoke
         shell: pwsh
-        run: ./scripts/windows-app/smoke.ps1
+        run: ./tools/release/windows-app/smoke.ps1
       - uses: actions/upload-artifact@v4
         if: always()
         with:

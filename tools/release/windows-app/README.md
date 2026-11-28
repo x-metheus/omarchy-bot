@@ -6,14 +6,13 @@ The compiled Sidecar process suite checks that a successfully launched applicati
 
 ## Build and install checks
 
-Dispatch the [Windows package workflow](../../.github/workflows/windows-app.yml) to build and run the install-only smoke in GitHub Actions.
+Dispatch the [Windows package workflow](../../../.github/workflows/windows-app.yml) to build and run the install-only smoke in GitHub Actions.
 
-Use a disposable Windows x64 account with PowerShell 7, Bun 1.4.5, Rust 1.97.1 MSVC, Visual Studio C++ build tools, WebView2, and network access for Tauri's NSIS toolchain and the pinned model. The frozen Bun install supplies the Tauri CLI.
+Use a disposable Windows x64 account with PowerShell 7, Bun 1.4.5, Rust 1.97.1 MSVC, Visual Studio C++ build tools, WebView2, and network access for Tauri's NSIS toolchain and the pinned model. Run the builder from the repository root. It installs the locked release tools and desktop dependencies, including the pinned Tauri CLI.
 
 ```powershell
-bun install --frozen-lockfile
-./scripts/windows-app/build.ps1
-./scripts/windows-app/smoke.ps1 -InstallOnly
+./tools/release/windows-app/build.ps1
+./tools/release/windows-app/smoke.ps1 -InstallOnly
 ```
 
 Build output and Cargo caches remain in `.lane/windows-app`; installers and checksums go to `.lane/dist`. The stable product name, version and `com.omarchy.bot` identity remain independent of preview labeling, preserving upgrade identity. Unsigned installers have `unsigned-preview` in their filename and preview bundle metadata. `WINDOWS_CERTIFICATE_THUMBPRINT` optionally enables an already-provisioned account's Authenticode certificate; the script fails if the resulting signature is invalid. No certificate is installed by these scripts. Updater signatures are separate and required for release builds even when Authenticode is absent.
@@ -24,11 +23,11 @@ Windows stores the daemon connection in Credential Manager at `agent-daemon-conn
 
 ## Full real WebView2 smoke
 
-The [manual and reusable workflow](../../.github/workflows/windows-webview-smoke.yml) builds and installs the real NSIS package, then drives its WebView2 using tauri-driver and the matching Edge WebDriver. The runner supplies a scripted loopback model endpoint. The actual desktop and standalone daemon exercise launch, pairing, provider Settings, Conversation messages, attachments, and offline Recall. No off-host fixture is required.
+The [manual and reusable workflow](../../../.github/workflows/windows-webview-smoke.yml) builds and installs the real NSIS package, then drives its WebView2 using tauri-driver and the matching Edge WebDriver. The runner supplies a scripted loopback model endpoint. The actual desktop and standalone daemon exercise launch, pairing, provider Settings, Conversation messages, attachments, and offline Recall. No off-host fixture is required.
 
 The harness sets `OMARCHY_BOT_SMOKE_DIR` for native application-directory isolation in addition to WebView2's user-data folder. Windows Known Folder APIs do not honor `APPDATA` environment overrides by themselves; use the native smoke directory seam when executing on a developer checkout, and retain the disposable Windows account requirement for Credential Manager and URL-scheme registration.
 
-Install tauri-driver 2.1.0 and a matching Edge WebDriver, put both on `PATH`, and run `./scripts/windows-app/smoke.ps1` in the disposable account. The workflow uploads the installed test results, screenshot, and driver logs. Verify desktop tool approval, execution, and denial from the installed app with a disposable local file and directory in a separate native acceptance run.
+Install tauri-driver 2.1.0 and a matching Edge WebDriver, put both on `PATH`, and run `./tools/release/windows-app/smoke.ps1` in the disposable account. The workflow uploads the installed test results, screenshot, and driver logs. Verify desktop tool approval, execution, and denial from the installed app with a disposable local file and directory in a separate native acceptance run.
 
 ## Cross-platform release
 
@@ -43,7 +42,7 @@ The publication caller assembles all four platform entries and includes both mac
 The shared assembler is independently runnable at the CLI seam after downloading all platform assets into one directory:
 
 ```sh
-APP_VERSION=1.2.3 GITHUB_REPOSITORY=owner/repo TAURI_UPDATER_PUBKEY='<public key>' bun scripts/app-release.ts asset-directory
+APP_VERSION=1.2.3 GITHUB_REPOSITORY=owner/repo TAURI_UPDATER_PUBKEY='<public key>' bun tools/release/app-release.ts asset-directory
 ```
 
 Missing platforms, installers, signatures, bad checksums or mismatched signed version/public-key metadata fail before manifest emission. Cryptographic verification remains Tauri's installation responsibility, exercised by the Linux signed updater smoke; this assembler checks release identity and integrity, not the signature's cryptography. Failed builds publish nothing. Rerun failed jobs to reuse successful build artifacts. Interrupted draft uploads may be replaced while private; public versioned bytes and manifest platform entries are immutable and must match on retry. A changed rebuild needs a new version. The rolling `app-latest` advances only to a numerically newer complete stable app version; publication of an older tag cannot roll it back.

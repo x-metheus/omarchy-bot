@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$root"
 mode=${1:---unsigned}
-[[ $# -le 1 && ( $mode == --unsigned || $mode == --signed ) ]] || { echo 'Usage: bash scripts/build-macos-app.sh [--unsigned|--signed]' >&2; exit 1; }
+[[ $# -le 1 && ( $mode == --unsigned || $mode == --signed ) ]] || { echo 'Usage: bash tools/release/build-macos-app.sh [--unsigned|--signed]' >&2; exit 1; }
 # Empty GitHub secrets must not enable Tauri signing or notarization accidentally.
 for variable in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
   [[ -n ${!variable:-} ]] || unset "$variable"
@@ -34,14 +34,15 @@ case $(uname -m) in
 esac
 export APP_VERSION=${APP_VERSION:-$(bun -e 'console.log(JSON.parse(await Bun.file("apps/omarchy-bot/src-tauri/tauri.conf.json").text()).version)')}
 export TAURI_UPDATER_PUBKEY=${TAURI_SIGNING_PUBLIC_KEY:-}
-build_config=$(bun scripts/linux-app/build-config.ts)
+build_config=$(bun tools/release/linux-app/build-config.ts)
 version=$APP_VERSION
 export CARGO_TARGET_DIR="$root/.lane/macos-app/target"
 export CARGO_HOME="$root/.lane/macos-app/cargo"
 export BUN_INSTALL_CACHE_DIR="$root/.lane/macos-app/bun-cache"
 mkdir -p "$root/.lane/dist" "$root/.lane/macos-app/evidence"
-[[ -d node_modules ]] || bun install --frozen-lockfile
-bun scripts/build-agent-daemon.ts
+bun install --cwd tools/release --frozen-lockfile
+bun install --cwd apps/omarchy-bot --frozen-lockfile
+bun tools/release/build-agent-daemon.ts
 arguments=(--bundles app,dmg --target "$triple" --config "$build_config")
 (cd apps/omarchy-bot && bun run tauri build "${arguments[@]}" -- --locked)
 bundle="$CARGO_TARGET_DIR/$triple/release/bundle"
@@ -52,7 +53,7 @@ artifact="$root/.lane/dist/omarchy-bot_${version}_${architecture}.dmg"
 daemon="$app/Contents/MacOS/omarchy-agent-daemon"
 "$daemon" --verify-recall-model "$app/Contents/Resources/recall-model"
 OMARCHY_BOT_SMOKE_AGENT_ARCHIVE="$root/.lane/dist/omarchy-agent-daemon_${version}_${triple}.tar.gz" \
-  OMARCHY_BOT_SMOKE_EVIDENCE="$root/.lane/macos-app/evidence" bun scripts/agent-release-smoke.ts
+  OMARCHY_BOT_SMOKE_EVIDENCE="$root/.lane/macos-app/evidence" bun tools/release/agent-release-smoke.ts
 if [[ $mode == --signed ]]; then
   codesign --verify --deep --strict --verbose=2 "$app"
   codesign --verify --strict --verbose=2 "$daemon"
@@ -72,7 +73,7 @@ if [[ -n ${TAURI_SIGNING_PRIVATE_KEY:-} ]]; then
   archive="$root/.lane/dist/omarchy-bot_${version}_${architecture}.app.tar.gz"
   cp "$updater" "$archive"
   cp "$updater.sig" "$archive.sig"
-  bun scripts/linux-app/check-signature.ts "$archive.sig" "$version"
+  bun tools/release/linux-app/check-signature.ts "$archive.sig" "$version"
   (cd "$root/.lane/dist" && shasum -a 256 "$(basename "$archive")") | tee "$archive.sha256"
 fi
 printf 'mode=%s\narchitecture=%s\nversion=%s\nWKWebView=not-run\n' "$mode" "$architecture" "$version" | tee "$root/.lane/macos-app/evidence/build-$architecture.txt"

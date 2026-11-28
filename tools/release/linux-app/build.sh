@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
-bash /src/scripts/linux-app/prepare-bundler.sh
-if [[ ! -d node_modules ]]; then bun install --frozen-lockfile; fi
-bun scripts/build-agent-daemon.ts
-config=$(bun scripts/linux-app/build-config.ts)
+bash /src/tools/release/linux-app/prepare-bundler.sh
+bun install --cwd tools/release --frozen-lockfile
+bun install --cwd apps/omarchy-bot --frozen-lockfile
+bun tools/release/build-agent-daemon.ts
+config=$(bun tools/release/linux-app/build-config.ts)
 version=$(bun -e 'console.log(JSON.parse(process.argv[1]).version)' "$config")
 cd apps/omarchy-bot
-[[ -f src-tauri/Cargo.lock ]] || cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
 bun run tauri build --config "$config" --bundles appimage -- --locked
 name=omarchy-bot_${version}_amd64.AppImage
-artifact=/src/.lane/linux-app/target/release/bundle/appimage/$name
+artifact=$CARGO_TARGET_DIR/release/bundle/appimage/$name
 [[ -f $artifact ]] || { echo "Missing expected AppImage: $artifact" >&2; exit 1; }
 if [[ -n ${TAURI_SIGNING_PRIVATE_KEY:-} ]]; then
   [[ -s $artifact.sig ]] || { echo "Missing updater signature: $artifact.sig" >&2; exit 1; }
-  bun /src/scripts/linux-app/check-signature.ts "$artifact.sig" "$version"
+  bun /src/tools/release/linux-app/check-signature.ts "$artifact.sig" "$version"
   cp "$artifact.sig" "/src/.lane/dist/$name.sig"
 else
   rm -f "/src/.lane/dist/$name.sig"

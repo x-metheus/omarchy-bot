@@ -15,14 +15,14 @@ jobs:
         with:
           bun-version: 1.4.5
       - uses: dtolnay/rust-toolchain@1.97.1
-      - run: bun install --frozen-lockfile
-      - run: bun test tests/integration/app-release.test.ts
+      - run: bun install --cwd tools/release --frozen-lockfile
+      - run: bun test tools/release/tests/app-release.test.ts
       - name: Build NSIS installer and standalone Agent Daemon
         shell: pwsh
-        run: ./scripts/windows-app/build.ps1
+        run: ./tools/release/windows-app/build.ps1
       - name: Install, inspect registered deep-link handler, uninstall
         shell: pwsh
-        run: ./scripts/windows-app/smoke.ps1 -InstallOnly
+        run: ./tools/release/windows-app/smoke.ps1 -InstallOnly
       - uses: actions/upload-artifact@v4
         if: always()
         with:

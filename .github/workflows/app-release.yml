@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Prove signed update, tamper refusal, and restart in private WebKitGTK
-        run: bash scripts/linux-app/updater-smoke.sh
+        run: bash tools/release/linux-app/updater-smoke.sh
       - name: Build signed release AppImage in pinned container
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -46,9 +46,9 @@ jobs:
           set -euo pipefail
           : "${TAURI_UPDATER_PUBKEY:?Set the app-release TAURI_UPDATER_PUBKEY variable}"
           : "${TAURI_SIGNING_PRIVATE_KEY:?Set the app-release TAURI_SIGNING_PRIVATE_KEY secret}"
-          bash scripts/build-linux-app.sh
+          bash tools/release/build-linux-app.sh
       - name: Smoke the release AppImage in private WebKitGTK
-        run: bash scripts/smoke-linux-app.sh ".lane/dist/omarchy-bot_${APP_VERSION}_amd64.AppImage"
+        run: bash tools/release/smoke-linux-app.sh ".lane/dist/omarchy-bot_${APP_VERSION}_amd64.AppImage"
       - uses: actions/upload-artifact@v4
         with:
           name: app-release-linux
@@ -96,8 +96,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.5
+      - run: bun install --cwd tools/release --frozen-lockfile
       - name: Exercise complete release assembly and rejection cases
-        run: bun test tests/integration/app-release.test.ts
+        run: bun test tools/release/tests/app-release.test.ts
       - uses: actions/download-artifact@v4
         with:
           name: app-release-linux
@@ -119,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           cp .lane/windows-release/dist/* .lane/release-assets/
-          bun scripts/app-release.ts .lane/release-assets
+          bun tools/release/app-release.ts .lane/release-assets
           printf '%s\n' \
             "Omarchy Bot ${APP_VERSION} for Linux x86_64, macOS Apple Silicon and Intel, and Windows x64." \
             'App versions are independent of Service runtime versions.' \

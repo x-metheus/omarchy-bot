@@ -6,12 +6,13 @@ import { z } from "zod";
 // Exercise the shipped shell in real WebKit, including the native signature verifier.
 const run = process.env.OMARCHY_BOT_SMOKE_DIR;
 const app = process.env.OMARCHY_BOT_SMOKE_APP;
-assert.ok(run && app, "Run through scripts/linux-app/updater-smoke.sh");
-const evidence = path.resolve(".lane/linux-app/evidence");
+assert.ok(run && app, "Run through tools/release/linux-app/updater-smoke.sh");
+const root = path.resolve(import.meta.dirname, "../../..");
+const evidence = path.join(root, ".lane/linux-app/evidence");
 mkdirSync(evidence, { recursive: true });
 const checks: string[] = [];
 let session = "";
-const candidate = path.resolve(process.env.OMARCHY_BOT_UPDATE_ARTIFACT ?? ".lane/dist/omarchy-bot_0.1.1_amd64.AppImage");
+const candidate = path.resolve(process.env.OMARCHY_BOT_UPDATE_ARTIFACT ?? path.join(root, ".lane/dist/omarchy-bot_0.1.1_amd64.AppImage"));
 assert.ok(existsSync(candidate), `Missing signed candidate: ${candidate}`);
 const signature = readFileSync(`${candidate}.sig`, "utf8").trim();
 let version = "0.1.1";

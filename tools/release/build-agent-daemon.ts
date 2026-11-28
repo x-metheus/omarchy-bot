@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { copyFile, mkdir, rename } from "node:fs/promises";
 import path from "node:path";
 
-const root = path.resolve(import.meta.dirname, "..");
+const root = path.resolve(import.meta.dirname, "../..");
 const version = process.env.APP_VERSION || "0.1.0";
 assert.match(version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
 const target = path.resolve(root, process.env.CARGO_TARGET_DIR || ".lane/agent-daemon/target");
@@ -17,12 +17,12 @@ async function run(command: string[]) {
   assert.equal(await child.exited, 0, `${command[0]} failed (${command[1]})`);
 }
 
-const rustc = Bun.spawnSync(["rustc", "+1.97.1", "--print", "host-tuple"], { cwd: root, env });
+const rustc = Bun.spawnSync(["rustc", "--print", "host-tuple"], { cwd: root, env });
 assert.equal(rustc.exitCode, 0, rustc.stderr.toString());
 const triple = rustc.stdout.toString().trim();
 assert.ok(["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"].includes(triple), `Unsupported native release target ${triple}`);
 
-await run(["cargo", "+1.97.1", "build", "--release", "--locked", "-j", "3", "--manifest-path", "apps/agent-daemon/Cargo.toml"]);
+await run(["cargo", "build", "--release", "--locked", "-j", "3", "-p", "omarchy-agent-daemon"]);
 await Promise.all([mkdir(binaries, { recursive: true }), mkdir(dist, { recursive: true })]);
 await run([executable, "--prepare-recall-model", path.join(binaries, "recall-model")]);
 await copyFile(path.join(root, "apps/agent-daemon/recall-model.LICENSE"), path.join(binaries, "recall-model", "LICENSE"));

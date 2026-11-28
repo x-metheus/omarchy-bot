@@ -2,14 +2,17 @@ param([switch]$Release)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'Build on Windows x64 with PowerShell 7.' }
-$root = (Resolve-Path "$PSScriptRoot/../..").Path
+$root = (Resolve-Path "$PSScriptRoot/../../..").Path
 Push-Location $root
 try {
   $lane = Join-Path $root '.lane/windows-app'
   New-Item -ItemType Directory -Force "$lane/cargo", "$lane/target", "$root/.lane/dist" | Out-Null
   $env:CARGO_HOME = "$lane/cargo"
   $env:CARGO_TARGET_DIR = "$lane/target"
-  if (-not (Test-Path node_modules)) { & bun install --frozen-lockfile; if ($LASTEXITCODE) { throw 'bun install failed' } }
+  & bun install --cwd tools/release --frozen-lockfile
+  if ($LASTEXITCODE) { throw 'Release tool dependency install failed' }
+  & bun install --cwd apps/omarchy-bot --frozen-lockfile
+  if ($LASTEXITCODE) { throw 'Desktop dependency install failed' }
   $version = (Get-Content apps/omarchy-bot/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
   $overlay = @{ bundle = @{
     createUpdaterArtifacts = $false
@@ -34,14 +37,14 @@ try {
     $overlay.bundle.windows = @{ certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT; digestAlgorithm = 'sha256'; timestampUrl = 'http://timestamp.digicert.com' }
   }
   $env:APP_VERSION = $version
-  & bun scripts/build-agent-daemon.ts
+  & bun tools/release/build-agent-daemon.ts
   if ($LASTEXITCODE) { throw 'Agent Daemon build failed' }
   $config = "$lane/build-config.json"
   $overlay | ConvertTo-Json -Depth 10 | Set-Content $config -Encoding utf8
   Push-Location apps/omarchy-bot
   try { & bun run tauri build --bundles nsis --config $config -- --locked; if ($LASTEXITCODE) { throw 'Tauri NSIS build failed' } }
   finally { Pop-Location }
-  $installers = @(Get-ChildItem "$lane/target/release/bundle/nsis/*-setup.exe")
+  $installers = @(Get-ChildItem "$env:CARGO_TARGET_DIR/release/bundle/nsis/*-setup.exe")
   if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer.' }
   $signed = (Get-AuthenticodeSignature $installers[0].FullName).Status -eq 'Valid'
   if ($env:WINDOWS_CERTIFICATE_THUMBPRINT -and -not $signed) { throw 'Requested Authenticode signing did not produce a valid signature.' }

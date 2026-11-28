@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import os from "node:os";
 import path from "node:path";
 
-const root = path.resolve(import.meta.dir, "../..");
+const root = path.resolve(import.meta.dir, "../../..");
 const bwrap = process.platform === "linux" ? Bun.which("bwrap") : null;
 // Some hosted runners ship bwrap but restrict unprivileged UID/GID mapping.
 const canUseRootNamespace = bwrap !== null && Bun.spawnSync([
@@ -32,7 +32,7 @@ async function session(options: { image?: boolean; container?: boolean; uid?: st
       "--proc", "/proc", "--dev", "/dev", "--bind", directory, "/fixture", "--ro-bind", root, "/src",
       ...(options.image ? ["--ro-bind", path.join(directory, "image"), "/etc/omarchy-bot-linux-app"] : []),
       ...(options.container ? ["--ro-bind", path.join(directory, "container"), "/.dockerenv"] : []),
-      "--", "/bin/bash", "-c", '[[ $(/usr/bin/id -u) == 0 ]] || exit 91; exec /bin/bash /src/scripts/linux-app/session.sh',
+      "--chdir", "/src", "--", "/bin/bash", "-c", '[[ $(/usr/bin/id -u) == 0 ]] || exit 91; exec /bin/bash /src/tools/release/linux-app/session.sh',
     ], {
       env: { PATH: "/fixture/bin:/usr/bin", OMARCHY_BOT_SMOKE_UID: options.uid ?? "1000", OMARCHY_BOT_SMOKE_GID: options.gid ?? "1000" },
       stdout: "pipe", stderr: "pipe",
@@ -79,7 +79,7 @@ linuxTest.each([
 
 linuxTest("Linux app smoke enters the private session as the requested unprivileged user", async () => {
   const result = await session({ image: true, container: true });
-  expect(result.drop).toBe("--reuid=1000 --regid=1000 --clear-groups /bin/true\n--reuid=1000 --regid=1000 --clear-groups bash /src/scripts/linux-app/session.sh\n");
+  expect(result.drop).toBe("--reuid=1000 --regid=1000 --clear-groups /bin/true\n--reuid=1000 --regid=1000 --clear-groups bash /src/tools/release/linux-app/session.sh\n");
   expect(result.mutations).toBe("");
   expect(result.code).toBe(0);
 });

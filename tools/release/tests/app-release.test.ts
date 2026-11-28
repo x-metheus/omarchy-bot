@@ -22,7 +22,8 @@ test("release CLI prepares one complete four-platform manifest and refuses incom
   const directory = mkdtempSync(path.join(os.tmpdir(), "app-release-"));
   const manifestFile = path.join(directory, "latest.json");
   const run = async (env: Record<string, string> = {}) => {
-    const child = Bun.spawn([process.execPath, "scripts/app-release.ts", directory], {
+    const child = Bun.spawn([process.execPath, path.resolve(import.meta.dirname, "../app-release.ts"), "."], {
+      cwd: directory,
       env: { ...process.env, APP_VERSION: "1.2.3", GITHUB_REPOSITORY: "example/bot", TAURI_UPDATER_PUBKEY: publicKey, ...env },
       stdout: "pipe", stderr: "pipe",
     });
