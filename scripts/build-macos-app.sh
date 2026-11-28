@@ -41,12 +41,11 @@ export CARGO_HOME="$root/.lane/macos-app/cargo"
 export BUN_INSTALL_CACHE_DIR="$root/.lane/macos-app/bun-cache"
 mkdir -p "$root/.lane/dist" "$root/.lane/macos-app/evidence"
 [[ -d node_modules ]] || bun install --frozen-lockfile
-bun run --filter=@omarchy-bot/web build
 bun scripts/build-sidecar.ts
 binary="$root/apps/omarchy-bot/src-tauri/binaries/omarchy-bot-sidecar-$triple"
 OMARCHY_BOT_TEST_SIDECAR_BINARY="$binary" bun test tests/integration/local-sidecar-process.test.ts
 arguments=(--bundles app,dmg --target "$triple" --config "$build_config")
-(cd apps/omarchy-bot && cargo tauri build "${arguments[@]}" -- --locked)
+(cd apps/omarchy-bot && bun run tauri build "${arguments[@]}" -- --locked)
 bundle="$CARGO_TARGET_DIR/$triple/release/bundle"
 app="$bundle/macos/omarchy-bot.app"
 dmgs=("$bundle"/dmg/*.dmg)

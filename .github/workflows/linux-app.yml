@@ -3,7 +3,6 @@ on:
   pull_request:
     paths:
       - "apps/omarchy-bot/**"
-      - "apps/web/**"
       - "apps/sidecar-rust/**"
       - "apps/daemon/**"
       - "packages/**"

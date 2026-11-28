@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { createMemoryShell, installShell, type LocalSidecarStatus } from "../../apps/web/src/lib/shell.ts";
-import { api } from "../../apps/web/src/lib/api.ts";
+import { createMemoryShell, installShell, type LocalSidecarStatus } from "../../apps/omarchy-bot/src/lib/shell.ts";
+import { api } from "../../apps/omarchy-bot/src/lib/api.ts";
 
 const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const originalFetch = globalThis.fetch;

@@ -214,7 +214,7 @@ The React web client connects to a Bun daemon that hosts the Bot runtime and per
 
 **Host Session acceptance remains open.** Automated real-Sway conformance covers two routed Screens, shared profile/runtime markers, Agent control, projection, URL reuse, deletion/reprovision, and host environment isolation. It does not prove the user's top bar, shortcuts, or ordinary physical-input experience. See the [Sway conformance test](tests/integration/bot-screen-sway-conformance.test.ts).
 
-Omarchy Bot at `apps/omarchy-bot` embeds the production Web UI in a thin Tauri 2 shell for Linux, macOS, and Windows. The Linux Service hosts the Bot runtime. Its packaged WebKitGTK smoke suite covers pairing, persistence, network policy, the event stream, Screen Projection, and Takeover. macOS WKWebView acceptance uses its native release checklist; Windows WebView2 acceptance uses the separate preview runner suite. Chromium tests remain shared UI coverage.
+The Tauri 2 desktop project at `apps/omarchy-bot` contains the UI and native shell for Linux, macOS, and Windows. Its packaged WebKitGTK smoke suite covers pairing, persistence, network policy, the event stream, Screen Projection, and Takeover. macOS WKWebView acceptance uses its native release checklist. Windows WebView2 acceptance uses the preview runner suite. Chromium tests cover the desktop frontend.
 
 The Local Sidecar connects outbound using `OMARCHY_BOT_SERVICE_URL` (`ws://…` or `wss://…`), `OMARCHY_BOT_DEVICE_ID` (`dev_<32hex>`), `OMARCHY_BOT_DEVICE_TOKEN` (the Paired Device token), and `OMARCHY_BOT_SIDECAR_ROOT`; `OMARCHY_BOT_HOSTNAME` is optional. TLS uses the operating system's trusted certificates, with no certificate bypass. Registration requires its OS (`linux`, `macos`, `windows`) and shell (`posix-sh`, `powershell-5.1`); the roster and each Turn's `local` tool description carry the sender's identity. Linux and macOS execute POSIX `sh` commands with process-group teardown; Windows executes Windows PowerShell 5.1 commands assigned to a Job Object before user code runs. Cancel and timeout terminate the command tree on every OS. File operations and search refuse `.ssh`, `.gnupg`, `.aws`, and `.config`; macOS additionally refuses `Library/Keychains`, `Library/Accounts`, and `Library/Application Support/com.apple.TCC`, while Windows additionally refuses Credentials, Protect, Vault, and Crypto under both `AppData/Local/Microsoft` and `AppData/Roaming/Microsoft`. Windows checks ignore case and expand existing NTFS short aliases, including ancestors of new write destinations. Screenshot, pointer, and compositor requests remain refused on every OS. The client tags each send with its Sidecar identity so the Service resolves **This Device** only from that Turn's sender; untagged, unknown, and offline senders never borrow another Sidecar. See the [Local Sidecar dispatch checks](tests/integration/local-sidecar-dispatch.test.ts).
 
@@ -226,14 +226,17 @@ On macOS, Web Control maps ⌘ to Ctrl and ⌥ to Super. Settings → Keyboard �
 
 Start with the [project instructions](AGENTS.md). The [development guide](docs/development.md) maps tasks to installed skills and verification commands. Use the [code map](docs/README.md#code-map) to locate the affected source and tests.
 
-From a local checkout:
+Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and run these commands from the repository root:
 
 ```bash
-bun install
-OMARCHY_BOT_DEV=1 bun run dev
+bun install --frozen-lockfile
+bun scripts/build-sidecar.ts
+bun run tauri dev
 ```
 
-Open **<http://127.0.0.1:7322>**. Vite serves the developer harness; the memory shell connects directly across origins to the Service, including HTTP, events, attachments, and Screen Projection. There is no API proxy. Issue a pairing code on the Service Host with `omarchy-bot pair`, then enter the printed address and code in Add Service. The memory shell stores the paired connection in that harness origin's localStorage; this is development persistence, while the app adapter owns keychain storage. Shell pairing intake accepts the same Service address and code without typing. A 401 clears the connection, stops event delivery, and returns to Add Service with a revoked-device message. The Service serves no static UI, single-page fallback, or `/pair` page, and its runtime archive excludes `apps/web/dist`.
+Run `bun run tauri build` to build the desktop application. Both Tauri commands also run from `apps/omarchy-bot`. The [development guide](docs/development.md#desktop-project-layout) covers the scaffold, application layout, and Agent Daemon prerequisite.
+
+For browser development against the legacy Service, run `OMARCHY_BOT_DEV=1 bun run dev` and open `http://127.0.0.1:7322`. The Vite harness uses the memory shell and connects directly to the Service over HTTP and WebSocket. Issue a pairing code with `omarchy-bot pair` on the Service Host and enter its address and code in Add Service. The harness stores its paired connection in browser localStorage, and the native shell uses the keychain. A 401 clears the connection, stops event delivery, and returns to Add Service with a revoked-device message. The runtime archive excludes the desktop app.
 
 The Service allows CORS and WebSocket connections from the app's fixed origins: `tauri://localhost`, `http://tauri.localhost`, and `https://tauri.localhost`. Set `OMARCHY_BOT_DEV=1` on the Service process to also allow HTTP development origins at exactly `localhost`, `127.0.0.1`, or `[::1]`, with any valid port. This opt-in defaults off and is not written into installed Service units. Preflight needs no token; actual API requests and WebSocket upgrades still require a Paired Device token in the `Authorization: Bearer` header or `access_token` query parameter. CORS never allows credentials (cookies). WebSockets without an Origin, such as the Local Sidecar, follow normal token authentication; foreign Origins are refused before authentication.
 
@@ -267,7 +270,7 @@ Conversation and plugin documentation links use the system browser. Clicking a m
 
 Windows x64 builds a per-user NSIS installer with the compiled PowerShell Local Sidecar and registered `omarchy-bot` deep links. Unsigned artifacts and release notes are labeled preview. Build with `pwsh -File scripts/windows-app/build.ps1`; the full packaged WebView2 suite additionally needs a reachable real Linux Service/Sway fixture. See [Windows build, smoke and release prerequisites](scripts/windows-app/README.md). CI distinguishes NSIS install checks from the full WebView suite and fails missing smoke prerequisites. The integrated native updater requires signed updater artifacts even for an unsigned preview installer; Windows runtime and publication acceptance remain runner checks.
 
-### Official website
+### Legacy public site
 
 The public product site lives in `apps/site`, separate from the local Bot Client.
 It remains a Vite + TypeScript frontend with native CSS. The full-viewport pixel
@@ -399,7 +402,7 @@ shared Skill files and custom MCP configuration. Live provider consent/business
 access, native Claude/Codex model authoring, and Tauri/WebView compatibility remain
 unverified; see the [acceptance record](.scratch/shared-plugins-native-discovery/issues/16-installed-plugin-upgrade-and-recovery.md).
 
-The composer uses Astryx's native slash-trigger menu. The [web package manifest](apps/web/package.json) pins the component library version.
+The composer uses Astryx's native slash-trigger menu. The [desktop app manifest](apps/omarchy-bot/package.json) pins the component library version.
 
 The Message input is a combobox while Skill commands are available, and a
 textbox for multiword drafts, offline Agents, and active Turns. End-to-end tests

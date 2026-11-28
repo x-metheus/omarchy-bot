@@ -1,12 +1,9 @@
 # macOS dmg release
 
-On a native Apple Silicon or Intel Mac, install the Xcode command line tools and the Bun and Rust versions pinned in the [macOS build workflow](../../.github/workflows/macos-app.yml). Install Tauri CLI 2.12.4 into the worktree.
+On a native Apple Silicon or Intel Mac, install the Xcode command line tools and the Bun and Rust versions pinned in the [macOS build workflow](../../.github/workflows/macos-app.yml). The frozen Bun install provides the pinned Tauri CLI.
 
 ```sh
-export CARGO_HOME="$PWD/.lane/macos-app/cargo"
-export CARGO_INSTALL_ROOT="$PWD/.lane/macos-app/tools"
-cargo install tauri-cli --version 2.12.4 --locked
-export PATH="$CARGO_INSTALL_ROOT/bin:$PATH"
+bun install --frozen-lockfile
 bash scripts/build-macos-app.sh --unsigned
 ```
 

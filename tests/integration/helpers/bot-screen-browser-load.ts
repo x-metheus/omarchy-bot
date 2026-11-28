@@ -80,14 +80,14 @@ export function selectNonLoopbackLanAddress(
 }
 
 export async function buildFinalWebClient(projectRoot: string): Promise<void> {
-  const build = Bun.spawn(["bun", "run", "--filter=@omarchy-bot/web", "build"], {
+  const build = Bun.spawn(["bun", "run", "--filter=@omarchy-bot/desktop", "build:frontend"], {
     cwd: projectRoot,
     stdin: "ignore",
     stdout: "inherit",
     stderr: "inherit",
   });
   const status = await build.exited;
-  const index = path.join(projectRoot, "apps/web/dist/index.html");
+  const index = path.join(projectRoot, "apps/omarchy-bot/dist/index.html");
   if (status !== 0 || !existsSync(index)) {
     throw new Error(`final web client build failed with status ${status}`);
   }
@@ -643,7 +643,7 @@ export function startProjectionProxy(
       const incoming = new URL(request.url);
       const target = new URL(`${incoming.pathname}${incoming.search}`, upstream);
       if (!incoming.pathname.startsWith("/api/")) {
-        const dist = path.resolve(import.meta.dir, "../../../apps/web/dist");
+        const dist = path.resolve(import.meta.dir, "../../../apps/omarchy-bot/dist");
         const asset = path.resolve(dist, `.${decodeURIComponent(incoming.pathname)}`);
         if (asset !== dist && !asset.startsWith(`${dist}${path.sep}`)) return new Response("not found", { status: 404 });
         return new Response(Bun.file(existsSync(asset) && !incoming.pathname.endsWith("/") ? asset : path.join(dist, "index.html")));

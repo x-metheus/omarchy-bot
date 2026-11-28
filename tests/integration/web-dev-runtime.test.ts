@@ -5,7 +5,7 @@ import path from "node:path";
 import { AVATAR_RENDERER_ID } from "../../packages/protocol/src/api.ts";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const webRoot = path.join(repoRoot, "apps/web");
+const appRoot = path.join(repoRoot, "apps/omarchy-bot");
 
 let devServer: Subprocess<"ignore", "pipe", "inherit"> | undefined;
 let devUrl = "";
@@ -23,7 +23,7 @@ beforeAll(async () => {
   devServer = Bun.spawn(
     ["bun", "run", "dev", "--", "--host", "127.0.0.1", "--port", String(port), "--strictPort", "--force"],
     {
-      cwd: webRoot,
+      cwd: appRoot,
       stdout: "pipe",
       stderr: "inherit",
     },

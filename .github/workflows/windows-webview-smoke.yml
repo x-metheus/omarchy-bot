@@ -38,12 +38,6 @@ jobs:
           bun-version: 1.4.5
       - uses: dtolnay/rust-toolchain@1.93.1
       - run: bun install --frozen-lockfile
-      - name: Install private Tauri CLI
-        shell: pwsh
-        run: |
-          cargo install tauri-cli --version 2.12.4 --locked --root "$pwd/.lane/windows-app/tools"
-          if ($LASTEXITCODE) { throw 'tauri-cli installation failed' }
-          "$pwd/.lane/windows-app/tools/bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
       - name: Build packaged Windows application
         shell: pwsh
         env:

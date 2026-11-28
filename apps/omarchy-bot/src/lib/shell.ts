@@ -1,4 +1,4 @@
-import defaults from "../../../omarchy-bot/shell-defaults.json";
+import defaults from "../../shell-defaults.json";
 
 export type ShellPlatform = "linux" | "macos" | "windows";
 export interface PairingRequest { serviceUrl: string; code: string }

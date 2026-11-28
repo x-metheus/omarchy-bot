@@ -6,7 +6,7 @@ The compiled Sidecar process suite checks that a successfully launched applicati
 
 ## Build and install checks
 
-Use a disposable Windows x64 account with PowerShell 7, Bun 1.4.4, Rust 1.93.1 MSVC, Visual Studio C++ build tools, WebView2 and network access for Tauri's NSIS toolchain. Install tauri-cli 2.12.4 with its Cargo lock into a private tool directory and add its bin directory to this process's PATH, as the workflow does. From the repository root:
+Use a disposable Windows x64 account with PowerShell 7, Bun 1.4.5, Rust 1.93.1 MSVC, Visual Studio C++ build tools, WebView2 and network access for Tauri's NSIS toolchain. The frozen Bun install provides the pinned Tauri CLI. From the repository root:
 
 ```powershell
 bun install --frozen-lockfile

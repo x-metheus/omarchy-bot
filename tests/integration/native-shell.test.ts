@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import type { Shell } from "../../apps/web/src/lib/shell.ts";
+import type { Shell } from "../../apps/omarchy-bot/src/lib/shell.ts";
 
 function install(platform: string, initial: Record<string, unknown> = {}, fetcher: (input: string | URL | Request, options?: RequestInit) => Promise<Response> = globalThis.fetch, digest = async () => "b".repeat(64)) {
   const calls: { command: string; args: unknown }[] = [];

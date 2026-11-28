@@ -5,7 +5,7 @@ import sharp from "../../apps/daemon/node_modules/sharp";
 import { AVATAR_RENDERER_ID, AVATAR_STYLE_IDS, AvatarRecipeDto, type BotDto } from "../../packages/protocol/src/index.ts";
 import { handleAvatarRequest } from "../../apps/daemon/src/api/avatarRoutes.ts";
 import { HttpError } from "../../apps/daemon/src/modules/bots/bots.ts";
-import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
+import { renderAvatarRecipe } from "../../apps/omarchy-bot/src/components/avatarRenderer.ts";
 import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 let h: Harness;

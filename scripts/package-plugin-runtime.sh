@@ -131,7 +131,6 @@ done
 
 # Keep the site workspace manifest, not publisher code, assets, or local secrets.
 tar -C "$root" --exclude=node_modules \
-  --exclude=apps/web/dist \
   --exclude=apps/cli/src/release-public-key \
   --exclude=apps/omarchy-bot \
   --exclude=apps/site/public --exclude=apps/site/src --exclude=apps/site/dist \

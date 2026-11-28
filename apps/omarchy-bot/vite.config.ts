@@ -14,6 +14,8 @@ function stylexForScripts(command: "build" | "serve"): Plugin {
     plugin.transform = function (code, id, options) {
       // Vite 8 passes CSS modules through JS transform hooks; StyleX only parses JS/TS sources.
       if (/\.css(?:$|\?)/.test(id)) return null;
+      // Pre-bundled dependencies already ship compiled styles. Vite can replace these chunks during discovery.
+      if (id.includes("/node_modules/.vite/deps/")) return null;
       return transform.call(this, code, id, options);
     };
   }
@@ -25,7 +27,9 @@ export default defineConfig(({ command }) => ({
     {
       name: "development-shell",
       apply: "serve",
-      transformIndexHtml: () => [{ tag: "script", attrs: { type: "module", src: "/src/dev-shell.ts" }, injectTo: "head" }],
+      transformIndexHtml: () => process.env.TAURI_ENV_PLATFORM
+        ? []
+        : [{ tag: "script", attrs: { type: "module", src: "/src/dev-shell.ts" }, injectTo: "head" }],
     },
     tanstackRouter({ target: "react", routesDirectory: "src/routes", generatedRouteTree: "src/routeTree.gen.ts" }),
     react(),
@@ -39,8 +43,13 @@ export default defineConfig(({ command }) => ({
       },
     },
   ],
+  clearScreen: false,
   server: {
-    host: process.env.OMARCHY_BOT_HOST ?? "127.0.0.1",
     port: 7322,
+    strictPort: true,
+    host: process.env.OMARCHY_BOT_HOST ?? "127.0.0.1",
+    watch: {
+      ignored: ["**/src-tauri/**"],
+    },
   },
 }));

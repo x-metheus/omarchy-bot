@@ -3,7 +3,6 @@ on:
   pull_request:
     paths:
       - "apps/omarchy-bot/**"
-      - "apps/web/**"
       - "apps/sidecar-rust/**"
       - "packages/**"
       - "tests/integration/local-sidecar-process.test.ts"
@@ -91,7 +90,6 @@ jobs:
     env:
       CARGO_HOME: ${{ github.workspace }}/.lane/macos-app/cargo
       CARGO_TARGET_DIR: ${{ github.workspace }}/.lane/macos-app/target
-      CARGO_INSTALL_ROOT: ${{ github.workspace }}/.lane/macos-app/tools
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -100,10 +98,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.93.1
-      - name: Install pinned Tauri CLI in the worktree
-        run: |
-          cargo install tauri-cli --version 2.12.4 --locked
-          echo "$CARGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
       - run: bun install --frozen-lockfile
       - name: Exercise native shell interface
         run: bun test tests/integration/native-shell.test.ts
