@@ -28,6 +28,8 @@ use crate::user_memory::{self, CurrentMemory, MemoryWrite, Proposal};
 
 pub(crate) use observations::{OBSERVATION_MESSAGE_OVERHEAD, Observation};
 
+use crate::desktop_tools::Target;
+
 #[derive(Serialize)]
 pub(crate) struct Bot {
     pub(crate) id: Uuid,
@@ -86,6 +88,7 @@ pub(crate) enum Admission {
         message_id: i64,
         text: String,
         attachments: Vec<Stored>,
+        desktop: Option<Target>,
         model: RigConnection,
     },
 }
@@ -289,6 +292,7 @@ impl Store {
         bot: Uuid,
         text: String,
         submissions: Vec<Submission>,
+        desktop: Option<Target>,
         history: History,
     ) -> Result<Admission> {
         let admission = self
@@ -335,12 +339,19 @@ impl Store {
                     )?;
                 }
                 work::admit(&transaction, UserMessageSource { bot, message_id })?;
+                if desktop.is_some() {
+                    transaction.execute(
+                        "INSERT INTO desktop_work (message_id) VALUES (?1)",
+                        [message_id],
+                    )?;
+                }
                 transaction.commit()?;
                 Ok(Admission::Accepted {
                     history,
                     message_id,
                     text,
                     attachments,
+                    desktop,
                     model,
                 })
             })

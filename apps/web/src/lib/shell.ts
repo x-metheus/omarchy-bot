@@ -23,8 +23,12 @@ export interface LocalAgentDaemon {
   pairingCode?(): Promise<string>;
 }
 
+export type DesktopSelectionKind = "directory" | "file";
+export interface DesktopSelection { session: string; name: string }
+
 export interface Shell {
   readonly agentDaemon?: LocalAgentDaemon;
+  readonly desktopTools?: { choose(kind: DesktopSelectionKind): Promise<DesktopSelection | null> } | undefined;
   readonly service: {
     baseUrl(): string;
     deviceToken(): string | undefined;

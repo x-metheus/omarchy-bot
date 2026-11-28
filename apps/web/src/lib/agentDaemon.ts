@@ -45,7 +45,7 @@ export const agentDaemon = {
   conversation: (id: string, signal?: AbortSignal) => json<AgentConversation>(botPath(id), signal ? { signal } : {}),
   rename: (id: string, name: string) => json<AgentBot>(botPath(id), { method: "PATCH", body: JSON.stringify({ name }) }),
   async remove(id: string) { await request(botPath(id), { method: "DELETE" }); },
-  async send(id: string, text: string, selected: readonly DraftAttachment[]) {
+  async send(id: string, text: string, selected: readonly DraftAttachment[], desktopSession?: string) {
     let body: string;
     if (selected.length) {
       const service = getShell().service;
@@ -55,12 +55,12 @@ export const agentDaemon = {
       if (service.baseUrl() !== origin || service.deviceToken() !== token) {
         throw new AttachmentSelectionError("The daemon connection changed. Reopen the Conversation before sending.");
       }
-      body = JSON.stringify({ text, attachments });
+      body = JSON.stringify({ text, attachments, desktopSession });
       if (new TextEncoder().encode(body).length > maxMessageBytes) {
         throw new AttachmentSelectionError("The message and attachments exceed 2 MiB. Remove an attachment and try again.");
       }
     } else {
-      body = JSON.stringify({ text });
+      body = JSON.stringify({ text, desktopSession });
     }
     const response = await request(`${botPath(id)}/messages`, { method: "POST", body });
     // The per-Bot feed already carries these replies and stays open across submissions.

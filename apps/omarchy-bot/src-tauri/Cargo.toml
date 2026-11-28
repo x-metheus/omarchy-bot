@@ -2,7 +2,7 @@
 name = "omarchy-bot"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.97.1"
 description = "Omarchy Bot application"
 
 [build-dependencies]
@@ -11,6 +11,7 @@ tauri-build = { version = "=2.7.4", features = [] }
 [dependencies]
 tauri = { version = "=2.12.5", features = [] }
 tauri-plugin-deep-link = "=2.6.3"
+tauri-plugin-dialog = "=2.8.4"
 tauri-plugin-opener = "=2.7.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,8 +22,12 @@ dirs = "7"
 base64 = "0.23"
 hmac = "0.12"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
+rig-core = { version = "=0.47.1", default-features = false }
+rig-tools = "=0.47.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-tokio = { version = "1", features = ["time"] }
+rustls-native-certs = "0.8"
+tokio = { version = "1", features = ["macros", "sync", "time"] }
+uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"

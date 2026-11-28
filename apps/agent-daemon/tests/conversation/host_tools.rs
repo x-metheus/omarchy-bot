@@ -17,7 +17,7 @@ fn workspace(directory: &Path) -> PathBuf {
     work
 }
 
-async fn start(directory: &Path, provider: &Provider) -> (Daemon, PathBuf) {
+pub(super) async fn start(directory: &Path, provider: &Provider) -> (Daemon, PathBuf) {
     let work = workspace(directory);
     let db = directory.join("conversation.sqlite3");
     provision_settings(&db);
@@ -136,12 +136,12 @@ async fn host_tools_refuse_startup_without_a_provisioned_bearer() {
     );
 }
 
-async fn tool(call: ProviderCall, index: usize, name: &str, args: Value) {
+pub(super) async fn tool(call: ProviderCall, index: usize, name: &str, args: Value) {
     call.tools(&[(&format!("call_fixture_{index}"), name, args)])
         .await;
 }
 
-fn latest_result(call: &ProviderCall) -> &str {
+pub(super) fn latest_result(call: &ProviderCall) -> &str {
     call.chat_messages()
         .iter()
         .rfind(|message| message["role"] == "tool")

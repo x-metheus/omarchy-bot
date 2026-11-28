@@ -40,9 +40,13 @@ pub(super) struct Pairing {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct PairedDevice(pub(super) Uuid);
+
+#[derive(Clone, Copy)]
 pub(super) enum Access {
     Conversation,
     Settings,
+    Device,
     Operator,
 }
 
@@ -78,16 +82,17 @@ impl Pairing {
 
 async fn authorize(
     State((pairing, access)): State<(Pairing, Access)>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     if pairing.operator.is_none() && matches!(access, Access::Conversation) {
         return next.run(request).await;
     }
     if let Some(provided) = bearer(request.headers()) {
-        if pairing
-            .operator
-            .is_some_and(|expected| bool::from(expected.as_ref().ct_eq(provided.as_ref())))
+        if !matches!(access, Access::Device)
+            && pairing
+                .operator
+                .is_some_and(|expected| bool::from(expected.as_ref().ct_eq(provided.as_ref())))
         {
             return uncached(next.run(request).await);
         }
@@ -100,6 +105,7 @@ async fn authorize(
                         .or_insert_with(|| watch::channel(()).0)
                         .subscribe();
                     drop(sessions);
+                    request.extensions_mut().insert(PairedDevice(device));
                     let mut response = tokio::select! {
                         biased;
                         _ = revoked.changed() => return denied(access),
@@ -145,6 +151,7 @@ fn denied(access: Access) -> Response {
     let code = match access {
         Access::Conversation => "conversation_unauthorized",
         Access::Settings => "settings_unauthorized",
+        Access::Device => "device_unauthorized",
         Access::Operator => "operator_unauthorized",
     };
     let mut response = ApiError(
@@ -282,6 +289,7 @@ async fn revoke(
     let revoked = tokio::spawn(async move {
         let mut sessions = daemon.pairing.sessions.lock().await;
         let revoked = daemon.store.revoke_device(device, now()).await?;
+        daemon.desktops.disconnect_device(device);
         sessions.remove(&device);
         Ok(revoked)
     })

@@ -8,6 +8,7 @@ use uuid::Uuid;
 use super::{Admission, ConversationEvent, Store, events, restore_conversation};
 use crate::agent::conversation::UserMessageSource;
 use crate::attachments;
+use crate::desktop_tools::Target;
 
 #[derive(Default)]
 pub(crate) struct Settlement {
@@ -34,6 +35,9 @@ pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
              status TEXT NOT NULL CHECK (status IN (
                  'queued', 'running', 'waiting', 'completed', 'failed', 'interrupted'
              ))
+         );
+         CREATE TABLE IF NOT EXISTS desktop_work (
+             message_id INTEGER PRIMARY KEY REFERENCES conversation_work(message_id) ON DELETE CASCADE
          );
          CREATE TABLE IF NOT EXISTS conversation_delegations (
              id INTEGER PRIMARY KEY,
@@ -180,17 +184,19 @@ impl Store {
             }
             super::History::Live => None,
         };
-        let text = db.connection.query_row(
-            "SELECT m.text FROM messages m JOIN conversation_work w ON w.message_id = m.id
+        let (text, desktop): (String, bool) = db.connection.query_row(
+            "SELECT m.text, EXISTS(SELECT 1 FROM desktop_work d WHERE d.message_id = m.id)
+             FROM messages m JOIN conversation_work w ON w.message_id = m.id
              WHERE m.bot_id = ?1 AND w.message_id = ?2 AND w.status = 'queued'",
             params![source.bot.as_bytes(), source.message_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         Ok(Some(Admission::Accepted {
             history,
             message_id: source.message_id,
             text,
             attachments: attachments::for_message(&db.connection, source.message_id)?,
+            desktop: desktop.then_some(Target::Unavailable),
             model,
         }))
     }

@@ -7,6 +7,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { attachmentAccept, AttachmentSelectionError, maxAttachments, type AgentAttachment, type DraftAttachment } from "../lib/agentAttachments.ts";
 import { agentDaemon, DaemonError, followConversation, type AgentConversation, type AgentMessage, type AgentWork, type ToolProgress } from "../lib/agentDaemon.ts";
+import { getShell, type DesktopSelection, type DesktopSelectionKind } from "../lib/shell.ts";
 import { AgentAttachmentPreview } from "./AgentAttachmentPreview.tsx";
 
 export interface ConversationFeed {
@@ -40,6 +41,8 @@ export function AgentConversationView({ botId, feed, onMissing }: {
   const [submitting, setSubmitting] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
+  const [desktop, setDesktop] = useState<DesktopSelection & { kind: DesktopSelectionKind }>();
+  const desktopTools = getShell().desktopTools;
   const [viewing, setViewing] = useState<AgentAttachment>();
   const composerDisabled = connection !== "connected" || submitting;
 
@@ -142,13 +145,24 @@ export function AgentConversationView({ botId, feed, onMissing }: {
     setAttachments([...attachments, ...items]);
   }
 
+  async function chooseDesktopPath(kind: DesktopSelectionKind) {
+    setFailure("");
+    try {
+      const selected = await desktopTools?.choose(kind);
+      if (selected) setDesktop({ ...selected, kind });
+    } catch (error) {
+      setFailure(typeof error === "string" ? error : "Could not connect the desktop tools.");
+    }
+  }
+
   async function send(text: string) {
     if (!text.trim() || submitting) return;
     setSubmitting(true);
     setDraft("");
     setFailure("");
     try {
-      await agentDaemon.send(botId, text, attachments);
+      await agentDaemon.send(botId, text, attachments, desktop?.session);
+      setDesktop(undefined);
       setAttachments([]);
     } catch (error) {
       if (error instanceof DaemonError || error instanceof AttachmentSelectionError) {
@@ -194,6 +208,13 @@ export function AgentConversationView({ botId, feed, onMissing }: {
           }} />
         <Button label="Attach files" size="sm" isDisabled={composerDisabled} onClick={() => picker.current?.click()} />
         <Text type="supporting" color="secondary">or drop files here</Text>
+        {desktopTools && <>
+          <Button label={desktop?.kind === "directory" ? `Desktop directory: ${desktop.name}` : "Choose desktop directory"}
+            size="sm" isDisabled={composerDisabled} clickAction={() => chooseDesktopPath("directory")} />
+          <Button label={desktop?.kind === "file" ? `Desktop file: ${desktop.name}` : "Choose desktop file"}
+            size="sm" isDisabled={composerDisabled} clickAction={() => chooseDesktopPath("file")} />
+        </>}
+        {desktop && <Button label="Use daemon host" size="sm" isDisabled={composerDisabled} onClick={() => setDesktop(undefined)} />}
       </HStack>}
       footerActions={attachments.map((attachment, index) =>
         <Button key={index} label={`Remove ${attachment.name}`} size="sm" isDisabled={composerDisabled} onClick={() => {

@@ -1,6 +1,7 @@
 mod agent;
 mod api;
 mod attachments;
+mod desktop_tools;
 mod duties;
 mod host_tools;
 mod recall;
@@ -53,10 +54,18 @@ fn main() -> Result<AppExit> {
     );
     app.insert_resource(recall.clone());
     recall::register(&mut app);
-    if let Some(workspace) = workspace {
+    let desktops = desktop_tools::Desktops::default();
+    if settings_token.is_some() {
         host_tools::register(&mut app, workspace);
+        desktop_tools::install(&mut app, desktops.clone());
     }
-    let router = api::router(store.clone(), conversations, settings_token, recall.clone());
+    let router = api::router(
+        store.clone(),
+        conversations,
+        settings_token,
+        recall.clone(),
+        desktops,
+    );
     let conversation_loop = runtime.spawn(api::run_conversations(
         store,
         turns,

@@ -2,6 +2,7 @@
 
 mod agent_daemon;
 mod attachments;
+mod desktop_tools;
 
 #[cfg(target_os = "linux")]
 use gio::prelude::*;
@@ -553,9 +554,11 @@ fn main() {
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     let application = builder
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
+        .manage(desktop_tools::DesktopTools::default())
         .manage(ShellState { origin, connection: connection.clone(), keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None), sidecar: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, sidecar_events, sidecar_decide, sidecar_start, host_digest, agent_daemon::ensure_local_daemon, agent_daemon::set_daemon_autostart, agent_daemon::local_daemon_pairing_code])
+        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, sidecar_events, sidecar_decide, sidecar_start, host_digest, agent_daemon::ensure_local_daemon, agent_daemon::set_daemon_autostart, agent_daemon::local_daemon_pairing_code, desktop_tools::choose_desktop_path])
         .setup(move |app| {
             let daemon = LocalDaemon::new(app.path().app_local_data_dir()?.join("agent-daemon"));
             let local = serde_json::json!({ "baseUrl": daemon.origin(), "autostart": daemon.autostart().unwrap_or(false) });
@@ -598,6 +601,7 @@ fn main() {
             tauri::RunEvent::Exit => {
                 log_lifecycle("exit");
                 stop_sidecar(&app.state::<ShellState>());
+                app.state::<desktop_tools::DesktopTools>().stop();
             },
             _ => {},
         }

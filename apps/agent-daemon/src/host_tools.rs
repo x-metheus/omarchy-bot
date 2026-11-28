@@ -13,7 +13,7 @@ use rig_harness::rig_tools::{Edit, Read, Shell, Write};
 
 use crate::agent::conversation::ConversationTools;
 
-const NAMES: [&str; 4] = [Read::NAME, Edit::NAME, Write::NAME, Shell::NAME];
+pub(crate) const NAMES: [&str; 4] = [Read::NAME, Edit::NAME, Write::NAME, Shell::NAME];
 
 #[derive(Debug, Resource)]
 pub(crate) struct WorkspaceRoot(pub(crate) PathBuf);
@@ -35,9 +35,11 @@ impl WorkspaceRoot {
     }
 }
 
-pub(crate) fn register(app: &mut App, workspace: WorkspaceRoot) {
-    app.insert_resource(workspace)
-        .add_tool_per_call(Read::default(), ToolOptions::default())
+pub(crate) fn register(app: &mut App, workspace: Option<WorkspaceRoot>) {
+    if let Some(workspace) = workspace {
+        app.insert_resource(workspace);
+    }
+    app.add_tool_per_call(Read::default(), ToolOptions::default())
         .add_tool_per_call(Edit::default(), ToolOptions::default())
         .add_tool_per_call(Write::default(), ToolOptions::default());
     let shell = PerCallShell::new(Shell::default(), app.world_mut());

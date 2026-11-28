@@ -197,7 +197,15 @@ Set `OMARCHY_AGENT_WORK_DIR` to an existing absolute directory to enable `read`,
 
 Run `cargo test --locked -j 3 --test conversation host_tools` from `apps/agent-daemon` on each supported host. The tests use a disposable workspace and scripted loopback providers.
 
-Rig's per-call `CallPlace` and `Workspace` are the execution boundary for adding authorized desktop tooling. The HTTP Conversation router is the authentication boundary for paired-device access.
+## Desktop tools
+
+In the paired native app, choose **Choose desktop directory** or **Choose desktop file** in the Conversation composer before sending a request. A directory selection enables `read`, `edit`, `write`, and `shell` on that device for the next message. A file selection enables file tools for that file. Attachments submit a separate copy to the Conversation. Use **Use daemon host** to clear the desktop selection before sending.
+
+The native app displays the paired device, requested operation, arguments, and local working directory before each tool runs. Choose **Allow once** or **Deny**. The app keeps the working directory local and sends the approved result to the originating Rig call. File tools use paths relative to the working directory and refuse symbolic links. The selected working directory is where `shell` starts, with the desktop account’s permissions.
+
+Closing the app, changing the selection, revoking a device, or losing the paired connection ends the desktop session. When a session ends, in-flight calls report the desktop unavailable and the app stops running tools where supported. An already-started file operation can finish. A later message without a desktop selection can use the daemon-host workspace when configured. Recovered work that previously targeted a desktop needs a new desktop selection and message.
+
+The native app uses Rig `0.47.1` for these operations and requires Rust `1.97.1` or newer.
 
 ## Shared UserMemory
 

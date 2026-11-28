@@ -13,6 +13,7 @@ use super::observational_memory::ObservationalHistory;
 use super::recovery::{DeliveredReports, Journal};
 use crate::api::{ApiError, ConversationCommand, UNAVAILABLE};
 use crate::attachments::Stored as StoredAttachment;
+use crate::desktop_tools::Target;
 use crate::duties::{self, DutyTurn};
 use crate::host_tools::WorkspaceRoot;
 use crate::store::{Admission, History, RestoredConversation, Role, work::Settlement};
@@ -52,6 +53,7 @@ pub(crate) struct TurnRequest {
     pub(crate) message_id: i64,
     pub(crate) text: String,
     pub(crate) attachments: Vec<StoredAttachment>,
+    pub(crate) desktop: Option<Target>,
     pub(crate) model: Connection,
     pub(crate) stream: Option<ReplySink>,
 }
@@ -116,6 +118,7 @@ struct DeliveredUser {
     source: UserMessageSource,
     original: Entry,
     had_attachments: bool,
+    desktop: Option<Target>,
 }
 
 #[derive(Component, Default)]
@@ -123,7 +126,7 @@ pub(crate) struct TurnDelivery {
     streams: Vec<ReplySink>,
     messages: Vec<DeliveredUser>,
     started: usize,
-    source: Option<(EffectId, UserMessageSource, ModelUserInput)>,
+    source: Option<(EffectId, UserMessageSource, ModelUserInput, Option<Target>)>,
 }
 
 impl TurnDelivery {
@@ -271,6 +274,7 @@ fn deliver(world: &mut World) {
                             message_id,
                             text,
                             attachments,
+                            desktop,
                             model,
                         })) => TurnRequest {
                             bot: source.bot,
@@ -278,6 +282,7 @@ fn deliver(world: &mut World) {
                             message_id,
                             text,
                             attachments,
+                            desktop,
                             model,
                             stream: None,
                         },
@@ -321,6 +326,7 @@ fn deliver(world: &mut World) {
                 message_id,
                 text,
                 attachments,
+                desktop,
                 model,
                 stream,
             } = request;
@@ -403,6 +409,9 @@ fn deliver(world: &mut World) {
                 ForAgent(agent),
                 UserMessageSource { bot, message_id },
             ));
+            if let Some(desktop) = desktop {
+                delivery.insert(desktop);
+            }
             if let Some(stream) = stream {
                 delivery.insert(stream);
             }
@@ -440,6 +449,7 @@ fn on_delivery(
     let entity = delivered.entity;
     commands.queue(move |world: &mut World| {
         let stream = world.entity_mut(entity).take::<ReplySink>();
+        let desktop = world.get::<Target>(entity).copied();
         if let Some(mut observation) = world.get_mut::<ObservationalHistory>(agent) {
             observation.committed(entry, source.message_id);
         }
@@ -471,6 +481,7 @@ fn on_delivery(
             source,
             original,
             had_attachments,
+            desktop,
         });
         delivery.streams.extend(stream);
         turn.insert_if_new(DutyTurn::default());
@@ -496,7 +507,7 @@ fn on_model_request(
             .iter()
             .rev()
             .find(|delivered| history.index_of(delivered.id).is_some())
-            .map(|delivered| (delivered.id, delivered.source))
+            .map(|delivered| (delivered.id, delivered.source, delivered.desktop))
     });
     let mut call = commands.entity(built.entity);
     if delivery.started < delivery.messages.len() {
@@ -513,9 +524,13 @@ fn on_model_request(
     call.insert(ModelDelivery {
         subscribers: delivery.streams.len(),
     });
-    delivery.source = source.map(|(entry, source)| (effect.id(), source, ModelUserInput(entry)));
-    if let Some((_, source, input)) = delivery.source {
+    delivery.source = source
+        .map(|(entry, source, desktop)| (effect.id(), source, ModelUserInput(entry), desktop));
+    if let Some((_, source, input, desktop)) = delivery.source {
         call.insert((source, input));
+        if let Some(desktop) = desktop {
+            call.insert(desktop);
+        }
     }
 }
 
@@ -537,12 +552,15 @@ fn on_tool_request(
         .and_then(|delivery| delivery.source)
         .filter(|(id, ..)| effect.parent == Some(*id));
     let mut call = commands.entity(added.entity);
-    if let Some((_, source, input)) = input {
+    if let Some((_, source, input, desktop)) = input {
         call.insert((source, input));
+        if let Some(desktop) = desktop {
+            call.insert(desktop);
+        }
     }
     if let Ok(bot) = roots.get(agent)
         && let Some(origin) = journal.prepare_delegation(
-            input.map(|(_, source, _)| source),
+            input.map(|(_, source, _, _)| source),
             reports.get(turn).ok(),
             bot.0,
             tool,

@@ -69,6 +69,7 @@ function installNativeShell(initial) {
       setAutostart: enabled => invoke("set_daemon_autostart", { enabled }),
       pairingCode: () => invoke("local_daemon_pairing_code"),
     },
+    desktopTools: connection ? { choose: kind => invoke("choose_desktop_path", { kind }) } : undefined,
     pairing: {
       onRequest(listener) {
         listeners.add(listener);

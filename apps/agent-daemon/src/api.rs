@@ -1,3 +1,4 @@
+mod desktop;
 mod events;
 mod pairing;
 
@@ -11,7 +12,7 @@ use axum::middleware;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use rig_core::conversation::MessageId;
 use rig_harness::prelude::Wake;
 use ring::digest::Digest;
@@ -24,19 +25,21 @@ use uuid::Uuid;
 use crate::agent::conversation::UserMessageSource;
 use crate::agent::{AgentCommand, ReplySink, TurnRequest};
 use crate::attachments::{Input as AttachmentInput, MAX_ATTACHMENTS, Submission};
+use crate::desktop_tools::{Desktops, Target};
 use crate::duties;
 use crate::recall::{Availability, Recall};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
 use crate::store::work::{Report, Retry, Settlement};
 use crate::store::{Admission, Bot, Conversation, History, Store, ToolProgress};
 
-use pairing::{Access, Pairing};
+use pairing::{Access, PairedDevice, Pairing};
 
 #[derive(Clone)]
 struct Daemon {
     store: Store,
     conversations: mpsc::UnboundedSender<ConversationCommand>,
     recall: Recall,
+    desktops: Desktops,
     pairing: Pairing,
 }
 
@@ -45,6 +48,7 @@ pub(crate) fn router(
     conversations: mpsc::UnboundedSender<ConversationCommand>,
     settings_token: Option<Digest>,
     recall: Recall,
+    desktops: Desktops,
 ) -> Router {
     let pairing = Pairing::new(store.clone(), settings_token);
     let conversations_router = Router::new()
@@ -62,12 +66,14 @@ pub(crate) fn router(
     pairing
         .protect(conversations_router, Access::Conversation)
         .merge(pairing.protect(settings_router, Access::Settings))
+        .merge(pairing.protect(desktop::routes(), Access::Device))
         .merge(pairing.routes())
         .layer(middleware::from_fn(pairing::cors))
         .with_state(Daemon {
             store,
             conversations,
             recall,
+            desktops,
             pairing,
         })
 }
@@ -256,11 +262,14 @@ struct SendMessage {
     text: String,
     #[serde(default)]
     attachments: Vec<AttachmentInput>,
+    #[serde(rename = "desktopSession")]
+    desktop_session: Option<Uuid>,
 }
 
 async fn send_message(
     State(daemon): State<Daemon>,
     Path(bot): Path<Uuid>,
+    device: Option<Extension<PairedDevice>>,
     input: Result<Json<SendMessage>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let Json(input) = input.map_err(|error| {
@@ -292,7 +301,20 @@ async fn send_message(
             ),
         ));
     }
-    let SendMessage { text, attachments } = input;
+    let SendMessage {
+        text,
+        attachments,
+        desktop_session,
+    } = input;
+    let desktop = if let Some(session) = desktop_session {
+        Some(
+            device
+                .and_then(|Extension(device)| daemon.desktops.target(device.0, session))
+                .ok_or(desktop::UNAVAILABLE)?,
+        )
+    } else {
+        None
+    };
     let submissions = if attachments.is_empty() {
         Vec::new()
     } else {
@@ -313,6 +335,7 @@ async fn send_message(
             bot,
             text,
             submissions,
+            desktop,
             stream: ReplySink::new(events),
             accepted,
         })
@@ -372,6 +395,7 @@ pub(crate) enum ConversationCommand {
         bot: Uuid,
         text: String,
         submissions: Vec<Submission>,
+        desktop: Option<Target>,
         stream: ReplySink,
         accepted: oneshot::Sender<Result<(), ApiError>>,
     },
@@ -486,6 +510,7 @@ pub(crate) async fn run_conversations(
                 bot,
                 text,
                 submissions,
+                desktop,
                 stream,
                 accepted,
             } => {
@@ -494,12 +519,16 @@ pub(crate) async fn run_conversations(
                 } else {
                     History::Restore
                 };
-                let admission = match store.accept_message(bot, text, submissions, history).await {
+                let admission = match store
+                    .accept_message(bot, text, submissions, desktop, history)
+                    .await
+                {
                     Ok(Admission::Accepted {
                         history,
                         message_id,
                         text,
                         attachments,
+                        desktop,
                         model,
                     }) => {
                         recall.history_changed();
@@ -510,6 +539,7 @@ pub(crate) async fn run_conversations(
                                 message_id,
                                 text,
                                 attachments,
+                                desktop,
                                 model,
                                 stream: Some(stream),
                             }))
