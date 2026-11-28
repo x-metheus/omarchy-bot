@@ -5,6 +5,10 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dir, "../..");
 const bwrap = process.platform === "linux" ? Bun.which("bwrap") : null;
+// Some hosted runners ship bwrap but restrict unprivileged UID/GID mapping.
+const canUseRootNamespace = bwrap !== null && Bun.spawnSync([
+  bwrap, "--unshare-user", "--uid", "0", "--gid", "0", "--ro-bind", "/", "/", "--", "/bin/true",
+], { stdout: "ignore", stderr: "ignore" }).success;
 
 // A private user/mount namespace runs the real entrypoint as root with a read-only host filesystem.
 async function session(options: { image?: boolean; container?: boolean; uid?: string; gid?: string; dropFails?: boolean } = {}) {
@@ -42,7 +46,7 @@ async function session(options: { image?: boolean; container?: boolean; uid?: st
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
-const linuxTest = bwrap ? test : test.skip;
+const linuxTest = canUseRootNamespace ? test : test.skip;
 linuxTest("Linux app smoke refuses to start as root on a host", async () => {
   const result = await session();
   expect(result.code).not.toBe(0);

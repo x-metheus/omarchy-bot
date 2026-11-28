@@ -11,7 +11,7 @@ if [[ $(id -u) -eq 0 ]]; then
   if [[ ! ${OMARCHY_BOT_SMOKE_UID:-} =~ ^[1-9][0-9]*$ || ! ${OMARCHY_BOT_SMOKE_GID:-} =~ ^[1-9][0-9]*$ ]] \
     || ! command -v setpriv >/dev/null \
     || ! setpriv --reuid="$OMARCHY_BOT_SMOKE_UID" --regid="$OMARCHY_BOT_SMOKE_GID" --clear-groups /bin/true; then
-    echo "CA trust requires a working non-root smoke UID/GID and setpriv privilege drop." >&2
+    echo "The private smoke requires a working non-root smoke UID/GID and setpriv privilege drop." >&2
     exit 1
   fi
   exec setpriv --reuid="$OMARCHY_BOT_SMOKE_UID" --regid="$OMARCHY_BOT_SMOKE_GID" --clear-groups bash /src/scripts/linux-app/session.sh
@@ -61,4 +61,5 @@ exit "\$status"
 EOF
 chmod 755 "$OMARCHY_BOT_SMOKE_APP"
 fi
+cd /src
 dbus-run-session -- bash /src/scripts/linux-app/keyring-session.sh
