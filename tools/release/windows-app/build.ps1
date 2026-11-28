@@ -25,7 +25,7 @@ try {
     foreach ($name in @('TAURI_SIGNING_PRIVATE_KEY','TAURI_UPDATER_PUBKEY','TAURI_UPDATER_ENDPOINT')) {
       if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Missing release variable $name" }
     }
-    if (-not (Select-String -Path apps/omarchy-bot/src-tauri/Cargo.toml -Pattern '^tauri-plugin-updater\s*=' -Quiet)) { throw 'Ticket 11 updater integration is required before release; artifact signing alone does not install an updater.' }
+    if (-not (Select-String -Path apps/omarchy-bot/src-tauri/Cargo.toml -Pattern '^tauri-plugin-updater\s*=' -Quiet)) { throw 'The desktop app must include tauri-plugin-updater to build a release.' }
     $version = $env:APP_VERSION
     $overlay.version = $version
     $overlay.bundle.createUpdaterArtifacts = $true

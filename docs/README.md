@@ -2,7 +2,7 @@
 
 The [development guide](development.md) covers skill selection, GitHub specifications and tickets, repository documents, and verification commands. Coding agents start with the [project instructions](../AGENTS.md).
 
-The [Agent Daemon guide](../apps/agent-daemon/README.md) covers standalone startup and an OpenAI smoke test.
+The [Agent Daemon guide](../apps/agent-daemon/README.md) covers standalone startup, pairing, and smoke tests for both model protocols. The [Rig Agent Daemon decision](agents/adr/0017-rig-agent-daemon.md) explains how the daemon and Tauri desktop share responsibility.
 
 ## Code map
 
@@ -14,6 +14,6 @@ These paths are starting points. Follow imports, contracts, and tests when a cha
 | Rig execution, work control, and memory | `apps/agent-daemon/src/agent/`, `apps/agent-daemon/src/user_memory.rs`, `apps/agent-daemon/src/recall.rs` | [Agent Daemon guide](../apps/agent-daemon/README.md) and Conversation scenarios in `apps/agent-daemon/tests/` |
 | Desktop UI and native shell | `apps/omarchy-bot/src/`, `apps/omarchy-bot/src-tauri/` | [Frontend instructions](../apps/omarchy-bot/AGENTS.md) and the native and shell integration tests in the desktop project |
 | Platform packaging and updates | `.github/workflows/app-release.yml`, `tools/release/` | Platform WebView release checks and release manifest tests |
-| Legacy public site | `apps/site/` | Site scripts, assets, publisher contract, route tests, and Vite configuration |
+| Public site | `apps/site/` | Site scripts, assets, publisher contract, route tests, and Vite configuration |
 
 Code paths in this table are relative to the repository root. The [Cargo workspace](../Cargo.toml) defines the native crates. Read the affected Bun package's configuration and existing tests for frontend, site, or release-tool changes.

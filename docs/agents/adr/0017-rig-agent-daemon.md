@@ -1,8 +1,8 @@
-# Replace the Pi runtime with a standalone Rust Agent Daemon
+# Run Bots in a standalone Rig Agent Daemon
 
 ## Status
 
-Accepted. This decision supersedes [ADR 0016](0016-build-bots-on-pi-durable.md).
+Accepted.
 
 ## Decision
 
@@ -10,6 +10,6 @@ Run Bots through Rig in a standalone Rust Agent Daemon. Rig's headless harness, 
 
 Paired desktop clients connect to a local daemon or a remote daemon over HTTPS. Provider credentials belong to the daemon that makes model requests. Tools run on the daemon host by default. An explicitly requested desktop operation runs in the paired Tauri app with local approval.
 
-The Agent Daemon starts with a fresh database. Unstarted work can resume after a restart. Started work is marked interrupted and requires an explicit retry so a restart cannot repeat an unfinished tool operation. Original messages remain available alongside background Observational Memory and on-demand Recall. Verified UserMemory is shared by Bots on the same daemon and survives deletion of its source Bot.
+Unstarted work can resume after a restart. Started work is marked interrupted and requires an explicit retry so a restart cannot repeat an unfinished tool operation. Original messages remain available alongside background Observational Memory and on-demand Recall. Verified UserMemory is shared by Bots on the same daemon and survives deletion of its source Bot.
 
-[Approved specification](https://github.com/x-metheus/omarchy-bot/issues/13) · [Agent Daemon guide](../../../apps/agent-daemon/README.md)
+[Approved Rig requirements](https://github.com/x-metheus/omarchy-bot/issues/13) · [Agent Daemon guide](../../../apps/agent-daemon/README.md)

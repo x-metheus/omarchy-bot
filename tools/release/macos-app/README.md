@@ -30,7 +30,7 @@ Updater builds require an explicit `APP_VERSION`, `TAURI_SIGNING_PRIVATE_KEY` an
 
 The caller downloads both asset sets into one release directory. It verifies the installers, daemon archives, checksums, and updater signature metadata, then writes the four-platform manifest. macOS entries point to `.app.tar.gz` updater payloads. The workflow uploads the assets to a draft `app-vX.Y.Z` release, verifies the downloaded bytes, publishes the complete release, and promotes `app-latest/latest.json` when the stable version increases. The unsigned Windows installer keeps the combined release labeled preview.
 
-Build failure publishes nothing. Rerun failed jobs to reuse successful Actions artifacts; an interrupted draft upload can be resumed. Public versioned assets are never overwritten: publication retry must match their existing bytes and platform map before finishing promotion. A rebuild that differs requires a new version. Workflow evidence is separate (`macos-app-evidence-<arch>`), records build mode and explicitly says WKWebView was not run. Native checklist and GitHub publication evidence remain required; integration alone closes no ticket 14 acceptance criterion.
+Build failure publishes nothing. Rerun failed jobs to reuse successful Actions artifacts. An interrupted draft upload can be resumed. Publication retry must match the existing bytes and platform map of a public release before finishing promotion. A rebuild that differs requires a new version. The `macos-app-evidence-<arch>` artifact records the build mode. Record WKWebView results using the native checklist below.
 
 ## Support gate
 
