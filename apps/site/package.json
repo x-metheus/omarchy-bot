@@ -3,11 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": { "bun": "1.4.5" },
+  "workspaces": ["protocol"],
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 7330 --strictPort",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 7330 --strictPort",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "@omarchy-bot/protocol": "workspace:*",
@@ -16,9 +19,13 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.5",
     "@types/node": "^26.6.11",
     "@vercel/node": "^33.0.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
+  },
+  "overrides": {
+    "@types/node": "26.6.11"
   }
 }

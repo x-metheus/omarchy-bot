@@ -1,9 +1,19 @@
 {
-  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": ["node", "vite/client"],
+    "types": ["bun", "node", "vite/client"],
     "rewriteRelativeImportExtensions": true
   },
-  "include": ["src", "api", "server", "vite.config.ts"]
+  "include": ["src", "api", "server", "protocol/src", "tests", "vite.config.ts"]
 }

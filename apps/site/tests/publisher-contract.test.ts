@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { handlePluginCloudRequest } from "../../apps/site/server/plugins.ts";
+import { handlePluginCloudRequest } from "../server/plugins.ts";
 
 test("the publisher serves the raw and normalised catalog through its existing routes", async () => {
   const publisher = "https://publisher-contract.invalid";
