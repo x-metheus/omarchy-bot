@@ -41,8 +41,6 @@ export PATH="$session/bin:$PATH"
 export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1
 export APPIMAGE_EXTRACT_AND_RUN=1
 export OMARCHY_BOT_SMOKE_DIR=$session OMARCHY_BOT_SMOKE_APP=$session/app
-export OMARCHY_BOT_SWAY_BUNDLE_DIR=/src/.lane/dist/sway
-export OMARCHY_BOT_FONT_DIR=/src/.lane/fonts OMARCHY_BOT_BROWSER_PACK_DIR=/src/.lane/browser
 cleanup() { [[ -z ${xvfb_pid:-} ]] || kill "$xvfb_pid" 2>/dev/null || true; rm -rf "$session" "$OMARCHY_BOT_SMOKE_TRUST"; }
 trap cleanup EXIT
 Xvfb "$DISPLAY" -screen 0 1440x1000x24 -nolisten tcp > "$session/xvfb.log" 2>&1 &
@@ -60,6 +58,8 @@ else
   # Extract exactly the packaged filesystem for the general WebKit smoke.
   cd "$session"
   /artifact/omarchy-bot.AppImage --appimage-extract > extract.log
+  test -x squashfs-root/usr/bin/omarchy-agent-daemon
+  test ! -e squashfs-root/usr/bin/omarchy-bot-sidecar
 cat > "$OMARCHY_BOT_SMOKE_APP" <<EOF
 #!/bin/sh
 "$session/squashfs-root/AppRun" "\$@" 2> "/src/.lane/linux-app/evidence/app-\$\$.stderr.log" &
@@ -78,8 +78,5 @@ exec "$session/squashfs-root/AppRun" "\$@"
 EOF
 chmod 755 "$OMARCHY_BOT_SMOKE_APP-no-keyring"
 fi
-cc /src/scripts/sway-runtime/conformance/x11-fixture.c -lX11 -o "$session/x11-fixture"
-export OMARCHY_BOT_X11_FIXTURE=$session/x11-fixture
-openssl req -x509 -newkey rsa:2048 -nodes -keyout "$session/tls.key" -out "$session/tls.pem" -days 1 -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' > "$session/openssl.log" 2>&1
 cd /src
 dbus-run-session -- bash /src/scripts/linux-app/keyring-session.sh

@@ -267,7 +267,7 @@ Conversation and plugin documentation links use the system browser. Clicking a m
 
 ### Windows application preview
 
-Windows x64 builds a per-user NSIS installer with the compiled PowerShell Local Sidecar and registered `omarchy-bot` deep links. Unsigned artifacts and release notes are labeled preview. Build with `pwsh -File scripts/windows-app/build.ps1`; the full packaged WebView2 suite additionally needs a reachable real Linux Service/Sway fixture. See [Windows build, smoke and release prerequisites](scripts/windows-app/README.md). CI distinguishes NSIS install checks from the full WebView suite and fails missing smoke prerequisites. The integrated native updater requires signed updater artifacts even for an unsigned preview installer; Windows runtime and publication acceptance remain runner checks.
+Windows x64 builds a per-user NSIS preview installer, a bundled Agent Daemon with verified Recall assets, and a separate standalone daemon archive. Build with `pwsh -File scripts/windows-app/build.ps1`. The native workflow runs WebView2 against the installed desktop and a scripted model on loopback. [Windows build, smoke and release prerequisites](scripts/windows-app/README.md)
 
 ### Legacy public site
 

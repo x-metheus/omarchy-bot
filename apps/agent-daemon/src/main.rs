@@ -5,6 +5,7 @@ mod desktop_tools;
 mod duties;
 mod host_tools;
 mod recall;
+mod recall_assets;
 mod settings;
 mod store;
 mod user_memory;
@@ -23,6 +24,22 @@ use tokio::sync::mpsc;
 use crate::store::Store;
 
 fn main() -> Result<AppExit> {
+    let mut args = env::args_os().skip(1);
+    if let Some(command) = args.next() {
+        let download = match command.to_str() {
+            Some("--prepare-recall-model") => true,
+            Some("--verify-recall-model") => false,
+            _ => anyhow::bail!("unknown daemon argument"),
+        };
+        let directory = args.next().context("provide the Recall model directory")?;
+        anyhow::ensure!(args.next().is_none(), "expected one Recall model directory");
+        let runtime = Runtime::new().context("start Recall preparation runtime")?;
+        runtime
+            .block_on(recall::prepare_model(PathBuf::from(directory), download))
+            .map_err(|reason| anyhow::anyhow!("Recall model preparation failed: {reason:?}"))?;
+        println!("Verified Recall model and CPU inference");
+        return Ok(AppExit::Success);
+    }
     let path = env::var_os("OMARCHY_AGENT_DB")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("agent-daemon.sqlite3"));
@@ -37,11 +54,8 @@ fn main() -> Result<AppExit> {
     let store = Store::open(&path)?;
 
     let runtime = Runtime::new().context("start HTTP runtime")?;
-    let recall = recall::Recall::start(
-        runtime.handle(),
-        env::var_os("OMARCHY_AGENT_RECALL_MODEL_DIR").map(PathBuf::from),
-        store.clone(),
-    );
+    let model = recall_assets::location(&path);
+    let recall = recall::Recall::start(runtime.handle(), model, store.clone());
     let scratch = tempfile::tempdir().context("create private Rig scratch directory")?;
     let (turns, pending) = mpsc::unbounded_channel();
     let (conversations, commands) = mpsc::unbounded_channel();

@@ -7,15 +7,15 @@ bun install --frozen-lockfile
 bash scripts/build-macos-app.sh --unsigned
 ```
 
-The minimum macOS version is 13.0 for both the app and its bundled Rust Sidecar.
+The desktop application and bundled Agent Daemon require macOS 13.0 or later and build with Rust 1.97.1.
 
-The script builds and exercises the native Rust Sidecar, embeds the production Web UI, and builds the host architecture only. PR builds use ad-hoc signing for Apple Silicon execution; they are validation artifacts and cannot establish Gatekeeper acceptance. Output is `.lane/dist/omarchy-bot_<version>_<aarch64|x64>.dmg` and `.dmg.sha256`. Cargo and Bun caches, target output and evidence stay in `.lane/macos-app`. The app uses the macOS Keychain and system certificate trust; untrusted TLS has no exception.
+The builder verifies the pinned Recall model and emits the desktop dmg and standalone Agent Daemon archive for the native host architecture. It exercises the unpacked daemon through pairing, provider configuration, Conversation, attachments, host tools, and offline Recall. Output and checksums go to `.lane/dist`. Cargo, Bun, and evidence stay in `.lane/macos-app`. PR builds use ad-hoc signing. The app uses macOS Keychain and system certificate trust.
 
 The merged `src-tauri/Info.plist` permits HTTP only for `localhost`, IPv4 loopback `127.0.0.0/8` and IPv6 `::1` in App Transport Security, matching the Service-origin validator and SSH-tunnel path. It adds no arbitrary-load or broad local-network exception. Verify all three forms on the native checklist, particularly macOS 14+ numeric-IP ATS behavior.
 
 For distribution, run `bash scripts/build-macos-app.sh --signed`. Supply `APPLE_SIGNING_IDENTITY` as a **Developer ID Application** identity, `APPLE_ID`, the app-specific `APPLE_PASSWORD`, and `APPLE_TEAM_ID`. Local signing uses the installed identity; CI additionally requires the base64 `.p12` `APPLE_CERTIFICATE` and its `APPLE_CERTIFICATE_PASSWORD`, which Tauri imports into a temporary build keychain. Missing credentials, failed signing, failed notarization or failed Gatekeeper/stapler assessment stop the job. This path deliberately supports one notarization credential method (Apple ID) rather than ambiguous partial alternatives. Never add credentials to the repository or evidence. See [Tauri signing prerequisites](https://v2.tauri.app/distribute/sign/macos/).
 
-Tauri signs the app and embedded executables with hardened runtime and notarizes/staples the app. The script also signs, notarizes and staples the dmg, verifies the app and Sidecar signatures, and assesses both the application and outer download. The checked-in `.icns` wraps the existing 128px PNG losslessly; replace both assets together when higher resolution product artwork exists.
+Tauri signs the app and the embedded Agent Daemon with hardened runtime and notarizes and staples the app. The script also notarizes and staples the dmg, verifies both executable signatures, and assesses the application and outer download.
 
 `.github/workflows/macos-app.yml` runs natively on `macos-15` (Apple Silicon) and `macos-15-intel` (Intel). The Sidecar conformance workflow also runs both architectures, including real TLS rejection, approved execution and process-tree cancellation. No macOS execution is implied by Linux cross-compilation.
 
@@ -27,6 +27,7 @@ Updater builds require an explicit `APP_VERSION`, `TAURI_SIGNING_PRIVATE_KEY` an
 
 - `omarchy-bot_<version>_<arch>.dmg` and `.dmg.sha256`
 - `omarchy-bot_<version>_<arch>.app.tar.gz`, `.app.tar.gz.sig` and `.app.tar.gz.sha256`
+- `omarchy-agent-daemon_<version>_<target>.tar.gz` and `.tar.gz.sha256`
 
 The caller downloads both asset sets into one flat release directory; architecture suffixes prevent collisions. It validates every payload, installer, checksum and updater signature's key/version metadata, then writes one manifest containing exactly `linux-x86_64`, `darwin-aarch64`, `darwin-x86_64` and `windows-x86_64`. macOS entries point to `.app.tar.gz` and contain the matching `.sig` contents. The dmg remains the installer. It uploads all assets to a draft `app-vX.Y.Z` release, verifies the downloaded bytes, publishes the complete release, and promotes `app-latest/latest.json` only when its numeric stable version increases. App releases remain separate from Service runtime releases. Windows currently makes the combined release a prerelease with explicit unsigned preview notes; this does not change stable app versioning.
 
@@ -34,4 +35,4 @@ Build failure publishes nothing. Rerun failed jobs to reuse successful Actions a
 
 ## Support gate
 
-Complete the [WKWebView checklist](https://github.com/x-metheus/omarchy-bot/blob/6750011404c8032470a169e52bf7ebe362a88e4c/docs/release/macos-wkwebview-checklist.md) on **both** architectures. Record the runs under [macOS release acceptance](../../.scratch/omarchy-bot-app/issues/14-macos-release.md#comments) before marking macOS supported. Tauri has no macOS WebDriver, so the manual WKWebView run is required; Linux WebKitGTK and Chromium results do not replace it. Distribution also requires Apple credentials and ticket 11 publication. Until those native checks and publication pass, this branch supplies the implementation and CI gate only.
+On both Apple Silicon and Intel, install the dmg in a disposable account. Open it in WKWebView and check that the app autostarts the bundled daemon, locally pairs, opens a Conversation, and reattaches after relaunch. Configure the provider in Settings. Send, view, and reuse a neutral attachment. Choose a local fixture directory and confirm that **Allow once** runs the selected file tool, then confirm **Deny** leaves the fixture unchanged. Ask the Bot to use Recall on a known earlier message while the model source is unavailable. Save the architecture, artifact digest, steps, and results in the release evidence. These are manual checks on macOS.

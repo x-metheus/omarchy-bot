@@ -3,10 +3,10 @@ on:
   pull_request:
     paths:
       - 'apps/omarchy-bot/**'
-      - 'apps/sidecar-rust/**'
+      - 'apps/agent-daemon/**'
       - 'packages/**'
       - 'scripts/windows-app/**'
-      - 'scripts/build-sidecar.ts'
+      - 'scripts/build-agent-daemon.ts'
       - 'scripts/app-release.ts'
       - 'tests/integration/app-release.test.ts'
       - 'bun.lock'
@@ -24,10 +24,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.5
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: dtolnay/rust-toolchain@1.97.1
       - run: bun install --frozen-lockfile
       - run: bun test tests/integration/app-release.test.ts
-      - name: Build NSIS unsigned preview with Rust Sidecar
+      - name: Build NSIS installer and standalone Agent Daemon
         shell: pwsh
         run: ./scripts/windows-app/build.ps1
       - name: Install, inspect registered deep-link handler, uninstall

@@ -3,7 +3,7 @@ mod attachments;
 #[path = "duties/scenarios.rs"]
 mod duties;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -67,6 +67,9 @@ impl Daemon {
             .env_remove("OMARCHY_AGENT_MASTER_KEY_FILE")
             .env_remove("OMARCHY_AGENT_SETTINGS_TOKEN_FILE")
             .env_remove("OMARCHY_AGENT_RECALL_MODEL_DIR")
+            .env_remove("OMARCHY_AGENT_RECALL_BUNDLE_DIR")
+            .env_remove("OMARCHY_AGENT_RECALL_DOWNLOAD")
+            .env_remove("OMARCHY_AGENT_RECALL_MODEL_SOURCE")
             .env_remove("OMARCHY_AGENT_WORK_DIR")
             .env("OPENAI_BASE_URL", format!("{}/v1", provider.url))
             .env("ANTHROPIC_BASE_URL", &provider.url)
@@ -526,6 +529,120 @@ async fn recall_is_unavailable_without_model_artifacts_and_chat_still_commits() 
 
     let status = recall_status(&client, &daemon, "unavailable").await;
     assert_eq!(status["reason"], "model_missing");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn recall_rejects_a_corrupt_background_download_while_chat_commits() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let requested = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind the model fixture");
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let fixture = axum::Router::new().route(
+        "/config.json",
+        axum::routing::get({
+            let requested = requested.clone();
+            let release = release.clone();
+            move || async move {
+                requested.notify_one();
+                release.notified().await;
+                "invalid model configuration"
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, fixture).await });
+    let mut provider = Provider::start().await;
+    let directory = tempfile::tempdir().expect("disposable daemon profile");
+    let db = directory.path().join("daemon.sqlite3");
+    let mut command = Daemon::command(&db, &provider);
+    command
+        .env("OMARCHY_AGENT_MODEL", MODEL)
+        .env("OPENAI_API_KEY", BOOTSTRAP_KEY)
+        .env("OMARCHY_AGENT_RECALL_DOWNLOAD", "1")
+        .env("OMARCHY_AGENT_RECALL_MODEL_SOURCE", endpoint);
+    let daemon = Daemon::launch(command).await;
+    timeout(DEADLINE, requested.notified())
+        .await
+        .expect("missing model triggered a background download");
+    let client = http_client();
+    let bot = daemon.create(&client).await;
+    let mut stream = ReplyStream::new(daemon.send(&client, bot_id(&bot), "Say hello").await);
+    chat_reply(provider.next().await, &mut stream, "Hello").await;
+    release.notify_one();
+
+    let status = recall_status(&client, &daemon, "unavailable").await;
+    assert_eq!(status["reason"], "verification_failed");
+    assert!(!directory.path().join("recall-model").exists());
+    daemon.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires the verified Recall model in OMARCHY_AGENT_RECALL_TEST_MODEL_DIR"]
+async fn recall_retries_preparation_after_restart_and_reuses_verified_cache_offline() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let model = std::env::var_os("OMARCHY_AGENT_RECALL_TEST_MODEL_DIR")
+        .map(PathBuf::from)
+        .expect("provide the pinned Recall model directory");
+    let corrupted = Arc::new(AtomicBool::new(true));
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind the model fixture");
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let fixture = axum::Router::new().route(
+        "/{*asset}",
+        axum::routing::get({
+            let corrupted = corrupted.clone();
+            move |axum::extract::Path(asset): axum::extract::Path<String>| async move {
+                if corrupted.load(Ordering::Relaxed) {
+                    return Ok(b"invalid model configuration".to_vec());
+                }
+                if !include_str!("../recall-model.sha256")
+                    .lines()
+                    .any(|line| line.split_once("  ").is_some_and(|(_, file)| file == asset))
+                {
+                    return Err(StatusCode::NOT_FOUND);
+                }
+                tokio::fs::read(model.join(asset))
+                    .await
+                    .map_err(|_| StatusCode::NOT_FOUND)
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, fixture).await });
+    let provider = Provider::start().await;
+    let directory = tempfile::tempdir().expect("disposable daemon profile");
+    let db = directory.path().join("daemon.sqlite3");
+    let command = || {
+        let mut command = Daemon::command(&db, &provider);
+        command
+            .env("OMARCHY_AGENT_RECALL_DOWNLOAD", "1")
+            .env("OMARCHY_AGENT_RECALL_MODEL_SOURCE", &endpoint);
+        command
+    };
+    let client = http_client();
+    let daemon = Daemon::launch(command()).await;
+    let first = recall_status(&client, &daemon, "unavailable").await;
+    assert_eq!(first["reason"], "verification_failed");
+    let bot = daemon.create(&client).await;
+    daemon.stop().await;
+
+    corrupted.store(false, Ordering::Relaxed);
+    let daemon = Daemon::launch(command()).await;
+    recall_status(&client, &daemon, "ready").await;
+    assert_eq!(daemon.read(&client, bot_id(&bot)).await["bot"], bot);
+    daemon.stop().await;
+
+    server.abort();
+    let daemon = Daemon::launch(command()).await;
+    recall_status(&client, &daemon, "ready").await;
     daemon.stop().await;
 }
 

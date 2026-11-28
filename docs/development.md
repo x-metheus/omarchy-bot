@@ -40,8 +40,8 @@ Run these commands from the repository root. Consult the affected workspace’s 
 | Command | Purpose |
 | --- | --- |
 | `bun install --frozen-lockfile` | Install locked dependencies |
-| `bun run tauri dev --config '{"bundle":{"externalBin":[]}}'` | Run the Tauri development window for daily Agent Daemon UI checks |
-| `bun run tauri build` | Build release artifacts after preparing their packaging inputs |
+| `bun run tauri dev` | Run the Tauri development window for daily Agent Daemon UI checks |
+| `bash scripts/build-linux-app.sh` | Build the packaged desktop and standalone daemon on Linux |
 | `OMARCHY_BOT_DEV=1 bun run dev` | Run the legacy Service development harness |
 | `bun run typecheck` | Check TypeScript types |
 | `bun run lint:boundaries` | Check package dependency boundaries |
@@ -53,9 +53,9 @@ Run these commands from the repository root. Consult the affected workspace’s 
 
 `apps/omarchy-bot` contains the Bun manifest, Vite config and frontend sources alongside `src-tauri`. The project is based on the official Bun, React TypeScript, Tauri 2 scaffold. To reproduce the starting scaffold in an empty directory, run `bunx create-tauri-app@4.7.5 omarchy-bot --manager bun --template react-ts --tauri-version 2 --identifier com.omarchy.bot --yes`. See the [Tauri project guide](https://v2.tauri.app/start/create-project/) and [Vite integration guide](https://v2.tauri.app/start/frontend/vite/).
 
-Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and run `bun install --frozen-lockfile`. Start daily UI checks from `apps/omarchy-bot` or the repository root with the `tauri dev` command above. Tauri starts Vite on `http://127.0.0.1:7322` and incrementally compiles the Rust debug target. The command works without a prebuilt frontend or staged legacy Sidecar. To test the legacy Sidecar itself, stage it with `bun scripts/build-sidecar.ts` and run `bun run tauri dev` with the standard config. Connect to a running Agent Daemon for normal UI checks. To test managed startup, set `OMARCHY_BOT_AGENT_DAEMON_BIN` to a daemon executable from the [standalone setup](../apps/agent-daemon/README.md).
+Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and run `bun install --frozen-lockfile`. Run `bun run tauri dev` from `apps/omarchy-bot` or the repository root. Tauri starts Vite on `http://127.0.0.1:7322` and incrementally compiles the Rust debug target. The command works without a prebuilt frontend or staged binaries. Connect to a running Agent Daemon for normal UI checks. For managed startup, set `OMARCHY_BOT_AGENT_DAEMON_BIN` to the absolute path of a daemon executable from the [standalone setup](../apps/agent-daemon/README.md).
 
-Use `tauri build` and the platform smoke steps for release and installer verification.
+The platform release scripts stage the daemon and verified Recall model, then invoke `tauri build` with the release configuration. See [Linux](../scripts/linux-app/README.md), [macOS](../scripts/macos-app/README.md), and [Windows](../scripts/windows-app/README.md) for packaging and native smoke commands. To exercise the legacy Local Sidecar itself, stage it with `bun scripts/build-sidecar.ts` and add `--config '{"bundle":{"externalBin":["binaries/omarchy-bot-sidecar"]}}'` to the Tauri command.
 
 The legacy `apps/site` workspace retains its explicit `site:dev` and `site:build` commands.
 

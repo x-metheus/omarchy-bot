@@ -19,6 +19,8 @@ install -d -m 700 "$state"
 
 From the repository root, start the daemon. These paths work on restart too. The daemon reads both files at startup.
 
+Extract `omarchy-agent-daemon_<version>_<target>.tar.gz` on a release host and keep the `recall-model` directory beside the executable. After setting the environment below, run the extracted `omarchy-agent-daemon` (`omarchy-agent-daemon.exe` on Windows). A source checkout can use `cargo run --locked` instead.
+
 ```sh
 state="$HOME/.local/state/omarchy-agent-daemon"
 export OMARCHY_AGENT_DB="$state/agent-daemon.sqlite3"
@@ -32,9 +34,27 @@ The daemon prints its bound address. `OMARCHY_AGENT_PORT` defaults to `8765`. Se
 
 The master key file must contain exactly 32 raw bytes. SQLite stores provider keys as AES-256-GCM ciphertext with a fresh OS-random nonce per write and the provider authenticated as associated data. Keep the database and its matching master key in separate protected backups. Restore both to resume saved Settings. A missing or incorrect key for the saved selection prevents startup. If the master key is permanently lost, stop the daemon and back up SQLite before clearing Settings in a transaction. Run `BEGIN IMMEDIATE; DELETE FROM model_settings; DELETE FROM provider_credentials; COMMIT;` against that database, then provision a new master key and re-enter provider credentials. Conversation history remains available. An independently replaced Settings bearer token takes effect on restart.
 
+## Fresh cutover from the Pi Service
+
+Stop the legacy Service before clearing its application state. The Agent Daemon uses a new SQLite database and a separate desktop pairing credential. Back up any old data you want to retain before applying the cutover.
+
+| Platform | Old Service data root | Old Service state root | Old managed Shared Workspace |
+| --- | --- | --- | --- |
+| Linux | `$HOME/.local/share/omarchy-bot` | `$HOME/.local/state/omarchy-bot` | `$HOME/.omarchy-bot/workspace` |
+| macOS | `$HOME/Library/Application Support/omarchy-bot` | `$HOME/Library/Application Support/omarchy-bot/state` | `$HOME/.omarchy-bot/workspace` |
+| Windows | `%APPDATA%\omarchy-bot` | `%APPDATA%\omarchy-bot\state` | `%USERPROFILE%\.omarchy-bot\workspace` |
+
+The Windows Service falls back to `%USERPROFILE%\AppData\Roaming` when `APPDATA` is unset. Pi Durable stores the Service's sessions in `db.sqlite` and its SQLite side files under the data root. The Service used the managed Shared Workspace for Threads without a selected working directory.
+
+Run `bun scripts/clear-legacy-agent-data.ts` from the checkout to print the exact entries. With the Service stopped, add `--apply` to remove those entries. The command rejects custom Service roots and symbolic links or junctions on the named paths. It confines deletion to the user profile. Standalone Pi sessions, user-selected directories outside the managed roots, and the installed binaries stay in place. The command runs when invoked by the operator.
+
+If a recorded working directory or allowed folder lies inside an entry scheduled for removal, the command refuses to apply the cutover. Preserve that directory separately before clearing the legacy installation.
+
+[Historical path resolution](https://github.com/x-metheus/omarchy-bot/blob/b47ac2aaa7745a441ba081453a7282a07a247f8e/apps/daemon/src/modules/workspace/paths.ts) · [Historical Pi Durable storage](https://github.com/x-metheus/omarchy-bot/blob/b47ac2aaa7745a441ba081453a7282a07a247f8e/apps/daemon/src/modules/runtime/runtime.ts) · [Cutover command](../../scripts/clear-legacy-agent-data.ts)
+
 ## Desktop connection
 
-Install `omarchy-agent-daemon` beside the Tauri executable or on the desktop process's `PATH`. The desktop checks `http://127.0.0.1:8765` when it opens for local use and attaches to an existing daemon. If the port is free and startup is enabled, it starts one using a private application data directory. Disable **Start the local daemon when opening Omarchy Bot** on the connection screen or in Settings. A launched daemon can keep working when the desktop disconnects or closes.
+Desktop release packages include `omarchy-agent-daemon` and the verified Recall model. For source builds, place the executable beside the Tauri executable, add it to the desktop process's `PATH`, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to its absolute path. The desktop checks `http://127.0.0.1:8765` when it opens for local use and attaches to an existing daemon. If the port is free and startup is enabled, it starts one using a private application data directory. Disable **Start the local daemon when opening Omarchy Bot** on the connection screen or in Settings. A launched daemon can keep working when the desktop disconnects or closes.
 
 Choose **Pair local daemon** for a daemon started by this desktop profile. To attach to a standalone daemon, obtain a code from its operator, then enter the daemon address and code in the desktop. With the token file from the setup above, the operator can mint a code on the daemon host:
 
@@ -279,7 +299,7 @@ The daemon embeds and indexes messages locally. Ordinary chat can run while Reca
 
 ### Offline provision
 
-The pinned model is Xenova's multilingual E5 small INT8 ONNX export at revision `761b726dd34fb83930e26aab4e9ac3899aa1fa78`. On a connected machine, run this from `apps/agent-daemon`, then copy the verified directory to the daemon host.
+Release packages include the pinned Xenova multilingual E5 small INT8 ONNX export at revision `761b726dd34fb83930e26aab4e9ac3899aa1fa78`. To prepare these same assets for a separate offline host, run `omarchy-agent-daemon --prepare-recall-model /path/to/recall-model` on a connected machine and copy the verified directory. The destination must have an existing parent directory. The following downloads the same files independently from `apps/agent-daemon`.
 
 ```sh
 recall_dir=/path/to/recall-model
@@ -291,7 +311,9 @@ recall_manifest="$PWD/recall-model.sha256"
 (cd "$recall_dir" && sha256sum -c "$recall_manifest")
 ```
 
-Set `OMARCHY_AGENT_RECALL_MODEL_DIR` to the absolute directory before starting the daemon. At startup the daemon verifies the five fixed files against [recall-model.sha256](recall-model.sha256), loads them through Rig FastEmbed, and runs a CPU inference check. `GET /recall/status` reports `loading`, `ready`, or `unavailable` with `reason`. Unavailable reasons are `not_configured`, `model_missing`, `model_unreadable`, `verification_failed`, and `initialization_failed`. The model loads entirely from local files. After replacing missing or rejected files, restart the daemon to verify them again.
+The daemon first uses `OMARCHY_AGENT_RECALL_MODEL_DIR`, when set, then the model included with the desktop or standalone executable. For a deployment without bundled assets, set `OMARCHY_AGENT_RECALL_DOWNLOAD=1` to download in the background to `recall-model` beside `OMARCHY_AGENT_DB`. Desktop-managed startup enables this fallback by default. The daemon verifies the five files against [recall-model.sha256](recall-model.sha256), loads them through Rig FastEmbed, and runs a CPU inference check. It publishes a new cache after the checks pass. Use `--verify-recall-model /path/to/recall-model` for an offline check without starting the daemon.
+
+`GET /recall/status` reports `loading`, `ready`, or `unavailable` with a reason. Chat remains available during preparation and failure. Reasons include `not_configured`, `model_missing`, `model_unreadable`, `download_failed`, `verification_failed`, and `initialization_failed`. To retry a failed download, restore access and restart the daemon. For a rejected existing directory, replace the files with verified copies before restarting. A failed download never publishes an incomplete model directory.
 
 The index uses FastEmbed 4.9.1 with the ONNX Runtime 1.20.0 CPU build, 384-dimensional normalized mean pooling, FastEmbed's 512-token limit, and one input per dynamic quantization batch. Queries use `query: ` and trimmed text. Passages use `passage: ` and verbatim text in windows of up to 480 UTF-8 bytes with 80 bytes of overlap, aligned to character boundaries. Exact case-insensitive identifier tokens containing digits take priority over cosine similarity. SQLite stores versioned vectors as derived data keyed to their original messages. Change the index version when changing artifacts or preprocessing so the daemon rebuilds affected rows from original Message History. [Model card](https://huggingface.co/intfloat/multilingual-e5-small) · [Pinned export](https://huggingface.co/Xenova/multilingual-e5-small/tree/761b726dd34fb83930e26aab4e9ac3899aa1fa78) · [Rig FastEmbed 0.47.1](https://docs.rs/rig-fastembed/0.47.1/rig_fastembed/)
 

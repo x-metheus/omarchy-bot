@@ -3,18 +3,15 @@ on:
   pull_request:
     paths:
       - "apps/omarchy-bot/**"
-      - "apps/sidecar-rust/**"
+      - "apps/agent-daemon/**"
       - "apps/daemon/**"
       - "packages/**"
       - "scripts/linux-app/**"
       - "scripts/build-linux-app.sh"
-      - "scripts/build-sidecar.ts"
+      - "scripts/build-agent-daemon.ts"
       - "scripts/smoke-linux-app.sh"
-      - "scripts/sway-runtime/**"
-      - "scripts/build-sway-runtime.sh"
-      - "scripts/prepare-fonts.sh"
-      - "scripts/*browser*"
-      - "tests/e2e/daemon-boot.ts"
+      - "scripts/agent-release-smoke.ts"
+      - "scripts/clear-legacy-agent-data.ts"
       - "bun.lock"
       - ".github/workflows/linux-app.yml"
   workflow_dispatch:
@@ -42,6 +39,7 @@ jobs:
           path: |
             .lane/dist/*.AppImage
             .lane/dist/*.AppImage.sha256
+            .lane/dist/omarchy-agent-daemon_*
             .lane/dist/*.AppImage.sig
             .lane/linux-app/evidence/
           if-no-files-found: error

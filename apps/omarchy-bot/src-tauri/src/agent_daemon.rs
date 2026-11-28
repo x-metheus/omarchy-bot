@@ -24,6 +24,7 @@ const MASTER_KEY: &str = "master.key";
 
 pub(super) struct LocalDaemon {
     directory: PathBuf,
+    recall_bundle: Option<PathBuf>,
     port: u16,
     child: Mutex<Option<Child>>,
 }
@@ -35,7 +36,7 @@ struct Health {
 }
 
 impl LocalDaemon {
-    pub(super) fn new(directory: PathBuf) -> Self {
+    pub(super) fn new(directory: PathBuf, resource_directory: Option<PathBuf>) -> Self {
         let port = std::env::var("OMARCHY_BOT_AGENT_PORT")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -43,6 +44,7 @@ impl LocalDaemon {
             .unwrap_or(DEFAULT_PORT);
         Self {
             directory,
+            recall_bundle: resource_directory.map(|directory| directory.join("recall-model")),
             port,
             child: Mutex::new(None),
         }
@@ -116,6 +118,12 @@ impl LocalDaemon {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(bundle) = &self.recall_bundle {
+            command.env("OMARCHY_AGENT_RECALL_BUNDLE_DIR", bundle);
+            if std::env::var_os("OMARCHY_AGENT_RECALL_DOWNLOAD").is_none() {
+                command.env("OMARCHY_AGENT_RECALL_DOWNLOAD", "1");
+            }
+        }
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         *child = Some(
@@ -358,6 +366,7 @@ mod tests {
             .port();
         let owner = StopOnDrop(LocalDaemon {
             directory: profile.path().join("owner"),
+            recall_bundle: None,
             port,
             child: Mutex::new(None),
         });
@@ -400,6 +409,7 @@ mod tests {
 
             let attached = LocalDaemon {
                 directory: profile.path().join("attached"),
+                recall_bundle: None,
                 port,
                 child: Mutex::new(None),
             };
