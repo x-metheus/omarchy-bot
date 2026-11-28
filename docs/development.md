@@ -42,10 +42,10 @@ Run these commands from the repository root. With mise activated in your shell, 
 | `mise install` | Install the pinned Rust and Bun versions |
 | `cargo test --workspace --locked` | Test both native crates |
 | `cargo test -p omarchy-agent-daemon --locked --test conversation` | Run the daemon protocol suite |
-| `bun --cwd apps/omarchy-bot install --frozen-lockfile` | Install the desktop's locked dependencies |
+| `bun --cwd=apps/omarchy-bot install --frozen-lockfile` | Install the desktop's locked dependencies |
 | `mise run dev` | Open the native Tauri development window |
-| `bun --cwd apps/omarchy-bot run typecheck` | Check desktop TypeScript types |
-| `bun --cwd apps/omarchy-bot run test` | Run the desktop's Bun tests |
+| `bun --cwd=apps/omarchy-bot run typecheck` | Check desktop TypeScript types |
+| `bun --cwd=apps/omarchy-bot run test` | Run the desktop's Bun tests |
 
 
 ### Desktop project layout
@@ -64,7 +64,7 @@ Run App production builds, packaging, and cross-platform package checks only for
 
 | Command | Purpose |
 | --- | --- |
-| `bun --cwd apps/omarchy-bot run build:frontend` | Build the production desktop frontend |
+| `bun --cwd=apps/omarchy-bot run build:frontend` | Build the production desktop frontend |
 | `bash tools/release/build-linux-app.sh` | Package the desktop app and standalone daemon on Linux |
 
 The platform release scripts in `tools/release` stage the daemon and verified Recall model, then invoke `tauri build` with the release configuration. See the [Linux](../tools/release/linux-app/README.md), [macOS](../tools/release/macos-app/README.md), and [Windows](../tools/release/windows-app/README.md) guides and the [release workflow](../.github/workflows/app-release.yml).

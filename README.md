@@ -34,7 +34,7 @@ Install [mise](https://mise.jdx.dev/getting-started.html) and the [Tauri system 
 
 ```sh
 mise install
-mise exec -- bun --cwd apps/omarchy-bot install --frozen-lockfile
+mise exec -- bun --cwd=apps/omarchy-bot install --frozen-lockfile
 mise run dev
 ```
 
