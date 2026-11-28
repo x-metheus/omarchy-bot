@@ -296,6 +296,25 @@ fn allows_app_navigation(url: &Url, dev: bool) -> bool {
     ) || (dev && origin == ("http", Some("127.0.0.1"), Some(7322)))
 }
 
+fn restart_process(environment: &tauri::Env) -> ! {
+    #[cfg(all(dev, unix))]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // Tauri CLI stops Vite when the supervised application process exits.
+        let error = match tauri::process::current_binary(environment) {
+            Ok(binary) => std::process::Command::new(binary)
+                .args(environment.args_os.iter().skip(1))
+                .exec(),
+            Err(error) => error,
+        };
+        log_lifecycle(&format!("Could not restart the development app: {error}"));
+        std::process::exit(1);
+    }
+    #[cfg(not(all(dev, unix)))]
+    tauri::process::restart(environment)
+}
+
 fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
@@ -398,7 +417,7 @@ fn main() {
         if let Ok(mut link) = handle.state::<ShellState>().restart_link.lock() {
             if let Some(link) = link.take() { environment.args_os.push(link.into()); }
         }
-        tauri::process::restart(&environment);
+        restart_process(&environment);
     }
     std::process::exit(exit);
 }
