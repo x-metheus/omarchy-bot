@@ -3,7 +3,12 @@
   "productName": "omarchy-bot",
   "version": "0.1.0",
   "identifier": "com.omarchy.bot",
-  "build": { "frontendDist": "../../web/dist" },
+  "build": {
+    "beforeDevCommand": "bun run dev --host 127.0.0.1",
+    "devUrl": "http://127.0.0.1:7322",
+    "beforeBuildCommand": "bun run build:frontend",
+    "frontendDist": "../dist"
+  },
   "app": {
     "windows": [],
     "security": {
@@ -11,7 +16,7 @@
       "capabilities": [{ "identifier": "main", "windows": ["main"], "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"] }]
     }
   },
-  "bundle": { "active": true, "targets": "all", "externalBin": ["binaries/omarchy-bot-sidecar"], "icon": ["icons/icon.png", "icons/icon.icns"], "category": "Utility", "shortDescription": "Conversations and Bot Screens", "macOS": { "minimumSystemVersion": "13.0", "entitlements": "Entitlements.plist" } },
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.png", "icons/icon.icns"], "category": "Utility", "shortDescription": "AI Bot Conversations", "macOS": { "minimumSystemVersion": "13.0", "entitlements": "Entitlements.plist" } },
   "plugins": {
     "deep-link": { "desktop": { "schemes": ["omarchy-bot"] } },
     "updater": {

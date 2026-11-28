@@ -41,21 +41,21 @@ export CARGO_HOME="$root/.lane/macos-app/cargo"
 export BUN_INSTALL_CACHE_DIR="$root/.lane/macos-app/bun-cache"
 mkdir -p "$root/.lane/dist" "$root/.lane/macos-app/evidence"
 [[ -d node_modules ]] || bun install --frozen-lockfile
-bun run --filter=@omarchy-bot/web build
-bun scripts/build-sidecar.ts
-binary="$root/apps/omarchy-bot/src-tauri/binaries/omarchy-bot-sidecar-$triple"
-OMARCHY_BOT_TEST_SIDECAR_BINARY="$binary" bun test tests/integration/local-sidecar-process.test.ts
+bun scripts/build-agent-daemon.ts
 arguments=(--bundles app,dmg --target "$triple" --config "$build_config")
-(cd apps/omarchy-bot && cargo tauri build "${arguments[@]}" -- --locked)
+(cd apps/omarchy-bot && bun run tauri build "${arguments[@]}" -- --locked)
 bundle="$CARGO_TARGET_DIR/$triple/release/bundle"
 app="$bundle/macos/omarchy-bot.app"
 dmgs=("$bundle"/dmg/*.dmg)
 [[ ${#dmgs[@]} -eq 1 && -f ${dmgs[0]} && -d $app ]] || { echo 'Expected one dmg and application bundle' >&2; exit 1; }
 artifact="$root/.lane/dist/omarchy-bot_${version}_${architecture}.dmg"
-OMARCHY_BOT_TEST_SIDECAR_BINARY="$app/Contents/MacOS/omarchy-bot-sidecar" bun test tests/integration/local-sidecar-process.test.ts
+daemon="$app/Contents/MacOS/omarchy-agent-daemon"
+"$daemon" --verify-recall-model "$app/Contents/Resources/recall-model"
+OMARCHY_BOT_SMOKE_AGENT_ARCHIVE="$root/.lane/dist/omarchy-agent-daemon_${version}_${triple}.tar.gz" \
+  OMARCHY_BOT_SMOKE_EVIDENCE="$root/.lane/macos-app/evidence" bun scripts/agent-release-smoke.ts
 if [[ $mode == --signed ]]; then
   codesign --verify --deep --strict --verbose=2 "$app"
-  codesign --verify --strict --verbose=2 "$app/Contents/MacOS/omarchy-bot-sidecar"
+  codesign --verify --strict --verbose=2 "$daemon"
   spctl --assess --type execute --verbose=2 "$app"
   xcrun stapler validate "$app"
   # Tauri notarizes the app; notarize and staple the outer download as well.

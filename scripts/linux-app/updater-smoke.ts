@@ -56,15 +56,22 @@ async function open(): Promise<void> {
   const opened = z.object({ sessionId: z.string() }).parse(await wd("POST", "/session", { capabilities: { alwaysMatch: { "tauri:options": { application: app } } } }));
   session = opened.sessionId;
   await wd("POST", `/session/${session}/timeouts`, { script: 120_000 });
+  const pairing = await wd("POST", `/session/${session}/execute/sync`, {
+    script: "const service = window.__OMARCHY_BOT_SHELL__.service; return { origin: service.baseUrl(), paired: Boolean(service.deviceToken()) };",
+    args: [],
+  });
+  assert.deepEqual(pairing, { origin: daemonOrigin, paired: true });
 }
 const installed = path.join(run, "installed.AppImage");
 const hash = async (file: string) => new Bun.CryptoHasher("sha256").update(await Bun.file(file).arrayBuffer()).digest("hex");
-const credential = JSON.stringify({ baseUrl: "http://127.0.0.1:7431", token: "updater-private-test-device-token" });
-const store = Bun.spawn(["secret-tool", "store", "--label=Updater smoke", "service", "com.omarchy.bot", "username", "service-connection"], { stdin: "pipe", stdout: "ignore", stderr: "inherit" });
+const daemonOrigin = "http://127.0.0.1:7431";
+const credentialAttributes = ["service", "com.omarchy.bot", "username", "agent-daemon-connection"];
+const credential = JSON.stringify({ baseUrl: daemonOrigin, token: "updater-private-test-device-token" });
+const store = Bun.spawn(["secret-tool", "store", "--label=Updater smoke", ...credentialAttributes], { stdin: "pipe", stdout: "ignore", stderr: "inherit" });
 store.stdin.write(credential);
 store.stdin.end();
 assert.equal(await store.exited, 0);
-const readCredential = () => Bun.spawnSync(["secret-tool", "lookup", "service", "com.omarchy.bot", "username", "service-connection"]).stdout.toString().trim();
+const readCredential = () => Bun.spawnSync(["secret-tool", "lookup", ...credentialAttributes]).stdout.toString().trim();
 try {
   await until("native driver ready", async () => (await fetch("http://127.0.0.1:4444/status")).ok ? true : undefined);
   await open();

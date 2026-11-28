@@ -1,10 +1,5 @@
-import { z, type ZodTypeAny } from "zod";
-import { createManagePluginsSchema } from "@omarchy-bot/agent-contract";
-import { PLUGIN_PROVIDERS } from "./pluginProviders.ts";
-import {
-  AuthorizePluginBody, InstallSkillBody, PluginAccountBody, PluginEnabledBody, PluginProviderId,
-  PluginServiceBody, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT, SaveMcpBody,
-} from "./plugins.ts";
+import { z } from "zod";
+import { PluginProviderId, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT } from "./plugins.ts";
 
 /** One HTTPS origin: no credentials, path, query, or fragment. Publisher and daemon share this check. */
 export const HttpsOrigin = z.string().url().transform((value, context) => {
@@ -143,73 +138,3 @@ export const NormalisedSkillDetail = z.object({
 }).strip();
 
 export { SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT };
-
-export const PluginOperationInput = z.object({
-  id: z.string().optional(),
-  query: z.string().optional(),
-  cursor: z.string().optional(),
-  source: z.string().optional(),
-  skillPath: z.string().optional(),
-  ref: z.string().optional(),
-  enabled: z.boolean().optional(),
-  connection: SaveMcpBody.optional(),
-  redirectUrl: z.string().optional(),
-  providerId: PluginProviderId.optional(),
-  serviceId: z.string().optional(),
-  label: z.string().optional(),
-  view: z.string().optional(),
-}).strict();
-export type PluginOperationInput = z.infer<typeof PluginOperationInput>;
-
-export interface PluginOperation {
-  action: string;
-  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-  /** Daemon HTTP path. `:id` and `:serviceId` are the only parameters. */
-  path: string;
-  /** Publisher route when this daemon path calls the normalised catalog. */
-  upstream?: string;
-  body?: ZodTypeAny;
-  /** Present when the same action has a second HTTP path the agent tool does not call. */
-  tool?: false;
-}
-
-const account = "/api/plugins/accounts/:id";
-const service = `${account}/services/:serviceId`;
-const mcp = "/api/plugins/mcp/:id";
-const skill = "/api/plugins/skills/:id";
-
-export const PLUGIN_OPERATIONS = [
-  { action: "list", method: "GET", path: "/api/plugins" },
-  { action: "inspect", method: "GET", path: "/api/plugins/inspect" },
-  { action: "inspect_skill", method: "GET", path: "/api/plugins/catalog/detail", upstream: "catalog/detail/normalised" },
-  { action: "search_skills", method: "GET", path: "/api/plugins/catalog", upstream: "catalog/normalised" },
-  { action: "install_skill", method: "POST", path: "/api/plugins/skills", body: InstallSkillBody },
-  { action: "enable_skill", method: "PATCH", path: skill, body: PluginEnabledBody },
-  { action: "remove_skill", method: "DELETE", path: skill },
-  { action: "update_skills", method: "POST", path: "/api/plugins/skills/update", body: z.object({}).strict() },
-  { action: "authorize_service", method: "POST", path: "/api/plugins/authorize", body: AuthorizePluginBody },
-  { action: "enable_service", method: "PATCH", path: `${account}/services`, body: PluginServiceBody },
-  { action: "remove_service", method: "DELETE", path: service },
-  { action: "update_service", method: "POST", path: `${service}/update`, body: z.object({}).strict() },
-  { action: "label_account", method: "PATCH", path: account, body: PluginAccountBody },
-  { action: "disconnect_account", method: "DELETE", path: account },
-  { action: "save_mcp", method: "POST", path: "/api/plugins/mcp", body: SaveMcpBody },
-  { action: "save_mcp", method: "PUT", path: mcp, body: SaveMcpBody, tool: false },
-  { action: "update_mcp", method: "POST", path: `${mcp}/update`, body: z.object({}).strict() },
-  { action: "enable_mcp", method: "PATCH", path: mcp, body: PluginEnabledBody },
-  { action: "remove_mcp", method: "DELETE", path: mcp },
-  { action: "check_mcp", method: "POST", path: `${mcp}/check` },
-  { action: "authorize_mcp", method: "POST", path: `${mcp}/authorize`, body: z.object({ redirectUrl: z.string().url().max(8192).optional() }).strict() },
-] as const satisfies readonly PluginOperation[];
-export type PluginAction = (typeof PLUGIN_OPERATIONS)[number]["action"];
-
-export const MANAGE_PLUGINS_SCHEMA = createManagePluginsSchema(
-  [...new Set(PLUGIN_OPERATIONS.map((operation) => operation.action))],
-  Object.keys(PLUGIN_PROVIDERS),
-);
-
-
-export const PluginManageInput = PluginOperationInput.extend({
-  action: z.enum(PLUGIN_OPERATIONS.flatMap((operation) => "tool" in operation && operation.tool === false ? [] : [operation.action]) as [PluginAction, ...PluginAction[]]),
-});
-export type PluginManageInput = z.infer<typeof PluginManageInput>;

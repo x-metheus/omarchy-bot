@@ -1,44 +1,344 @@
 # Agent Daemon
 
-The standalone daemon runs a Rig 0.47.1 Agent for each active Bot Turn. The Bot ID also identifies its single Conversation. The HTTP listener binds to IPv4 loopback. Run one daemon per SQLite file.
+The standalone daemon hosts one Rig 0.47.1 root Agent per Bot Conversation. The Bot ID also identifies its single Conversation. The HTTP listener binds to IPv4 loopback. Run one daemon per SQLite file.
 
-## OpenAI smoke test
+## Headless startup
 
-From the repository root, run the daemon in a terminal with `OPENAI_API_KEY` already exported through your credential manager. The default model is `gpt-4.1-mini`. Set `OMARCHY_AGENT_MODEL` to select another OpenAI Chat Completions model available to your account. The real smoke uses OpenAI's default endpoint, so leave `OPENAI_BASE_URL` unset. A scripted server can supply an alternate Chat Completions base URL, including its `/v1` path.
+Use Rust 1.97.1. In a POSIX shell, create a private state directory and provision two separate random secrets. Run this block once for a new instance.
 
 ```sh
-cd apps/agent-daemon
-OMARCHY_AGENT_DB=./agent-smoke.sqlite3 cargo run --locked
+state="$HOME/.local/state/omarchy-agent-daemon"
+install -d -m 700 "$state"
+(
+  umask 077
+  set -C
+  openssl rand 32 > "$state/master.key" &&
+    openssl rand -hex 32 > "$state/settings-token"
+)
 ```
 
-The daemon prints its HTTP address after binding. `OMARCHY_AGENT_PORT` defaults to `8765`. Set it to `0` for an available port and use the printed address. `OMARCHY_AGENT_DB` defaults to `agent-daemon.sqlite3` in the current directory.
+From the repository root, start the daemon. These paths work on restart too. The daemon reads both files at startup.
 
-In a second terminal, use `curl` and `jq` to create a Bot, stream a reply, and ask a follow-up that refers to the earlier message.
+Extract `omarchy-agent-daemon_<version>_<target>.tar.gz` on a release host and keep the `recall-model` directory beside the executable. After setting the environment below, run the extracted `omarchy-agent-daemon` (`omarchy-agent-daemon.exe` on Windows). A source checkout can use `cargo run --locked` instead.
+
+```sh
+state="$HOME/.local/state/omarchy-agent-daemon"
+export OMARCHY_AGENT_DB="$state/agent-daemon.sqlite3"
+export OMARCHY_AGENT_MASTER_KEY_FILE="$state/master.key"
+export OMARCHY_AGENT_SETTINGS_TOKEN_FILE="$state/settings-token"
+cd apps/agent-daemon
+cargo run --locked
+```
+
+The daemon prints its bound address. `OMARCHY_AGENT_PORT` defaults to `8765`. Set it to `0` for an available port and use the printed address. `OMARCHY_AGENT_DB` defaults to `agent-daemon.sqlite3` in the current directory. On startup with no provider credential, the daemon can create Bots and read Conversations. A message POST receives `503 provider_unconfigured` before the user message is committed.
+
+The master key file must contain exactly 32 raw bytes. SQLite stores provider keys as AES-256-GCM ciphertext with a fresh OS-random nonce per write and the provider authenticated as associated data. Keep the database and its matching master key in separate protected backups. Restore both to resume saved Settings. A missing or incorrect key for the saved selection prevents startup. If the master key is permanently lost, stop the daemon and back up SQLite before clearing Settings in a transaction. Run `BEGIN IMMEDIATE; DELETE FROM model_settings; DELETE FROM provider_credentials; COMMIT;` against that database, then provision a new master key and re-enter provider credentials. Conversation history remains available. An independently replaced Settings bearer token takes effect on restart.
+
+## Fresh cutover from the Pi Service
+
+Stop the legacy Service before clearing its application state. The Agent Daemon uses a new SQLite database and a separate desktop pairing credential. Back up any old data you want to retain before applying the cutover.
+
+| Platform | Old Service data root | Old Service state root | Old managed Shared Workspace |
+| --- | --- | --- | --- |
+| Linux | `$HOME/.local/share/omarchy-bot` | `$HOME/.local/state/omarchy-bot` | `$HOME/.omarchy-bot/workspace` |
+| macOS | `$HOME/Library/Application Support/omarchy-bot` | `$HOME/Library/Application Support/omarchy-bot/state` | `$HOME/.omarchy-bot/workspace` |
+| Windows | `%APPDATA%\omarchy-bot` | `%APPDATA%\omarchy-bot\state` | `%USERPROFILE%\.omarchy-bot\workspace` |
+
+The Windows Service falls back to `%USERPROFILE%\AppData\Roaming` when `APPDATA` is unset. Pi Durable stores the Service's sessions in `db.sqlite` and its SQLite side files under the data root. The Service used the managed Shared Workspace for Threads without a selected working directory.
+
+Run `bun scripts/clear-legacy-agent-data.ts` from the checkout to print the exact entries. With the Service stopped, add `--apply` to remove those entries. The command rejects custom Service roots and symbolic links or junctions on the named paths. It confines deletion to the user profile. Standalone Pi sessions, user-selected directories outside the managed roots, and the installed binaries stay in place. The command runs when invoked by the operator.
+
+If a recorded working directory or allowed folder lies inside an entry scheduled for removal, the command refuses to apply the cutover. Preserve that directory separately before clearing the legacy installation.
+
+[Historical path resolution](https://github.com/x-metheus/omarchy-bot/blob/b47ac2aaa7745a441ba081453a7282a07a247f8e/apps/daemon/src/modules/workspace/paths.ts) · [Historical Pi Durable storage](https://github.com/x-metheus/omarchy-bot/blob/b47ac2aaa7745a441ba081453a7282a07a247f8e/apps/daemon/src/modules/runtime/runtime.ts) · [Cutover command](../../scripts/clear-legacy-agent-data.ts)
+
+## Desktop connection
+
+Desktop release packages include `omarchy-agent-daemon` and the verified Recall model. For source builds, place the executable beside the Tauri executable, add it to the desktop process's `PATH`, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to its absolute path. The desktop checks `http://127.0.0.1:8765` when it opens for local use and attaches to an existing daemon. If the port is free and startup is enabled, it starts one using a private application data directory. Disable **Start the local daemon when opening Omarchy Bot** on the connection screen or in Settings. A launched daemon can keep working when the desktop disconnects or closes.
+
+Choose **Pair local daemon** for a daemon started by this desktop profile. To attach to a standalone daemon, obtain a code from its operator, then enter the daemon address and code in the desktop. With the token file from the setup above, the operator can mint a code on the daemon host:
 
 ```sh
 base=http://127.0.0.1:8765
-bot=$(curl -fsS "$base/bots" -H 'Content-Type: application/json' \
-  -d '{"name":"Smoke Bot"}' | jq -er .id)
-curl -fsSN "$base/bots/$bot/messages" -H 'Content-Type: application/json' \
-  -d '{"text":"Remember the word amber. Reply with a short acknowledgment."}'
-curl -fsSN "$base/bots/$bot/messages" -H 'Content-Type: application/json' \
-  -d '{"text":"What word did I ask you to remember? Reply with just that word."}'
-curl -fsS "$base/bots/$bot" | jq .
+token_file="$HOME/.local/state/omarchy-agent-daemon/settings-token"
+printf 'Authorization: Bearer %s\n' "$(cat "$token_file")" |
+  curl -fsS "$base/api/pairing/codes" -H @- -H 'Content-Type: application/json' \
+    -d '{"name":"Work desktop"}' | jq -r .code
 ```
 
-Expect ordered `delta` events followed by `committed` for each reply. The follow-up should answer `amber`. Stop the daemon with Ctrl+C and start it again with the same database command. In the second terminal, run the final `GET` again. The Bot ID and ordered messages should match the earlier read.
+Pairing codes expire after ten minutes and can be used once. The desktop keeps its device credential in the OS keychain. The operator bearer can list devices at `GET /api/devices/paired` and revoke a device with `POST /api/devices/paired/{id}/revoke`. Revocation closes both of that device's live streams and denies subsequent requests while accepted work keeps running. A paired device can read and write Settings and use the daemon's Bot and Conversation routes.
+
+For standalone use without a token file, Conversation routes remain available on loopback and device pairing and Settings are disabled. Provision a token before exposing the daemon through a reverse proxy.
+
+## Settings API
+
+`GET /settings` and `PUT /settings` require an operator or paired-device `Authorization: Bearer <token>` header. The daemon checks the header before reading a Settings request body. If the operator token file is omitted, both routes reject requests. An operator can run without the master key file before saving any Settings. `GET` then reports `writable: false` and `PUT` returns `503 settings_read_only`.
+
+Send `PUT /settings` as JSON with `provider` (`openai` or `anthropic`), `model`, and optional `apiKey`. Supply `apiKey` on first setup and to rotate that provider's credential. Omit it to reuse that provider's stored key. Model IDs must be nonempty and free of surrounding whitespace and control characters. API keys must be nonempty printable ASCII without whitespace. Unknown fields and explicit `null` keys are rejected. The provider validates account credentials and model availability on the next Turn. A syntactically valid key can save successfully and later fail upstream, yielding a sanitized `turn_failed` event.
+
+Both methods return the same status shape. `active` is `null` until configured. Its `source` is `saved` or `environment`. `storedCredentials` indicates which providers have an encrypted credential in the database.
+
+```json
+{
+  "active": {"provider": "openai", "model": "gpt-4.1-mini", "source": "saved"},
+  "storedCredentials": {"openai": true, "anthropic": false},
+  "writable": true
+}
+```
+
+A successful `PUT` commits the selection and any key replacement together. Invalid input or a failed write preserves the prior configuration. Writes and message admission share a lock. An HTTP message starting a Turn uses the model and key captured at admission. Input delivered into a running Turn uses that Turn's connection. A Subagent inherits its parent's connection when spawned, and a report can wake the root using its existing connection. The latest committed write determines the active selection.
+
+| Provider | Default request URL | Operator base URL override |
+| --- | --- | --- |
+| `openai` | `https://api.openai.com/v1/chat/completions` | `OPENAI_BASE_URL`, including the gateway's `/v1` or equivalent API prefix |
+| `anthropic` | `https://api.anthropic.com/v1/messages` | `ANTHROPIC_BASE_URL`, the API root before `/v1/messages` |
+
+Set overrides in the daemon environment before startup. Use a trusted endpoint that implements the selected protocol and use HTTPS for network deployments. Rig supplies Anthropic output limits for known models. The daemon supplies a 1,024-token limit for Messages aliases without a Rig default.
+
+For existing headless deployments, `OPENAI_API_KEY` and `OMARCHY_AGENT_MODEL` optionally bootstrap OpenAI Chat Completions. The default bootstrap model is `gpt-4.1-mini`. A saved selection takes precedence. The environment key stays in the host bootstrap and does not count as a stored Settings credential.
+
+## Live smoke for both protocols
+
+Start the daemon as above with the official endpoints or authorized gateway overrides. In a second terminal, use `curl`, `jq`, and Python 3. The helper prompts for provider keys without echo and sends them directly to loopback. The model names below can be replaced with IDs enabled for your account.
+
+```sh
+base=http://127.0.0.1:8765
+token_file="$HOME/.local/state/omarchy-agent-daemon/settings-token"
+
+select_provider() {
+  python3 - "$base" "$token_file" "$1" "$2" "${3:-}" <<'PY'
+import getpass
+import json
+import sys
+import urllib.request
+from pathlib import Path
+
+base, token_file, provider, model, rotate = sys.argv[1:]
+settings = {"provider": provider, "model": model}
+if rotate == "replace":
+    settings["apiKey"] = getpass.getpass(f"{provider} API key: ")
+request = urllib.request.Request(
+    f"{base}/settings", data=json.dumps(settings).encode(), method="PUT",
+    headers={"Authorization": "Bearer " + Path(token_file).read_text().rstrip("\r\n"),
+             "Content-Type": "application/json"},
+)
+with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=15) as response:
+    print(json.dumps(json.load(response), indent=2))
+PY
+}
+
+operator_header() { printf 'Authorization: Bearer %s\n' "$(cat "$token_file")"; }
+
+select_provider openai gpt-4.1-mini replace
+bot=$(operator_header | curl -fsS "$base/bots" -H @- -H 'Content-Type: application/json' \
+  -d '{"name":"Smoke Bot"}' | jq -er .id)
+operator_header | curl -fsSN "$base/bots/$bot/messages" -H @- -H 'Content-Type: application/json' \
+  -d '{"text":"Remember the word amber. Reply with a short acknowledgment."}'
+
+select_provider anthropic claude-haiku-4-5 replace
+operator_header | curl -fsSN "$base/bots/$bot/messages" -H @- -H 'Content-Type: application/json' \
+  -d '{"text":"What word did I ask you to remember? Reply with just that word."}'
+operator_header | curl -fsS "$base/bots/$bot" -H @- | jq .
+```
+
+Expect ordered `delta` events followed by `committed` for both replies. The follow-up should answer `amber`. Restart the daemon with the same database and key files and use the same Bot ID to read its Conversation. Send another follow-up to exercise the restored Anthropic selection. Run `select_provider openai gpt-4.1-mini` to switch back using the stored OpenAI key, or add `replace` to rotate it before the next Turn.
 
 ## HTTP behavior
 
 | Request | Response |
 | --- | --- |
-| `POST /bots` with `{"name":"Lumen"}` | `201` with `id` and `name` |
+| `GET /bots` | `200` with the daemon's Bot profiles in stable name order |
+| `POST /bots` with `{"name":"Lumen"}` | `201` with the new Bot profile and `duties: null` |
 | `GET /bots/{id}` | `200` with `bot` and `messages`, oldest first |
+| `PATCH /bots/{id}` with `{"name":"Prism"}` | `200` with the renamed Bot profile |
+| `DELETE /bots/{id}` | `204` after deletion, `404 bot_not_found` for an unknown Bot |
 | `POST /bots/{id}/messages` with `{"text":"Hello"}` | `200` with a `text/event-stream` reply |
+| `GET /bots/{id}/events` | `200` with ordered replay followed by live Conversation events |
+| `POST /bots/{id}/work/{messageId}/retry` | `202` queues the original interrupted input, `409` for other work states |
+| `GET /bots/{id}/attachments/{attachmentId}` | `200` with the stored bytes and media type |
+| `GET /recall/status` | `200` with independent Recall model availability |
+
+A Bot profile has `id`, `name`, and `duties`. Creating a Bot requires a nonempty name. Rename updates the name on the existing profile. The same ID opens the original Conversation before and after a restart.
+
+Deleting a Bot stops its Rig work and closes its Conversation and reply streams. The daemon removes its Message History, events, work records, Observational Memory, Recall entries, and attachments with no remaining Conversation references. Shared UserMemory values and forgetting state survive. UserMemory inspection returns `source: null` if the original message was deleted.
+
+Set duties by sending an explicit standing instruction such as “Your ongoing job is to classify new color samples by their shade.” Send a later message to revise those duties. Use a model that supports tool calls. The Agent uses the latest user-authored message text as evidence. The daemon saves the proposed duties and the completed reply in the same transaction, then supplies the saved duties to the model on later Turns.
 
 A successful message POST commits the user message before starting the model call. Each `delta` contains a JSON string. The terminal `committed` event contains the same `{id, role, text}` message returned by `GET` and is sent after the SQLite commit. A failed Turn ends with an `error` event containing `code` and `message`. Any deltas from that Turn are provisional. The committed user message remains in the Conversation.
 
-A Bot accepts one Turn at a time. An overlapping POST receives `409` with `turn_in_progress` and adds no message. A Turn continues after its client disconnects. A client whose stream closes before a terminal event can use `GET` to read the committed state. On process restart, the daemon loads committed messages from SQLite and starts a fresh Turn on the next POST.
+A Bot accepts new messages while a Turn is running. Rig delivers them through the Inbox at the next model call. A POST stream starts receiving deltas when its input is delivered and closes after that Turn's `committed` or `error` event. When Rig delivers multiple inputs to the same Turn, their POST streams receive the same committed reply ID. A disconnect leaves the Turn running.
+
+Read `/bots/{id}/events` to subscribe to the entire Conversation, including detached replies after the POST streams close. Save the last processed SSE `id` and pass it as `Last-Event-ID` on reconnect. IDs are increasing and remain stable across restart. The daemon replays later events for that Bot and then follows live updates on the same connection. Reply events use the same IDs on the POST and Conversation streams. The history endpoint includes committed messages from before event recording was available.
+
+The Conversation stream also emits `work` events with `messageId` and `status`. A request can be `queued`, `running`, `waiting` for a delegated report, `completed`, `failed`, or `interrupted`. On restart, the daemon resumes queued inputs with the current model and credential. If configuration is missing, queued work reports `reason: "provider_unconfigured"` and resumes when Settings are saved.
+
+`tool` events contain a stable `id`, the tool `name`, and a sanitized `status`. Each `running` event is followed by `completed`, `failed`, `cancelled`, or, after restart, `interrupted`. Tool arguments and results stay out of the feed.
+
+Previously running or delegated work becomes `interrupted`. Its original message and any committed replies are available in Message History. An explicit retry reuses the original message and attachments with current Settings. Interrupted instructions stay out of restored model input until that retry. Interrupted Rig tool calls and Subagents are discarded on restart.
+
+### Rig lifecycle
+
+The daemon restores committed model context when it creates a Bot's root Agent. Admission saves a user message and its queued work in one SQLite transaction. The Inbox effect carries the Bot and durable user message ID. Rig provides `DeliveredAs` and `DeliveredIn` when the message reaches a Turn. Before its model request can start, the daemon durably marks the delivered input as running. Model calls and tools retain the eligible source for each invocation.
+
+`SubagentsPlugin` owns delegation, messaging, and reports. The daemon records the originating authored input for a delegated request and resolves it when the root commits its report reply. A live report can wake the root using its existing connection. Settlement commits the reply, work state, and corresponding events before notifying the POST or Conversation streams.
+
+### Control ongoing work in chat
+
+Send the correction, cancellation, or progress question as another message to the same Bot. Name the operation when more than one is active. The Bot uses `redirect_work` to deliver a correction through Rig's Inbox to the chosen Subagent. An earlier lookup can finish, but the Agent receives a superseded notice in place of its result when the lookup predates the correction. Independent work continues.
+
+When asked for progress, the Bot can inspect running Subagents and those waiting for delegated work. An ambiguous change or cancellation prompts a question. For a clear cancellation, the Agent calls Rig's `StopTurn` on the selected Subagent and its descendants. A tool or external operation can only stop where its execution supports cancellation. A stop does not undo a completed external action.
+
+#### Live correction acceptance
+
+With authorization to use a tool-capable Chat Completions model, set `OPENAI_BASE_URL` to its API root, `OMARCHY_AGENT_MODEL` to its model ID, and `OPENAI_API_KEY` through the approved credential environment. From `apps/agent-daemon`, run the opt-in check in that environment.
+
+```sh
+cargo test --locked -j 3 --test conversation \
+  work_control::live::a_live_model_reports_only_the_corrected_label -- --ignored --exact --nocapture
+```
+
+The test starts the daemon with a disposable database and a loopback provider relay. The relay handles only the three neutral parcel lookup briefs locally. It forwards planning, correction, and report generation to the configured model. The fixture holds both the original Alder lookup and the independent Birch tally, sends the correction, then releases the old result after the correction reply commits. It waits for the south-depot query before releasing the corrected label and the Birch tally. Success requires a committed reply containing `BLU-159` and `12`, with no assistant message publishing `GRN-807`. The gateway credential stays in the relay process and is never written to the daemon database.
+
+The fixture prints the lookup and report route, the short Rig Agent IDs, and the committed message ID for label-bearing replies. An obsolete mention gets a diagnostic classification when its wording makes the use clear. The acceptance still fails if any committed reply includes the obsolete label.
+
+## Observational Memory
+
+As a Bot approaches its selected model's history budget, the daemon starts a separate model request to summarize an older prefix of committed messages. Each Bot has one observation in SQLite with the exact committed message ID it covers. Later requests can include that historical summary with recent original messages. The Conversation returned by `GET /bots/{id}` and the original text available to Recall remain complete.
+
+The daemon uses the pinned Rig catalog's input limits and Rig's token estimate for the prompt and tool schemas. It reserves reply space and keeps the active Turn intact, including tool calls and results. Model aliases without catalog limits use an 8,192-token window estimate. While an observation is pending or after it fails, the Agent can continue with the recent history that fits and any previously saved observation. The observer uses the selected chat provider and receives committed message text as historical data. The observed prefix stops before queued, running, waiting, or interrupted work until that work settles.
+
+## Daemon-host tools
+
+Set `OMARCHY_AGENT_WORK_DIR` to an existing absolute directory to enable `read`, `edit`, `write`, and `shell` on the daemon host. Provision `OMARCHY_AGENT_SETTINGS_TOKEN_FILE` before starting in this mode. Every Bot, Conversation, attachment, and message request requires an operator or paired-device `Authorization: Bearer <token>` header. The daemon returns `401 conversation_unauthorized` before admitting unauthorized work. Leave `OMARCHY_AGENT_WORK_DIR` unset for ordinary chat without host tools.
+
+`read` returns UTF-8 text or a supported PNG, JPEG, GIF, or WebP image. Images are sent to the selected model when its provider and model support image input. `edit` applies the requested replacements together. `write` creates a file or replaces a text version observed by the calling Agent during the current daemon run. If the file changes after observation, read it again before replacing it. File tools resolve paths within the configured workspace.
+
+`shell` starts in the configured directory or a `cwd` within it. It uses `sh` on Linux and macOS and Windows PowerShell on Windows. It returns stdout and stderr with an exit status or a timeout when `timeout_secs` is reached. Commands run with the permissions of the daemon account. The starting directory limits where a command launches. Commands can access anything the daemon account can access. On Windows a timeout stops PowerShell itself, and a subprocess may continue.
+
+Run `cargo test --locked -j 3 --test conversation host_tools` from `apps/agent-daemon` on each supported host. The tests use a disposable workspace and scripted loopback providers.
+
+## Desktop tools
+
+In the paired native app, choose **Choose desktop directory** or **Choose desktop file** in the Conversation composer before sending a request. A directory selection enables `read`, `edit`, `write`, and `shell` on that device for the next message. A file selection enables file tools for that file. Attachments submit a separate copy to the Conversation. Use **Use daemon host** to clear the desktop selection before sending.
+
+The native app displays the paired device, requested operation, arguments, and local working directory before each tool runs. Choose **Allow once** or **Deny**. The app keeps the working directory local and sends the approved result to the originating Rig call. File tools use paths relative to the working directory and refuse symbolic links. The selected working directory is where `shell` starts, with the desktop account’s permissions.
+
+Closing the app, changing the selection, revoking a device, or losing the paired connection ends the desktop session. When a session ends, in-flight calls report the desktop unavailable and the app stops running tools where supported. An already-started file operation can finish. A later message without a desktop selection can use the daemon-host workspace when configured. Recovered work that previously targeted a desktop needs a new desktop selection and message.
+
+The native app uses Rig `0.47.1` for these operations and requires Rust `1.97.1` or newer.
+
+## Shared UserMemory
+
+A Bot can save a fact or standing preference from its current user message. For example, say “Always reply in French,” “My time zone is Europe/Paris,” or “Please call me Áine.” The daemon verifies the proposal against the original committed text and shares the saved value with all Bots on that daemon. Use a direct first-person statement for facts, such as “Remember that my favorite tea is hojicha.” Ambiguous wording requires clarification. Use a model that supports tool calls when saving UserMemory.
+
+Ask any Bot “What do you remember about my units preference?” to inspect the current value. If the source is available, the Bot can cite its Conversation and quote your original statement. Say “Change my units preference to metric” to correct it, or “Forget my units preference” as its own message to clear it for every Bot. The original Conversation messages remain readable. A later explicit statement can establish the preference again.
+
+Each model request receives the current reply language, time zone, and preferred name when available. Other entries are selected by matching words from the current request against the entry's topic, with a limit of six. A current instruction such as “Reply in English this time” takes precedence for that request. Request context and tool traces do not become Conversation messages.
+
+### Storage and provenance contract
+
+`user_memory` holds one current value per key. Recurring keys are `preferences.reply_language`, `profile.time_zone`, and `profile.preferred_name`. Additional keys are `preferences.units`, `preferences.format`, and `facts.<snake_case_topic>`. Each row stores `source_bot_id`, `source_message_id`, `source_order`, and the half-open UTF-8 byte range `[evidence_start, evidence_end)` in the original user text. Source identifiers survive deletion independently of the source row. A missing source row makes the original evidence unavailable.
+
+`messages.id` is the global committed order. `message_order` keeps its SQLite high-water mark across restarts and source deletion. Message insertions allocate through the daemon Store, and the insertion trigger advances the high-water mark in the same transaction. The memory write updates SQLite only for a strictly newer `source_order`, then publishes the committed value to Rig's shared read snapshot.
+
+When Rig builds a request, the daemon binds it to the most recent authored input delivered into that Turn and present in its model context. Tool calls carry the source of the model effect that produced them. The daemon verifies the source Bot, message ID, user role, and verbatim evidence against SQLite. Report-only Turns have no source for memory writes.
+
+`user_memory_forgotten` stores the last committed user message order for each forgotten key. A forget transaction removes the value and records its order, even if no value has been saved yet. A newer verified statement replaces the tombstone with a current value. Across both tables, the latest applicable user message wins. An equal order is a repeat and cannot change the state. The daemon holds the snapshot write lock across the commit and publication so model preparation sees the complete change.
+
+Inspection returns current values only. Available sources include the originating Bot ID and name, committed message ID, and verbatim evidence. The source is `null` when its original message is unavailable. A Bot's normal Conversation reads continue to return the original text.
+
+Model requests treat UserMemory as authoritative for standing preferences. When applicable, a forgotten key is accompanied by its committed order instead of its old value. Historical Recall results should carry their original committed message IDs. Observational Memory summaries should retain the committed order they cover. Earlier statements, summaries, Recall results, and prior tool receipts are historical context. Only a new, explicit authored user statement can restore a forgotten key.
+
+## Conversation attachments
+
+In the Desktop Conversation, choose **Attach files** or drop files into the composer, then send a message. Desktop reads the selected files and submits bounded UTF-8 text or supported static image content. Source paths stay on the Desktop, and submitted content stays available to the daemon after the client disconnects. Open an attachment in history to view or save the submitted content. The Conversation cannot open the original file, including after reconnecting. Use **Reuse** to attach available content from the same Bot's Conversation to a new message. The daemon checks access when it accepts the message.
+
+Include an optional `attachments` array in a message POST. The daemon associates entries with the committed message in array order. The `text` field remains required and stores the exact user-authored text used for UserMemory evidence. Attachment content enters the selected model's current Turn. A later Turn can include the content again by referencing its ID.
+
+```json
+{
+  "text": "Use the new note and the diagram I attached earlier.",
+  "attachments": [
+    {"type":"inline","name":"sample.txt","mediaType":"text/plain","content":"Sample material is cobalt."},
+    {"type":"reference","id":"e30e61e5-aaea-4840-a622-ebe5167d4df5"}
+  ]
+}
+```
+
+Send extracted plain UTF-8 text in `content` for `text/plain`, up to 64 KiB. For `image/png`, `image/jpeg`, `image/gif`, and `image/webp`, send standard padded base64 of a static image up to 1 MiB decoded and 2,048 pixels on either axis. The daemon verifies the format and decodes the image before storing its original bytes. The JSON request limit is 2 MiB with up to eight attachment entries. Use a file name as the label. Extract document text on the client before sending it. Both text and image content are shared with the configured model provider when used in a Turn.
+
+`GET /bots/{id}` returns an `attachments` array on each message with attachment records. Each record has `id`, `name`, `mediaType`, and `available`. Download available content from the attachment GET route. Both download and reference reuse require an existing association in the target Bot's Conversation on the connected daemon. Unknown IDs and IDs from another Bot return `404 attachment_not_found`. A malformed POST reference returns `422 invalid_message`. A rejected reference leaves the submission uncommitted.
+
+An admitted message with an unusable attachment emits an `attachment_warning` SSE event with `attachmentId`, `code`, and `message` before reply deltas. Missing, invalid, or over-limit content gives `attachment_unavailable`. An unsupported MIME type gives `attachment_format_unsupported`. These records are visible in the Conversation with `available: false`, and their content GET returns `410 attachment_unavailable`. A valid image for a text-only selected model gives `attachment_model_unsupported` and remains downloadable. The Agent can still use the message text and any usable attachments.
+
+OpenAI Chat Completions and Anthropic Messages accept text attachments as text parts. For image support, the daemon uses the pinned Rig catalog for known models, including `openai/gpt-4.1-mini` and `anthropic/claude-haiku-4-5`. For unlisted gateway aliases it uses Rig's provider wire capability rule. Select an alias the gateway documents as vision-capable. Provider failures appear as `turn_failed` and the committed message stays in the Conversation. [Rig model catalog](https://docs.rs/rig-core/0.47.1/rig_core/catalog/) · [OpenAI vision guide](https://developers.openai.com/api/docs/guides/images-vision/) · [Anthropic vision guide](https://platform.claude.com/docs/en/build-with-claude/vision)
+
+### Live attachment smoke
+
+Use a disposable daemon database, an authorized credential, and a vision-capable model that supports streaming on the selected endpoint. For an authorized Chat Completions gateway, set `OPENAI_BASE_URL` to its API root and select its vision-capable model ID in Settings or through `OMARCHY_AGENT_MODEL`. Start a fresh Bot as in the smoke test above. Put a neutral text sample that says `Calibration sample: cobalt.` in `sample.txt` and prepare a static red PNG named `pixel.png` within the stated limits. Run this with `curl` and `jq`.
+
+```sh
+jq -n --rawfile note sample.txt --arg image "$(base64 -w0 pixel.png)" '{
+  text: "Which calibration sample does the text name, and what color is the PNG?",
+  attachments: [
+    {type:"inline",name:"sample.txt",mediaType:"text/plain",content:$note},
+    {type:"inline",name:"pixel.png",mediaType:"image/png",content:$image}
+  ]
+}' | curl -fsSN "$base/bots/$bot/messages" -H 'Content-Type: application/json' --data-binary @-
+```
+
+Expect a committed reply identifying cobalt and red and a Conversation with both attachment IDs on the submitted message.
+
+## Recall
+
+An Agent using a tool-capable chat model can call `recall` with a query. Recall searches committed user and assistant text from the calling Bot before the first user message delivered to its current Turn. A report-only Turn searches the committed history at lookup. Recall returns up to five historical matches with `bot_id`, `message_id`, `role`, verbatim `text`, and the half-open UTF-8 range `[start_byte, end_byte)` in the original message. `message_id` is the global committed order and resolves against `GET /bots/{id}`. Each tool result labels its messages as `historical`. Recall evidence has no authority to update UserMemory or establish a current preference.
+
+When the user asks which other Bot discussed a specific earlier topic, the Agent can opt in with `recall` and `scope: "source_bot"`. This searches the owner's other Bots on the same daemon for messages committed before the current Turn. It returns up to three matching passages with the source Bot's current name and stable ID. Reference-code queries require an exact identifier match, and topic queries use a minimum semantic similarity. The Agent receives the passages in the same Turn and replies in the current Conversation.
+
+The daemon embeds and indexes messages locally. Ordinary chat can run while Recall verifies the model or builds its index. A Recall call can catch up on pending messages within its scope. If the Agent chooses to use Recall, retrieved text is included in the configured chat provider's next request.
+
+### Offline provision
+
+Release packages include the pinned Xenova multilingual E5 small INT8 ONNX export at revision `761b726dd34fb83930e26aab4e9ac3899aa1fa78`. To prepare these same assets for a separate offline host, run `omarchy-agent-daemon --prepare-recall-model /path/to/recall-model` on a connected machine and copy the verified directory. The destination must have an existing parent directory. The following downloads the same files independently from `apps/agent-daemon`.
+
+```sh
+recall_dir=/path/to/recall-model
+hf download Xenova/multilingual-e5-small \
+  --revision 761b726dd34fb83930e26aab4e9ac3899aa1fa78 \
+  --local-dir "$recall_dir" \
+  onnx/model_int8.onnx config.json tokenizer.json special_tokens_map.json tokenizer_config.json
+recall_manifest="$PWD/recall-model.sha256"
+(cd "$recall_dir" && sha256sum -c "$recall_manifest")
+```
+
+The daemon first uses `OMARCHY_AGENT_RECALL_MODEL_DIR`, when set, then the model included with the desktop or standalone executable. For a deployment without bundled assets, set `OMARCHY_AGENT_RECALL_DOWNLOAD=1` to download in the background to `recall-model` beside `OMARCHY_AGENT_DB`. Desktop-managed startup enables this fallback by default. The daemon verifies the five files against [recall-model.sha256](recall-model.sha256), loads them through Rig FastEmbed, and runs a CPU inference check. It publishes a new cache after the checks pass. Use `--verify-recall-model /path/to/recall-model` for an offline check without starting the daemon.
+
+`GET /recall/status` reports `loading`, `ready`, or `unavailable` with a reason. Chat remains available during preparation and failure. Reasons include `not_configured`, `model_missing`, `model_unreadable`, `download_failed`, `verification_failed`, and `initialization_failed`. To retry a failed download, restore access and restart the daemon. For a rejected existing directory, replace the files with verified copies before restarting. A failed download never publishes an incomplete model directory.
+
+The index uses FastEmbed 4.9.1 with the ONNX Runtime 1.20.0 CPU build, 384-dimensional normalized mean pooling, FastEmbed's 512-token limit, and one input per dynamic quantization batch. Queries use `query: ` and trimmed text. Passages use `passage: ` and verbatim text in windows of up to 480 UTF-8 bytes with 80 bytes of overlap, aligned to character boundaries. Exact case-insensitive identifier tokens containing digits take priority over cosine similarity. SQLite stores versioned vectors as derived data keyed to their original messages. Change the index version when changing artifacts or preprocessing so the daemon rebuilds affected rows from original Message History. [Model card](https://huggingface.co/intfloat/multilingual-e5-small) · [Pinned export](https://huggingface.co/Xenova/multilingual-e5-small/tree/761b726dd34fb83930e26aab4e9ac3899aa1fa78) · [Rig FastEmbed 0.47.1](https://docs.rs/rig-fastembed/0.47.1/rig_fastembed/)
+
+### CPU evaluation
+
+The [fixture](tests/fixtures/recall.json) uses 16 neutral passages and 14 labeled queries across English, Spanish, French, German, Portuguese, Chinese, Japanese, and mixed Chinese/English. Candidate runs used the pinned Rust Rig adapter and ONNX Runtime, one embedding at a time, on three logical CPUs on a Linux x86_64 Ryzen 9 7900X. Timings include local model loading and tokenization. Peak RSS is for the standalone probe. The table gives semantic ranks before exact identifier matching.
+
+| Candidate | Artifact bytes | Load | Index 16 | Query p50 / max | Peak RSS | Top 1 / 3 / 5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Xenova multilingual E5 small INT8 | 135,138,591 | 1.52 s | 37.1 ms | 1.9 / 2.4 ms | 806 MiB | 10 / 13 / 14 |
+| Xenova multilingual E5 small FP32 | 487,352,531 | 2.23 s | 85.5 ms | 4.2 / 5.4 ms | 1,545 MiB | 10 / 13 / 14 |
+| Qdrant multilingual MiniLM L12 v2 quantized | 252,138,706 | 1.67 s | Runtime error | — | — | — |
+
+INT8 matched FP32 on aggregate recall with 28% of the artifact bytes. It ranked the German-to-French match third and the Japanese-to-English match fifth, one position below FP32 for each. Both E5 models ranked bare `GDN-417-R` first and placed the near neighbor above `GDN-417-Q` when the identifier appeared in a sentence. The daemon prioritizes exact tokens. MiniLM loaded but failed first inference with a missing `encoder.layer.0.attention.output.LayerNorm.weight` input to `SkipLayerNormalization`. The CPU results are specific to the measured Linux host. [MiniLM candidate revision](https://huggingface.co/Qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q/tree/faf4aa4225822f3bc6376869cb1164e8e3feedd0)
+
+To exercise the real daemon and verified local model with a scripted provider on loopback, run from `apps/agent-daemon`.
+
+```sh
+OMARCHY_AGENT_RECALL_TEST_MODEL_DIR="$recall_dir" cargo test --locked -j 3 \
+  --test conversation recall_returns_original_messages_from_the_calling_bot_after_restart \
+  -- --ignored --exact
+OMARCHY_AGENT_RECALL_TEST_MODEL_DIR="$recall_dir" cargo test --locked -j 3 \
+  --test conversation source_recall::source_bot_recall_returns_matching_originals_in_the_current_conversation \
+  -- --ignored --exact
+```
 
 ## Checks
 
@@ -47,7 +347,7 @@ Run from `apps/agent-daemon`.
 ```sh
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --test conversation
+cargo test --locked
 ```
 
-The tests launch the actual binary with a temporary database and a local scripted OpenAI Chat Completions endpoint. They need no provider credential.
+Integration tests launch the actual daemon binary with temporary SQLite databases and local scripted OpenAI Chat Completions and Anthropic Messages endpoints. The tests use fixture credentials.

@@ -6,6 +6,11 @@ gdbus wait --session --timeout 15 org.freedesktop.secrets
 mkdir -p /src/.lane/linux-app/evidence
 : > /src/.lane/linux-app/evidence/app-exits.log
 # tauri-driver owns WebKitWebDriver; all processes share only this private bus.
+export OPENAI_BASE_URL=http://127.0.0.1:18443/v1 OMARCHY_BOT_AGENT_PORT=18444
+export OMARCHY_AGENT_RECALL_MODEL_SOURCE=http://127.0.0.1:1
+export OMARCHY_BOT_SMOKE_AGENT_PROFILE=$XDG_DATA_HOME/com.omarchy.bot/agent-daemon
+export OMARCHY_BOT_SMOKE_AGENT_ARCHIVE=/artifact/agent-daemon.tar.gz
+export OMARCHY_BOT_SMOKE_EVIDENCE=/src/.lane/linux-app/evidence
 /usr/local/cargo/bin/tauri-driver --native-driver /usr/bin/WebKitWebDriver > "$OMARCHY_BOT_SMOKE_DIR/driver.log" 2>&1 &
 driver_pid=$!
 prefix=
@@ -26,6 +31,6 @@ trap cleanup EXIT
   printf 'tauri-driver 2.1.0; tauri-cli 2.12.4 (Dockerfile --locked installs)\n'
   sha256sum /artifact/omarchy-bot.AppImage
 } > "/src/.lane/linux-app/evidence/${prefix}environment.txt"
-smoke=scripts/linux-app/smoke.ts
+smoke=scripts/agent-release-smoke.ts
 if [[ ${OMARCHY_BOT_UPDATER_SMOKE:-0} == 1 ]]; then smoke=scripts/linux-app/updater-smoke.ts; fi
-NODE_PATH=/src/apps/daemon/node_modules bun "$smoke" /artifact/omarchy-bot.AppImage 2>&1 | tee "/src/.lane/linux-app/evidence/${prefix}smoke.log"
+bun "$smoke" /artifact/omarchy-bot.AppImage 2>&1 | tee "/src/.lane/linux-app/evidence/${prefix}smoke.log"

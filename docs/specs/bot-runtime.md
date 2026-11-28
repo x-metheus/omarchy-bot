@@ -286,7 +286,7 @@ bun run typecheck
 bun run lint:boundaries
 bun test apps/daemon
 bun test                 # full Bun suite
-bun run test:e2e
+bunx playwright test -c tests/e2e # legacy Service fixture
 OMARCHY_BOT_DEV=1 bun run dev
 ```
 

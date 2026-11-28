@@ -1,6 +1,0 @@
-{
-  "direction": "client",
-  "frame": {
-    "type": "heartbeat"
-  }
-}

@@ -1,0 +1,391 @@
+use std::path::Path;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use reqwest::{Client, Response, StatusCode};
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+use super::{Daemon, Provider, ReplyStream, bot_id, chat_reply, http_client};
+
+const PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+const TEXT: &str = "Calibration sample: cobalt.";
+const VISION_MODEL: &str = "gpt-4.1-mini";
+
+async fn start(db: &Path, provider: &Provider, model: &str) -> Daemon {
+    let mut command = Daemon::command(db, provider);
+    command
+        .env("OMARCHY_AGENT_MODEL", model)
+        .env("OPENAI_API_KEY", super::BOOTSTRAP_KEY);
+    Daemon::launch(command).await
+}
+
+async fn send(daemon: &Daemon, client: &Client, bot: &str, message: Value) -> Response {
+    client
+        .post(format!("{}/bots/{bot}/messages", daemon.url))
+        .bearer_auth(super::SETTINGS_TOKEN)
+        .json(&message)
+        .send()
+        .await
+        .expect("submit message with attachments")
+}
+
+async fn download(daemon: &Daemon, client: &Client, bot: &str, attachment: &str) -> Response {
+    client
+        .get(format!(
+            "{}/bots/{bot}/attachments/{attachment}",
+            daemon.url
+        ))
+        .bearer_auth(super::SETTINGS_TOKEN)
+        .send()
+        .await
+        .expect("read Conversation attachment")
+}
+
+#[tokio::test]
+async fn forwards_text_and_image_through_chat_completions() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("conversation.sqlite3");
+    let client = http_client();
+    let mut provider = Provider::start().await;
+    let daemon = start(&db, &provider, VISION_MODEL).await;
+    let bot = daemon.create(&client).await;
+    let mut stream = ReplyStream::new(
+        send(
+            &daemon,
+            &client,
+            bot_id(&bot),
+            json!({"text": "What are the sample and pixel colors?", "attachments": [
+                {"type": "inline", "name": "sample.txt", "mediaType": "text/plain", "content": TEXT},
+                {"type": "inline", "name": "pixel.png", "mediaType": "image/png", "content": PNG}
+            ]}),
+        )
+        .await,
+    );
+    let call = provider.next().await;
+    call.assert_request(super::CHAT_PATH, VISION_MODEL, super::BOOTSTRAP_KEY);
+    let message = &call.chat_messages()[0];
+    assert_eq!(message["role"], "user");
+    assert_eq!(
+        message["content"][0],
+        json!({"type": "text", "text": "What are the sample and pixel colors?"})
+    );
+    assert_eq!(message["content"][1], json!({"type": "text", "text": TEXT}));
+    assert_eq!(message["content"][2]["type"], "image_url");
+    assert_eq!(
+        message["content"][2]["image_url"]["url"],
+        format!("data:image/png;base64,{PNG}")
+    );
+    chat_reply(call, &mut stream, "Cobalt and red").await;
+
+    let mut follow_up = ReplyStream::new(daemon.send(&client, bot_id(&bot), "Thanks.").await);
+    let call = provider.next().await;
+    let history = call.chat_messages();
+    assert_eq!(
+        history[0]["content"],
+        "What are the sample and pixel colors?"
+    );
+    assert!(
+        !history
+            .iter()
+            .any(|message| message.to_string().contains(TEXT))
+    );
+    assert!(
+        !history
+            .iter()
+            .any(|message| message.to_string().contains(PNG))
+    );
+    chat_reply(call, &mut follow_up, "You're welcome.").await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn restores_attachment_ownership_and_reuses_only_authorized_references() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("conversation.sqlite3");
+    let client = http_client();
+    let mut provider = Provider::start().await;
+    let daemon = start(&db, &provider, VISION_MODEL).await;
+    let bot = daemon.create(&client).await;
+    let bot = bot_id(&bot);
+    let other = daemon.create(&client).await;
+    let other = bot_id(&other);
+    let mut stream = ReplyStream::new(send(&daemon, &client, bot, json!({
+        "text": "Keep these samples available.", "attachments": [
+            {"type": "inline", "name": "sample.txt", "mediaType": "text/plain", "content": TEXT},
+            {"type": "inline", "name": "pixel.png", "mediaType": "image/png", "content": PNG}
+        ]
+    })).await);
+    chat_reply(provider.next().await, &mut stream, "Stored").await;
+    let before_restart = daemon.read(&client, bot).await;
+    daemon.stop().await;
+
+    let daemon = start(&db, &provider, VISION_MODEL).await;
+    let restored = daemon.read(&client, bot).await;
+    assert_eq!(restored, before_restart);
+    let first = &restored["messages"][0];
+    assert_eq!(first["text"], "Keep these samples available.");
+    let attachments = first["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 2);
+    for (attachment, name, media_type) in [
+        (&attachments[0], "sample.txt", "text/plain"),
+        (&attachments[1], "pixel.png", "image/png"),
+    ] {
+        assert_eq!(attachment["name"], name);
+        assert_eq!(attachment["mediaType"], media_type);
+        assert_eq!(attachment["available"], true);
+        assert!(attachment.get("content").is_none());
+    }
+    let sample = attachments[0]["id"].as_str().unwrap();
+    let image = attachments[1]["id"].as_str().unwrap();
+    assert!(restored["messages"][1].get("attachments").is_none());
+
+    let response = download(&daemon, &client, bot, sample).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(response.text().await.unwrap(), TEXT);
+    let response = download(&daemon, &client, bot, image).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(
+        &response.bytes().await.unwrap()[..],
+        STANDARD.decode(PNG).unwrap()
+    );
+
+    let unknown = Uuid::new_v4().to_string();
+    for (target, id) in [(other, image), (bot, unknown.as_str())] {
+        let response = download(&daemon, &client, target, id).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["code"],
+            "attachment_not_found"
+        );
+        let response = send(&daemon, &client, target, json!({
+            "text": "Reject the entire submission.", "attachments": [
+                {"type": "inline", "name": "unused.txt", "mediaType": "text/plain", "content": "unused"},
+                {"type": "reference", "id": id}
+            ]
+        })).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["code"],
+            "attachment_not_found"
+        );
+    }
+    let response = send(&daemon, &client, bot, json!({
+        "text": "Reject a malformed ID.", "attachments": [{"type": "reference", "id": "not-a-uuid"}]
+    })).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(daemon.read(&client, bot).await, restored);
+    assert_eq!(daemon.read(&client, other).await["messages"], json!([]));
+
+    let mut stream = ReplyStream::new(
+        send(
+            &daemon,
+            &client,
+            bot,
+            json!({
+                "text": "Use the same samples again.", "attachments": [
+                    {"type": "reference", "id": image}, {"type": "reference", "id": sample}
+                ]
+            }),
+        )
+        .await,
+    );
+    let call = provider.next().await;
+    let messages = call.chat_messages();
+    assert_eq!(messages[0]["content"], "Keep these samples available.");
+    let parts = messages.last().unwrap()["content"].as_array().unwrap();
+    assert_eq!(
+        parts[1]["image_url"]["url"],
+        format!("data:image/png;base64,{PNG}")
+    );
+    assert_eq!(parts[2], json!({"type": "text", "text": TEXT}));
+    chat_reply(call, &mut stream, "Used again").await;
+    assert_eq!(
+        daemon.read(&client, bot).await["messages"][2]["attachments"],
+        json!([attachments[1], attachments[0]])
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn deleting_a_bot_removes_exclusive_attachments_and_keeps_shared_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("conversation.sqlite3");
+    let client = http_client();
+    let mut provider = Provider::start().await;
+    let daemon = start(&db, &provider, VISION_MODEL).await;
+    let owner = daemon.create(&client).await;
+    let owner = bot_id(&owner);
+    let survivor = daemon.create(&client).await;
+    let survivor = bot_id(&survivor);
+
+    let mut stream = ReplyStream::new(
+        send(&daemon, &client, owner, json!({
+            "text": "Save both samples.", "attachments": [
+                {"type": "inline", "name": "shared.txt", "mediaType": "text/plain", "content": TEXT},
+                {"type": "inline", "name": "exclusive.txt", "mediaType": "text/plain", "content": "Ochre."}
+            ]
+        })).await,
+    );
+    chat_reply(provider.next().await, &mut stream, "Saved both.").await;
+    let mut stream = ReplyStream::new(
+        daemon
+            .send(&client, survivor, "Keep the shared sample.")
+            .await,
+    );
+    chat_reply(provider.next().await, &mut stream, "Saved.").await;
+    let owner_history = daemon.read(&client, owner).await;
+    let survivor_history = daemon.read(&client, survivor).await;
+    let message = survivor_history["messages"][0]["id"].as_i64().unwrap();
+    let attachments = &owner_history["messages"][0]["attachments"];
+    let shared = attachments[0]["id"].as_str().unwrap();
+    let exclusive = attachments[1]["id"].as_str().unwrap();
+    daemon.stop().await;
+
+    // The API only grants existing Conversation access. Seed a second association in this fixture.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO message_attachments (message_id, position, attachment_id) VALUES (?1, 0, ?2)",
+            rusqlite::params![message, Uuid::parse_str(shared).unwrap().as_bytes()],
+        )
+        .unwrap();
+    let daemon = start(&db, &provider, VISION_MODEL).await;
+    let shared_bytes = download(&daemon, &client, survivor, shared).await;
+    assert_eq!(shared_bytes.text().await.unwrap(), TEXT);
+    let response = client
+        .delete(format!("{}/bots/{owner}", daemon.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        download(&daemon, &client, owner, exclusive).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    daemon.stop().await;
+
+    let fixture = rusqlite::Connection::open(&db).unwrap();
+    let remaining: bool = fixture
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM attachments WHERE id = ?1)",
+            [Uuid::parse_str(exclusive).unwrap().as_bytes()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!remaining, "the unreferenced attachment bytes were removed");
+    drop(fixture);
+    let daemon = start(&db, &provider, VISION_MODEL).await;
+    assert_eq!(
+        download(&daemon, &client, owner, shared).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let shared_bytes = download(&daemon, &client, survivor, shared).await;
+    assert_eq!(shared_bytes.text().await.unwrap(), TEXT);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn warns_about_unavailable_and_unsupported_attachments_and_keeps_the_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("conversation.sqlite3");
+    let client = http_client();
+    let mut provider = Provider::start().await;
+    let daemon = start(&db, &provider, "gpt-3.5-turbo").await;
+    let bot = daemon.create(&client).await;
+    let bot = bot_id(&bot);
+    let text = "  Explain the failed samples.  ";
+    let mut stream = ReplyStream::new(send(&daemon, &client, bot, json!({
+        "text": text, "attachments": [
+            {"type": "inline", "name": "pixel.png", "mediaType": "image/png", "content": PNG},
+            {"type": "inline", "name": "missing.txt", "mediaType": "text/plain"},
+            {"type": "inline", "name": "bad.png", "mediaType": "image/png", "content": "bm90IGFuIGltYWdl"},
+            {"type": "inline", "name": "bad.pdf", "mediaType": "application/pdf", "content": "not suitable"},
+            {"type": "inline", "name": "sample.txt", "mediaType": "text/plain", "content": TEXT}
+        ]
+    })).await);
+    let message = &daemon.read(&client, bot).await["messages"][0];
+    assert_eq!(message["text"], text);
+    for (index, (code, available)) in [
+        ("attachment_model_unsupported", true),
+        ("attachment_unavailable", false),
+        ("attachment_unavailable", false),
+        ("attachment_format_unsupported", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let warning = stream.expect("attachment_warning").await;
+        assert_eq!(warning["code"], code);
+        assert_eq!(warning["attachmentId"], message["attachments"][index]["id"]);
+        assert_eq!(message["attachments"][index]["available"], available);
+    }
+    let call = provider.next().await;
+    assert_eq!(
+        call.chat_messages()[0]["content"],
+        json!([
+            {"type": "text", "text": text.trim()}, {"type": "text", "text": TEXT}
+        ])
+    );
+    chat_reply(call, &mut stream, "The text sample is cobalt").await;
+
+    let missing = message["attachments"][1]["id"].as_str().unwrap();
+    let response = download(&daemon, &client, bot, missing).await;
+    assert_eq!(response.status(), StatusCode::GONE);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["code"],
+        "attachment_unavailable"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn forwards_text_and_image_through_an_unlisted_messages_alias() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("conversation.sqlite3");
+    let client = http_client();
+    let mut provider = Provider::start().await;
+    super::provision_settings(&db);
+    let daemon = Daemon::launch(super::settings_command(&db, &provider)).await;
+    super::put_settings(
+        &client,
+        &daemon,
+        json!({
+            "provider": "anthropic", "model": super::MESSAGES_MODEL, "apiKey": super::ANTHROPIC_KEY
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    let bot = daemon.create(&client).await;
+    let mut stream = ReplyStream::new(send(&daemon, &client, bot_id(&bot), json!({
+        "text": "What are the sample and pixel colors?", "attachments": [
+            {"type": "inline", "name": "sample.txt", "mediaType": "text/plain", "content": TEXT},
+            {"type": "inline", "name": "pixel.png", "mediaType": "image/png", "content": PNG}
+        ]
+    })).await);
+    let call = provider.next().await;
+    call.assert_request(
+        super::MESSAGES_PATH,
+        super::MESSAGES_MODEL,
+        super::ANTHROPIC_KEY,
+    );
+    assert_eq!(
+        call.body["messages"][0],
+        json!({"role": "user", "content": [
+            {"type": "text", "text": "What are the sample and pixel colors?"},
+            {"type": "text", "text": TEXT},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": PNG}}
+        ]})
+    );
+    call.messages_reply("Cobalt and red").await;
+    assert_eq!(stream.expect("delta").await, "Cobalt and red");
+    assert_eq!(stream.expect("committed").await["text"], "Cobalt and red");
+    assert!(stream.next().await.is_none());
+    daemon.stop().await;
+}

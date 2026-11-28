@@ -10,7 +10,11 @@ const smoke = process.env.OMARCHY_BOT_UPDATER_SMOKE === "1";
 assert.ok(endpoint.protocol === "https:" || (smoke && endpoint.protocol === "http:" && endpoint.hostname === "127.0.0.1"), "Updater endpoint must use HTTPS (private smoke permits loopback HTTP)");
 console.log(JSON.stringify({
   version,
-  bundle: { createUpdaterArtifacts: signed },
+  bundle: {
+    createUpdaterArtifacts: signed,
+    externalBin: ["binaries/omarchy-agent-daemon"],
+    resources: { "binaries/recall-model/": "recall-model/" },
+  },
   plugins: { updater: {
     ...(pubkey ? { pubkey } : {}),
     endpoints: [endpoint.href],

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][ValidateSet('credential','processes','activate','clear-credential')][string]$Action, [string]$Value)
+param([Parameter(Mandatory)][ValidateSet('credential','processes','activate','clear-credential')][string]$Action, [string]$Value, [string]$CredentialTarget)
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Windows native smoke requires Windows and PowerShell 7.' }
 if ($Action -eq 'activate') { Start-Process -FilePath $Value; exit 0 }
@@ -7,6 +7,7 @@ if ($Action -eq 'processes') {
   ConvertTo-Json -InputObject $processes -Compress
   exit 0
 }
+if (-not $CredentialTarget) { throw 'Credential operations require an explicit fixture target.' }
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -26,7 +27,7 @@ public static class SmokeCredential {
   [DllImport("advapi32.dll")] public static extern void CredFree(IntPtr credential);
 }
 '@
-$target = 'service-connection.com.omarchy.bot'
+$target = $CredentialTarget
 if ($Action -eq 'clear-credential') {
   if (-not [SmokeCredential]::Delete($target, 1, 0) -and [Runtime.InteropServices.Marshal]::GetLastWin32Error() -ne 1168) { throw 'Credential cleanup failed' }
   exit 0

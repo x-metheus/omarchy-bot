@@ -18,12 +18,18 @@ const payloads: Record<string, string> = {
   "darwin-x86_64": `omarchy-bot_${version}_x64.app.tar.gz`,
   "windows-x86_64": windows[0]!,
 };
-const assets = [...Object.values(payloads), `omarchy-bot_${version}_aarch64.dmg`, `omarchy-bot_${version}_x64.dmg`];
+const daemonTargets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"];
+const assets = [
+  ...Object.values(payloads), `omarchy-bot_${version}_aarch64.dmg`, `omarchy-bot_${version}_x64.dmg`,
+  ...daemonTargets.map(target => `omarchy-agent-daemon_${version}_${target}.tar.gz`),
+];
 for (const name of assets) {
-  const file = Bun.file(path.join(directory, name));
+  const file: Bun.BunFile = Bun.file(path.join(directory, name));
   assert.ok(await file.size > 0, `Missing or empty release asset: ${name}`);
-  const hash = new Bun.CryptoHasher("sha256").update(await file.arrayBuffer()).digest("hex");
-  const checksum = (await Bun.file(path.join(directory, `${name}.sha256`)).text()).trim().replace(/^\uFEFF/, "");
+  const sha256 = new Bun.CryptoHasher("sha256");
+  for await (const chunk of file.stream()) sha256.update(chunk);
+  const hash = sha256.digest("hex");
+  const checksum: string = (await Bun.file(path.join(directory, `${name}.sha256`)).text()).trim().replace(/^\uFEFF/, "");
   assert.equal(checksum, `${hash}  ${name}`, `Checksum mismatch: ${name}`);
 }
 const platforms: Record<string, { url: string; signature: string }> = {};

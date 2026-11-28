@@ -131,7 +131,7 @@ Existing one-Bot Threads, Bot mail, and Takeover keep their current behavior.
 
 - The [runtime spec's](bot-runtime.md#tech-stack) stack: Bun, TypeScript, `pi-ai`, and `pi-durable`, pinned exactly.
 - Group records live in the Service's SQLite database. Each member's conversation lives in the `pi_` tables like any other.
-- Web UI: React 19, Vite 7, and Astryx, following `apps/web/AGENTS.md`.
+- Desktop frontend: React 19, Vite, and Astryx, following `apps/omarchy-bot/AGENTS.md`.
 
 ## Design
 
@@ -330,7 +330,7 @@ bun run typecheck
 bun run lint:boundaries
 bun test apps/daemon
 bun test                 # full Bun suite
-bun run test:e2e
+bunx playwright test -c tests/e2e # legacy Service fixture
 OMARCHY_BOT_DEV=1 bun run dev
 ```
 
@@ -343,7 +343,7 @@ apps/daemon/src/modules/runtime/extensions/group.ts
                                              mention_group_members, Reply Rules and Personality sections
 apps/daemon/src/modules/runtime/             reply-decision call; mapping keyed by Thread and Bot
 packages/agent-contract/                     DTO and protocol changes
-apps/web/src/                                Groups section, mention list, attributed transcript, member header
+apps/omarchy-bot/src/                        Groups section, mention list, attributed transcript, member header
 tests/e2e/                                   the Group Thread flow
 ```
 

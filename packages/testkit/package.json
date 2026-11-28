@@ -1,7 +1,0 @@
-{
-  "name": "@omarchy-bot/testkit",
-  "version": "0.1.0",
-  "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@earendil-works/pi-ai": "1.6.1" }
-}
