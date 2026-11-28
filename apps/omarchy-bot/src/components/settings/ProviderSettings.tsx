@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckIcon, CircleAlertIcon, KeyRoundIcon, PencilIcon, RefreshCwIcon, SaveIcon } from "lucide-react";
+import { CheckIcon, CircleAlertIcon, KeyRoundIcon, PencilIcon, RefreshCwIcon, SaveIcon } from "@/components/icons";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "@/components/ui/combobox";

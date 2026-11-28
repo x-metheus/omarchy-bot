@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CircleAlertIcon, CpuIcon, MonitorIcon, MoonIcon, RefreshCwIcon, SunIcon } from "lucide-react";
+import { CircleAlertIcon, CpuIcon, MonitorIcon, MoonIcon, RefreshCwIcon, SunIcon } from "@/components/icons";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";

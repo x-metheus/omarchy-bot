@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BotIcon, CircleAlertIcon, EllipsisIcon, MessageSquareIcon, PencilIcon, PlusIcon, RefreshCwIcon, SettingsIcon, Trash2Icon } from "lucide-react";
+import { BotIcon, CircleAlertIcon, EllipsisIcon, MessageSquareIcon, PencilIcon, PlusIcon, RefreshCwIcon, SettingsIcon, Trash2Icon } from "@/components/icons";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertDialog, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";

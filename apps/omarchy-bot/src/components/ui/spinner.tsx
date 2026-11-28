@@ -1,9 +1,10 @@
 import { cn } from "cn"
-import { Loader2Icon } from "lucide-react"
+import { LoaderCircleIcon } from "@/components/icons"
 
-function Spinner({ className, ...props }: React.ComponentProps<"svg">) {
+function Spinner({ className, ...props }: React.ComponentProps<typeof LoaderCircleIcon>) {
   return (
-    <Loader2Icon data-slot="spinner" role="status" aria-label="Loading" className={cn("size-4 animate-spin", className)} {...props} />
+    <LoaderCircleIcon animateOnInteraction={false} data-slot="spinner" role="status" aria-label="Loading" aria-hidden={false}
+      className={cn("size-4 motion-safe:animate-spin", className)} {...props} />
   )
 }
 

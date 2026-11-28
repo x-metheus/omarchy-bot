@@ -1,5 +1,5 @@
 import { Children, isValidElement, useState, type ReactNode } from "react";
-import { CircleAlertIcon } from "lucide-react";
+import { CircleAlertIcon } from "@/components/icons";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CodeBlock, CodeBlockActions, CodeBlockContent, CodeBlockCopyButton, CodeBlockHeader, CodeBlockLine, CodeBlockTitle } from "@/components/ui/code-block";

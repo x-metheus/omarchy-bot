@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from "react";
-import { ArrowUpIcon, BotIcon, CheckIcon, CircleAlertIcon, ClockIcon, FileIcon, FileTextIcon, FolderOpenIcon, ImageIcon, PaperclipIcon, RefreshCwIcon, ServerIcon, WrenchIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, BotIcon, CheckIcon, CircleAlertIcon, ClockIcon, FileIcon, FileTextIcon, FolderOpenIcon, ImageIcon, PaperclipIcon, RefreshCwIcon, ServerIcon, WrenchIcon, XIcon } from "@/components/icons";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Attachment, AttachmentAction, AttachmentActions, AttachmentContent, AttachmentDescription, AttachmentGroup, AttachmentMedia, AttachmentTitle } from "@/components/ui/attachment";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";

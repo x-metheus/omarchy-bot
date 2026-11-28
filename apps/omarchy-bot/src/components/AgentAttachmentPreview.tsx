@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CircleAlertIcon, DownloadIcon, FileTextIcon, ImageIcon } from "lucide-react";
+import { CircleAlertIcon, DownloadIcon, FileTextIcon, ImageIcon } from "@/components/icons";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, CodeBlockContent } from "@/components/ui/code-block";

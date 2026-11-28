@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BotIcon, CircleAlertIcon, LinkIcon, MonitorIcon, RefreshCwIcon, ServerIcon } from "lucide-react";
+import { BotIcon, CircleAlertIcon, LinkIcon, MonitorIcon, RefreshCwIcon, ServerIcon } from "@/components/icons";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
