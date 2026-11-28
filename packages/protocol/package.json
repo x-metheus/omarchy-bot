@@ -4,8 +4,6 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
-    "@omarchy-bot/agent-contract": "workspace:*",
-    "@omarchy-bot/domain": "workspace:*",
     "zod": "^4.6.7"
   }
 }

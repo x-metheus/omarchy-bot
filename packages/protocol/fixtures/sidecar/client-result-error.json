@@ -1,9 +1,0 @@
-{
-  "direction": "client",
-  "frame": {
-    "type": "local.result",
-    "jobId": "job-error",
-    "ok": false,
-    "error": "Local request denied"
-  }
-}

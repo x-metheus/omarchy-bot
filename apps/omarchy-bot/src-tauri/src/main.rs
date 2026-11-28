@@ -8,12 +8,7 @@ mod desktop_tools;
 use gio::prelude::*;
 use agent_daemon::LocalDaemon;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::io::Write;
 use std::sync::Mutex;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
@@ -50,76 +45,12 @@ struct PairingRequest {
     code: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum Decision { AllowOnce, Deny, Always, Never }
-
-#[derive(Serialize)]
-struct DecisionLine<'a> {
-    #[serde(rename = "type")]
-    decision: Decision,
-    #[serde(rename = "jobId")]
-    job_id: &'a str,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum Approval {
-    #[serde(rename = "ask", rename_all = "camelCase")]
-    Ask {
-        job_id: String,
-        hostname: String,
-        action: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        command: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        destination: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        query: Option<String>,
-    },
-    #[serde(rename = "ask.dismiss", rename_all = "camelCase")]
-    Dismiss { job_id: String },
-}
-
-impl Approval {
-    fn job_id(&self) -> &str {
-        match self { Self::Ask { job_id, .. } | Self::Dismiss { job_id } => job_id }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SidecarFrame {
-    Registered {
-        #[serde(rename = "type")]
-        _kind: Registered,
-        #[serde(rename = "deviceId")]
-        device_id: String,
-    },
-    Approval(Approval),
-}
-
-#[derive(Deserialize)]
-enum Registered { #[serde(rename = "registered")] Registered }
-
-struct Sidecar {
-    child: Child,
-    stdin: ChildStdin,
-    device_id: String,
-    registered: bool,
-    approvals: Vec<Approval>,
-    pending: HashSet<String>,
-}
-
 struct ShellState {
     origin: Option<String>,
     connection: Option<Connection>,
     keychain: Mutex<()>,
     pending_pairing: Mutex<Option<PairingRequest>>,
     restart_link: Mutex<Option<String>>,
-    sidecar: Mutex<Option<Sidecar>>,
 }
 
 fn service_origin(value: &str) -> Result<Url, String> {
@@ -141,153 +72,6 @@ fn is_loopback_service(url: &Url) -> bool {
         None => false,
     }
 }
-
-fn websocket_url(mut service: Url) -> Result<Url, String> {
-    service.set_scheme(if service.scheme() == "https" { "wss" } else { "ws" }).map_err(|_| "Invalid Sidecar Service URL.")?;
-    Ok(service)
-}
-
-#[tauri::command]
-fn host_digest(salt: String) -> Result<String, String> {
-    if salt.len() != 64 || !salt.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
-        return Err("The Service returned an invalid host identity salt.".into());
-    }
-    let override_file = std::env::var_os("OMARCHY_BOT_MACHINE_ID_FILE");
-    let files: &[&std::ffi::OsStr] = match override_file.as_deref() {
-        Some(file) => &[file],
-        None => &[std::ffi::OsStr::new("/etc/machine-id"), std::ffi::OsStr::new("/var/lib/dbus/machine-id")],
-    };
-    for file in files {
-        if let Ok(machine_id) = std::fs::read_to_string(file) {
-            let machine_id = machine_id.trim();
-            if machine_id.len() == 32 && machine_id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                && machine_id.bytes().any(|byte| byte != b'0') {
-                let mut digest = Sha256::new();
-                digest.update(salt.as_bytes());
-                digest.update(b":");
-                digest.update(machine_id.as_bytes());
-                return Ok(format!("{:x}", digest.finalize()));
-            }
-        }
-    }
-    Err("This machine's host identity is unavailable.".into())
-}
-
-#[tauri::command]
-fn sidecar_start(app: tauri::AppHandle, state: tauri::State<ShellState>) -> Result<(), String> {
-    if state.sidecar.lock().map_err(|_| "Local Sidecar is busy.")?.is_some() { return Ok(()); }
-    let connection = state.connection.as_ref().ok_or("Pair with a Service before starting local actions.")?;
-    start_sidecar(&app, connection)
-}
-
-fn start_sidecar(app: &tauri::AppHandle, connection: &Connection) -> Result<(), String> {
-    let service = websocket_url(service_origin(&connection.base_url)?)?;
-    let config = app.path().app_config_dir().map_err(|_| "Could not locate app configuration.")?;
-    std::fs::create_dir_all(&config).map_err(|_| "Could not create app configuration.")?;
-    let identity_path = config.join("sidecar-device-id");
-    let device_id = match std::fs::read_to_string(&identity_path) {
-        Ok(identity) => identity,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut random = [0u8; 16];
-            getrandom::fill(&mut random).map_err(|_| "Could not generate Local Sidecar identity.")?;
-            let identity = format!("dev_{}", random.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
-            std::fs::write(&identity_path, &identity).map_err(|_| "Could not persist Local Sidecar identity.")?;
-            identity
-        },
-        Err(_) => return Err("Could not read Local Sidecar identity.".into()),
-    };
-    if device_id.len() != 36 || !device_id.starts_with("dev_") || !device_id.as_bytes()[4..].iter().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)) {
-        return Err("The stored Local Sidecar identity is invalid.".into());
-    }
-    let root = app.path().app_local_data_dir().map_err(|_| "Could not locate Local Sidecar data.")?.join("sidecar");
-    std::fs::create_dir_all(&root).map_err(|_| "Could not create Local Sidecar data.")?;
-    let executable = std::env::current_exe().map_err(|_| "Could not locate bundled Local Sidecar.")?;
-    let binary = executable.with_file_name(if cfg!(windows) { "omarchy-bot-sidecar.exe" } else { "omarchy-bot-sidecar" });
-    let mut command = Command::new(binary);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000); // CREATE_NO_WINDOW: the Sidecar communicates through pipes.
-    let mut child = command
-        .env("OMARCHY_BOT_SERVICE_URL", service.as_str())
-        .env("OMARCHY_BOT_DEVICE_ID", &device_id)
-        .env("OMARCHY_BOT_DEVICE_TOKEN", &connection.token)
-        .env("OMARCHY_BOT_SIDECAR_ROOT", root)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|_| "Could not start bundled Local Sidecar.")?;
-    let stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-    *app.state::<ShellState>().sidecar.lock().map_err(|_| "Local Sidecar is busy.")? = Some(Sidecar {
-        child, stdin, device_id, registered: false, approvals: Vec::new(), pending: HashSet::new(),
-    });
-    // Drain diagnostics without forwarding child output that may contain credentials.
-    std::thread::spawn(move || { let _ = std::io::copy(&mut BufReader::new(stderr), &mut std::io::sink()); });
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break; };
-            let Ok(frame) = serde_json::from_str::<SidecarFrame>(&line) else { continue; };
-            let state = handle.state::<ShellState>();
-            let Ok(mut guard) = state.sidecar.lock() else { break; };
-            let Some(sidecar) = guard.as_mut() else { break; };
-            match frame {
-                SidecarFrame::Registered { device_id, .. } if device_id == sidecar.device_id => sidecar.registered = true,
-                SidecarFrame::Approval(approval @ Approval::Ask { .. }) => {
-                    if sidecar.pending.insert(approval.job_id().to_owned()) { sidecar.approvals.push(approval); }
-                },
-                SidecarFrame::Approval(approval @ Approval::Dismiss { .. }) => {
-                    sidecar.pending.remove(approval.job_id());
-                    sidecar.approvals.retain(|ask| ask.job_id() != approval.job_id());
-                    sidecar.approvals.push(approval);
-                },
-                _ => {},
-            }
-            drop(guard);
-            if let Some(window) = handle.get_webview_window("main") {
-                let _ = window.eval("window.dispatchEvent(new Event('omarchy-sidecar')); ");
-            }
-        }
-        stop_sidecar(&handle.state::<ShellState>());
-        if let Some(window) = handle.get_webview_window("main") {
-            let _ = window.eval("window.dispatchEvent(new Event('omarchy-sidecar')); ");
-        }
-    });
-    Ok(())
-}
-
-fn stop_sidecar(state: &ShellState) {
-    let sidecar = state.sidecar.lock().ok().and_then(|mut guard| guard.take());
-    if let Some(mut sidecar) = sidecar {
-        drop(sidecar.stdin);
-        // Closing stdin asks the Sidecar to stop its command trees before it exits.
-        for _ in 0..100 {
-            if matches!(sidecar.child.try_wait(), Ok(Some(_))) { return; }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let _ = sidecar.child.kill();
-        let _ = sidecar.child.wait();
-    }
-}
-
-#[tauri::command]
-fn sidecar_events(state: tauri::State<ShellState>) -> Result<serde_json::Value, String> {
-    let mut guard = state.sidecar.lock().map_err(|_| "Local Sidecar is busy.")?;
-    Ok(match guard.as_mut() {
-        Some(sidecar) => serde_json::json!({ "status": { "running": sidecar.registered, "deviceId": sidecar.device_id }, "approvals": std::mem::take(&mut sidecar.approvals) }),
-        None => serde_json::json!({ "status": { "running": false }, "approvals": [] }),
-    })
-}
-
-#[tauri::command]
-fn sidecar_decide(state: tauri::State<ShellState>, job_id: String, decision: Decision) -> Result<(), String> {
-    let mut guard = state.sidecar.lock().map_err(|_| "Local Sidecar is busy.")?;
-    let sidecar = guard.as_mut().ok_or("No Local Sidecar is running.")?;
-    if !sidecar.pending.contains(&job_id) { return Err("This local approval is no longer pending.".into()); }
-    let frame = serde_json::to_string(&DecisionLine { decision, job_id: &job_id }).map_err(|_| "Could not encode Local Sidecar decision.")?;
-    writeln!(sidecar.stdin, "{frame}").and_then(|_| sidecar.stdin.flush()).map_err(|_| "Could not deliver Local Sidecar decision.")?;
-    sidecar.pending.remove(&job_id);
-    Ok(())
-}
-
 
 fn pairing_request(value: &str) -> Option<PairingRequest> {
     let url = Url::parse(value).ok()?;
@@ -345,7 +129,6 @@ fn store_connection(app: tauri::AppHandle, state: tauri::State<ShellState>, base
     let secret = serde_json::to_string(&Connection { base_url: origin, token }).map_err(|_| "Could not encode the Service connection.")?;
     keychain()?.set_password(&secret).map_err(keychain_error)?;
     if let Ok(directory) = app.path().app_config_dir() { let _ = std::fs::remove_file(directory.join("revoked-agent-daemon")); }
-    stop_sidecar(&state);
     app.exit(RESTART_EXIT_CODE);
     Ok(())
 }
@@ -362,7 +145,6 @@ fn clear_connection(app: tauri::AppHandle, state: tauri::State<ShellState>) -> R
         let notice = std::fs::create_dir_all(&directory).and_then(|_| std::fs::write(directory.join("revoked-agent-daemon"), origin));
         if notice.is_err() { eprintln!("The revoked credential was cleared, but its Service address could not be retained."); }
     }
-    stop_sidecar(&state);
     app.exit(RESTART_EXIT_CODE);
     Ok(())
 }
@@ -549,10 +331,7 @@ fn main() {
     let connection = if incoming.is_some() { None } else { stored };
     let origin = connection.as_ref().map(|connection| connection.base_url.clone());
     let mut policy = context.config().app.security.csp.clone().expect("CSP configured").to_string();
-    let network = if let Some(origin) = &origin {
-        let socket = websocket_url(Url::parse(origin).expect("validated Service origin")).expect("WebSocket scheme");
-        format!("{origin} {}", socket.origin().ascii_serialization())
-    } else { "http://localhost:*/api/pairing/exchange http://127.0.0.1:*/api/pairing/exchange https://*:*/api/pairing/exchange".into() };
+    let network = origin.as_deref().unwrap_or("http://localhost:*/api/pairing/exchange http://127.0.0.1:*/api/pairing/exchange https://*:*/api/pairing/exchange");
     policy = policy.replace("connect-src 'self' ipc: http://ipc.localhost", &format!("connect-src 'self' ipc: http://ipc.localhost {network}"));
     if let Some(origin) = &origin { policy = policy.replace("img-src 'self' data: blob:", &format!("img-src 'self' data: blob: {origin}")); }
     context.config_mut().app.security.csp = Some(tauri::utils::config::Csp::Policy(policy));
@@ -568,8 +347,8 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .manage(desktop_tools::DesktopTools::default())
-        .manage(ShellState { origin, connection: connection.clone(), keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None), sidecar: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, sidecar_events, sidecar_decide, sidecar_start, host_digest, agent_daemon::ensure_local_daemon, agent_daemon::set_daemon_autostart, agent_daemon::local_daemon_pairing_code, desktop_tools::choose_desktop_path])
+        .manage(ShellState { origin, connection: connection.clone(), keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None) })
+        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, agent_daemon::ensure_local_daemon, agent_daemon::set_daemon_autostart, agent_daemon::local_daemon_pairing_code, desktop_tools::choose_desktop_path])
         .setup(move |app| {
             let daemon = LocalDaemon::new(app.path().app_local_data_dir()?.join("agent-daemon"));
             let local = serde_json::json!({ "baseUrl": daemon.origin(), "autostart": daemon.autostart().unwrap_or(false) });
@@ -578,8 +357,7 @@ fn main() {
                 std::fs::read_to_string(app.path().app_config_dir()?.join("revoked-agent-daemon")).ok()
                     .and_then(|origin| service_origin(&origin).ok()).map(|url| url.origin().ascii_serialization())
             } else { None };
-            let defaults: serde_json::Value = serde_json::from_str(include_str!("../../shell-defaults.json"))?;
-            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "platform": std::env::consts::OS, "defaults": defaults, "localDaemon": local });
+            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "localDaemon": local });
             let script = format!("({})({});", include_str!("shell.js"), initial);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Omarchy Bot").inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)
@@ -610,7 +388,6 @@ fn main() {
             tauri::RunEvent::ExitRequested { code, .. } => log_lifecycle(&format!("exit-requested code={code:?}")),
             tauri::RunEvent::Exit => {
                 log_lifecycle("exit");
-                stop_sidecar(&app.state::<ShellState>());
                 app.state::<desktop_tools::DesktopTools>().stop();
             },
             _ => {},
@@ -652,50 +429,10 @@ fn navigation_allows_only_app_origins_and_the_exact_vite_origin_in_dev() {
     }
 }
 
-#[cfg(test)]
-mod sidecar_wire_tests {
-    use super::*;
-
-    #[test]
-    fn decisions_use_the_existing_wire_values() {
-        for (wire, decision) in [("allow-once", Decision::AllowOnce), ("deny", Decision::Deny), ("always", Decision::Always), ("never", Decision::Never)] {
-            let parsed: Decision = serde_json::from_value(serde_json::json!(wire)).unwrap();
-            assert_eq!(parsed, decision);
-            assert_eq!(serde_json::to_value(DecisionLine { decision, job_id: "job-1" }).unwrap(), serde_json::json!({"type": wire, "jobId": "job-1"}));
-        }
-        for invalid in [serde_json::json!("AllowOnce"), serde_json::json!("allow"), serde_json::Value::Null, serde_json::json!(42)] {
-            assert!(serde_json::from_value::<Decision>(invalid).is_err());
-        }
-    }
-
-    #[test]
-    fn approvals_keep_camel_case_fields_and_ignore_malformed_frames() {
-        for wire in [
-            serde_json::json!({"type":"ask", "jobId":"job-1", "hostname":"laptop", "action":"run"}),
-            serde_json::json!({"type":"ask", "jobId":"job-1", "hostname":"laptop", "action":"transfer", "command":"echo ok", "path":"file", "destination":"target", "query":"needle"}),
-            serde_json::json!({"type":"ask.dismiss", "jobId":"job-1"}),
-        ] {
-            let SidecarFrame::Approval(approval) = serde_json::from_value(wire.clone()).unwrap() else { panic!("expected approval") };
-            assert_eq!(approval.job_id(), "job-1");
-            assert_eq!(serde_json::to_value(approval).unwrap(), wire);
-        }
-        assert!(matches!(serde_json::from_str::<SidecarFrame>(r#"{"type":"registered","deviceId":"dev_1"}"#).unwrap(), SidecarFrame::Registered { device_id, .. } if device_id == "dev_1"));
-        for invalid in [
-            r#"{"type":"unknown","jobId":"job-1"}"#,
-            r#"{"type":"ask","jobId":42,"hostname":"laptop","action":"run"}"#,
-            r#"{"type":"ask","jobId":"job-1"}"#,
-            r#"{"type":"ask.dismiss"}"#,
-            r#"{"type":"registered","deviceId":null}"#,
-            "not json",
-        ] {
-            assert!(serde_json::from_str::<SidecarFrame>(invalid).is_err(), "{invalid}");
-        }
-    }
-}
-
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn certificate_probe_rejects_untrusted_ipv6_tls() { check_certificate_probe("[::1]:0"); }

@@ -32,20 +32,19 @@ For Rust implementation, porting, and review, use [rust-best-practices](../.agen
 
 ## Stack and verification
 
-- The TypeScript workspaces use ES modules and the exact Bun version pinned in `engines.bun`. When upgrading Bun, rerun the secret-store tests because the runtime uses the experimental `Bun.secrets` API. [Root manifest](../package.json) · [Secret-store tests](../apps/daemon/src/modules/runtime/bunSecrets.test.ts)
-- The desktop app keeps React, Vite, Astryx, and Tauri in one project. The [app manifest](../apps/omarchy-bot/package.json) pins the Tauri CLI and declares frontend dependencies. The Rust Local Sidecar builds separately. Verify desktop interactions in the running Tauri app using the platform WebView. Release smoke uses packaged builds on Linux (WebKitGTK), macOS (WKWebView), and Windows (WebView2). [Linux smoke](../scripts/linux-app/README.md) · [macOS smoke](../scripts/macos-app/README.md) · [Windows smoke](../scripts/windows-app/README.md)
+- TypeScript workspaces use ES modules and the exact Bun version pinned in `engines.bun`. [Root manifest](../package.json)
+- The desktop app uses React, Vite, Astryx, and Tauri. Verify desktop interactions in the running Tauri window with the platform WebView. Release smoke uses packaged builds on Linux (WebKitGTK), macOS (WKWebView), and Windows (WebView2). [App manifest](../apps/omarchy-bot/package.json) · [Release workflow](../.github/workflows/app-release.yml)
+- The standalone Agent Daemon runs Rig on Rust 1.97.1. Its integration tests use temporary databases and scripted providers. [Agent Daemon guide](../apps/agent-daemon/README.md#checks)
 
 Run these commands from the repository root. Consult the affected workspace’s `package.json` for additional checks.
 
 | Command | Purpose |
 | --- | --- |
 | `bun install --frozen-lockfile` | Install locked dependencies |
-| `bun run tauri dev --config '{"bundle":{"externalBin":[]}}'` | Run the Tauri development window for daily Agent Daemon UI checks |
+| `bun run tauri dev` | Run the native Tauri development window |
 | `bun run tauri build` | Build release artifacts after preparing their packaging inputs |
-| `OMARCHY_BOT_DEV=1 bun run dev` | Run the legacy Service development harness |
 | `bun run typecheck` | Check TypeScript types |
-| `bun run lint:boundaries` | Check package dependency boundaries |
-| `bun run build` | Check boundaries and build the Service helper and desktop frontend |
+| `bun run build` | Build the desktop frontend for packaging |
 | `bun test <path>` / `bun test` | Run focused tests / the Bun suite |
 
 
@@ -53,7 +52,7 @@ Run these commands from the repository root. Consult the affected workspace’s 
 
 `apps/omarchy-bot` contains the Bun manifest, Vite config and frontend sources alongside `src-tauri`. The project is based on the official Bun, React TypeScript, Tauri 2 scaffold. To reproduce the starting scaffold in an empty directory, run `bunx create-tauri-app@4.7.5 omarchy-bot --manager bun --template react-ts --tauri-version 2 --identifier com.omarchy.bot --yes`. See the [Tauri project guide](https://v2.tauri.app/start/create-project/) and [Vite integration guide](https://v2.tauri.app/start/frontend/vite/).
 
-Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and run `bun install --frozen-lockfile`. Start daily UI checks from `apps/omarchy-bot` or the repository root with the `tauri dev` command above. Tauri starts Vite on `http://127.0.0.1:7322` and incrementally compiles the Rust debug target. The command works without a prebuilt frontend or staged legacy Sidecar. To test the legacy Sidecar itself, stage it with `bun scripts/build-sidecar.ts` and run `bun run tauri dev` with the standard config. Connect to a running Agent Daemon for normal UI checks. To test managed startup, set `OMARCHY_BOT_AGENT_DAEMON_BIN` to a daemon executable from the [standalone setup](../apps/agent-daemon/README.md).
+Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and run `bun install --frozen-lockfile`. Start daily UI checks from `apps/omarchy-bot` or the repository root with `bun run tauri dev`. Tauri starts Vite on `http://127.0.0.1:7322` and incrementally compiles the native debug target. A clean checkout can start without a prebuilt frontend or staged binaries. Connect to a running Agent Daemon, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to a daemon executable to check managed startup. [Standalone daemon setup](../apps/agent-daemon/README.md#headless-startup)
 
 Use `tauri build` and the platform smoke steps for release and installer verification.
 

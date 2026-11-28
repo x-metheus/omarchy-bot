@@ -8,7 +8,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { connectionState, pairService } from "../lib/pairing.ts";
 
-export function AddService({ agentControls }: { agentControls?: ReactNode } = {}): JSX.Element {
+export function AddService({ agentControls }: { agentControls: ReactNode }): JSX.Element {
   const connection = connectionState();
   const [serviceUrl, setServiceUrl] = useState(connection.serviceUrl);
   const [code, setCode] = useState("");
@@ -17,16 +17,16 @@ export function AddService({ agentControls }: { agentControls?: ReactNode } = {}
       <LayoutContent>
         <form onSubmit={event => { event.preventDefault(); void pairService({ serviceUrl, code }); }}>
           <VStack gap={6}>
-            <Heading level={1}>{agentControls ? "Connect to an Agent Daemon" : "Add Service"}</Heading>
+            <Heading level={1}>Connect to an Agent Daemon</Heading>
             {connection.message === undefined ? null : <Banner status="error" title={connection.message} />}
             <FormLayout>
-              <TextInput label={agentControls ? "Daemon address" : "Service address"} value={serviceUrl} onChange={setServiceUrl} isRequired isDisabled={connection.pending} width="100%" />
+              <TextInput label="Daemon address" value={serviceUrl} onChange={setServiceUrl} isRequired isDisabled={connection.pending} width="100%" />
               <TextInput label="Pairing code" value={code} onChange={setCode} isRequired isDisabled={connection.pending} width="100%" />
             </FormLayout>
             <Button label="Pair" variant="primary" type="submit" isLoading={connection.pending} />
           </VStack>
         </form>
-        {agentControls && <VStack gap={2} paddingBlock={4}>{agentControls}</VStack>}
+        <VStack gap={2} paddingBlock={4}>{agentControls}</VStack>
       </LayoutContent>
     </Layout>
   );

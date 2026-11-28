@@ -1,0 +1,37 @@
+name: checks
+on:
+  pull_request:
+    paths:
+      - 'apps/agent-daemon/**'
+      - 'apps/omarchy-bot/**'
+      - 'packages/protocol/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'bunfig.toml'
+      - 'tsconfig*.json'
+      - '.github/workflows/checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  desktop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - run: cargo test --locked --manifest-path apps/omarchy-bot/src-tauri/Cargo.toml
+  agent-daemon:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: cargo test --locked --manifest-path apps/agent-daemon/Cargo.toml --test conversation

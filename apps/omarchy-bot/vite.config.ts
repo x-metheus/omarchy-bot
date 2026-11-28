@@ -1,7 +1,6 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import stylex from "@stylexjs/rollup-plugin";
-import { tanstackRouter } from "@tanstack/router-plugin/vite";
 
 function stylexForScripts(command: "build" | "serve"): Plugin {
   const plugin = stylex({
@@ -24,14 +23,6 @@ function stylexForScripts(command: "build" | "serve"): Plugin {
 
 export default defineConfig(({ command }) => ({
   plugins: [
-    {
-      name: "development-shell",
-      apply: "serve",
-      transformIndexHtml: () => process.env.TAURI_ENV_PLATFORM
-        ? []
-        : [{ tag: "script", attrs: { type: "module", src: "/src/dev-shell.ts" }, injectTo: "head" }],
-    },
-    tanstackRouter({ target: "react", routesDirectory: "src/routes", generatedRouteTree: "src/routeTree.gen.ts" }),
     react(),
     stylexForScripts(command),
     {

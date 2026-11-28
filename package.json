@@ -3,22 +3,16 @@
   "private": true,
   "type": "module",
   "engines": { "bun": "1.4.5" },
-  "workspaces": ["packages/*", "apps/*", "tests/*"],
+  "workspaces": ["packages/*", "apps/*"],
   "scripts": {
-    "dev": "bun run --filter='@omarchy-bot/daemon' --filter='@omarchy-bot/desktop' dev",
     "tauri": "bun run --cwd apps/omarchy-bot tauri",
-    "start": "bun run --filter='@omarchy-bot/daemon' start",
-    "serve": "bash scripts/serve.sh",
     "site:dev": "bun run --filter='@omarchy-bot/site' dev",
     "site:build": "bun run --filter='@omarchy-bot/site' build",
-    "build": "bun run lint:boundaries && bun run --filter='@omarchy-bot/daemon' build && bun run --filter='@omarchy-bot/desktop' build:frontend",
-    "typecheck": "tsc --noEmit",
-    "lint:boundaries": "bun test tests/integration/package-boundaries.test.ts",
+    "build": "bun run --cwd apps/omarchy-bot build:frontend",
+    "typecheck": "tsc --noEmit && tsc -p apps/omarchy-bot/tsconfig.json",
     "test": "bun test"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.14.1",
-    "@playwright/test": "1.65.1",
     "@types/bun": "^1.4.5",
     "@types/node": "26.6.11",
     "typescript": "^7.0.2"

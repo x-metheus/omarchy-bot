@@ -42,36 +42,34 @@ export function AgentDesktop({ daemon, paired, baseUrl }: {
     if (!paired || baseUrl === daemon.baseUrl) void check();
   }, [baseUrl, check, daemon.baseUrl, paired]);
 
-  const launch: LaunchPreference = { enabled: autostart };
-  if (daemon.setAutostart) {
-    launch.setEnabled = async enabled => {
-      await daemon.setAutostart?.(enabled);
-      setAutostart(enabled);
-    };
-  }
+  const setLaunchEnabled = async (enabled: boolean) => {
+    await daemon.setAutostart(enabled);
+    setAutostart(enabled);
+  };
+  const launch: LaunchPreference = { enabled: autostart, setEnabled: setLaunchEnabled };
 
   if (paired) return <AgentWorkspace key={baseUrl} baseUrl={baseUrl} launch={launch} />;
   return <AddService agentControls={<VStack gap={2}>
     {launchError && <Banner title={launchError} status="warning" />}
-    {launch.setEnabled && <CheckboxInput label="Start the local daemon when opening Omarchy Bot" value={autostart}
+    <CheckboxInput label="Start the local daemon when opening Omarchy Bot" value={autostart}
       changeAction={async enabled => {
         setLaunchError("");
-        try { await launch.setEnabled?.(enabled); }
+        try { await setLaunchEnabled(enabled); }
         catch { setLaunchError("Could not save the local daemon launch preference."); }
-      }} onChange={() => {}} />}
-    {daemon.pairingCode && <HStack gap={2}>
+      }} onChange={() => {}} />
+    <HStack gap={2}>
       <Button label="Check local daemon" clickAction={check} isLoading={checking} />
       {ready && <Button label="Pair local daemon" variant="primary" isLoading={pairing} clickAction={async () => {
         setPairing(true);
         setLaunchError("");
         try {
-          const code = await daemon.pairingCode?.();
+          const code = await daemon.pairingCode();
           if (code) await pairService({ serviceUrl: daemon.baseUrl, code });
         } catch (error) {
           setLaunchError(typeof error === "string" ? error : "Could not pair the local Agent Daemon.");
         } finally { setPairing(false); }
       }} />}
-    </HStack>}
+    </HStack>
   </VStack>} />;
 }
 

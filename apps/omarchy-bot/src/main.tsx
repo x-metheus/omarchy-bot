@@ -9,8 +9,7 @@ try {
     [shell.browser, ["open"]],
     [shell.attachments, ["save"]],
     [shell.updates, ["check", "download", "restart"]],
-    [shell.localSidecar, ["start", "status", "onApproval", "onApprovalDismiss", "decide"]],
-    [shell.keyMapping, ["platform", "metaSendsSuper", "setMetaSendsSuper"]],
+    [shell.agentDaemon, ["ensure", "setAutostart", "pairingCode"]],
   ] as const) {
     if (!capability || methods.some(method => typeof Reflect.get(capability, method) !== "function")) {
       throw new Error("The native shell is broken.");
