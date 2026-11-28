@@ -11,7 +11,7 @@ impl ReplyStream {
     pub(super) async fn expect_reply(&mut self, name: &str) -> Value {
         loop {
             let (event, data) = self.next().await.expect("expected a reply event");
-            if event != "work" {
+            if !matches!(event.as_str(), "work" | "tool") {
                 assert_eq!(event, name);
                 return data;
             }
@@ -19,7 +19,14 @@ impl ReplyStream {
     }
 
     async fn expect_work(&mut self, message: i64, status: &str) -> Value {
-        let work = self.expect("work").await;
+        let work = loop {
+            let (event, body) = self.next().await.expect("work status event");
+            if event == "tool" {
+                continue;
+            }
+            assert_eq!(event, "work");
+            break body;
+        };
         assert_eq!(work["messageId"], message, "{work}");
         assert_eq!(work["status"], status, "{work}");
         work
@@ -93,13 +100,44 @@ async fn restart_resumes_queued_work_and_requires_explicit_retry_of_unanswered_w
     events.expect_work(completed_id, "completed").await;
     events.expect_work(active_id, "queued").await;
     events.expect_work(active_id, "running").await;
-    events.expect_work(queued_id, "queued").await;
+    let mut wait_id = None;
+    loop {
+        let (event, body) = events.next().await.expect("queued work after tool start");
+        if event == "tool" && body["name"] == "wait" {
+            assert_eq!(body["status"], "running");
+            assert_eq!(
+                body.as_object().unwrap().len(),
+                3,
+                "only sanitized tool metadata"
+            );
+            wait_id = Some(body["id"].clone());
+        }
+        if event == "work" && body["messageId"] == queued_id {
+            assert_eq!(body["status"], "queued");
+            break;
+        }
+    }
+    let wait_id = wait_id.expect("running wait tool was journaled");
     let before_restart = events.cursor.unwrap();
     daemon.stop().await;
     drop((active, queued, child, spare, events));
 
     let daemon = Daemon::launch(settings_command(&db, &provider)).await;
     let mut events = daemon.events(&client, id, before_restart).await;
+    loop {
+        let (event, body) = events
+            .next()
+            .await
+            .expect("interrupted tool event after restart");
+        assert_eq!(event, "tool");
+        if body["id"] == wait_id {
+            assert_eq!(
+                body,
+                json!({"id": wait_id, "name": "wait", "status": "interrupted"})
+            );
+            break;
+        }
+    }
     events.expect_work(active_id, "interrupted").await;
     assert_eq!(
         events.expect_work(queued_id, "queued").await["reason"],
@@ -136,7 +174,13 @@ async fn restart_resumes_queued_work_and_requires_explicit_retry_of_unanswered_w
     );
 
     let retry = format!("{}/bots/{id}/work/{active_id}/retry", daemon.url);
-    let (first, second) = tokio::join!(client.post(&retry).send(), client.post(&retry).send());
+    let retry_request = || {
+        client
+            .post(&retry)
+            .bearer_auth(super::SETTINGS_TOKEN)
+            .send()
+    };
+    let (first, second) = tokio::join!(retry_request(), retry_request());
     let mut statuses = [first.unwrap().status(), second.unwrap().status()];
     statuses.sort_unstable();
     assert_eq!(statuses, [StatusCode::ACCEPTED, StatusCode::CONFLICT]);
@@ -219,7 +263,7 @@ async fn restart_preserves_detached_replies_and_interrupts_unfinished_delegation
     replay.expect_work(second_id, "queued").await;
     replay.expect_work(second_id, "running").await;
     assert_eq!(
-        replay.expect("delta").await,
+        replay.expect_reply("delta").await,
         "The second check is underway."
     );
     replay.expect("committed").await;

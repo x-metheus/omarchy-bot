@@ -15,7 +15,16 @@ export interface LocalApproval {
 export type LocalApprovalDecision = "allow-once" | "deny" | "always" | "never";
 export interface UpdateStatus { available: boolean; version?: string }
 
+export interface LocalAgentDaemon {
+  baseUrl: string;
+  autostart: boolean;
+  ensure(): Promise<boolean>;
+  setAutostart?(enabled: boolean): Promise<void>;
+  pairingCode?(): Promise<string>;
+}
+
 export interface Shell {
+  readonly agentDaemon?: LocalAgentDaemon;
   readonly service: {
     baseUrl(): string;
     deviceToken(): string | undefined;
@@ -55,6 +64,7 @@ type ConnectionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 interface MemoryShellOptions {
   storage?: ConnectionStorage | null;
   baseUrl?: string;
+  fallbackBaseUrl?: string;
   deviceToken?: string;
   localSidecar?: LocalSidecarStatus;
   platform?: ShellPlatform;
@@ -73,7 +83,8 @@ function browserPlatform(): ShellPlatform {
 export function createMemoryShell(options: MemoryShellOptions = {}) {
   // Harness persistence stands in for the app's keychain; callers only see the shell.
   const storage = options.storage === undefined ? browserStorage() : options.storage;
-  let baseUrl = options.baseUrl ?? DEFAULT_SERVICE_URL;
+  const fallbackBaseUrl = options.fallbackBaseUrl ?? DEFAULT_SERVICE_URL;
+  let baseUrl = options.baseUrl ?? fallbackBaseUrl;
   let token = options.deviceToken;
   let metaSendsSuper = options.metaSendsSuper ?? false;
   try {
@@ -104,7 +115,7 @@ export function createMemoryShell(options: MemoryShellOptions = {}) {
         storage?.removeItem(DEVICE_TOKEN_STORAGE_KEY);
         storage?.removeItem(SERVICE_URL_STORAGE_KEY);
         token = undefined;
-        baseUrl = DEFAULT_SERVICE_URL;
+        baseUrl = fallbackBaseUrl;
       },
     },
     pairing: {

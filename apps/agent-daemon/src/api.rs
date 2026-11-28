@@ -1,21 +1,21 @@
 mod events;
+mod pairing;
 
 use std::collections::HashSet;
 use std::convert::Infallible;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::middleware::{self, Next};
+use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
+use axum::middleware;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rig_core::conversation::MessageId;
 use rig_harness::prelude::Wake;
-use ring::digest::{self, Digest};
+use ring::digest::Digest;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
@@ -28,24 +28,27 @@ use crate::duties;
 use crate::recall::{Availability, Recall};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
 use crate::store::work::{Report, Retry, Settlement};
-use crate::store::{Admission, Bot, Conversation, History, Store};
+use crate::store::{Admission, Bot, Conversation, History, Store, ToolProgress};
+
+use pairing::{Access, Pairing};
 
 #[derive(Clone)]
 struct Daemon {
     store: Store,
     conversations: mpsc::UnboundedSender<ConversationCommand>,
     recall: Recall,
+    pairing: Pairing,
 }
 
 pub(crate) fn router(
     store: Store,
     conversations: mpsc::UnboundedSender<ConversationCommand>,
     settings_token: Option<Digest>,
-    conversation_token: Option<Digest>,
     recall: Recall,
 ) -> Router {
-    let conversation_routes = Router::new()
-        .route("/bots", post(create_bot))
+    let pairing = Pairing::new(store.clone(), settings_token);
+    let conversations_router = Router::new()
+        .route("/bots", get(list_bots).post(create_bot))
         .route(
             "/bots/{bot}",
             get(read_bot).patch(rename_bot).delete(delete_bot),
@@ -53,80 +56,24 @@ pub(crate) fn router(
         .route("/bots/{bot}/messages", post(send_message))
         .route("/bots/{bot}/work/{message}/retry", post(retry_work))
         .route("/bots/{bot}/events", get(events::read))
-        .route("/bots/{bot}/attachments/{id}", get(read_attachment));
-    // Device authorization can replace this loopback guard at the Conversation boundary.
-    let conversation_routes = if let Some(expected) = conversation_token {
-        conversation_routes.route_layer(middleware::from_fn_with_state(
-            Bearer {
-                expected: Some(expected),
-                denied: Problem::new(
-                    "conversation_unauthorized",
-                    "a valid operator bearer token is required",
-                ),
-            },
-            authorize_bearer,
-        ))
-    } else {
-        conversation_routes
-    };
-    conversation_routes
-        .route("/recall/status", get(recall_status))
-        .merge(
-            Router::new()
-                .route("/settings", get(read_settings).put(write_settings))
-                .route_layer(middleware::from_fn_with_state(
-                    Bearer {
-                        expected: settings_token,
-                        denied: Problem::new(
-                            "settings_unauthorized",
-                            "a valid Settings bearer token is required",
-                        ),
-                    },
-                    authorize_bearer,
-                )),
-        )
+        .route("/bots/{bot}/attachments/{id}", get(read_attachment))
+        .route("/recall/status", get(recall_status));
+    let settings_router = Router::new().route("/settings", get(read_settings).put(write_settings));
+    pairing
+        .protect(conversations_router, Access::Conversation)
+        .merge(pairing.protect(settings_router, Access::Settings))
+        .merge(pairing.routes())
+        .layer(middleware::from_fn(pairing::cors))
         .with_state(Daemon {
             store,
             conversations,
             recall,
+            pairing,
         })
 }
 
 async fn recall_status(State(daemon): State<Daemon>) -> Json<Availability> {
     Json(daemon.recall.availability())
-}
-
-#[derive(Clone, Copy)]
-struct Bearer {
-    expected: Option<Digest>,
-    denied: Problem,
-}
-
-async fn authorize_bearer(State(auth): State<Bearer>, request: Request, next: Next) -> Response {
-    let bearer = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
-        .map(|(_, token)| token);
-    let authorized = auth.expected.zip(bearer).is_some_and(|(expected, token)| {
-        let provided = digest::digest(&digest::SHA256, token.as_bytes());
-        bool::from(expected.as_ref().ct_eq(provided.as_ref()))
-    });
-    let mut response = if authorized {
-        next.run(request).await
-    } else {
-        let mut response = ApiError(StatusCode::UNAUTHORIZED, auth.denied).into_response();
-        response
-            .headers_mut()
-            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        response
-    };
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
 }
 
 async fn read_settings(State(daemon): State<Daemon>) -> Result<Json<SettingsStatus>, ApiError> {
@@ -211,6 +158,10 @@ impl BotName {
             Ok(name.to_owned())
         }
     }
+}
+
+async fn list_bots(State(daemon): State<Daemon>) -> Result<Json<Vec<Bot>>, ApiError> {
+    Ok(Json(daemon.store.list_bots().await.map_err(store_error)?))
 }
 
 async fn create_bot(
@@ -424,6 +375,10 @@ pub(crate) enum ConversationCommand {
         stream: ReplySink,
         accepted: oneshot::Sender<Result<(), ApiError>>,
     },
+    Tool {
+        bot: Uuid,
+        event: ToolProgress,
+    },
     Event {
         bot: Uuid,
         name: &'static str,
@@ -570,6 +525,9 @@ pub(crate) async fn run_conversations(
                     Err(error) => Err(store_error(error)),
                 };
                 let _ = accepted.send(admission);
+            }
+            ConversationCommand::Tool { bot, event } => {
+                let _ = store.record_tool(bot, event).await.map_err(store_error);
             }
             ConversationCommand::Event {
                 bot,

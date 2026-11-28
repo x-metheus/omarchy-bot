@@ -2,6 +2,7 @@ pub(crate) mod conversation;
 mod observational_memory;
 mod recovery;
 mod redirect;
+mod tool_progress;
 mod work_control;
 
 pub(crate) use conversation::{AgentCommand, ReplySink, TurnRequest};
@@ -51,6 +52,7 @@ pub(crate) fn headless_app(
         .insert_resource(Models(Connector::new(Catalog::default())));
     rig_harness::load::<SubagentsPlugin>(&mut app, "rig-basics", "");
     recovery::register(&mut app, store, conversations.clone());
+    tool_progress::add(&mut app, conversations.clone());
     conversation::add(&mut app, pending, conversations);
     work_control::install(&mut app);
     redirect::install(&mut app);

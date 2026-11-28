@@ -48,7 +48,7 @@ function installNativeShell(initial) {
 
   window.__OMARCHY_BOT_SHELL__ = {
     service: {
-      baseUrl: () => connection?.baseUrl ?? initial.revoked ?? initial.defaults.serviceUrl,
+      baseUrl: () => connection?.baseUrl ?? initial.revoked ?? initial.localDaemon.baseUrl,
       deviceToken: () => connection?.token,
       status: () => ({ error: initial.error ?? undefined, revoked: Boolean(initial.revoked) }),
       certificateUntrusted: origin => invoke("certificate_untrusted", { origin }),
@@ -61,6 +61,13 @@ function installNativeShell(initial) {
         await invoke("clear_connection");
         connection = null;
       },
+    },
+    agentDaemon: {
+      baseUrl: initial.localDaemon.baseUrl,
+      autostart: initial.localDaemon.autostart,
+      ensure: () => invoke("ensure_local_daemon"),
+      setAutostart: enabled => invoke("set_daemon_autostart", { enabled }),
+      pairingCode: () => invoke("local_daemon_pairing_code"),
     },
     pairing: {
       onRequest(listener) {

@@ -5,6 +5,7 @@ import { useEffect, useSyncExternalStore, type JSX } from "react";
 import { connectionState, pairService, subscribeConnection } from "../lib/pairing.ts";
 import { getShell } from "../lib/shell.ts";
 import { AddService } from "../components/AddService.tsx";
+import { AgentDesktop } from "../components/AgentDesktop.tsx";
 import { ProtocolGate } from "../components/ProtocolGate.tsx";
 import { LocalApprovalPrompt } from "../components/LocalApprovalPrompt.tsx";
 import { useQueryClient } from "@tanstack/react-query";
@@ -14,9 +15,11 @@ function Root(): JSX.Element {
   const queryClient = useQueryClient();
   useEffect(() => { if (!connection.paired) queryClient.clear(); }, [connection.paired, queryClient]);
   useEffect(() => getShell().pairing.onRequest(request => { void pairService(request); }), []);
+  const daemon = getShell().agentDaemon;
   return (
     <Theme theme={neutralTheme}>
-      {connection.paired ? <><ProtocolGate><Outlet /></ProtocolGate><LocalApprovalPrompt /></> : <AddService />}
+      {daemon ? <AgentDesktop daemon={daemon} paired={connection.paired} baseUrl={connection.serviceUrl} /> :
+        connection.paired ? <><ProtocolGate><Outlet /></ProtocolGate><LocalApprovalPrompt /></> : <AddService />}
     </Theme>
   );
 }

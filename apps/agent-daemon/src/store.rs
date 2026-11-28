@@ -1,10 +1,14 @@
 mod deletion;
+mod devices;
 mod events;
 mod observations;
 mod recall_index;
+mod tools;
 pub(crate) mod work;
 
+pub(crate) use devices::Device;
 pub(crate) use events::ConversationEvent;
+pub(crate) use tools::{ToolProgress, ToolStatus};
 
 use std::path::{self, Path};
 use std::sync::{Arc, Mutex};
@@ -176,6 +180,8 @@ impl Store {
         }
         deletion::initialize(&connection).context("initialize Conversation deletion")?;
         events::initialize(&connection).context("initialize Conversation event storage")?;
+        devices::initialize(&connection).context("initialize device pairing storage")?;
+        tools::initialize(&connection).context("recover Conversation tool progress")?;
         work::initialize(&connection).context("initialize Conversation work storage")?;
         connection
             .execute_batch("COMMIT")
@@ -215,6 +221,24 @@ impl Store {
                 name,
                 duties: None,
             })
+        })
+        .await
+    }
+
+    pub(crate) async fn list_bots(&self) -> Result<Vec<Bot>> {
+        self.run(|db| {
+            let mut statement = db.connection.prepare_cached(
+                "SELECT id, name, duties FROM bots ORDER BY name COLLATE NOCASE, id",
+            )?;
+            Ok(statement
+                .query_map([], |row| {
+                    Ok(Bot {
+                        id: Uuid::from_bytes(row.get(0)?),
+                        name: row.get(1)?,
+                        duties: row.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?)
         })
         .await
     }

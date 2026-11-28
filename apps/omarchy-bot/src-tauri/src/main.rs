@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_daemon;
 mod attachments;
 
 #[cfg(target_os = "linux")]
 use gio::prelude::*;
+use agent_daemon::LocalDaemon;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -19,7 +21,7 @@ use tauri_plugin_updater::UpdaterExt;
 use url::Url;
 
 const KEYCHAIN_SERVICE: &str = "com.omarchy.bot";
-const KEYCHAIN_USER: &str = "service-connection";
+const KEYCHAIN_USER: &str = "agent-daemon-connection";
 const RESTART_EXIT_CODE: i32 = 75;
 
 static APP_LOG: std::sync::OnceLock<Mutex<std::fs::File>> = std::sync::OnceLock::new();
@@ -325,9 +327,9 @@ fn read_connection() -> Result<Option<Connection>, String> {
         Err(error) => return Err(keychain_error(error)),
     };
     let connection: Connection = serde_json::from_str(&secret)
-        .map_err(|_| "The OS keychain connection is invalid. Remove the com.omarchy.bot / service-connection entry to pair again.".to_string())?;
+        .map_err(|_| "The OS keychain connection is invalid. Remove the com.omarchy.bot / agent-daemon-connection entry to pair again.".to_string())?;
     service_origin(&connection.base_url)?;
-    if connection.token.is_empty() { return Err("The OS keychain device token is empty. Remove its service-connection entry to pair again.".into()); }
+    if connection.token.is_empty() { return Err("The OS keychain device token is empty. Remove its agent-daemon-connection entry to pair again.".into()); }
     Ok(Some(connection))
 }
 
@@ -341,7 +343,7 @@ fn store_connection(app: tauri::AppHandle, state: tauri::State<ShellState>, base
     let _guard = state.keychain.lock().map_err(|_| "The OS keychain is busy. Restart the app.")?;
     let secret = serde_json::to_string(&Connection { base_url: origin, token }).map_err(|_| "Could not encode the Service connection.")?;
     keychain()?.set_password(&secret).map_err(keychain_error)?;
-    if let Ok(directory) = app.path().app_config_dir() { let _ = std::fs::remove_file(directory.join("revoked-service")); }
+    if let Ok(directory) = app.path().app_config_dir() { let _ = std::fs::remove_file(directory.join("revoked-agent-daemon")); }
     stop_sidecar(&state);
     app.exit(RESTART_EXIT_CODE);
     Ok(())
@@ -356,7 +358,7 @@ fn clear_connection(app: tauri::AppHandle, state: tauri::State<ShellState>) -> R
         Err(error) => return Err(keychain_error(error)),
     }
     if let (Some(origin), Ok(directory)) = (&state.origin, app.path().app_config_dir()) {
-        let notice = std::fs::create_dir_all(&directory).and_then(|_| std::fs::write(directory.join("revoked-service"), origin));
+        let notice = std::fs::create_dir_all(&directory).and_then(|_| std::fs::write(directory.join("revoked-agent-daemon"), origin));
         if notice.is_err() { eprintln!("The revoked credential was cleared, but its Service address could not be retained."); }
     }
     stop_sidecar(&state);
@@ -553,14 +555,17 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .manage(ShellState { origin, connection: connection.clone(), keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None), sidecar: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, sidecar_events, sidecar_decide, sidecar_start, host_digest])
+        .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, sidecar_events, sidecar_decide, sidecar_start, host_digest, agent_daemon::ensure_local_daemon, agent_daemon::set_daemon_autostart, agent_daemon::local_daemon_pairing_code])
         .setup(move |app| {
+            let daemon = LocalDaemon::new(app.path().app_local_data_dir()?.join("agent-daemon"));
+            let local = serde_json::json!({ "baseUrl": daemon.origin(), "autostart": daemon.autostart().unwrap_or(false) });
+            app.manage(daemon);
             let revoked = if connection.is_none() {
-                std::fs::read_to_string(app.path().app_config_dir()?.join("revoked-service")).ok()
+                std::fs::read_to_string(app.path().app_config_dir()?.join("revoked-agent-daemon")).ok()
                     .and_then(|origin| service_origin(&origin).ok()).map(|url| url.origin().ascii_serialization())
             } else { None };
             let defaults: serde_json::Value = serde_json::from_str(include_str!("../../shell-defaults.json"))?;
-            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "platform": std::env::consts::OS, "defaults": defaults });
+            let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "platform": std::env::consts::OS, "defaults": defaults, "localDaemon": local });
             let script = format!("({})({});", include_str!("shell.js"), initial);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Omarchy Bot").inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)

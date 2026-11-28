@@ -178,7 +178,10 @@ pub(super) fn add(
     .add_observer(on_tool_request)
     .add_observer(on_settled)
     .add_systems(PreUpdate, deliver)
-    .add_systems(PostUpdate, (stream_deltas, finish_turns).chain());
+    .add_systems(
+        PostUpdate,
+        (stream_deltas, super::tool_progress::settled, finish_turns).chain(),
+    );
 }
 
 fn delete_bot(

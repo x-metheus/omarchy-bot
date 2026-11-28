@@ -24,6 +24,7 @@ async fn start(db: &Path, provider: &Provider, model: &str) -> Daemon {
 async fn send(daemon: &Daemon, client: &Client, bot: &str, message: Value) -> Response {
     client
         .post(format!("{}/bots/{bot}/messages", daemon.url))
+        .bearer_auth(super::SETTINGS_TOKEN)
         .json(&message)
         .send()
         .await
@@ -36,6 +37,7 @@ async fn download(daemon: &Daemon, client: &Client, bot: &str, attachment: &str)
             "{}/bots/{bot}/attachments/{attachment}",
             daemon.url
         ))
+        .bearer_auth(super::SETTINGS_TOKEN)
         .send()
         .await
         .expect("read Conversation attachment")

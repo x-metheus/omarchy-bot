@@ -46,6 +46,7 @@ export async function pairService({ serviceUrl, code }: PairingRequest): Promise
     if (address.protocol === "http:" && !loopback) throw new Error("Use HTTPS or a loopback HTTP address through an SSH tunnel.");
     const response = await serviceFetch(`${address.origin}/api/pairing/exchange`, {
       method: "POST",
+      redirect: "error",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ code: code.trim() }),
     }).catch((error: unknown) => {

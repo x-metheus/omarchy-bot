@@ -32,9 +32,27 @@ The daemon prints its bound address. `OMARCHY_AGENT_PORT` defaults to `8765`. Se
 
 The master key file must contain exactly 32 raw bytes. SQLite stores provider keys as AES-256-GCM ciphertext with a fresh OS-random nonce per write and the provider authenticated as associated data. Keep the database and its matching master key in separate protected backups. Restore both to resume saved Settings. A missing or incorrect key for the saved selection prevents startup. If the master key is permanently lost, stop the daemon and back up SQLite before clearing Settings in a transaction. Run `BEGIN IMMEDIATE; DELETE FROM model_settings; DELETE FROM provider_credentials; COMMIT;` against that database, then provision a new master key and re-enter provider credentials. Conversation history remains available. An independently replaced Settings bearer token takes effect on restart.
 
+## Desktop connection
+
+Install `omarchy-agent-daemon` beside the Tauri executable or on the desktop process's `PATH`. The desktop checks `http://127.0.0.1:8765` when it opens for local use and attaches to an existing daemon. If the port is free and startup is enabled, it starts one using a private application data directory. Disable **Start the local daemon when opening Omarchy Bot** on the connection screen or in Settings. A launched daemon can keep working when the desktop disconnects or closes.
+
+Choose **Pair local daemon** for a daemon started by this desktop profile. To attach to a standalone daemon, obtain a code from its operator, then enter the daemon address and code in the desktop. With the token file from the setup above, the operator can mint a code on the daemon host:
+
+```sh
+base=http://127.0.0.1:8765
+token_file="$HOME/.local/state/omarchy-agent-daemon/settings-token"
+printf 'Authorization: Bearer %s\n' "$(cat "$token_file")" |
+  curl -fsS "$base/api/pairing/codes" -H @- -H 'Content-Type: application/json' \
+    -d '{"name":"Work desktop"}' | jq -r .code
+```
+
+Pairing codes expire after ten minutes and can be used once. The desktop keeps its device credential in the OS keychain. The operator bearer can list devices at `GET /api/devices/paired` and revoke a device with `POST /api/devices/paired/{id}/revoke`. Revocation closes both of that device's live streams and denies subsequent requests while accepted work keeps running. A paired device can read and write Settings and use the daemon's Bot and Conversation routes.
+
+For standalone use without a token file, Conversation routes remain available on loopback and device pairing and Settings are disabled. Provision a token before exposing the daemon through a reverse proxy.
+
 ## Settings API
 
-`GET /settings` and `PUT /settings` require `Authorization: Bearer <token>` using the operator-provisioned token file. The daemon checks the header before reading a Settings request body. When the token file is omitted, both routes reject requests. An operator can also run without the master key file before saving any Settings. `GET` then reports `writable: false` and `PUT` returns `503 settings_read_only`.
+`GET /settings` and `PUT /settings` require an operator or paired-device `Authorization: Bearer <token>` header. The daemon checks the header before reading a Settings request body. If the operator token file is omitted, both routes reject requests. An operator can run without the master key file before saving any Settings. `GET` then reports `writable: false` and `PUT` returns `503 settings_read_only`.
 
 Send `PUT /settings` as JSON with `provider` (`openai` or `anthropic`), `model`, and optional `apiKey`. Supply `apiKey` on first setup and to rotate that provider's credential. Omit it to reuse that provider's stored key. Model IDs must be nonempty and free of surrounding whitespace and control characters. API keys must be nonempty printable ASCII without whitespace. Unknown fields and explicit `null` keys are rejected. The provider validates account credentials and model availability on the next Turn. A syntactically valid key can save successfully and later fail upstream, yielding a sanitized `turn_failed` event.
 
@@ -89,16 +107,18 @@ with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, 
 PY
 }
 
+operator_header() { printf 'Authorization: Bearer %s\n' "$(cat "$token_file")"; }
+
 select_provider openai gpt-4.1-mini replace
-bot=$(curl -fsS "$base/bots" -H 'Content-Type: application/json' \
+bot=$(operator_header | curl -fsS "$base/bots" -H @- -H 'Content-Type: application/json' \
   -d '{"name":"Smoke Bot"}' | jq -er .id)
-curl -fsSN "$base/bots/$bot/messages" -H 'Content-Type: application/json' \
+operator_header | curl -fsSN "$base/bots/$bot/messages" -H @- -H 'Content-Type: application/json' \
   -d '{"text":"Remember the word amber. Reply with a short acknowledgment."}'
 
 select_provider anthropic claude-haiku-4-5 replace
-curl -fsSN "$base/bots/$bot/messages" -H 'Content-Type: application/json' \
+operator_header | curl -fsSN "$base/bots/$bot/messages" -H @- -H 'Content-Type: application/json' \
   -d '{"text":"What word did I ask you to remember? Reply with just that word."}'
-curl -fsS "$base/bots/$bot" | jq .
+operator_header | curl -fsS "$base/bots/$bot" -H @- | jq .
 ```
 
 Expect ordered `delta` events followed by `committed` for both replies. The follow-up should answer `amber`. Restart the daemon with the same database and key files and use the same Bot ID to read its Conversation. Send another follow-up to exercise the restored Anthropic selection. Run `select_provider openai gpt-4.1-mini` to switch back using the stored OpenAI key, or add `replace` to rotate it before the next Turn.
@@ -107,6 +127,7 @@ Expect ordered `delta` events followed by `committed` for both replies. The foll
 
 | Request | Response |
 | --- | --- |
+| `GET /bots` | `200` with the daemon's Bot profiles in stable name order |
 | `POST /bots` with `{"name":"Lumen"}` | `201` with the new Bot profile and `duties: null` |
 | `GET /bots/{id}` | `200` with `bot` and `messages`, oldest first |
 | `PATCH /bots/{id}` with `{"name":"Prism"}` | `200` with the renamed Bot profile |
@@ -130,6 +151,8 @@ A Bot accepts new messages while a Turn is running. Rig delivers them through th
 Read `/bots/{id}/events` to subscribe to the entire Conversation, including detached replies after the POST streams close. Save the last processed SSE `id` and pass it as `Last-Event-ID` on reconnect. IDs are increasing and remain stable across restart. The daemon replays later events for that Bot and then follows live updates on the same connection. Reply events use the same IDs on the POST and Conversation streams. The history endpoint includes committed messages from before event recording was available.
 
 The Conversation stream also emits `work` events with `messageId` and `status`. A request can be `queued`, `running`, `waiting` for a delegated report, `completed`, `failed`, or `interrupted`. On restart, the daemon resumes queued inputs with the current model and credential. If configuration is missing, queued work reports `reason: "provider_unconfigured"` and resumes when Settings are saved.
+
+`tool` events contain a stable `id`, the tool `name`, and a sanitized `status`. Each `running` event is followed by `completed`, `failed`, `cancelled`, or, after restart, `interrupted`. Tool arguments and results stay out of the feed.
 
 Previously running or delegated work becomes `interrupted`. Its original message and any committed replies are available in Message History. An explicit retry reuses the original message and attachments with current Settings. Interrupted instructions stay out of restored model input until that retry. Interrupted Rig tool calls and Subagents are discarded on restart.
 
@@ -166,7 +189,7 @@ The daemon uses the pinned Rig catalog's input limits and Rig's token estimate f
 
 ## Daemon-host tools
 
-Set `OMARCHY_AGENT_WORK_DIR` to an existing absolute directory to enable `read`, `edit`, `write`, and `shell` on the daemon host. Provision `OMARCHY_AGENT_SETTINGS_TOKEN_FILE` before starting in this mode. Every Bot, Conversation, attachment, and message request then needs `Authorization: Bearer <token>`. The daemon returns `401 conversation_unauthorized` before admitting unauthorized work. Leave `OMARCHY_AGENT_WORK_DIR` unset for ordinary chat without host tools.
+Set `OMARCHY_AGENT_WORK_DIR` to an existing absolute directory to enable `read`, `edit`, `write`, and `shell` on the daemon host. Provision `OMARCHY_AGENT_SETTINGS_TOKEN_FILE` before starting in this mode. Every Bot, Conversation, attachment, and message request requires an operator or paired-device `Authorization: Bearer <token>` header. The daemon returns `401 conversation_unauthorized` before admitting unauthorized work. Leave `OMARCHY_AGENT_WORK_DIR` unset for ordinary chat without host tools.
 
 `read` returns UTF-8 text or a supported PNG, JPEG, GIF, or WebP image. Images are sent to the selected model when its provider and model support image input. `edit` applies the requested replacements together. `write` creates a file or replaces a text version observed by the calling Agent during the current daemon run. If the file changes after observation, read it again before replacing it. File tools resolve paths within the configured workspace.
 

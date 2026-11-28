@@ -29,6 +29,8 @@ mod deletion;
 mod host_tools;
 #[path = "conversation/observational_memory.rs"]
 mod observational_memory;
+#[path = "conversation/pairing.rs"]
+mod pairing;
 #[path = "conversation/recovery.rs"]
 mod recovery;
 #[path = "conversation/source_recall.rs"]
@@ -139,6 +141,7 @@ impl Daemon {
     async fn create(&self, client: &Client) -> Value {
         let response = client
             .post(format!("{}/bots", self.url))
+            .bearer_auth(SETTINGS_TOKEN)
             .json(&json!({ "name": "Lumen" }))
             .send()
             .await
@@ -150,6 +153,7 @@ impl Daemon {
     async fn read(&self, client: &Client, bot: &str) -> Value {
         client
             .get(format!("{}/bots/{bot}", self.url))
+            .bearer_auth(SETTINGS_TOKEN)
             .send()
             .await
             .expect("open Bot Conversation")
@@ -163,6 +167,7 @@ impl Daemon {
     async fn send(&self, client: &Client, bot: &str, text: &str) -> Response {
         client
             .post(format!("{}/bots/{bot}/messages", self.url))
+            .bearer_auth(SETTINGS_TOKEN)
             .json(&json!({ "text": text }))
             .send()
             .await
@@ -172,6 +177,7 @@ impl Daemon {
     async fn events(&self, client: &Client, bot: &str, after: i64) -> ReplyStream {
         let response = client
             .get(format!("{}/bots/{bot}/events", self.url))
+            .bearer_auth(SETTINGS_TOKEN)
             .header("Last-Event-ID", after)
             .send()
             .await
