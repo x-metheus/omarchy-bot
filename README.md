@@ -30,16 +30,17 @@ Add files to a Conversation or explicitly select a desktop file or working direc
 
 ## Development
 
-Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and run these commands from the repository root.
+Install [mise](https://mise.jdx.dev/getting-started.html) and the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/). Run these commands from the repository root.
 
 ```sh
-bun install --frozen-lockfile
-bun run tauri dev
+mise install
+mise exec -- bun --cwd apps/omarchy-bot install --frozen-lockfile
+mise run dev
 ```
 
-Use the Tauri window for daily UI checks. The command starts Vite and compiles the Rust debug target as needed. Connect to a running Agent Daemon, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to an executable to check desktop-managed startup. See the [development guide](docs/development.md#desktop-project-layout) and [code map](docs/README.md#code-map).
+`mise run dev` runs `bun run tauri dev` in the desktop project. Tauri starts Vite and compiles the Rust debug target as needed. Connect to a running Agent Daemon, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to an executable to check desktop-managed startup. See the [development guide](docs/development.md#desktop-project-layout) and [code map](docs/README.md#code-map).
 
-Use `bun run typecheck` and `bun test` for the TypeScript checks. Run the native Rust checks from `apps/omarchy-bot/src-tauri` and the daemon's [controlled protocol tests](apps/agent-daemon/README.md#checks) from `apps/agent-daemon`.
+Run `cargo test --workspace --locked` from the repository root for the native workspace. Run frontend type checks and tests inside `apps/omarchy-bot`.
 
 Native lifecycle logs are stored in `~/.local/share/com.omarchy.bot/logs/omarchy-bot.log` on Linux (or under `XDG_DATA_HOME`), `~/Library/Logs/com.omarchy.bot/omarchy-bot.log` on macOS, and `%LOCALAPPDATA%\com.omarchy.bot\logs\omarchy-bot.log` on Windows.
 
@@ -66,25 +67,23 @@ and Skills catalog routes. Default Skills access is ready to use; service
 authorization still requires publisher configuration.
 
 ```bash
-bun run site:dev   # http://127.0.0.1:7330
-bun run site:build # apps/site/dist
+cd apps/site
+bun install --frozen-lockfile
+bun run dev   # http://127.0.0.1:7330
+bun run build # dist
 ```
 
 For Vercel, import the repository and set **Root Directory** to `apps/site`.
-Enable access to source files outside that directory for the Bun workspace
-installation. `apps/site/vercel.json` sets the install command, build command,
-static output directory, and response headers. Deployment requires a signed-in
-Vercel account; the repository does not contain deployment credentials.
-Install and build commands use `bunx bun@1.4.2` so Vercel's preinstalled Bun does
-not need to support the repository's v2 lockfile. Keep the frozen-lockfile check
-enabled; do not regenerate dependency resolutions to work around an older build image.
+The site has its own Bun lockfile and publisher contract. `apps/site/vercel.json`
+sets the pinned Bun install and build commands, static output directory, and
+response headers. Deployment requires a signed-in Vercel account.
 The production hostname supplied by Vercel generates canonical and social-image
 URLs; set `SITE_URL` to the final HTTPS origin when using a custom domain.
 Vite previews the public pages only; OAuth and catalog functions run on Vercel.
 
 ## Releases
 
-The tag-triggered [release workflow](.github/workflows/app-release.yml) builds desktop installers, signed updater artifacts, and standalone daemon archives. See the [Linux](scripts/linux-app/README.md), [macOS](scripts/macos-app/README.md), and [Windows](scripts/windows-app/README.md) guides for manual workflows and native packaging and verification commands.
+The tag-triggered [release workflow](.github/workflows/app-release.yml) builds desktop installers, signed updater artifacts, and standalone daemon archives. See the [Linux](tools/release/linux-app/README.md), [macOS](tools/release/macos-app/README.md), and [Windows](tools/release/windows-app/README.md) guides for manual workflows and native packaging commands.
 
 ## Development sources
 

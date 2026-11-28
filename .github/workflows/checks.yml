@@ -4,13 +4,12 @@ on:
     paths:
       - 'apps/agent-daemon/**'
       - 'apps/omarchy-bot/**'
-      - 'packages/protocol/**'
-      - 'scripts/**'
-      - 'tests/**'
-      - 'package.json'
-      - 'bun.lock'
-      - 'bunfig.toml'
-      - 'tsconfig*.json'
+      - 'apps/site/**'
+      - 'tools/release/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'mise.toml'
       - '.github/workflows/checks.yml'
   workflow_dispatch:
 permissions:
@@ -20,18 +19,30 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.5
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: jdx/mise-action@v3
       - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
+      - run: bun --cwd apps/omarchy-bot install --frozen-lockfile
+      - run: bun --cwd apps/omarchy-bot run typecheck
       - run: bun test
-      - run: cargo test --locked --manifest-path apps/omarchy-bot/src-tauri/Cargo.toml
+        working-directory: apps/omarchy-bot
+      - run: cargo test --locked -p omarchy-bot
   agent-daemon:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - run: cargo test --locked --manifest-path apps/agent-daemon/Cargo.toml --test conversation
+      - uses: jdx/mise-action@v3
+      - run: cargo test --locked -p omarchy-agent-daemon --test conversation
+  tooling:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        directory: [apps/site, tools/release]
+    defaults:
+      run:
+        working-directory: ${{ matrix.directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v3
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test

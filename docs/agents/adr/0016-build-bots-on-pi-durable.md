@@ -18,7 +18,7 @@ The product is changing from an Omarchy app that hosts coding agents into a self
 - The app owns the model and login layer.
 - Bots run on a desktop or server. Desktop and future mobile apps are clients of one Bot service.
 
-This reopens the 2026-11-05 decision to build on `pi-agent-core` 0.84.4 (`.scratch/bot-runtime/spec.md`). Options are judged on memory, proactive work (schedules, waiting, watching, background tasks), crash recovery, stability, client support, and fit with the app's own login layer and Service. Pi core, pi-durable, Mastra, and TanStack AI were compared.
+This reopens the 2026-11-05 decision to build on `pi-agent-core` 0.84.4. Options are judged on memory, proactive work (schedules, waiting, watching, background tasks), crash recovery, stability, client support, and fit with the app's own login layer and Service. Pi core, pi-durable, Mastra, and TanStack AI were compared. [Archived decision](https://github.com/x-metheus/omarchy-bot/blob/81ef4f058c5919acc0d5190dfd4eb060b9907097/.scratch/bot-runtime/spec.md)
 
 ### Facts checked on 2026-11-10
 
@@ -114,7 +114,7 @@ A failed check is solved within pi-durable, through a workaround in the runtime 
 
 ## Consequences
 
-- `.scratch/bot-runtime/spec.md`, which targeted `pi-agent-core` 0.84.4, is replaced by [the runtime spec](../../specs/bot-runtime.md).
+- The runtime spec replaced the earlier `pi-agent-core` 0.84.4 spec. [Runtime spec](../../specs/bot-runtime.md)
 - [The memory spec](../../specs/bot-memory.md) keeps its design. Its recall and learning hooks map to `beforeRequest` and `afterRun`.
 - New specs are needed for:
   - proactive Bots: check-ins, follow-ups, watchers, notifications, and ask-before-act

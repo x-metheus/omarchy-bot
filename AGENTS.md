@@ -41,6 +41,6 @@ Use the shared root glossary and relevant architecture decisions when exploring 
 - Before implementation, read the relevant GitHub spec or ticket and any linked specification in `docs/specs/`. Consult `docs/CONSTRAINTS.md` when present. Confirm any unresolved requirements that affect the work.
 - For frontend changes in `apps/omarchy-bot/`, follow the [frontend instructions](apps/omarchy-bot/AGENTS.md).
 - Run focused tests and applicable Bun or Cargo checks for the affected code. For documentation, check links, paths, commands, and the diff. Report results and blockers.
-- To verify desktop interactions or native capabilities, including end-to-end flows, run `bun run tauri dev` from the repository root and exercise the behavior in the App window on the current platform. Report any blocker that prevents verification in the Tauri window.
+- To verify desktop interactions or native capabilities, run `mise run dev` from the repository root and exercise the behavior in the App window on the current platform. Report blockers to native verification.
 - Run App production builds, packaging, and cross-platform package checks only for explicit release tasks. See the [development guide](docs/development.md#stack-and-verification).
 - Commit, push, merge, or deploy when the user’s request or an authorized project workflow calls for it.
