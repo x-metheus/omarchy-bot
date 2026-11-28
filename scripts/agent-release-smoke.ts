@@ -75,7 +75,7 @@ async function request(origin: string, route: string, token?: string, body?: obj
   const headers = new Headers();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (body) headers.set("Content-Type", "application/json");
-  const response = await fetch(`${origin}${route}`, { method, headers, body: body && JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+  const response = await fetch(`${origin}${route}`, { method, headers, ...(body && { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
   assert.ok(response.ok, `${method} ${route}: ${response.status}`);
   return response;
 }
@@ -96,7 +96,7 @@ const driver = "http://127.0.0.1:4444";
 const elementKey = "element-6066-11e4-a52e-4f735466cecf";
 async function wd(method: string, route: string, body?: object) {
   const response = await fetch(`${driver}${route}`, { method, headers: { "content-type": "application/json" },
-    body: body && JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
+    ...(body && { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20_000) });
   const { value } = await response.json();
   assert.ok(response.ok && !value?.error, `WebDriver ${route}: ${value?.message ?? response.status}`);
   return value;

@@ -11,13 +11,13 @@ The desktop application and bundled Agent Daemon require macOS 13.0 or later and
 
 The builder verifies the pinned Recall model and emits the desktop dmg and standalone Agent Daemon archive for the native host architecture. It exercises the unpacked daemon through pairing, provider configuration, Conversation, attachments, host tools, and offline Recall. Output and checksums go to `.lane/dist`. Cargo, Bun, and evidence stay in `.lane/macos-app`. PR builds use ad-hoc signing. The app uses macOS Keychain and system certificate trust.
 
-The merged `src-tauri/Info.plist` permits HTTP only for `localhost`, IPv4 loopback `127.0.0.0/8` and IPv6 `::1` in App Transport Security, matching the Service-origin validator and SSH-tunnel path. It adds no arbitrary-load or broad local-network exception. Verify all three forms on the native checklist, particularly macOS 14+ numeric-IP ATS behavior.
+The merged `src-tauri/Info.plist` permits plaintext HTTP for `localhost`, IPv4 loopback `127.0.0.0/8`, and IPv6 `::1` in App Transport Security. Verify those forms on the native checklist, particularly macOS 14+ numeric-IP behavior.
 
 For distribution, run `bash scripts/build-macos-app.sh --signed`. Supply `APPLE_SIGNING_IDENTITY` as a **Developer ID Application** identity, `APPLE_ID`, the app-specific `APPLE_PASSWORD`, and `APPLE_TEAM_ID`. Local signing uses the installed identity; CI additionally requires the base64 `.p12` `APPLE_CERTIFICATE` and its `APPLE_CERTIFICATE_PASSWORD`, which Tauri imports into a temporary build keychain. Missing credentials, failed signing, failed notarization or failed Gatekeeper/stapler assessment stop the job. This path deliberately supports one notarization credential method (Apple ID) rather than ambiguous partial alternatives. Never add credentials to the repository or evidence. See [Tauri signing prerequisites](https://v2.tauri.app/distribute/sign/macos/).
 
 Tauri signs the app and the embedded Agent Daemon with hardened runtime and notarizes and staples the app. The script also notarizes and staples the dmg, verifies both executable signatures, and assesses the application and outer download.
 
-`.github/workflows/macos-app.yml` runs natively on `macos-15` (Apple Silicon) and `macos-15-intel` (Intel). The Sidecar conformance workflow also runs both architectures, including real TLS rejection, approved execution and process-tree cancellation. No macOS execution is implied by Linux cross-compilation.
+The [macOS workflow](../../.github/workflows/macos-app.yml) runs natively on `macos-15` (Apple Silicon) and `macos-15-intel` (Intel).
 
 ## Cross-platform publication
 
@@ -29,7 +29,7 @@ Updater builds require an explicit `APP_VERSION`, `TAURI_SIGNING_PRIVATE_KEY` an
 - `omarchy-bot_<version>_<arch>.app.tar.gz`, `.app.tar.gz.sig` and `.app.tar.gz.sha256`
 - `omarchy-agent-daemon_<version>_<target>.tar.gz` and `.tar.gz.sha256`
 
-The caller downloads both asset sets into one flat release directory; architecture suffixes prevent collisions. It validates every payload, installer, checksum and updater signature's key/version metadata, then writes one manifest containing exactly `linux-x86_64`, `darwin-aarch64`, `darwin-x86_64` and `windows-x86_64`. macOS entries point to `.app.tar.gz` and contain the matching `.sig` contents. The dmg remains the installer. It uploads all assets to a draft `app-vX.Y.Z` release, verifies the downloaded bytes, publishes the complete release, and promotes `app-latest/latest.json` only when its numeric stable version increases. App releases remain separate from Service runtime releases. Windows currently makes the combined release a prerelease with explicit unsigned preview notes; this does not change stable app versioning.
+The caller downloads both asset sets into one release directory. It verifies the installers, daemon archives, checksums, and updater signature metadata, then writes the four-platform manifest. macOS entries point to `.app.tar.gz` updater payloads. The workflow uploads the assets to a draft `app-vX.Y.Z` release, verifies the downloaded bytes, publishes the complete release, and promotes `app-latest/latest.json` when the stable version increases. The unsigned Windows installer keeps the combined release labeled preview.
 
 Build failure publishes nothing. Rerun failed jobs to reuse successful Actions artifacts; an interrupted draft upload can be resumed. Public versioned assets are never overwritten: publication retry must match their existing bytes and platform map before finishing promotion. A rebuild that differs requires a new version. Workflow evidence is separate (`macos-app-evidence-<arch>`), records build mode and explicitly says WKWebView was not run. Native checklist and GitHub publication evidence remain required; integration alone closes no ticket 14 acceptance criterion.
 

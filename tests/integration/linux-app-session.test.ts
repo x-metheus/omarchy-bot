@@ -43,7 +43,7 @@ async function session(options: { image?: boolean; container?: boolean; uid?: st
 }
 
 const linuxTest = bwrap ? test : test.skip;
-linuxTest("Linux app smoke refuses CA trust on a host even as root", async () => {
+linuxTest("Linux app smoke refuses to start as root on a host", async () => {
   const result = await session();
   expect(result.code).not.toBe(0);
   expect(result.stderr).toContain("repository's Linux app container");
@@ -66,16 +66,16 @@ linuxTest.each([
   { uid: "0" }, { uid: "" }, { uid: "invalid" },
   { gid: "0" }, { gid: "" }, { gid: "invalid" },
   { dropFails: true },
-])("Linux app smoke refuses CA trust before an unusable privilege drop: %j", async options => {
+])("Linux app smoke refuses an unusable privilege drop: %j", async options => {
   const result = await session({ image: true, container: true, ...options });
   expect(result.code).not.toBe(0);
   expect(result.stderr).toContain("working non-root smoke UID/GID");
   expect(result.mutations).toBe("");
 });
 
-linuxTest("Linux app smoke reaches certificate setup only after container and privilege checks", async () => {
+linuxTest("Linux app smoke enters the private session as the requested unprivileged user", async () => {
   const result = await session({ image: true, container: true });
-  expect(result.drop).toBe("--reuid=1000 --regid=1000 --clear-groups /bin/true\n");
-  expect(result.mutations).toBe("mktemp\n");
-  expect(result.code).toBe(90);
+  expect(result.drop).toBe("--reuid=1000 --regid=1000 --clear-groups /bin/true\n--reuid=1000 --regid=1000 --clear-groups bash /src/scripts/linux-app/session.sh\n");
+  expect(result.mutations).toBe("");
+  expect(result.code).toBe(0);
 });

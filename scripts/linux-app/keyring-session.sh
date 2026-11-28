@@ -33,4 +33,4 @@ trap cleanup EXIT
 } > "/src/.lane/linux-app/evidence/${prefix}environment.txt"
 smoke=scripts/agent-release-smoke.ts
 if [[ ${OMARCHY_BOT_UPDATER_SMOKE:-0} == 1 ]]; then smoke=scripts/linux-app/updater-smoke.ts; fi
-NODE_PATH=/src/apps/daemon/node_modules bun "$smoke" /artifact/omarchy-bot.AppImage 2>&1 | tee "/src/.lane/linux-app/evidence/${prefix}smoke.log"
+bun "$smoke" /artifact/omarchy-bot.AppImage 2>&1 | tee "/src/.lane/linux-app/evidence/${prefix}smoke.log"

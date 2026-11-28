@@ -327,7 +327,7 @@ fn main() {
     let loaded = read_connection();
     let error = loaded.as_ref().err().cloned();
     let stored = loaded.ok().flatten();
-    // An explicit pairing link opens Add Service without deleting the previous keychain entry.
+    // An explicit pairing link opens the connection screen while retaining the previous credential.
     let connection = if incoming.is_some() { None } else { stored };
     let origin = connection.as_ref().map(|connection| connection.base_url.clone());
     let mut policy = context.config().app.security.csp.clone().expect("CSP configured").to_string();

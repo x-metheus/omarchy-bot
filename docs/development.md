@@ -42,7 +42,7 @@ Run these commands from the repository root. Consult the affected workspace’s 
 | --- | --- |
 | `bun install --frozen-lockfile` | Install locked dependencies |
 | `bun run tauri dev` | Run the native Tauri development window |
-| `bun run tauri build` | Build release artifacts after preparing their packaging inputs |
+| `bash scripts/build-linux-app.sh` | Package the desktop and standalone daemon on Linux |
 | `bun run typecheck` | Check TypeScript types |
 | `bun run build` | Build the desktop frontend for packaging |
 | `bun test <path>` / `bun test` | Run focused tests / the Bun suite |
@@ -54,7 +54,7 @@ Run these commands from the repository root. Consult the affected workspace’s 
 
 Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and run `bun install --frozen-lockfile`. Start daily UI checks from `apps/omarchy-bot` or the repository root with `bun run tauri dev`. Tauri starts Vite on `http://127.0.0.1:7322` and incrementally compiles the native debug target. A clean checkout can start without a prebuilt frontend or staged binaries. Connect to a running Agent Daemon, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to a daemon executable to check managed startup. [Standalone daemon setup](../apps/agent-daemon/README.md#headless-startup)
 
-The platform release scripts stage the daemon and verified Recall model, then invoke `tauri build` with the release configuration. See [Linux](../scripts/linux-app/README.md), [macOS](../scripts/macos-app/README.md), and [Windows](../scripts/windows-app/README.md) for packaging and native smoke commands. To exercise the legacy Local Sidecar itself, stage it with `bun scripts/build-sidecar.ts` and add `--config '{"bundle":{"externalBin":["binaries/omarchy-bot-sidecar"]}}'` to the Tauri command.
+The platform release scripts stage the daemon and verified Recall model, then invoke `tauri build` with the release configuration. See [Linux](../scripts/linux-app/README.md), [macOS](../scripts/macos-app/README.md), and [Windows](../scripts/windows-app/README.md) for packaging and native smoke commands.
 
 The legacy `apps/site` workspace retains its explicit `site:dev` and `site:build` commands.
 

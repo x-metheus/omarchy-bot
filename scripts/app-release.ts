@@ -24,12 +24,12 @@ const assets = [
   ...daemonTargets.map(target => `omarchy-agent-daemon_${version}_${target}.tar.gz`),
 ];
 for (const name of assets) {
-  const file = Bun.file(path.join(directory, name));
+  const file: Bun.BunFile = Bun.file(path.join(directory, name));
   assert.ok(await file.size > 0, `Missing or empty release asset: ${name}`);
   const sha256 = new Bun.CryptoHasher("sha256");
   for await (const chunk of file.stream()) sha256.update(chunk);
   const hash = sha256.digest("hex");
-  const checksum = (await Bun.file(path.join(directory, `${name}.sha256`)).text()).trim().replace(/^\uFEFF/, "");
+  const checksum: string = (await Bun.file(path.join(directory, `${name}.sha256`)).text()).trim().replace(/^\uFEFF/, "");
   assert.equal(checksum, `${hash}  ${name}`, `Checksum mismatch: ${name}`);
 }
 const platforms: Record<string, { url: string; signature: string }> = {};

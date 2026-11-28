@@ -22,7 +22,7 @@ Choose the desktop package for your platform from the [releases](https://github.
 
 On first launch, connect to an Agent Daemon with its address and one-time pairing code. The desktop stores its credential in the OS keychain. Provision a model in desktop Settings after pairing. For a remote connection, use a private HTTPS endpoint such as [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve).
 
-The Rig release starts with fresh application data. The release cutover and verification against a disposable legacy profile are tracked in [issue #31](https://github.com/x-metheus/omarchy-bot/issues/31).
+The Rig release starts with fresh application data. The [cutover guide](apps/agent-daemon/README.md#fresh-cutover-from-the-pi-service) explains how to preview and clear the old app-owned files.
 
 ## Product model
 
@@ -84,7 +84,9 @@ The production hostname supplied by Vercel generates canonical and social-image
 URLs; set `SITE_URL` to the final HTTPS origin when using a custom domain.
 Vite previews the public pages only; OAuth and catalog functions run on Vercel.
 
-[Platform release workflows](.github/workflows/app-release.yml) publish desktop installers and updater artifacts. Follow [issue #31](https://github.com/x-metheus/omarchy-bot/issues/31) for daemon distribution and release cutover evidence.
+## Releases
+
+The [release workflow](.github/workflows/app-release.yml) builds desktop installers, signed updater artifacts, and standalone daemon archives. See the [Linux](scripts/linux-app/README.md), [macOS](scripts/macos-app/README.md), and [Windows](scripts/windows-app/README.md) guides for their native packaging and verification commands.
 
 ## Development sources
 

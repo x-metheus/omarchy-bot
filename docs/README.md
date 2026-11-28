@@ -10,7 +10,7 @@ These paths are starting points. Follow imports, contracts, and tests when a cha
 
 | Area | Starting points | Read together when relevant |
 | --- | --- | --- |
-| Bot identity, Conversations, events, attachments, and pairing | `apps/agent-daemon/src/api.rs`, `apps/agent-daemon/src/api/`, `apps/agent-daemon/src/store/` | Daemon [protocol tests](../apps/agent-daemon/tests/conversation.rs) and the desktop client in `src/lib/agentDaemon.ts` |
+| Bot identity, Conversations, events, attachments, and pairing | `apps/agent-daemon/src/api.rs`, `apps/agent-daemon/src/api/`, `apps/agent-daemon/src/store/` | Daemon [protocol tests](../apps/agent-daemon/tests/conversation.rs) and `apps/omarchy-bot/src/lib/agentDaemon.ts` |
 | Rig execution, work control, and memory | `apps/agent-daemon/src/agent/`, `apps/agent-daemon/src/user_memory.rs`, `apps/agent-daemon/src/recall.rs` | [Agent Daemon guide](../apps/agent-daemon/README.md) and Conversation scenarios in `apps/agent-daemon/tests/` |
 | Desktop UI and native shell | `apps/omarchy-bot/src/`, `apps/omarchy-bot/src-tauri/` | [Frontend instructions](../apps/omarchy-bot/AGENTS.md), native tests, and [shell integration tests](../tests/integration/native-shell.test.ts) |
 | Platform packaging and updates | `.github/workflows/app-release.yml`, `scripts/linux-app/`, `scripts/windows-app/`, `scripts/build-macos-app.sh` | Platform WebView release checks and [release manifest tests](../tests/integration/app-release.test.ts) |

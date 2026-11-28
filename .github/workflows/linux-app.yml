@@ -4,7 +4,6 @@ on:
     paths:
       - "apps/omarchy-bot/**"
       - "apps/agent-daemon/**"
-      - "apps/daemon/**"
       - "packages/**"
       - "scripts/linux-app/**"
       - "scripts/build-linux-app.sh"
@@ -12,6 +11,7 @@ on:
       - "scripts/smoke-linux-app.sh"
       - "scripts/agent-release-smoke.ts"
       - "scripts/clear-legacy-agent-data.ts"
+      - "scripts/legacy-agent-paths.ts"
       - "bun.lock"
       - ".github/workflows/linux-app.yml"
   workflow_dispatch:

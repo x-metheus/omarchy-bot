@@ -51,7 +51,6 @@ dmgs=("$bundle"/dmg/*.dmg)
 artifact="$root/.lane/dist/omarchy-bot_${version}_${architecture}.dmg"
 daemon="$app/Contents/MacOS/omarchy-agent-daemon"
 "$daemon" --verify-recall-model "$app/Contents/Resources/recall-model"
-[[ ! -e "$app/Contents/MacOS/omarchy-bot-sidecar" ]]
 OMARCHY_BOT_SMOKE_AGENT_ARCHIVE="$root/.lane/dist/omarchy-agent-daemon_${version}_${triple}.tar.gz" \
   OMARCHY_BOT_SMOKE_EVIDENCE="$root/.lane/macos-app/evidence" bun scripts/agent-release-smoke.ts
 if [[ $mode == --signed ]]; then

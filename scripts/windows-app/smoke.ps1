@@ -23,7 +23,6 @@ try {
   if (-not (Test-Path $env:OMARCHY_BOT_SMOKE_APP)) { throw 'Installed app executable missing.' }
   $daemon = Join-Path $installDir 'omarchy-agent-daemon.exe'
   if (-not (Test-Path $daemon)) { throw 'Agent Daemon missing from NSIS installation.' }
-  if (Test-Path "$installDir/omarchy-bot-sidecar.exe") { throw 'Legacy Sidecar unexpectedly shipped.' }
   & $daemon --verify-recall-model "$installDir/recall-model"
   if ($LASTEXITCODE) { throw 'Bundled Recall validation failed.' }
   $scheme = 'Registry::HKEY_CURRENT_USER\Software\Classes\omarchy-bot'
