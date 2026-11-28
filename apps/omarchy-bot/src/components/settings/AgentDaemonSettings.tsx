@@ -3,16 +3,13 @@ import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
 import { Divider } from "@astryxdesign/core/Divider";
-import { FormLayout } from "@astryxdesign/core/FormLayout";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Layout, LayoutContent, LayoutHeader } from "@astryxdesign/core/Layout";
-import { Selector } from "@astryxdesign/core/Selector";
-import { TextInput } from "@astryxdesign/core/TextInput";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { agentDaemon, DaemonError, type AgentSettings, type Provider } from "../../lib/agentDaemon.ts";
-import { CustomProviders } from "./CustomProviders.tsx";
+import { useQuery } from "@tanstack/react-query";
+import { agentDaemon } from "../../lib/agentDaemon.ts";
+import { ProviderSettings } from "./ProviderSettings.tsx";
 
 export interface LaunchPreference {
   enabled: boolean;
@@ -41,9 +38,8 @@ export function AgentDaemonSettings({ baseUrl, launch }: { baseUrl: string; laun
           <VStack as="section" gap={3}>
             <Heading level={2}>Providers</Heading>
             <VStack gap={1}>
-              <Text color="secondary" wordBreak="break-word">Connected daemon: {baseUrl}</Text>
               {active && <>
-                <Text color="secondary">Current provider: {providerLabels[active.provider]}</Text>
+                <Text color="secondary" wordBreak="break-word">Current provider: {active.name ?? providerLabels[active.provider]}</Text>
                 <Text color="secondary" wordBreak="break-word">Current model: {active.model}</Text>
               </>}
               {settings.data && !active && <Text color="secondary">No model configured.</Text>}
@@ -53,12 +49,7 @@ export function AgentDaemonSettings({ baseUrl, launch }: { baseUrl: string; laun
               <Banner status="error" title="Could not read daemon Settings." />
               <Button label="Try again" clickAction={async () => { await settings.refetch(); }} />
             </>}
-            {settings.data && <>
-              <CustomProviders baseUrl={baseUrl} writable={settings.data.writable} />
-              <Divider />
-              <Heading level={3}>Built-in providers</Heading>
-              <ModelForm initial={settings.data} baseUrl={baseUrl} />
-            </>}
+            {settings.data && <ProviderSettings baseUrl={baseUrl} settings={settings.data} />}
           </VStack>
         </VStack>
       </LayoutContent>
@@ -66,58 +57,4 @@ export function AgentDaemonSettings({ baseUrl, launch }: { baseUrl: string; laun
   );
 }
 
-const providers = [{ label: "OpenAI", value: "openai" }, { label: "Anthropic", value: "anthropic" }];
 const providerLabels = { openai: "OpenAI", anthropic: "Anthropic", custom: "Custom OpenAI-compatible" };
-
-function ModelForm({ initial, baseUrl }: { initial: AgentSettings; baseUrl: string }) {
-  const queryClient = useQueryClient();
-  const active = initial.active?.provider === "custom" ? null : initial.active;
-  const [provider, setProvider] = useState<Provider>(active?.provider === "anthropic" ? "anthropic" : "openai");
-  const [model, setModel] = useState(active?.model ?? "");
-  const [apiKey, setApiKey] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<{ status: "success" | "error"; text: string }>();
-  const keyStored = initial.storedCredentials[provider];
-
-  async function save() {
-    if (saving || !model.trim() || (!keyStored && !apiKey)) return;
-    setSaving(true);
-    setFeedback(undefined);
-    try {
-      const settings = await agentDaemon.saveSettings({ provider, model: model.trim(), ...(apiKey ? { apiKey } : {}) });
-      queryClient.setQueryData(["agent-settings", baseUrl], settings);
-      void queryClient.invalidateQueries({ queryKey: ["provider-configurations", baseUrl] });
-      setApiKey("");
-      setFeedback({ status: "success", text: "Daemon Settings saved." });
-    } catch (error) {
-      setFeedback({ status: "error", text: error instanceof DaemonError ? error.message : "Could not confirm the Settings update." });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <form onSubmit={event => { event.preventDefault(); void save(); }}>
-      <VStack gap={3}>
-        {!initial.writable && <Banner status="warning" title="The daemon operator must enable writable Settings." />}
-        {feedback && <Banner status={feedback.status} title={feedback.text} />}
-        <FormLayout>
-          <Selector label="Provider" options={providers} value={provider} isDisabled={!initial.writable || saving}
-            onChange={value => {
-              if (value !== "openai" && value !== "anthropic") return;
-              setProvider(value);
-              setModel(initial.active?.provider === value ? initial.active.model : "");
-              setApiKey("");
-              setFeedback(undefined);
-            }} />
-          <TextInput label="Model ID" value={model} onChange={setModel} isRequired isDisabled={!initial.writable || saving} />
-          <TextInput label={keyStored ? "Replacement API key" : "API key"} type="password" autoComplete="new-password"
-            description={keyStored ? "Leave blank to use the stored key." : "The Agent Daemon stores this key."}
-            value={apiKey} onChange={setApiKey} isRequired={!keyStored} isDisabled={!initial.writable || saving} />
-        </FormLayout>
-        <Button label="Save daemon Settings" variant="primary" type="submit" isLoading={saving}
-          isDisabled={!initial.writable || !model.trim() || (!keyStored && !apiKey)} />
-      </VStack>
-    </form>
-  );
-}

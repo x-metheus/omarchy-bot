@@ -15,7 +15,7 @@ use std::env;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rig_harness::AppExit;
 use rig_harness::prelude::Wake;
 use tokio::net::TcpListener;
@@ -29,31 +29,35 @@ fn main() -> AppExit {
     tracing::info!(pid = std::process::id(), "Agent Daemon startup");
     match run() {
         Ok(exit) => exit,
-        Err(error_code) => {
-            tracing::error!(error_code, "Agent Daemon startup failed");
+        Err(error) => {
+            let error_code = error
+                .downcast_ref::<&str>()
+                .copied()
+                .unwrap_or("startup_failed");
+            logging::failure(error_code, "Agent Daemon startup failed", &error);
             AppExit::error()
         }
     }
 }
 
-fn run() -> Result<AppExit, &'static str> {
+fn run() -> Result<AppExit> {
     let mut args = env::args_os().skip(1);
     if let Some(command) = args.next() {
         let download = match command.to_str() {
             Some("--prepare-recall-model") => true,
             Some("--verify-recall-model") => false,
-            _ => return Err("unknown_argument"),
+            _ => return Err(anyhow::Error::msg("unknown_argument")),
         };
-        let directory = args.next().ok_or("missing_recall_model_directory")?;
+        let directory = args.next().context("missing_recall_model_directory")?;
         if args.next().is_some() {
-            return Err("unexpected_recall_argument");
+            return Err(anyhow::Error::msg("unexpected_recall_argument"));
         }
-        let runtime = Runtime::new().map_err(|_| "recall_runtime_failed")?;
+        let runtime = Runtime::new().context("recall_runtime_failed")?;
         runtime
             .block_on(recall::prepare_model(PathBuf::from(directory), download))
             .map_err(|reason| {
                 tracing::error!(?reason, "Recall model preparation failed");
-                "recall_model_preparation_failed"
+                anyhow::Error::msg("recall_model_preparation_failed")
             })?;
         println!("Verified Recall model and CPU inference");
         return Ok(AppExit::Success);
@@ -62,20 +66,20 @@ fn run() -> Result<AppExit, &'static str> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("agent-daemon.sqlite3"));
     let port = env_or("OMARCHY_AGENT_PORT", "8765")
-        .map_err(|_| "invalid_http_port")?
+        .context("invalid_http_port")?
         .parse()
-        .map_err(|_| "invalid_http_port")?;
-    let settings_token = settings::load_token().map_err(|_| "settings_token_load_failed")?;
-    let workspace = host_tools::WorkspaceRoot::from_env().map_err(|_| "workspace_load_failed")?;
+        .context("invalid_http_port")?;
+    let settings_token = settings::load_token().context("settings_token_load_failed")?;
+    let workspace = host_tools::WorkspaceRoot::from_env().context("workspace_load_failed")?;
     if workspace.is_some() && settings_token.is_none() {
-        return Err("workspace_requires_settings_token");
+        return Err(anyhow::Error::msg("workspace_requires_settings_token"));
     }
-    let store = Store::open(&path).map_err(|_| "database_open_failed")?;
+    let store = Store::open(&path).context("database_open_failed")?;
 
-    let runtime = Runtime::new().map_err(|_| "http_runtime_failed")?;
+    let runtime = Runtime::new().context("http_runtime_failed")?;
     let model = recall_assets::location(&path);
     let recall = recall::Recall::start(runtime.handle(), model, store.clone());
-    let scratch = tempfile::tempdir().map_err(|_| "scratch_directory_failed")?;
+    let scratch = tempfile::tempdir().context("scratch_directory_failed")?;
     let (turns, pending) = mpsc::unbounded_channel();
     let (conversations, commands) = mpsc::unbounded_channel();
     let mut app = agent::headless_app(
@@ -111,8 +115,8 @@ fn run() -> Result<AppExit, &'static str> {
             Ipv4Addr::LOCALHOST,
             port,
         )))
-        .map_err(|_| "http_bind_failed")?;
-    let address = listener.local_addr().map_err(|_| "http_address_failed")?;
+        .context("http_bind_failed")?;
+    let address = listener.local_addr().context("http_address_failed")?;
     tracing::info!(port = address.port(), "Agent Daemon ready");
     let http = runtime.spawn(async move {
         if axum::serve(listener, router).await.is_err() {

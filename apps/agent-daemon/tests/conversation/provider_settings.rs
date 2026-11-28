@@ -1,8 +1,11 @@
+use std::convert::Infallible;
+
 use super::{
     BOOTSTRAP_KEY, Daemon, MODEL, OPENAI_KEY, ObserverReplies, Provider, ProviderCall,
     REJECTED_API_KEY, REPLACEMENT_KEY, ReplyStream, SETTINGS_TOKEN, completion, http_client,
     provision_settings, put_settings, settings, settings_command, settings_json,
 };
+use axum::body::{Body, Bytes};
 use axum::extract::{OriginalUri, State};
 use axum::http::header::{AUTHORIZATION, LOCATION};
 use axum::http::{HeaderMap, StatusCode};
@@ -280,13 +283,13 @@ async fn saves_and_switches_custom_providers_across_restart_and_turns() {
         first_saved["configurations"],
         json!([{
             "id": first_id, "name": "First", "baseUrl": first_base,
-            "authentication": "apiKey", "hasApiKey": true, "model": MODEL
+            "authentication": "apiKey", "hasApiKey": true, "model": MODEL, "revision": 0
         }])
     );
     assert_eq!(
         settings(&client, &daemon).await,
         json!({
-            "active": {"provider": "custom", "model": MODEL, "source": "saved"},
+            "active": {"provider": "custom", "name": "First", "model": MODEL, "source": "saved"},
             "storedCredentials": {"openai": false, "anthropic": false}, "writable": true
         })
     );
@@ -407,6 +410,7 @@ async fn saves_and_switches_custom_providers_across_restart_and_turns() {
     command.env("OPENAI_API_KEY", BOOTSTRAP_KEY);
     let daemon = Daemon::launch(command).await;
     assert_eq!(status(&client, &daemon, device_token).await, activated);
+    assert_eq!(settings(&client, &daemon).await["active"]["name"], "Second");
     let mut resumed = ReplyStream::new(
         daemon
             .send(
@@ -502,6 +506,7 @@ async fn validates_edits_against_the_exact_connection_and_preserves_committed_se
     });
     let saved = settings_json(response.unwrap(), StatusCode::OK).await;
     let id = saved["currentId"].as_str().unwrap();
+    let revision = &saved["configurations"][0]["revision"];
     let edit =
         request(&client, &daemon, Method::PUT, &format!("/{id}")).bearer_auth(SETTINGS_TOKEN);
 
@@ -512,6 +517,7 @@ async fn validates_edits_against_the_exact_connection_and_preserves_committed_se
         let mut invalid = invalid;
         invalid["name"] = json!("Uncommitted");
         invalid["model"] = json!(MODEL);
+        invalid["revision"] = revision.clone();
         let rejected = edit
             .try_clone()
             .unwrap()
@@ -547,6 +553,24 @@ async fn validates_edits_against_the_exact_connection_and_preserves_committed_se
             "provider_authentication_failed"
         );
     }
+    let (response, ()) = tokio::join!(discovery.try_clone().unwrap().send(), async {
+        let chunks = std::iter::once(Bytes::from_static(br#"{"data":[]}"#)).chain(
+            std::iter::repeat_n(Bytes::from_static(&[b' '; 64 * 1024]), 128),
+        );
+        upstream
+            .list("first", Some(OPENAI_KEY))
+            .await
+            .reply
+            .send(
+                Body::from_stream(tokio_stream::iter(chunks.map(Ok::<_, Infallible>)))
+                    .into_response(),
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        settings_json(response.unwrap(), StatusCode::BAD_GATEWAY).await["code"],
+        "provider_model_list_too_large"
+    );
     let (response, ()) = tokio::join!(discovery.send(), async {
         upstream
             .list("first", Some(OPENAI_KEY))
@@ -568,7 +592,7 @@ async fn validates_edits_against_the_exact_connection_and_preserves_committed_se
     );
     upstream.assert_no_discovery();
 
-    let mut lost = json!({"name": "Stale", "baseUrl": base, "authentication": "apiKey", "model": "stale-model"});
+    let mut lost = json!({"name": "Stale", "baseUrl": base, "authentication": "apiKey", "model": "stale-model", "revision": revision});
     let rejected = edit.try_clone().unwrap().json(&lost);
     let (response, ()) = tokio::join!(rejected.send(), async {
         upstream
@@ -590,8 +614,10 @@ async fn validates_edits_against_the_exact_connection_and_preserves_committed_se
     );
     let held_call = upstream.turn("first", Some(OPENAI_KEY), MODEL).await;
 
-    let stale_request = edit.try_clone().unwrap().json(&lost);
-    let stale = tokio::spawn(stale_request.send());
+    let stale_request = request(&client, &daemon, Method::PUT, &format!("/{id}"))
+        .bearer_auth(device_token)
+        .json(&lost);
+    let stale = tokio::spawn(stale_request.try_clone().unwrap().send());
     let pending = upstream.list("first", Some(OPENAI_KEY)).await;
     lost["name"] = json!("Updated");
     lost["model"] = json!("updated-model");
@@ -606,9 +632,21 @@ async fn validates_edits_against_the_exact_connection_and_preserves_committed_se
     assert_eq!(updated["currentId"], id);
     assert_eq!(updated["configurations"][0]["id"], id);
     assert_eq!(updated["configurations"][0]["name"], "Updated");
+    assert_ne!(updated["configurations"][0]["revision"], *revision);
+    assert_eq!(
+        settings(&client, &daemon).await["active"]["name"],
+        "Updated"
+    );
     pending.reply(&["stale-model"]);
     let stale = settings_json(stale.await.unwrap().unwrap(), StatusCode::CONFLICT).await;
     assert_eq!(stale["code"], "provider_configuration_changed");
+
+    let stale = stale_request.send().await.unwrap();
+    assert_eq!(
+        settings_json(stale, StatusCode::CONFLICT).await["code"],
+        "provider_configuration_changed"
+    );
+    upstream.assert_no_discovery();
     assert_eq!(status(&client, &daemon, SETTINGS_TOKEN).await, updated);
 
     let bot = daemon.create(&client).await;
@@ -643,10 +681,12 @@ async fn validates_edits_against_the_exact_connection_and_preserves_committed_se
          WHEN NEW.name = 'Rollback' BEGIN SELECT RAISE(ABORT, 'fixture storage failure'); END;",
         )
         .unwrap();
-    let daemon = Daemon::launch(settings_command(&db, &upstream.provider)).await;
+    let mut command = settings_command(&db, &upstream.provider);
+    command.env("OMARCHY_AGENT_LOG_DIR", &log_directory);
+    let daemon = Daemon::launch(command).await;
     assert_eq!(status(&client, &daemon, SETTINGS_TOKEN).await, updated);
     let rejected = request(&client, &daemon, Method::PUT, &format!("/{id}")).bearer_auth(SETTINGS_TOKEN)
-        .json(&json!({"name": "Rollback", "baseUrl": base, "authentication": "apiKey", "model": "rollback-model"}));
+        .json(&json!({"name": "Rollback", "baseUrl": base, "authentication": "apiKey", "model": "rollback-model", "revision": updated["configurations"][0]["revision"]}));
     let (response, ()) = tokio::join!(rejected.send(), async {
         upstream
             .list("first", Some(REPLACEMENT_KEY))
@@ -672,6 +712,12 @@ async fn validates_edits_against_the_exact_connection_and_preserves_committed_se
     )
     .await;
     daemon.stop().await;
+    let logs = std::fs::read_to_string(log_directory.join("agent-daemon.log")).unwrap();
+    assert!(logs.lines().any(
+        |line| line.contains("settings_storage_failed") && line.contains("ConstraintViolation")
+    ));
+    super::assert_secret_free(logs.as_bytes());
+    assert!(!logs.contains("fixture storage failure"));
 }
 
 #[tokio::test]
@@ -729,8 +775,23 @@ async fn custom_provider_keys_cannot_move_to_a_different_id_or_base_url() {
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         super::assert_secret_free(&output.stderr);
-        assert!(String::from_utf8_lossy(&output.stderr).contains("database_open_failed"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("database_open_failed"));
+        assert!(stderr.contains("credential_decrypt_failed"));
     }
+    let output = timeout(
+        super::DEADLINE,
+        settings_command(&db, &upstream.provider)
+            .env_remove("OMARCHY_AGENT_MASTER_KEY_FILE")
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("master_key_missing"));
+    super::assert_secret_free(&output.stderr);
     upstream.assert_no_discovery();
 }
 

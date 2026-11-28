@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.omarchy.bot",
   "build": {
-    "beforeDevCommand": "bun run dev --host 127.0.0.1",
+    "beforeDevCommand": "cargo build --locked -p omarchy-agent-daemon && bun run dev --host 127.0.0.1",
     "devUrl": "http://127.0.0.1:7322",
     "beforeBuildCommand": "bun run build:frontend",
     "frontendDist": "../dist"

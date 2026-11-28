@@ -91,7 +91,7 @@ async fn read_settings(State(daemon): State<Daemon>) -> Result<Json<SettingsStat
         .settings()
         .await
         .map(Json)
-        .map_err(|_| SETTINGS_STORAGE_FAILED)
+        .map_err(|error| settings_storage_error(&error))
 }
 
 async fn write_settings(
@@ -116,7 +116,7 @@ async fn write_settings(
     match result
         .await
         .map_err(|_| SETTINGS_STORAGE_FAILED)?
-        .map_err(|_| SETTINGS_STORAGE_FAILED)?
+        .map_err(|error| settings_storage_error(&error))?
     {
         Update::Saved(status) => Ok(Json(status)),
         Update::InvalidModel => Err(ApiError(
@@ -691,6 +691,15 @@ const SETTINGS_STORAGE_FAILED: ApiError = ApiError(
         "daemon Settings could not be stored or read",
     ),
 );
+
+fn settings_storage_error(error: &anyhow::Error) -> ApiError {
+    crate::logging::failure(
+        "settings_storage_failed",
+        "Settings storage operation failed",
+        error,
+    );
+    SETTINGS_STORAGE_FAILED
+}
 
 fn store_error(_: anyhow::Error) -> ApiError {
     tracing::error!(code = "storage_failed", "Conversation storage operation failed");

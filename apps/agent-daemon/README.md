@@ -88,12 +88,12 @@ Set `baseUrl` to an HTTP(S) API root such as `https://example.com/v1` that the d
 | `GET /settings/providers` | Returns `{configurations, currentId}`. `currentId` is `null` when a built-in or no model is active. |
 | `POST /settings/providers/models` | Accepts `baseUrl`, `authentication`, optional `apiKey`, and optional `id` to reuse a saved key. Returns `{models}` with the discovered Model IDs. |
 | `POST /settings/providers` | Creates a configuration from `name`, `baseUrl`, `authentication`, `model`, and optional `apiKey`. Returns the collection status. |
-| `PUT /settings/providers/{id}` | Edits the configuration using the same fields and returns the collection status. |
+| `PUT /settings/providers/{id}` | Edits the configuration using the same fields plus the `revision` from the loaded configuration. Returns the collection status. |
 | `POST /settings/providers/{id}/activate` | Sets the configuration as current and returns the collection status. |
 
-Each configuration in the collection has `id`, `name`, `baseUrl`, `authentication`, `model`, and `hasApiKey`. The daemon stores each key encrypted with its configuration ID and normalized Base URL as associated data. An edit or discovery may omit `apiKey` to reuse the key for the same configuration and Base URL. A new Base URL requires a replacement key or `none` authentication. With `none`, omit `apiKey`.
+Each configuration in the collection has `id`, `name`, `baseUrl`, `authentication`, `model`, `hasApiKey`, and `revision`. `GET /settings` includes `active.name` when a custom configuration is current. The daemon stores each key encrypted with its configuration ID and normalized Base URL as associated data. An edit or discovery may omit `apiKey` to reuse the key for the same configuration and Base URL. A new Base URL requires a replacement key or `none` authentication. With `none`, omit `apiKey`.
 
-Each save verifies the selected Model ID with a fresh model list from the proposed connection. If another write changes the configuration during discovery, the edit returns `409 provider_configuration_changed`. Upstream authentication failures return `502 provider_authentication_failed`. Failed saves preserve the previous configuration and selection.
+Each save verifies the selected Model ID with a fresh model list from the proposed connection. An edit returns `409 provider_configuration_changed` if its revision is stale or another write changes the configuration during discovery. Reload the configuration before retrying. Model discovery uses a 10 second timeout and returns `502 provider_model_list_too_large` if a successful upstream response body exceeds 8 MiB. Upstream authentication failures return `502 provider_authentication_failed`. Failed saves preserve the previous configuration and selection.
 
 The first save activates its configuration when no model is current. Other creates leave the selection as it was. Activation and edits to the current configuration apply to new Turns. An admitted Turn retains its connection. `PUT /settings` selects a built-in model and clears `currentId`. The daemon restores its configurations and current selection from SQLite on restart.
 

@@ -358,6 +358,12 @@ fn main() {
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, arguments, _| {
+        if arguments.len() == 1 {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }
         for link in arguments.iter().skip(1) { receive_link(app, link); }
     }));
     #[cfg(desktop)]

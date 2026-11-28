@@ -97,6 +97,7 @@ async fn managed_startup_failure_reaches_its_file_or_stderr_when_file_is_unavail
     assert!(records.contains("Agent Daemon startup"));
     assert!(records.contains("Agent Daemon startup failed"));
     assert!(records.contains("database_open_failed"));
+    assert!(records.contains("CannotOpen"));
     assert!(!records.contains(SECRET));
 
     let fallback = tokio::time::timeout(
@@ -122,4 +123,30 @@ async fn managed_startup_failure_reaches_its_file_or_stderr_when_file_is_unavail
         );
         assert!(!blocked.join("agent-daemon.log").exists());
     }
+}
+
+#[tokio::test]
+async fn bind_failure_logs_the_io_kind() {
+    let profile = tempfile::tempdir().unwrap();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let output = tokio::time::timeout(
+        DEADLINE,
+        daemon(profile.path(), &profile.path().join("daemon.sqlite3"))
+            .env(
+                "OMARCHY_AGENT_PORT",
+                socket.local_addr().unwrap().port().to_string(),
+            )
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.contains("http_bind_failed") && line.contains("AddrInUse"))
+    );
 }

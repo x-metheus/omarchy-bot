@@ -1,6 +1,6 @@
 pub(crate) mod providers;
 
-use std::{env, fs, str};
+use std::{env, fmt, fs, str};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use rig_core::catalog::{Catalog, ModelSpec};
@@ -42,6 +42,8 @@ impl Provider {
 #[derive(Clone, Serialize)]
 struct Selection {
     provider: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     model: String,
     source: Source,
 }
@@ -134,6 +136,7 @@ impl Endpoints {
             }),
             selection: Selection {
                 provider: provider.name(),
+                name: None,
                 model: model_id,
                 source,
             },
@@ -183,10 +186,9 @@ impl Settings {
         let master_key = env::var_os("OMARCHY_AGENT_MASTER_KEY_FILE")
             .map(|path| {
                 let bytes =
-                    Zeroizing::new(fs::read(path).context("read OMARCHY_AGENT_MASTER_KEY_FILE")?);
-                let key = aead::UnboundKey::new(&aead::AES_256_GCM, &bytes).map_err(|_| {
-                    anyhow!("OMARCHY_AGENT_MASTER_KEY_FILE must contain exactly 32 raw bytes")
-                })?;
+                    Zeroizing::new(fs::read(path).context(CredentialFailure::MasterKeyReadFailed)?);
+                let key = aead::UnboundKey::new(&aead::AES_256_GCM, &bytes)
+                    .map_err(|_| CredentialFailure::MasterKeyInvalid)?;
                 Ok::<_, anyhow::Error>(aead::LessSafeKey::new(key))
             })
             .transpose()?;
@@ -207,7 +209,7 @@ impl Settings {
             };
             let master_key = master_key
                 .as_ref()
-                .context("saved Settings require OMARCHY_AGENT_MASTER_KEY_FILE")?;
+                .context(CredentialFailure::MasterKeyMissing)?;
             let key = read_key(db, master_key, provider)?
                 .context("saved Settings have no provider credential")?;
             Some(endpoints.connect(provider, model, Source::Saved, key))
@@ -363,6 +365,29 @@ pub(crate) fn load_token() -> Result<Option<Digest>> {
         .transpose()
 }
 
+#[derive(Debug)]
+pub(crate) enum CredentialFailure {
+    MasterKeyMissing,
+    MasterKeyReadFailed,
+    MasterKeyInvalid,
+    DecryptFailed,
+    EncryptFailed,
+}
+
+impl fmt::Display for CredentialFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::MasterKeyMissing => "master_key_missing",
+            Self::MasterKeyReadFailed => "master_key_read_failed",
+            Self::MasterKeyInvalid => "master_key_invalid",
+            Self::DecryptFailed => "credential_decrypt_failed",
+            Self::EncryptFailed => "credential_encrypt_failed",
+        })
+    }
+}
+
+impl std::error::Error for CredentialFailure {}
+
 fn seal_key(
     master_key: &aead::LessSafeKey,
     associated_data: &str,
@@ -371,7 +396,7 @@ fn seal_key(
     let mut nonce = [0; aead::NONCE_LEN];
     SystemRandom::new()
         .fill(&mut nonce)
-        .map_err(|_| anyhow!("could not generate a credential nonce"))?;
+        .map_err(|_| CredentialFailure::EncryptFailed)?;
     let mut sealed =
         Vec::with_capacity(nonce.len() + key.expose().len() + aead::AES_256_GCM.tag_len());
     sealed.extend_from_slice(&nonce);
@@ -382,7 +407,7 @@ fn seal_key(
             aead::Aad::from(associated_data),
             &mut sealed[aead::NONCE_LEN..],
         )
-        .map_err(|_| anyhow!("could not encrypt the provider credential"))?;
+        .map_err(|_| CredentialFailure::EncryptFailed)?;
     sealed.extend_from_slice(tag.as_ref());
     Ok(sealed)
 }
@@ -412,18 +437,13 @@ fn open_key(
     let mut sealed = Zeroizing::new(sealed);
     let (nonce, ciphertext) = sealed
         .split_at_mut_checked(aead::NONCE_LEN)
-        .context("stored provider credential is incomplete")?;
+        .context(CredentialFailure::DecryptFailed)?;
     let nonce = aead::Nonce::try_assume_unique_for_key(nonce)
-        .map_err(|_| anyhow!("stored provider credential has an invalid nonce"))?;
+        .map_err(|_| CredentialFailure::DecryptFailed)?;
     let plaintext = master_key
         .open_in_place(nonce, aead::Aad::from(associated_data), ciphertext)
-        .map_err(|_| {
-            anyhow!("cannot decrypt stored provider credential with OMARCHY_AGENT_MASTER_KEY_FILE")
-        })?;
-    let key = str::from_utf8(plaintext).context("stored provider credential is invalid")?;
-    ensure!(
-        valid_header_token(key),
-        "stored provider credential is invalid"
-    );
+        .map_err(|_| CredentialFailure::DecryptFailed)?;
+    let key = str::from_utf8(plaintext).context(CredentialFailure::DecryptFailed)?;
+    ensure!(valid_header_token(key), CredentialFailure::DecryptFailed);
     Ok(Secret::from(key))
 }

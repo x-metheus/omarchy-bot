@@ -10,7 +10,7 @@ export interface AgentWork { messageId: number; status: WorkStatus; reason?: str
 export interface ToolProgress { id: string; name: string; status: "running" | "completed" | "failed" | "cancelled" | "interrupted" }
 export type Provider = "openai" | "anthropic";
 export interface AgentSettings {
-  active: { provider: Provider | "custom"; model: string; source: "saved" | "environment" } | null;
+  active: { provider: Provider | "custom"; name?: string; model: string; source: "saved" | "environment" } | null;
   storedCredentials: Record<Provider, boolean>;
   writable: boolean;
 }
@@ -23,6 +23,7 @@ export interface ProviderConfiguration {
   authentication: ProviderAuthentication;
   model: string;
   hasApiKey: boolean;
+  revision: number;
 }
 export interface ProviderConfigurations {
   configurations: ProviderConfiguration[];
@@ -101,9 +102,10 @@ export const agentDaemon = {
   providerConfigurations: (signal: AbortSignal) => json<ProviderConfigurations>(providersPath, { signal }),
   providerModels: (connection: ProviderConnection & { id?: string }, signal: AbortSignal) =>
     json<{ models: string[] }>(`${providersPath}/models`, { method: "POST", body: JSON.stringify(connection), signal }),
-  saveProviderConfiguration: (configuration: ProviderConfigurationUpdate, id?: string) =>
-    json<ProviderConfigurations>(id ? providerPath(id) : providersPath, {
-      method: id ? "PUT" : "POST", body: JSON.stringify(configuration),
+  saveProviderConfiguration: (configuration: ProviderConfigurationUpdate, edit?: Pick<ProviderConfiguration, "id" | "revision">) =>
+    json<ProviderConfigurations>(edit ? providerPath(edit.id) : providersPath, {
+      method: edit ? "PUT" : "POST",
+      body: JSON.stringify(edit ? { ...configuration, revision: edit.revision } : configuration),
     }),
   activateProviderConfiguration: (id: string) =>
     json<ProviderConfigurations>(`${providerPath(id)}/activate`, { method: "POST" }),

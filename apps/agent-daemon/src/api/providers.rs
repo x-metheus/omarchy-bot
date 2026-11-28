@@ -11,7 +11,9 @@ use uuid::Uuid;
 
 use crate::settings::providers::{DiscoveryInput, Error, Mutation, SaveInput, Status, discover};
 
-use super::{ApiError, ConversationCommand, Daemon, Problem, SETTINGS_STORAGE_FAILED};
+use super::{
+    ApiError, ConversationCommand, Daemon, Problem, SETTINGS_STORAGE_FAILED, settings_storage_error,
+};
 
 pub(super) fn routes() -> Router<Daemon> {
     Router::new()
@@ -99,7 +101,7 @@ fn settings_input<T>(input: Result<Json<T>, JsonRejection>) -> Result<T, ApiErro
 impl From<Error> for ApiError {
     fn from(error: Error) -> Self {
         let (status, code, message) = match error {
-            Error::Storage => return SETTINGS_STORAGE_FAILED,
+            Error::Storage(error) => return settings_storage_error(&error),
             Error::ReadOnly => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "settings_read_only",
@@ -113,7 +115,12 @@ impl From<Error> for ApiError {
             Error::Changed => (
                 StatusCode::CONFLICT,
                 "provider_configuration_changed",
-                "the Provider Configuration changed during discovery; reload Settings and try again",
+                "the Provider Configuration has changed; reload it and try again",
+            ),
+            Error::InvalidRevision => (
+                StatusCode::BAD_REQUEST,
+                "invalid_revision",
+                "include the saved configuration revision when editing and omit it when creating",
             ),
             Error::InvalidName => (
                 StatusCode::BAD_REQUEST,
@@ -154,6 +161,11 @@ impl From<Error> for ApiError {
                 StatusCode::BAD_GATEWAY,
                 "provider_discovery_failed",
                 "the custom provider could not list models",
+            ),
+            Error::ModelListTooLarge => (
+                StatusCode::BAD_GATEWAY,
+                "provider_model_list_too_large",
+                "the custom provider returned a model list larger than 8 MiB",
             ),
             Error::AuthenticationFailed => (
                 StatusCode::BAD_GATEWAY,

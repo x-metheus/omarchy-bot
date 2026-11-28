@@ -2,13 +2,19 @@
 
 mod responses;
 
+use std::fmt;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use futures::StreamExt;
 use reqwest::StatusCode;
 use rig_core::completion::ReplayTarget;
 use rig_core::error::ProviderError;
+use rig_core::http_client::{
+    self, Bytes, HttpClientExt, LazyBody, Method, MultipartForm, Request, Response,
+    StreamingResponse,
+};
 use rig_core::model::ModelList;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig, wire::Auth};
 use rig_core::serve::adapters::ModelAdapter;
@@ -22,19 +28,77 @@ use uuid::Uuid;
 use self::responses::ResponsesHandler;
 
 use super::{
-    ConfiguredModel, Provider, Selection, Settings, Source, base_url, deserialize_key,
-    model_connection, open_key, seal_key, valid_header_token, valid_model,
+    ConfiguredModel, CredentialFailure, Provider, Selection, Settings, Source, base_url,
+    deserialize_key, model_connection, open_key, seal_key, valid_header_token, valid_model,
 };
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
-static HTTP: LazyLock<Result<ReqwestClient, reqwest::Error>> = LazyLock::new(|| {
+// Match Rig's limit for ChatGPT account model discovery.
+const MODEL_LIST_LIMIT: usize = 8 * 1024 * 1024;
+
+static HTTP: LazyLock<Result<ProviderHttp, reqwest::Error>> = LazyLock::new(|| {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(DISCOVERY_TIMEOUT)
         .build()?;
-    Ok(ReqwestClient::from(client))
+    Ok(ProviderHttp(ReqwestClient::from(client)))
 });
+
+#[derive(Clone)]
+struct ProviderHttp(ReqwestClient);
+
+impl HttpClientExt for ProviderHttp {
+    fn send(
+        &self,
+        request: Request<Bytes>,
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
+        let http = self.0.clone();
+        async move {
+            if request.method() != Method::GET {
+                return http.send(request).await;
+            }
+            let (parts, mut stream) = http.send_streaming(request).await?.into_parts();
+            let body: LazyBody = Box::pin(async move {
+                let mut body = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk?;
+                    if chunk.len() > MODEL_LIST_LIMIT - body.len() {
+                        return Err(http_client::Error::permanent(ModelListTooLarge));
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(Bytes::from(body))
+            });
+            Ok(Response::from_parts(parts, body))
+        }
+    }
+
+    fn send_multipart(
+        &self,
+        request: Request<MultipartForm>,
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
+        self.0.send_multipart(request)
+    }
+
+    async fn send_streaming(
+        &self,
+        request: Request<Bytes>,
+    ) -> http_client::Result<StreamingResponse> {
+        self.0.send_streaming(request).await
+    }
+}
+
+#[derive(Debug)]
+struct ModelListTooLarge;
+
+impl fmt::Display for ModelListTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "model list exceeds the {MODEL_LIST_LIMIT}-byte limit")
+    }
+}
+
+impl std::error::Error for ModelListTooLarge {}
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +126,7 @@ pub(crate) struct SaveInput {
     authentication: Authentication,
     #[serde(default, deserialize_with = "deserialize_key")]
     api_key: Option<Secret>,
+    revision: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -73,6 +138,7 @@ struct Configuration {
     authentication: Authentication,
     model: String,
     has_api_key: bool,
+    revision: i64,
 }
 
 #[derive(Serialize)]
@@ -84,10 +150,11 @@ pub(crate) struct Status {
 
 #[derive(Debug)]
 pub(crate) enum Error {
-    Storage,
+    Storage(anyhow::Error),
     ReadOnly,
     NotFound,
     Changed,
+    InvalidRevision,
     InvalidName,
     InvalidBaseUrl,
     InvalidKey,
@@ -96,25 +163,25 @@ pub(crate) enum Error {
     InvalidModel,
     ModelUnavailable,
     DiscoveryFailed,
+    ModelListTooLarge,
     AuthenticationFailed,
     DiscoveryTimeout,
 }
 
 impl From<anyhow::Error> for Error {
-    fn from(_: anyhow::Error) -> Self {
-        Self::Storage
+    fn from(error: anyhow::Error) -> Self {
+        Self::Storage(error)
     }
 }
 
 impl From<rusqlite::Error> for Error {
-    fn from(_: rusqlite::Error) -> Self {
-        Self::Storage
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
     }
 }
 
 pub(crate) struct PreparedSave {
-    id: Option<Uuid>,
-    revision: Option<i64>,
+    edit: Option<(Uuid, i64)>,
     name: String,
     model: String,
     client: OpenAI,
@@ -141,6 +208,7 @@ impl PreparedSave {
 }
 
 struct Saved {
+    name: String,
     base_url: String,
     model: String,
     sealed_key: Option<Vec<u8>>,
@@ -150,13 +218,14 @@ struct Saved {
 impl Saved {
     fn read(db: &Connection, id: Uuid) -> rusqlite::Result<Option<Self>> {
         db.query_row(
-            "SELECT base_url, model, sealed_key, revision FROM provider_configurations WHERE id = ?1",
+            "SELECT name, base_url, model, sealed_key, revision FROM provider_configurations WHERE id = ?1",
             [id.as_bytes()],
             |row| Ok(Self {
-                base_url: row.get(0)?,
-                model: row.get(1)?,
-                sealed_key: row.get(2)?,
-                revision: row.get(3)?,
+                name: row.get(0)?,
+                base_url: row.get(1)?,
+                model: row.get(2)?,
+                sealed_key: row.get(3)?,
+                revision: row.get(4)?,
             }),
         ).optional()
     }
@@ -169,8 +238,7 @@ impl Saved {
         self.sealed_key
             .take()
             .map(|sealed| {
-                let master_key =
-                    master_key.context("saved Settings require OMARCHY_AGENT_MASTER_KEY_FILE")?;
+                let master_key = master_key.context(CredentialFailure::MasterKeyMissing)?;
                 open_key(master_key, &credential_identity(id, &self.base_url), sealed)
             })
             .transpose()
@@ -184,6 +252,7 @@ impl Saved {
         let key = self.credential(id, master_key)?;
         Ok(responses_connection(
             client(self.base_url, key)?,
+            self.name,
             self.model,
             id,
             self.revision,
@@ -232,7 +301,7 @@ pub(super) fn restore_current(
 
 pub(crate) fn status(db: &Connection) -> rusqlite::Result<Status> {
     let mut query = db.prepare_cached(
-        "SELECT id, name, base_url, model, sealed_key IS NOT NULL
+        "SELECT id, name, base_url, model, sealed_key IS NOT NULL, revision
          FROM provider_configurations ORDER BY name COLLATE NOCASE, id",
     )?;
     let configurations = query
@@ -249,6 +318,7 @@ pub(crate) fn status(db: &Connection) -> rusqlite::Result<Status> {
                     Authentication::None
                 },
                 has_api_key,
+                revision: row.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -264,14 +334,14 @@ impl Settings {
         db: &Connection,
         input: DiscoveryInput,
     ) -> Result<OpenAI, Error> {
-        let (client, _) = self.prepare_client(
+        self.prepare_client(
             db,
             input.id,
             &input.base_url,
             input.authentication,
             input.api_key,
-        )?;
-        Ok(client)
+            None,
+        )
     }
 
     pub(crate) fn prepare_save(
@@ -281,6 +351,11 @@ impl Settings {
         input: SaveInput,
     ) -> Result<PreparedSave, Error> {
         self.master_key.as_ref().ok_or(Error::ReadOnly)?;
+        if id.is_some() != input.revision.is_some()
+            || input.revision.is_some_and(|revision| revision < 0)
+        {
+            return Err(Error::InvalidRevision);
+        }
         let name = input.name.trim();
         if name.is_empty() || name.chars().any(char::is_control) {
             return Err(Error::InvalidName);
@@ -288,11 +363,16 @@ impl Settings {
         if !valid_model(&input.model) {
             return Err(Error::InvalidModel);
         }
-        let (client, revision) =
-            self.prepare_client(db, id, &input.base_url, input.authentication, input.api_key)?;
-        Ok(PreparedSave {
+        let client = self.prepare_client(
+            db,
             id,
-            revision,
+            &input.base_url,
+            input.authentication,
+            input.api_key,
+            input.revision,
+        )?;
+        Ok(PreparedSave {
+            edit: id.zip(input.revision),
             name: name.to_owned(),
             model: input.model,
             client,
@@ -306,12 +386,19 @@ impl Settings {
         url: &str,
         authentication: Authentication,
         key: Option<Secret>,
-    ) -> Result<(OpenAI, Option<i64>), Error> {
+        expected_revision: Option<i64>,
+    ) -> Result<OpenAI, Error> {
         let base_url = base_url("baseUrl", url).map_err(|_| Error::InvalidBaseUrl)?;
         let mut saved = id
             .map(|id| Saved::read(db, id)?.ok_or(Error::NotFound))
             .transpose()?;
-        let revision = saved.as_ref().map(|saved| saved.revision);
+        if let Some(expected) = expected_revision
+            && !saved
+                .as_ref()
+                .is_some_and(|saved| saved.revision == expected)
+        {
+            return Err(Error::Changed);
+        }
         let key = match (authentication, key) {
             (Authentication::None, None) => None,
             (Authentication::None, Some(_)) => return Err(Error::UnexpectedKey),
@@ -334,7 +421,7 @@ impl Settings {
                 )
             }
         };
-        Ok((client(base_url, key)?, revision))
+        Ok(client(base_url, key)?)
     }
 
     pub(crate) fn mutate_provider(
@@ -347,13 +434,12 @@ impl Settings {
         let active = match mutation {
             Mutation::Save(save) => {
                 let ValidatedSave(PreparedSave {
-                    id,
-                    revision,
+                    edit,
                     name,
                     model,
                     client,
                 }) = *save;
-                let id = id.unwrap_or_else(Uuid::new_v4);
+                let id = edit.map_or_else(Uuid::new_v4, |(id, _)| id);
                 let config = client.config();
                 let sealed_key = if config.api_key.is_empty() {
                     None
@@ -364,9 +450,11 @@ impl Settings {
                         &config.api_key,
                     )?)
                 };
-                let revision = if let Some(revision) = revision {
-                    let next_revision = revision.checked_add(1).ok_or(Error::Storage)?;
-                    // The credential used for discovery must still be the one this edit is replacing.
+                let revision = if let Some((_, revision)) = edit {
+                    let next_revision = revision
+                        .checked_add(1)
+                        .context("Provider Configuration revision exhausted")?;
+                    // Discovery ran outside the transaction, so the revision must still match.
                     let changed = transaction.execute(
                         "UPDATE provider_configurations
                          SET name = ?2, base_url = ?3, model = ?4, sealed_key = ?5, revision = ?7
@@ -397,7 +485,7 @@ impl Settings {
                     0
                 };
                 (current_id(&transaction)? == Some(id))
-                    .then(|| responses_connection(client, model, id, revision))
+                    .then(|| responses_connection(client, name, model, id, revision))
             }
             Mutation::Activate(id) => {
                 let saved = Saved::read(&transaction, id)?.ok_or(Error::NotFound)?;
@@ -442,7 +530,7 @@ fn client(base_url: String, key: Option<Secret>) -> anyhow::Result<OpenAI> {
 async fn list_models(client: &OpenAI) -> Result<ModelList, Error> {
     let started = Instant::now();
     let result = tokio::time::timeout(DISCOVERY_TIMEOUT, client.list_models()).await;
-    let duration_ms = started.elapsed().as_millis() as u64;
+    let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     match result {
         Ok(Ok(models)) => {
             tracing::info!(
@@ -452,7 +540,7 @@ async fn list_models(client: &OpenAI) -> Result<ModelList, Error> {
             );
             Ok(models)
         }
-        Ok(Err(error)) => Err(discovery_error(error, duration_ms)),
+        Ok(Err(error)) => Err(discovery_error(&error, duration_ms)),
         Err(_) => {
             tracing::warn!(
                 duration_ms,
@@ -476,7 +564,7 @@ pub(crate) async fn discover(client: &OpenAI) -> Result<Vec<String>, Error> {
     Ok(models)
 }
 
-fn discovery_error(error: ProviderError, duration_ms: u64) -> Error {
+fn discovery_error(error: &ProviderError, duration_ms: u64) -> Error {
     let status = error.provider_response_status();
     let (failure, code) = if matches!(error, ProviderError::InvalidAuthentication(_))
         || matches!(
@@ -487,6 +575,10 @@ fn discovery_error(error: ProviderError, duration_ms: u64) -> Error {
             Error::AuthenticationFailed,
             "provider_authentication_failed",
         )
+    } else if matches!(error, ProviderError::Http(error)
+        if matches!(&**error, http_client::Error::Permanent(cause) if cause.is::<ModelListTooLarge>()))
+    {
+        (Error::ModelListTooLarge, "provider_model_list_too_large")
     } else {
         (Error::DiscoveryFailed, "provider_discovery_failed")
     };
@@ -501,6 +593,7 @@ fn discovery_error(error: ProviderError, duration_ms: u64) -> Error {
 
 fn responses_connection(
     client: OpenAI,
+    name: String,
     model_id: String,
     id: Uuid,
     revision: i64,
@@ -513,6 +606,7 @@ fn responses_connection(
         }),
         selection: Selection {
             provider: "custom",
+            name: Some(name),
             model: model_id,
             source: Source::Saved,
         },
