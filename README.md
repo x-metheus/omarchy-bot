@@ -230,11 +230,10 @@ Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisite
 
 ```bash
 bun install --frozen-lockfile
-bun scripts/build-sidecar.ts
-bun run tauri dev
+bun run tauri dev --config '{"bundle":{"externalBin":[]}}'
 ```
 
-Run `bun run tauri build` to build the desktop application. Both Tauri commands also run from `apps/omarchy-bot`. The [development guide](docs/development.md#desktop-project-layout) covers the scaffold, application layout, and Agent Daemon prerequisite.
+Test day-to-day desktop changes in the Tauri development window. The CLI runs Vite and compiles the Rust debug target as needed. This config override skips staging the legacy Sidecar for Agent Daemon development. Use an already running daemon or point `OMARCHY_BOT_AGENT_DAEMON_BIN` at a daemon executable for managed startup. Run `bun run tauri build` for release artifacts. Both Tauri commands also run from `apps/omarchy-bot`. [Development guide](docs/development.md#desktop-project-layout)
 
 For browser development against the legacy Service, run `OMARCHY_BOT_DEV=1 bun run dev` and open `http://127.0.0.1:7322`. The Vite harness uses the memory shell and connects directly to the Service over HTTP and WebSocket. Issue a pairing code with `omarchy-bot pair` on the Service Host and enter its address and code in Add Service. The harness stores its paired connection in browser localStorage, and the native shell uses the keychain. A 401 clears the connection, stops event delivery, and returns to Add Service with a revoked-device message. The runtime archive excludes the desktop app.
 
