@@ -28,14 +28,6 @@ export default defineConfig({
             attrs: { property: "og:url", content: new URL("/", base).href },
             injectTo: "head" as const,
           },
-          {
-            tag: "meta",
-            attrs: {
-              property: "og:image",
-              content: new URL("/images/workspace.webp", base).href,
-            },
-            injectTo: "head" as const,
-          },
         ];
       },
     },

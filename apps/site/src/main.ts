@@ -124,30 +124,3 @@ if (menuToggle && mobileNav) {
       if (event.matches) closeMenu();
     });
 }
-
-const copyButton = document.querySelector<HTMLButtonElement>("#copy-install");
-const command = document.querySelector<HTMLElement>("#install-command");
-const copyStatus = document.querySelector<HTMLElement>("#copy-status");
-if (copyButton && command && copyStatus) {
-  copyButton.hidden = false;
-  copyButton.addEventListener("click", async () => {
-    copyButton.disabled = true;
-    try {
-      await navigator.clipboard.writeText(command.textContent?.trim() ?? "");
-      copyStatus.textContent =
-        "Copied. Paste into your Omarchy terminal when you're ready.";
-      copyButton.textContent = "Copied";
-    } catch {
-      const range = document.createRange();
-      range.selectNodeContents(command);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      copyStatus.textContent =
-        "Clipboard unavailable. The command is selected; copy it manually.";
-      copyButton.textContent = "Copy command";
-    } finally {
-      copyButton.disabled = false;
-    }
-  });
-}
