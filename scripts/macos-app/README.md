@@ -9,7 +9,7 @@ bash scripts/build-macos-app.sh --unsigned
 
 The desktop application and bundled Agent Daemon require macOS 13.0 or later and build with Rust 1.97.1.
 
-The builder verifies the pinned Recall model and emits the desktop dmg and standalone Agent Daemon archive for the native host architecture. It exercises the unpacked daemon through pairing, provider configuration, Conversation, attachments, host tools, and offline Recall. Output and checksums go to `.lane/dist`. Cargo, Bun, and evidence stay in `.lane/macos-app`. PR builds use ad-hoc signing. The app uses macOS Keychain and system certificate trust.
+The builder verifies the pinned Recall model and emits the desktop dmg and standalone Agent Daemon archive for the native host architecture. It exercises the unpacked daemon through pairing, provider configuration, Conversation, attachments, host tools, and offline Recall. Output and checksums go to `.lane/dist`. Cargo, Bun, and evidence stay in `.lane/macos-app`. Unsigned builds use ad-hoc signing. The app uses macOS Keychain and system certificate trust.
 
 The merged `src-tauri/Info.plist` permits plaintext HTTP for `localhost`, IPv4 loopback `127.0.0.0/8`, and IPv6 `::1` in App Transport Security. Verify those forms on the native checklist, particularly macOS 14+ numeric-IP behavior.
 

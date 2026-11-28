@@ -1,5 +1,7 @@
 # Linux AppImage and WebKit smoke
 
+Dispatch the [Linux package workflow](../../.github/workflows/linux-app.yml) to build and smoke the AppImage in GitHub Actions.
+
 Run from a Linux x86_64 checkout with Docker available:
 
 ```sh
@@ -9,7 +11,7 @@ bash scripts/smoke-linux-app.sh .lane/dist/omarchy-bot_0.1.0_amd64.AppImage
 
 The build container pins Rust 1.97.1 by image digest, Debian dependencies by snapshot, Bun 1.4.5 by checksum, and the locked Tauri tools. It builds the desktop and Agent Daemon with the native toolchain and verifies the pinned Recall files before bundling. `.lane/dist` receives the AppImage, standalone `omarchy-agent-daemon_<version>_x86_64-unknown-linux-gnu.tar.gz`, and checksums. Toolchains stay in the image and caches stay inside `.lane/linux-app`.
 
-The Agent Daemon smoke uses a temporary home, XDG directories, Xvfb, D-Bus, and Secret Service. It opens the AppImage's AppRun with WebKitWebDriver and launches the standalone archive separately. The test exercises clean cutover, autostart, attach, pairing, provider Settings, a Conversation, attachments, and offline Recall. It drives the native GTK file picker and tool approval in the private display. A loopback fixture supplies model responses.
+The Agent Daemon smoke uses a temporary home, XDG directories, Xvfb, D-Bus, and Secret Service. It opens the AppImage's AppRun with WebKitWebDriver and launches the standalone archive separately. The test exercises autostart, attach, pairing, provider Settings, a Conversation, attachments, and offline Recall. It drives the native GTK file picker and tool approval in the private display. A loopback fixture supplies model responses.
 
 `session.sh` requires the image-owned `/etc/omarchy-bot-linux-app` marker and Docker's `/.dockerenv` or Podman's `/run/.containerenv` when started as root. It validates the requested UID and GID, then drops privileges before setting up the private profile. `bun test tests/integration/linux-app-session.test.ts` exercises the entry point in a Bubblewrap user and mount namespace with a read-only host filesystem.
 

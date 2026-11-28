@@ -34,24 +34,6 @@ The daemon prints its bound address. `OMARCHY_AGENT_PORT` defaults to `8765`. Se
 
 The master key file must contain exactly 32 raw bytes. SQLite stores provider keys as AES-256-GCM ciphertext with a fresh OS-random nonce per write and the provider authenticated as associated data. Keep the database and its matching master key in separate protected backups. Restore both to resume saved Settings. A missing or incorrect key for the saved selection prevents startup. If the master key is permanently lost, stop the daemon and back up SQLite before clearing Settings in a transaction. Run `BEGIN IMMEDIATE; DELETE FROM model_settings; DELETE FROM provider_credentials; COMMIT;` against that database, then provision a new master key and re-enter provider credentials. Conversation history remains available. An independently replaced Settings bearer token takes effect on restart.
 
-## Fresh cutover from the Pi Service
-
-Stop the legacy Service before clearing its application state. The Agent Daemon uses a new SQLite database and a separate desktop pairing credential. Back up any old data you want to retain before applying the cutover.
-
-| Platform | Old Service data root | Old Service state root | Old managed Shared Workspace |
-| --- | --- | --- | --- |
-| Linux | `$HOME/.local/share/omarchy-bot` | `$HOME/.local/state/omarchy-bot` | `$HOME/.omarchy-bot/workspace` |
-| macOS | `$HOME/Library/Application Support/omarchy-bot` | `$HOME/Library/Application Support/omarchy-bot/state` | `$HOME/.omarchy-bot/workspace` |
-| Windows | `%APPDATA%\omarchy-bot` | `%APPDATA%\omarchy-bot\state` | `%USERPROFILE%\.omarchy-bot\workspace` |
-
-The Windows Service falls back to `%USERPROFILE%\AppData\Roaming` when `APPDATA` is unset. Pi Durable stores the Service's sessions in `db.sqlite` and its SQLite side files under the data root. The Service used the managed Shared Workspace for Threads without a selected working directory.
-
-Run `bun scripts/clear-legacy-agent-data.ts` from the checkout to print the exact entries. With the Service stopped, add `--apply` to remove those entries. The command rejects custom Service roots and symbolic links or junctions on the named paths. It confines deletion to the user profile. Standalone Pi sessions, user-selected directories outside the managed roots, and the installed binaries stay in place. The command runs when invoked by the operator.
-
-If a recorded working directory or allowed folder lies inside an entry scheduled for removal, the command refuses to apply the cutover. Preserve that directory separately before clearing the legacy installation.
-
-[Historical path resolution](https://github.com/x-metheus/omarchy-bot/blob/b47ac2aaa7745a441ba081453a7282a07a247f8e/apps/daemon/src/modules/workspace/paths.ts) · [Historical Pi Durable storage](https://github.com/x-metheus/omarchy-bot/blob/b47ac2aaa7745a441ba081453a7282a07a247f8e/apps/daemon/src/modules/runtime/runtime.ts) · [Cutover command](../../scripts/clear-legacy-agent-data.ts)
-
 ## Desktop connection
 
 Desktop release packages include `omarchy-agent-daemon` and the verified Recall model. For source builds, place the executable beside the Tauri executable, add it to the desktop process's `PATH`, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to its absolute path. The desktop checks `http://127.0.0.1:8765` when it opens for local use and attaches to an existing daemon. If the port is free and startup is enabled, it starts one using a private application data directory. Disable **Start the local daemon when opening Omarchy Bot** on the connection screen or in Settings. A launched daemon can keep working when the desktop disconnects or closes.

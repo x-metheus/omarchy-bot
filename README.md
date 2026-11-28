@@ -22,8 +22,6 @@ Choose the desktop package for your platform from the [releases](https://github.
 
 On first launch, connect to an Agent Daemon with its address and one-time pairing code. The desktop stores its credential in the OS keychain. Provision a model in desktop Settings after pairing. For a remote connection, use a private HTTPS endpoint such as [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve).
 
-The Rig release starts with fresh application data. The [cutover guide](apps/agent-daemon/README.md#fresh-cutover-from-the-pi-service) explains how to preview and clear the old app-owned files.
-
 ## Product model
 
 Each Bot has one Conversation, a stable identity, and ongoing duties you can set in chat. The Agent can delegate work, accept corrections while it runs, and return results to the same Conversation. The daemon retains Message History and can use shared UserMemory, Observational Memory, and local Recall.
@@ -86,7 +84,7 @@ Vite previews the public pages only; OAuth and catalog functions run on Vercel.
 
 ## Releases
 
-The [release workflow](.github/workflows/app-release.yml) builds desktop installers, signed updater artifacts, and standalone daemon archives. See the [Linux](scripts/linux-app/README.md), [macOS](scripts/macos-app/README.md), and [Windows](scripts/windows-app/README.md) guides for their native packaging and verification commands.
+The tag-triggered [release workflow](.github/workflows/app-release.yml) builds desktop installers, signed updater artifacts, and standalone daemon archives. See the [Linux](scripts/linux-app/README.md), [macOS](scripts/macos-app/README.md), and [Windows](scripts/windows-app/README.md) guides for manual workflows and native packaging and verification commands.
 
 ## Development sources
 
