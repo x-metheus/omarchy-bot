@@ -33,7 +33,7 @@ For Rust implementation, porting, and review, use [rust-best-practices](../.agen
 ## Stack and verification
 
 - The TypeScript workspaces use ES modules and the exact Bun version pinned in `engines.bun`. When upgrading Bun, rerun the secret-store tests because the runtime uses the experimental `Bun.secrets` API. [Root manifest](../package.json) · [Secret-store tests](../apps/daemon/src/modules/runtime/bunSecrets.test.ts)
-- The desktop app keeps React, Vite, Astryx, and Tauri in one project. The [app manifest](../apps/omarchy-bot/package.json) pins the Tauri CLI and declares frontend dependencies. The Rust Local Sidecar builds separately. For native integration changes, exercise the packaged AppImage with the [Linux smoke test](../scripts/smoke-linux-app.sh).
+- The desktop app keeps React, Vite, Astryx, and Tauri in one project. The [app manifest](../apps/omarchy-bot/package.json) pins the Tauri CLI and declares frontend dependencies. The Rust Local Sidecar builds separately. Verify desktop interactions in the running Tauri app using the platform WebView. Release smoke uses packaged builds on Linux (WebKitGTK), macOS (WKWebView), and Windows (WebView2). [Linux smoke](../scripts/linux-app/README.md) · [macOS smoke](../scripts/macos-app/README.md) · [Windows smoke](../scripts/windows-app/README.md)
 
 Run these commands from the repository root. Consult the affected workspace’s `package.json` for additional checks.
 
@@ -41,12 +41,12 @@ Run these commands from the repository root. Consult the affected workspace’s 
 | --- | --- |
 | `bun install --frozen-lockfile` | Install locked dependencies |
 | `bun run tauri dev` / `bun run tauri build` | Run or build the Tauri desktop application after preparing the native prerequisites |
-| `OMARCHY_BOT_DEV=1 bun run dev` | Run the legacy Service and the desktop frontend's browser harness |
+| `OMARCHY_BOT_DEV=1 bun run dev` | Run the legacy Service development harness |
 | `bun run typecheck` | Check TypeScript types |
 | `bun run lint:boundaries` | Check package dependency boundaries |
 | `bun run build` | Check boundaries and build the Service helper and desktop frontend |
 | `bun test <path>` / `bun test` | Run focused tests / the Bun suite |
-| `bun run test:e2e` | Run the Playwright suite with its configured prerequisites |
+
 
 ### Desktop project layout
 
@@ -56,7 +56,7 @@ Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisite
 
 The legacy `apps/site` workspace retains its explicit `site:dev` and `site:build` commands.
 
-Implement and verify one increment at a time. For a behavior fix, start with a failing regression test. For web UI changes, verify the affected behavior in a browser. For documentation, check links, paths, commands, and the diff. Preserve existing checks and report the verification commands, their results, and any unresolved blockers.
+Implement and verify one increment at a time. For a behavior fix, start with a failing regression test. For desktop UI changes, verify the affected behavior in a Tauri window. For documentation, check links, paths, commands, and the diff. Preserve existing checks and report the verification commands, their results, and any unresolved blockers.
 
 ## Skill resources and maintenance
 

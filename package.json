@@ -14,8 +14,7 @@
     "build": "bun run lint:boundaries && bun run --filter='@omarchy-bot/daemon' build && bun run --filter='@omarchy-bot/desktop' build:frontend",
     "typecheck": "tsc --noEmit",
     "lint:boundaries": "bun test tests/integration/package-boundaries.test.ts",
-    "test": "bun test",
-    "test:e2e": "bunx playwright test -c tests/e2e"
+    "test": "bun test"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.1",

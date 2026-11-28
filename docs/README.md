@@ -11,7 +11,7 @@ These paths are starting points. Follow imports, contracts, and tests when a cha
 | Area | Starting points | Read together when relevant |
 | --- | --- | --- |
 | Bots, Threads, attachments, and shared work files | `apps/daemon/`, `packages/domain/`, `packages/protocol/` | Affected web UI, API client, persistence, and integration tests |
-| Desktop UI and native shell | `apps/omarchy-bot/src/`, `apps/omarchy-bot/src-tauri/` | [Frontend instructions](../apps/omarchy-bot/AGENTS.md), `packages/api-client/`, protocol, Sidecar integration, and Browser and native smoke tests |
+| Desktop UI and native shell | `apps/omarchy-bot/src/`, `apps/omarchy-bot/src-tauri/` | [Frontend instructions](../apps/omarchy-bot/AGENTS.md), `packages/api-client/`, protocol, Sidecar integration, and platform WebView smoke tests |
 | Local Sidecar | `apps/sidecar-rust/` | Native shell integration, Sidecar protocol, and conformance tests |
 | Bot runtime, conversations, and Turns | `apps/daemon/src/modules/runtime/`, `apps/daemon/src/modules/turns/` | Runtime module tests and `tests/integration/runtime-parity.test.ts` |
 | Bot Computer, screens, input, and capture | `apps/daemon/src/modules/computer/`, `packages/agent-contract/` | Protocol types, desktop helper scripts, and computer integration tests |
