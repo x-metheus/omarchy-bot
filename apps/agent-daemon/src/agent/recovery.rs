@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::conversation::{BotAgent, UserMessageSource};
+use super::redirect::REDIRECT_WORK;
 use crate::api::ConversationCommand;
 use crate::store::{Store, work::Report};
 
@@ -76,7 +77,7 @@ impl Journal {
         place: &InReply,
     ) -> Option<Delegation> {
         let name = tool.call.function.name.as_str();
-        if !matches!(name, TASK | MESSAGE) {
+        if !matches!(name, TASK | MESSAGE | REDIRECT_WORK) {
             return None;
         }
         let source = source.or_else(|| {
@@ -91,7 +92,7 @@ impl Journal {
         })?;
         // This is the request identifier used by SubagentsPlugin::task and ::message.
         let request = format!("{bot}:{}", place.at().wire());
-        if name == MESSAGE {
+        if matches!(name, MESSAGE | REDIRECT_WORK) {
             self.messages.insert(request.clone(), source);
         }
         Some(Delegation { source, request })

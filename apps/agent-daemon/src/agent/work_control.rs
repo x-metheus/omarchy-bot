@@ -17,12 +17,11 @@ const STOP_WORK: &str = "stop_work";
 const BOT_GUIDANCE: &str = "When the user asks about ongoing work, use work_status and the reports \
     you have received. Say what is running or waiting without interrupting it. If a request to \
     change or stop work could refer to more than one operation, ask which one and leave them \
-    running. Send a clear correction with message to the specific Subagent, including every \
-    dependent part it must update. Leave independent Subagents working. Acknowledge the change \
-    and let the corrected work report back. Treat output based on superseded instructions as \
-    obsolete even if it arrives later. Use only current results for the revised answer. When the \
-    user explicitly asks to stop a specific operation, use stop_work on its Subagent. Explain \
-    any uncertainty about side effects already in flight.";
+    running. For a clear correction, use redirect_work on the specific Subagent, including every \
+    dependent part it must update. Use message for ordinary coordination. Leave independent \
+    Subagents working. Acknowledge the change and let the corrected work report back. Use current \
+    results for the revised answer. When the user explicitly asks to stop one operation, use \
+    stop_work on its Subagent. Explain any uncertainty about side effects already in flight.";
 
 const SUBAGENT_GUIDANCE: &str = "Follow corrections from your parent Agent before acting on or \
     reporting results. A result from earlier instructions can arrive after a correction. Treat \
@@ -59,7 +58,7 @@ fn guidance(text: &str) -> PromptSection {
     PromptSection::new(PromptSection::ORDER_ROLE + 2, "conversation_work", text)
 }
 
-type Tasks<'w, 's> = Query<
+pub(super) type Tasks<'w, 's> = Query<
     'w,
     's,
     (
@@ -138,13 +137,10 @@ fn stop_work(
     if decision.is_decided() {
         return;
     }
-    let evidence = called.args.evidence.trim();
-    let from_user = !evidence.is_empty()
-        && inputs
-            .get(called.call)
-            .ok()
-            .and_then(|input| input.text(conversation))
-            .is_some_and(|text| text.contains(evidence));
+    let from_user = inputs
+        .get(called.call)
+        .ok()
+        .is_some_and(|input| authored_evidence(*input, conversation, &called.args.evidence));
     let wanted = called.args.agent.trim();
     let mut targets = children
         .into_iter()
@@ -170,4 +166,16 @@ fn stop_work(
         )),
     };
     decision.decide(Decider::plugin(STOP_WORK), result);
+}
+
+pub(super) fn authored_evidence(
+    input: ModelUserInput,
+    conversation: &Conversation,
+    evidence: &str,
+) -> bool {
+    let evidence = evidence.trim();
+    !evidence.is_empty()
+        && input
+            .text(conversation)
+            .is_some_and(|text| text.contains(evidence))
 }

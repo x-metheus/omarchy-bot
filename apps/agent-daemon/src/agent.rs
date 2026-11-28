@@ -1,6 +1,7 @@
 pub(crate) mod conversation;
 mod observational_memory;
 mod recovery;
+mod redirect;
 mod work_control;
 
 pub(crate) use conversation::{AgentCommand, ReplySink, TurnRequest};
@@ -52,6 +53,7 @@ pub(crate) fn headless_app(
     recovery::register(&mut app, store, conversations.clone());
     conversation::add(&mut app, pending, conversations);
     work_control::install(&mut app);
+    redirect::install(&mut app);
     user_memory::install(&mut app, store);
     observational_memory::install(&mut app, store);
     duties::register(&mut app);

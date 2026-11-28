@@ -138,7 +138,7 @@ The daemon restores committed model context when it creates a Bot's root Agent. 
 
 ### Control ongoing work in chat
 
-Send the correction, cancellation, or progress question as another message to the same Bot. Name the operation when more than one is active. The Bot uses Rig's `message` to pass a correction to the chosen Subagent for its next model call. A lookup started before the correction can still return. The Bot and Subagent are instructed to update affected conclusions and use current results. Independent work continues.
+Send the correction, cancellation, or progress question as another message to the same Bot. Name the operation when more than one is active. The Bot uses `redirect_work` to deliver a correction through Rig's Inbox to the chosen Subagent. An earlier lookup can finish, but the Agent receives a superseded notice in place of its result when the lookup predates the correction. Independent work continues.
 
 When asked for progress, the Bot can inspect running Subagents and those waiting for delegated work. An ambiguous change or cancellation prompts a question. For a clear cancellation, the Agent calls Rig's `StopTurn` on the selected Subagent and its descendants. A tool or external operation can only stop where its execution supports cancellation. A stop does not undo a completed external action.
 
@@ -148,10 +148,12 @@ With authorization to use a tool-capable Chat Completions model, set `OPENAI_BAS
 
 ```sh
 cargo test --locked -j 3 --test conversation \
-  work_control::live::a_live_model_reports_only_the_corrected_label -- --ignored --exact
+  work_control::live::a_live_model_reports_only_the_corrected_label -- --ignored --exact --nocapture
 ```
 
 The test starts the daemon with a disposable database and a loopback provider relay. The relay handles only the three neutral parcel lookup briefs locally. It forwards planning, correction, and report generation to the configured model. The fixture holds both the original Alder lookup and the independent Birch tally, sends the correction, then releases the old result after the correction reply commits. It waits for the south-depot query before releasing the corrected label and the Birch tally. Success requires a committed reply containing `BLU-159` and `12`, with no assistant message publishing `GRN-807`. The gateway credential stays in the relay process and is never written to the daemon database.
+
+The fixture prints the lookup and report route, the short Rig Agent IDs, and the committed message ID for label-bearing replies. An obsolete mention gets a diagnostic classification when its wording makes the use clear. The acceptance still fails if any committed reply includes the obsolete label.
 
 ## Observational Memory
 

@@ -111,15 +111,15 @@ async fn a_correction_updates_one_lookup_when_the_obsolete_result_returns_late()
     assert_eq!(call.last_message()["content"], CORRECTION);
     call.tools(&[(
         "redirect",
-        "message",
-        json!({"agent": alder_id, "text": CORRECTION}),
+        "redirect_work",
+        json!({"agent": alder_id, "text": CORRECTION, "evidence": CORRECTION}),
     )])
     .await;
     let root = provider.next().await;
     assert!(
         root.last_message()
             .to_string()
-            .contains("with its next step")
+            .contains("for its next step")
     );
     chat_reply(root, &mut correction, "Alder now uses the south depot.").await;
 
@@ -143,12 +143,23 @@ async fn a_correction_updates_one_lookup_when_the_obsolete_result_returns_late()
     let corrected_at = history.find(CORRECTION).unwrap_or_else(|| {
         panic!("the running Alder Subagent must receive the correction: {history}")
     });
-    let old_at = history.find(OBSOLETE).unwrap_or_else(|| {
-        panic!("the obsolete lookup must still return to its Subagent: {history}")
-    });
+    let superseded_at = history
+        .find("Result superseded by the user's correction.")
+        .expect("the returned north lookup is identified as superseded");
     assert!(
-        corrected_at < old_at,
-        "the obsolete result arrived after the correction"
+        corrected_at < superseded_at,
+        "the north report arrived after the correction"
+    );
+    assert!(
+        !history.contains(OBSOLETE),
+        "the obsolete report cannot supply active evidence"
+    );
+    assert!(
+        alder
+            .chat_messages()
+            .iter()
+            .any(|message| { message["role"] == "tool" && message["tool_call_id"] == "hold" }),
+        "the old wait still has a paired result"
     );
     let new_lookup = lookup(&mut provider, alder, "Read Alder in the south depot.").await;
     reply(new_lookup, CURRENT).await;
@@ -168,6 +179,26 @@ async fn a_correction_updates_one_lookup_when_the_obsolete_result_returns_late()
             .iter()
             .all(|(_, text)| !text.contains("GRN-807"))
     );
+    let correction_id = history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "user" && message["text"] == CORRECTION)
+        .expect("the correction is in Message History")["id"]
+        .as_i64()
+        .unwrap();
+    let mut events = daemon.events(&client, id, correction.cursor.unwrap()).await;
+    let mut states = Vec::new();
+    while let Some((name, event)) = events.next().await {
+        if name == "work" && event["messageId"] == correction_id {
+            let state = event["status"].as_str().expect("work status");
+            states.push(state.to_owned());
+            if state == "completed" {
+                break;
+            }
+        }
+    }
+    assert_eq!(states, ["waiting", "completed"]);
     daemon.stop().await;
 }
 
