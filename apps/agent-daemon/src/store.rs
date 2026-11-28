@@ -408,7 +408,10 @@ impl Store {
     }
 }
 
-fn restore_conversation(connection: &Connection, bot: Uuid) -> Result<Option<RestoredConversation>> {
+fn restore_conversation(
+    connection: &Connection,
+    bot: Uuid,
+) -> Result<Option<RestoredConversation>> {
     let Some(conversation) = load_conversation(connection, bot, History::Restore)? else {
         return Ok(None);
     };

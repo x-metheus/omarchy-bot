@@ -11,7 +11,7 @@ use rig_core::effect::{Answered, EffectId, EffectKind};
 use rig_core::message::StopReason;
 use rig_core::serve::Dispatch;
 use rig_harness::prelude::*;
-use rig_harness::rig_memory::{find_cut_point, request_tokens, summary_text};
+use rig_harness::rig_memory::{clamp_max_tokens, find_cut_point, request_tokens, summary_text};
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::timeout;
@@ -141,17 +141,28 @@ fn fit_history(
             serde_json::to_string(&request.tools).expect("serialize Rig tool definitions")
         });
         let system = prompt.text();
-        let live = text_tokens(system.len())
-            + tools.as_ref().map_or(0, |json| text_tokens(json.len()))
-            + messages[past..].iter().map(message_tokens).sum::<u64>();
+        let fixed = request_tokens(
+            (Some(&system), tools.as_deref()),
+            &[] as &[Arc<Message>],
+            None,
+        );
+        let live = fixed + messages[past..].iter().map(message_tokens).sum::<u64>();
         let mut budget = input_limit(&model.spec, output_reserve(&model.spec, request.max_tokens))
             .saturating_sub(live);
         let mut covered = 0;
+        let mut summary_cost = 0;
         if let Some(observation) = &state.observation {
             let section = observation_section(observation);
             let cost = text_tokens(section.text.len()) + 24;
             if cost <= budget {
-                covered = state.covered(history, past, observation.through);
+                // Keep the latest report verbatim when it still fits. It is not an original message in SQLite.
+                let keep_report = (0..past).rev().find(|&at| {
+                    history
+                        .author(at)
+                        .is_some_and(|author| author.kind == AuthorKind::Agent)
+                });
+                covered = state.covered(history, keep_report.unwrap_or(past), observation.through);
+                summary_cost = cost;
                 budget -= cost;
                 prompt.sections.push(section);
             }
@@ -189,6 +200,19 @@ fn fit_history(
             }
         }
         let first = safe_cut(messages, first, past);
+        if let Some(asked) = request
+            .max_tokens
+            .or(model.spec.output_limit().map(u64::from))
+        {
+            let retained = messages[first..past]
+                .iter()
+                .map(message_tokens)
+                .sum::<u64>();
+            let fitted = clamp_max_tokens(&model.spec, live + summary_cost + retained, asked);
+            if fitted < asked {
+                Arc::make_mut(request).max_tokens = Some(fitted);
+            }
+        }
         if first > 0 {
             history.splice(..first, [], Author::plugin("observational-memory"));
         }
@@ -205,7 +229,7 @@ fn input_limit(spec: &ModelSpec, reserve: u64) -> u64 {
 
 fn output_reserve(spec: &ModelSpec, requested: Option<u64>) -> u64 {
     let window = spec.context_window.map_or(ALIAS_INPUT_TOKENS, u64::from);
-    requested.unwrap_or_else(|| (window / 4).min(4_096))
+    requested.unwrap_or_else(|| spec.output_limit().map_or(4_096, u64::from).min(window / 4))
 }
 
 fn text_tokens(bytes: usize) -> u64 {

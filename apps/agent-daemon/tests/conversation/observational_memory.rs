@@ -290,3 +290,55 @@ async fn bots_observe_independently_and_chat_continues_after_a_failed_observatio
     assert_eq!(conversation["messages"][0]["text"], original_first);
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn observation_stops_before_interrupted_work_after_restart() {
+    const INTERRUPTED: &str = "Check the unfinished swatch";
+    let mut provider = Provider::start_with_observers(ObserverReplies::Scripted).await;
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("daemon.sqlite3");
+    let client = http_client();
+    let daemon = Daemon::start(&db, &provider).await;
+    let bot = daemon.create(&client).await;
+    let bot = bot_id(&bot);
+    let oldest = record_catalog(&daemon, &client, &mut provider, bot, CATALOG_ID).await;
+
+    let interrupted = daemon.send(&client, bot, INTERRUPTED).await;
+    let (observation, chat) = observation_and_chat(&mut provider).await;
+    chat.assert_messages(&[("user", INTERRUPTED)]);
+    daemon.stop().await;
+    drop((interrupted, observation, chat));
+
+    let daemon = Daemon::start(&db, &provider).await;
+    let later = format!("Later catalog label G7.{}", " sample notes".repeat(780));
+    let mut stream = ReplyStream::new(daemon.send(&client, bot, &later).await);
+    let (observation, chat) = observation_and_chat(&mut provider).await;
+    chat.assert_messages(&[("user", &later)]);
+    chat_reply(chat, &mut stream, "G7 recorded").await;
+    daemon.stop().await;
+    drop(observation);
+
+    let daemon = Daemon::start(&db, &provider).await;
+    let history = daemon.read(&client, bot).await;
+    assert_eq!(history["messages"][2]["text"], INTERRUPTED);
+    let recent = "Check the current catalog";
+    let mut stream = ReplyStream::new(daemon.send(&client, bot, recent).await);
+    let (observation, chat) = observation_and_chat(&mut provider).await;
+    chat.assert_messages(&[("user", recent)]);
+    let input = transcript_sent_to_observer(&observation);
+    assert!(input.contains(&oldest));
+    assert!(input.contains("Catalog label saved"));
+    assert!(!input.contains(INTERRUPTED));
+    assert!(!input.contains("Later catalog label G7"));
+    chat_reply(chat, &mut stream, "Checked").await;
+
+    let summary = "Historical catalog before the interrupted work";
+    observation.text(summary).await;
+    observation.finish().await;
+    let (mut stream, chat) =
+        request_with_summary(&daemon, &client, &mut provider, bot, summary).await;
+    let through = &history["messages"][1]["id"];
+    assert!(system_prompt(&chat).contains(&format!("through committed message {through}.")));
+    chat_reply(chat, &mut stream, "Ready").await;
+    daemon.stop().await;
+}

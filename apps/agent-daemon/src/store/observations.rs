@@ -37,9 +37,17 @@ impl Store {
         capacity: usize,
     ) -> Result<Vec<Message>> {
         self.run(move |db| {
+            // Work that can be retried must settle before its text enters a historical summary.
+            // Stop at its ID so the saved watermark always describes a contiguous prefix.
             let mut statement = db.connection.prepare_cached(
                 "SELECT id, role, text FROM messages
-                 WHERE bot_id = ?1 AND id > ?2 AND id <= ?3 ORDER BY id",
+                 WHERE bot_id = ?1 AND id > ?2 AND id <= coalesce((
+                     SELECT first.id - 1 FROM messages first
+                     JOIN conversation_work w ON w.message_id = first.id
+                     WHERE first.bot_id = ?1 AND first.id > ?2 AND first.id <= ?3
+                       AND w.status IN ('queued', 'running', 'waiting', 'interrupted')
+                     ORDER BY first.id LIMIT 1
+                 ), ?3) ORDER BY id",
             )?;
             let mut rows = statement.query(params![bot.as_bytes().as_slice(), after, through])?;
             let mut batch = Vec::new();

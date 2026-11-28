@@ -157,7 +157,7 @@ The test starts the daemon with a disposable database and a loopback provider re
 
 As a Bot approaches its selected model's history budget, the daemon starts a separate model request to summarize an older prefix of committed messages. Each Bot has one observation in SQLite with the exact committed message ID it covers. Later requests can include that historical summary with recent original messages. The Conversation returned by `GET /bots/{id}` and the original text available to Recall remain complete.
 
-The daemon uses the pinned Rig catalog's input limits. It estimates space for the prompt, tools and current Turn, and reserves room for the reply. Model aliases without catalog limits use an 8,192-token input estimate. While an observation is pending or after it fails, the Agent can continue with recent history that fits and any previously saved observation. The active Turn, including its tool calls and results, stays intact. The observer uses the selected chat provider and receives committed message text from that Bot as historical data.
+The daemon uses the pinned Rig catalog's input limits and Rig's token estimate for the prompt and tool schemas. It reserves reply space and keeps the active Turn intact, including tool calls and results. Model aliases without catalog limits use an 8,192-token window estimate. While an observation is pending or after it fails, the Agent can continue with the recent history that fits and any previously saved observation. The observer uses the selected chat provider and receives committed message text as historical data. The observed prefix stops before queued, running, waiting, or interrupted work until that work settles.
 
 ## Daemon-host tools
 
