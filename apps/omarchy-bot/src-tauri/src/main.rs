@@ -297,21 +297,35 @@ fn allows_app_navigation(url: &Url, dev: bool) -> bool {
 }
 
 fn restart_process(environment: &tauri::Env) -> ! {
-    #[cfg(all(dev, unix))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::process::CommandExt;
 
-        // Tauri CLI stops Vite when the supervised application process exits.
         let error = match tauri::process::current_binary(environment) {
-            Ok(binary) => std::process::Command::new(binary)
-                .args(environment.args_os.iter().skip(1))
-                .exec(),
+            Ok(binary) => {
+                #[cfg(target_os = "linux")]
+                let bundled = environment.appimage.is_some()
+                    || tauri::utils::platform::bundle_type().is_some();
+                #[cfg(target_os = "macos")]
+                let bundled = binary
+                    .parent()
+                    .and_then(|directory| directory.file_name())
+                    .is_some_and(|directory| directory == "MacOS");
+
+                if bundled {
+                    tauri::process::restart(environment);
+                }
+                // Replacing a plain executable in place preserves its process supervisor.
+                std::process::Command::new(binary)
+                    .args(environment.args_os.iter().skip(1))
+                    .exec()
+            }
             Err(error) => error,
         };
-        log_lifecycle(&format!("Could not restart the development app: {error}"));
+        log_lifecycle(&format!("Could not restart Omarchy Bot: {error}"));
         std::process::exit(1);
     }
-    #[cfg(not(all(dev, unix)))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     tauri::process::restart(environment)
 }
 
