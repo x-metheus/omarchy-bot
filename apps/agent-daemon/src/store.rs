@@ -14,6 +14,7 @@ use std::path::{self, Path};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use rig_core::providers::openai::OpenAI;
 use rig_ecs::model::Connection as RigConnection;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -23,6 +24,10 @@ use uuid::Uuid;
 
 use crate::agent::conversation::UserMessageSource;
 use crate::attachments::{self, Metadata, Stored, Submission};
+use crate::settings::providers::{
+    self, DiscoveryInput, Error as ProviderError, Mutation, PreparedSave, SaveInput,
+    Status as ProviderStatus,
+};
 use crate::settings::{Settings, SettingsStatus, SettingsUpdate, Update};
 use crate::user_memory::{self, CurrentMemory, MemoryWrite, Proposal};
 
@@ -186,6 +191,7 @@ impl Store {
         devices::initialize(&connection).context("initialize device pairing storage")?;
         tools::initialize(&connection).context("recover Conversation tool progress")?;
         work::initialize(&connection).context("initialize Conversation work storage")?;
+        providers::initialize(&connection).context("initialize provider configurations")?;
         connection
             .execute_batch("COMMIT")
             .context("commit SQLite schema")?;
@@ -210,6 +216,37 @@ impl Store {
     pub(crate) async fn update_settings(&self, update: SettingsUpdate) -> Result<Update> {
         self.run(move |db| db.settings.update(&mut db.connection, update))
             .await
+    }
+
+    pub(crate) async fn provider_status(&self) -> Result<ProviderStatus, ProviderError> {
+        self.run(|db| Ok(providers::status(&db.connection)?))
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn prepare_provider_discovery(
+        &self,
+        input: DiscoveryInput,
+    ) -> Result<OpenAI, ProviderError> {
+        self.run(move |db| Ok(db.settings.prepare_discovery(&db.connection, input)))
+            .await?
+    }
+
+    pub(crate) async fn prepare_provider_save(
+        &self,
+        id: Option<Uuid>,
+        input: SaveInput,
+    ) -> Result<PreparedSave, ProviderError> {
+        self.run(move |db| Ok(db.settings.prepare_save(&db.connection, id, input)))
+            .await?
+    }
+
+    pub(crate) async fn mutate_provider(
+        &self,
+        mutation: Mutation,
+    ) -> Result<ProviderStatus, ProviderError> {
+        self.run(move |db| Ok(db.settings.mutate_provider(&mut db.connection, mutation)))
+            .await?
     }
 
     pub(crate) async fn create_bot(&self, name: String) -> Result<Bot> {

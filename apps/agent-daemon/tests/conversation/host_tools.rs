@@ -130,10 +130,7 @@ async fn host_tools_refuse_startup_without_a_provisioned_bearer() {
         .unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("requires OMARCHY_AGENT_SETTINGS_TOKEN_FILE")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("workspace_requires_settings_token"));
 }
 
 pub(super) async fn tool(call: ProviderCall, index: usize, name: &str, args: Value) {

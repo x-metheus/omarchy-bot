@@ -293,8 +293,11 @@ fn deliver(world: &mut World) {
                             continue;
                         }
                         Ok(Some(_)) => unreachable!("queued work was already admitted"),
-                        Err(error) => {
-                            eprintln!("could not load queued Conversation work: {error:#}");
+                        Err(_) => {
+                            tracing::error!(
+                                code = "queued_work_load_failed",
+                                "Could not load queued Conversation work"
+                            );
                             world.write_message(rig_harness::AppExit::error());
                             return;
                         }

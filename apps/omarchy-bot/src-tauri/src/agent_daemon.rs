@@ -25,6 +25,7 @@ const MASTER_KEY: &str = "master.key";
 pub(super) struct LocalDaemon {
     directory: PathBuf,
     recall_bundle: Option<PathBuf>,
+    log_directory: Option<PathBuf>,
     port: u16,
     child: Mutex<Option<Child>>,
 }
@@ -36,7 +37,11 @@ struct Health {
 }
 
 impl LocalDaemon {
-    pub(super) fn new(directory: PathBuf, resource_directory: Option<PathBuf>) -> Self {
+    pub(super) fn new(
+        directory: PathBuf,
+        resource_directory: Option<PathBuf>,
+        log_directory: Option<PathBuf>,
+    ) -> Self {
         let port = std::env::var("OMARCHY_BOT_AGENT_PORT")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -45,6 +50,7 @@ impl LocalDaemon {
         Self {
             directory,
             recall_bundle: resource_directory.map(|directory| directory.join("recall-model")),
+            log_directory,
             port,
             child: Mutex::new(None),
         }
@@ -117,7 +123,12 @@ impl LocalDaemon {
             .env_remove("OMARCHY_AGENT_WORK_DIR")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // The daemon can outlive this App and must keep its stderr destination.
+            .stderr(Stdio::inherit())
+            .env_remove("OMARCHY_AGENT_LOG_DIR");
+        if let Some(directory) = &self.log_directory {
+            command.env("OMARCHY_AGENT_LOG_DIR", directory);
+        }
         if let Some(bundle) = &self.recall_bundle {
             command.env("OMARCHY_AGENT_RECALL_BUNDLE_DIR", bundle);
             if std::env::var_os("OMARCHY_AGENT_RECALL_DOWNLOAD").is_none() {
@@ -126,11 +137,16 @@ impl LocalDaemon {
         }
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        *child = Some(
-            command
-                .spawn()
-                .map_err(|error| format!("Could not start the local Agent Daemon: {error}"))?,
-        );
+        let process = command.spawn().map_err(|error| {
+            tracing::error!(
+                error_code = "daemon_spawn_failed",
+                kind = ?error.kind(),
+                "Could not start the local Agent Daemon"
+            );
+            format!("Could not start the local Agent Daemon: {error}")
+        })?;
+        tracing::info!(pid = process.id(), "Local Agent Daemon spawned");
+        *child = Some(process);
         Ok(())
     }
 
@@ -179,6 +195,11 @@ impl LocalDaemon {
                 match child.as_mut() {
                     Some(process) => match process.try_wait().map_err(|error| error.to_string())? {
                         Some(exit) => {
+                            tracing::error!(
+                                error_code = "daemon_exited_before_ready",
+                                code = exit.code(),
+                                "Local Agent Daemon exited before becoming ready"
+                            );
                             *child = None;
                             return Err(format!(
                                 "The local Agent Daemon exited before becoming ready ({exit})."
@@ -194,6 +215,10 @@ impl LocalDaemon {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        tracing::warn!(
+            error_code = "daemon_readiness_timeout",
+            "Local Agent Daemon did not become ready"
+        );
         Err("The local Agent Daemon did not become ready.".into())
     }
 
@@ -356,6 +381,68 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn daemon_stderr_reaches_the_original_sink_after_the_launcher_exits() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+
+        const PROFILE: &str = "OMARCHY_TEST_DAEMON_STDERR_PROFILE";
+        if let Some(profile) = std::env::var_os(PROFILE) {
+            let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let daemon = LocalDaemon {
+                directory: PathBuf::from(profile).join("daemon"),
+                recall_bundle: None,
+                log_directory: None,
+                port,
+                child: Mutex::new(None),
+            };
+            daemon.start_if_needed().unwrap();
+            return;
+        }
+
+        let profile = tempfile::tempdir().unwrap();
+        let fixture = profile.path().join("stderr-fixture");
+        fs::write(
+            &fixture,
+            r#"#!/bin/sh
+while [ ! -f "$OMARCHY_TEST_DAEMON_STDERR_PROFILE/launcher-exited" ]; do
+    [ -d "$OMARCHY_TEST_DAEMON_STDERR_PROFILE" ] || exit 1
+    sleep 0.02
+done
+printf 'daemon fallback after launcher exit\n' >&2
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut launcher = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agent_daemon::tests::daemon_stderr_reaches_the_original_sink_after_the_launcher_exits",
+            ])
+            .env(PROFILE, profile.path())
+            .env("OMARCHY_BOT_AGENT_DAEMON_BIN", &fixture)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert!(launcher.wait().unwrap().success());
+        fs::write(profile.path().join("launcher-exited"), []).unwrap();
+        let mut stderr = String::new();
+        launcher
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert_eq!(stderr, "daemon fallback after launcher exit\n");
+    }
+
     #[test]
     #[ignore = "set OMARCHY_BOT_AGENT_DAEMON_BIN to a locally built daemon"]
     fn native_launcher_honors_preference_starts_and_attaches_to_real_daemon() {
@@ -367,6 +454,7 @@ mod tests {
         let owner = StopOnDrop(LocalDaemon {
             directory: profile.path().join("owner"),
             recall_bundle: None,
+            log_directory: Some(profile.path().join("logs")),
             port,
             child: Mutex::new(None),
         });
@@ -393,6 +481,8 @@ mod tests {
                 .wait_for_daemon()
                 .await
                 .expect("daemon became ready"));
+            let log = fs::read_to_string(profile.path().join("logs/agent-daemon.log")).unwrap();
+            assert!(log.contains("Agent Daemon ready"));
             let code = owner
                 .0
                 .pairing_code()
@@ -410,6 +500,7 @@ mod tests {
             let attached = LocalDaemon {
                 directory: profile.path().join("attached"),
                 recall_bundle: None,
+                log_directory: Some(profile.path().join("logs")),
                 port,
                 child: Mutex::new(None),
             };

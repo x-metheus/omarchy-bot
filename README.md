@@ -42,7 +42,15 @@ mise run dev
 
 Run `cargo test --workspace --locked` from the repository root for the native workspace. Run frontend type checks and tests inside `apps/omarchy-bot`.
 
-Native lifecycle logs are stored in `~/.local/share/com.omarchy.bot/logs/omarchy-bot.log` on Linux (or under `XDG_DATA_HOME`), `~/Library/Logs/com.omarchy.bot/omarchy-bot.log` on macOS, and `%LOCALAPPDATA%\com.omarchy.bot\logs\omarchy-bot.log` on Windows.
+The App writes `omarchy-bot.log` and its managed Agent Daemon writes `agent-daemon.log` in the same directory.
+
+| Platform | Log directory |
+| --- | --- |
+| Linux | `~/.local/share/com.omarchy.bot/logs` or `$XDG_DATA_HOME/com.omarchy.bot/logs` |
+| macOS | `~/Library/Logs/com.omarchy.bot` |
+| Windows | `%LOCALAPPDATA%\com.omarchy.bot\logs` |
+
+Each log rotates at 5 MiB and keeps three numbered archives. The App also logs to stderr. A standalone Agent Daemon sends diagnostics to stderr and prints its `LISTENING` readiness line on stdout. A managed daemon uses the stderr stream inherited from the App when its log file is unavailable. The default level is `INFO`. Set `RUST_LOG=debug` or `RUST_LOG=omarchy_agent_daemon=trace` to increase first-party verbosity.
 
 ### Public site
 

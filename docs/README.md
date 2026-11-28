@@ -4,6 +4,8 @@ The [development guide](development.md) covers skill selection, GitHub specifica
 
 The [Agent Daemon guide](../apps/agent-daemon/README.md) covers standalone startup, pairing, and smoke tests for both model protocols. The [Rig Agent Daemon decision](agents/adr/0017-rig-agent-daemon.md) explains how the daemon and Tauri desktop share responsibility.
 
+The [Provider Settings specification](specs/provider-settings.md) covers the desktop Settings page, custom providers, model discovery, and Rig's OAuth support.
+
 ## Code map
 
 These paths are starting points. Follow imports, contracts, and tests when a change crosses packages.

@@ -35,3 +35,7 @@ A summary of earlier messages in one **Conversation** that helps its **Agent** m
 **Recall**
 
 A **Bot**'s on-demand retrieval of earlier original messages and their sources.
+
+**Provider Configuration**
+
+A saved pairing of a model provider and a selected model for an **Agent Daemon**. An **Agent Daemon** can keep configurations for multiple providers.

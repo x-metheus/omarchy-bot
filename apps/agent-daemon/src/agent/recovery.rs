@@ -88,8 +88,11 @@ impl Journal {
             let report = reports?.0.last()?;
             match self.store.report_source(bot, report) {
                 Ok(source) => source,
-                Err(error) => {
-                    eprintln!("could not read delegation provenance: {error:#}");
+                Err(_) => {
+                    tracing::error!(
+                        code = "delegation_provenance_failed",
+                        "Could not read delegation provenance"
+                    );
                     None
                 }
             }

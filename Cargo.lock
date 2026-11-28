@@ -1216,8 +1216,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -4461,6 +4463,7 @@ dependencies = [
  "rig-harness",
  "rig-reqwest",
  "ring",
+ "rolling-file",
  "rusqlite",
  "schemars 1.2.3",
  "serde",
@@ -4469,6 +4472,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "zeroize",
@@ -4487,6 +4492,7 @@ dependencies = [
  "reqwest",
  "rig-core",
  "rig-tools",
+ "rolling-file",
  "rustls",
  "rustls-native-certs",
  "schannel",
@@ -4503,6 +4509,8 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]
@@ -5770,6 +5778,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rolling-file"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8395b4f860856b740f20a296ea2cd4d823e81a2658cf05ef61be22916026a906"
+dependencies = [
+ "chrono",
 ]
 
 [[package]]

@@ -3,12 +3,12 @@
 mod agent_daemon;
 mod attachments;
 mod desktop_tools;
+mod logging;
 
 #[cfg(target_os = "linux")]
 use gio::prelude::*;
 use agent_daemon::LocalDaemon;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::sync::Mutex;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
@@ -19,17 +19,6 @@ use url::Url;
 const KEYCHAIN_SERVICE: &str = "com.omarchy.bot";
 const KEYCHAIN_USER: &str = "agent-daemon-connection";
 const RESTART_EXIT_CODE: i32 = 75;
-
-static APP_LOG: std::sync::OnceLock<Mutex<std::fs::File>> = std::sync::OnceLock::new();
-
-fn log_lifecycle(message: &str) {
-    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-    let line = format!("{timestamp} pid={} {message}\n", std::process::id());
-    let _ = std::io::stderr().write_all(line.as_bytes());
-    if let Some(file) = APP_LOG.get() {
-        if let Ok(mut file) = file.lock() { let _ = file.write_all(line.as_bytes()); }
-    }
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,7 +132,12 @@ fn clear_connection(app: tauri::AppHandle, state: tauri::State<ShellState>) -> R
     }
     if let (Some(origin), Ok(directory)) = (&state.origin, app.path().app_config_dir()) {
         let notice = std::fs::create_dir_all(&directory).and_then(|_| std::fs::write(directory.join("revoked-agent-daemon"), origin));
-        if notice.is_err() { eprintln!("The revoked credential was cleared, but its Service address could not be retained."); }
+        if notice.is_err() {
+            tracing::warn!(
+                error_code = "revoked_notice_write_failed",
+                "The revoked credential was cleared, but its Service address could not be retained"
+            );
+        }
     }
     app.exit(RESTART_EXIT_CODE);
     Ok(())
@@ -322,7 +316,11 @@ fn restart_process(environment: &tauri::Env) -> ! {
             }
             Err(error) => error,
         };
-        log_lifecycle(&format!("Could not restart Omarchy Bot: {error}"));
+        tracing::error!(
+            error_code = "restart_failed",
+            kind = ?error.kind(),
+            "Could not restart Omarchy Bot"
+        );
         std::process::exit(1);
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -330,35 +328,24 @@ fn restart_process(environment: &tauri::Env) -> ! {
 }
 
 fn main() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic| {
-        log_lifecycle(&format!("panic location={:?}\n{}", panic.location(), std::backtrace::Backtrace::force_capture()));
-        default_hook(panic);
-    }));
+    logging::install_panic_hook();
     let mut context = tauri::generate_context!();
     #[cfg(windows)]
     if let Some(directory) = std::env::var_os("OMARCHY_BOT_SMOKE_DIR") {
         context.config_mut().app.app_directories_override = Some(tauri::utils::config::AppDirectoriesOverride::Root(directory.into()));
     }
-    // Match Tauri's app_log_dir before creating the native runtime, which can panic.
-    let logging = (|| -> Result<(), Box<dyn std::error::Error>> {
-        #[cfg(target_os = "macos")]
-        let directory = dirs::home_dir().map(|home| home.join("Library/Logs").join(&context.config().identifier));
-        #[cfg(not(target_os = "macos"))]
-        let directory = dirs::data_local_dir().map(|data| data.join(&context.config().identifier).join("logs"));
-        #[cfg(windows)]
-        let directory = std::env::var_os("OMARCHY_BOT_SMOKE_DIR").map(|root| std::path::PathBuf::from(root).join("logs")).or(directory);
-        let directory = directory.ok_or("Native app log directory is unavailable")?;
-        std::fs::create_dir_all(&directory)?;
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(directory.join("omarchy-bot.log"))?;
-        let _ = APP_LOG.set(Mutex::new(file));
-        Ok(())
-    })();
-    if let Err(error) = logging { let _ = writeln!(std::io::stderr(), "Could not open native app log: {error}"); }
-    log_lifecycle("startup");
+    let log_directory = logging::directory(&context.config().identifier);
+    let close_log_file = logging::init(log_directory.as_deref());
+    tracing::info!(pid = std::process::id(), "startup");
     let incoming = std::env::args().skip(1).find_map(|argument| pairing_request(&argument));
     let loaded = read_connection();
     let error = loaded.as_ref().err().cloned();
+    if error.is_some() {
+        tracing::warn!(
+            error_code = "connection_load_failed",
+            "Could not load the saved Agent Daemon connection"
+        );
+    }
     let stored = loaded.ok().flatten();
     // An explicit pairing link opens the connection screen while retaining the previous credential.
     let connection = if incoming.is_some() { None } else { stored };
@@ -383,7 +370,11 @@ fn main() {
         .manage(ShellState { origin, connection: connection.clone(), keychain: Mutex::new(()), pending_pairing: Mutex::new(None), restart_link: Mutex::new(None) })
         .invoke_handler(tauri::generate_handler![store_connection, clear_connection, open_browser, certificate_untrusted, restart_app, take_pairing_request, save_attachment, check_update, install_update, agent_daemon::ensure_local_daemon, agent_daemon::set_daemon_autostart, agent_daemon::local_daemon_pairing_code, desktop_tools::choose_desktop_path])
         .setup(move |app| {
-            let daemon = LocalDaemon::new(app.path().app_local_data_dir()?.join("agent-daemon"), app.path().resource_dir().ok());
+            let daemon = LocalDaemon::new(
+                app.path().app_local_data_dir()?.join("agent-daemon"),
+                app.path().resource_dir().ok(),
+                log_directory,
+            );
             let local = serde_json::json!({ "baseUrl": daemon.origin(), "autostart": daemon.autostart().unwrap_or(false) });
             app.manage(daemon);
             let revoked = if connection.is_none() {
@@ -401,12 +392,18 @@ fn main() {
             Ok(())
         })
         .on_window_event(|_, event| match event {
-            tauri::WindowEvent::CloseRequested { .. } => log_lifecycle("window-close-requested"),
-            tauri::WindowEvent::Destroyed => log_lifecycle("window-destroyed"),
+            tauri::WindowEvent::CloseRequested { .. } => tracing::info!("window-close-requested"),
+            tauri::WindowEvent::Destroyed => tracing::info!("window-destroyed"),
             _ => {},
         })
-        .build(context)
-        .expect("Could not start Omarchy Bot");
+        .build(context);
+    let application = match application {
+        Ok(application) => application,
+        Err(_) => {
+            tracing::error!(error_code = "native_app_build_failed", "Could not start Omarchy Bot");
+            std::process::exit(1);
+        }
+    };
     let handle = application.handle().clone();
     let mut environment = handle.env();
     // Rebuild argv at the process boundary so consumed pairing codes are never replayed.
@@ -418,19 +415,20 @@ fn main() {
             for url in urls { receive_link(app, url.as_str()); }
         }
         match event {
-            tauri::RunEvent::ExitRequested { code, .. } => log_lifecycle(&format!("exit-requested code={code:?}")),
+            tauri::RunEvent::ExitRequested { code, .. } => tracing::info!(?code, "exit-requested"),
             tauri::RunEvent::Exit => {
-                log_lifecycle("exit");
+                tracing::info!("exit");
                 app.state::<desktop_tools::DesktopTools>().stop();
             },
             _ => {},
         }
     });
-    log_lifecycle(&format!("event-loop-return code={exit}"));
+    tracing::info!(code = exit, "event-loop-return");
     if exit == RESTART_EXIT_CODE {
         if let Ok(mut link) = handle.state::<ShellState>().restart_link.lock() {
             if let Some(link) = link.take() { environment.args_os.push(link.into()); }
         }
+        close_log_file();
         restart_process(&environment);
     }
     std::process::exit(exit);

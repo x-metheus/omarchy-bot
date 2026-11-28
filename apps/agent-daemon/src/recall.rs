@@ -114,7 +114,10 @@ impl Recall {
                     let mut after = 0;
                     loop {
                         if recall.backfill(None, &mut after).await.is_err() {
-                            eprintln!("Recall could not index Conversation history");
+                            tracing::warn!(
+                                code = "recall_index_failed",
+                                "Recall could not index Conversation history"
+                            );
                         }
                         recall.0.changes.notified().await;
                     }

@@ -32,7 +32,7 @@ cargo run --locked
 
 The daemon prints its bound address. `OMARCHY_AGENT_PORT` defaults to `8765`. Set it to `0` for an available port and use the printed address. `OMARCHY_AGENT_DB` defaults to `agent-daemon.sqlite3` in the current directory. On startup with no provider credential, the daemon can create Bots and read Conversations. A message POST receives `503 provider_unconfigured` before the user message is committed.
 
-The master key file must contain exactly 32 raw bytes. SQLite stores provider keys as AES-256-GCM ciphertext with a fresh OS-random nonce per write and the provider authenticated as associated data. Keep the database and its matching master key in separate protected backups. Restore both to resume saved Settings. A missing or incorrect key for the saved selection prevents startup. If the master key is permanently lost, stop the daemon and back up SQLite before clearing Settings in a transaction. Run `BEGIN IMMEDIATE; DELETE FROM model_settings; DELETE FROM provider_credentials; COMMIT;` against that database, then provision a new master key and re-enter provider credentials. Conversation history remains available. An independently replaced Settings bearer token takes effect on restart.
+The master key file must contain exactly 32 raw bytes. SQLite stores provider keys as AES-256-GCM ciphertext with a fresh OS-random nonce per write. Keep the database and its matching master key in separate protected backups. Restore both to resume saved Settings. A missing or incorrect master key for a key-protected current selection prevents startup. If the key is permanently lost, stop the daemon and back up SQLite before clearing Settings in a transaction. Run `BEGIN IMMEDIATE; DELETE FROM current_provider_configuration; DELETE FROM provider_configurations; DELETE FROM model_settings; DELETE FROM provider_credentials; COMMIT;` against that database, then provision a new master key and re-enter provider credentials. Conversation history remains available. An independently replaced Settings bearer token takes effect on restart.
 
 ## Desktop connection
 
@@ -54,11 +54,11 @@ For standalone use without a token file, Conversation routes remain available on
 
 ## Settings API
 
-`GET /settings` and `PUT /settings` require an operator or paired-device `Authorization: Bearer <token>` header. The daemon checks the header before reading a Settings request body. If the operator token file is omitted, both routes reject requests. An operator can run without the master key file before saving any Settings. `GET` then reports `writable: false` and `PUT` returns `503 settings_read_only`.
+All Settings routes require an operator or paired-device `Authorization: Bearer <token>` header. The daemon checks authorization before reading a Settings request body or contacting a provider. Without the operator token file, Settings requests are denied. Without the master key, `GET /settings` reports `writable: false` and writes return `503 settings_read_only`.
 
 Send `PUT /settings` as JSON with `provider` (`openai` or `anthropic`), `model`, and optional `apiKey`. Supply `apiKey` on first setup and to rotate that provider's credential. Omit it to reuse that provider's stored key. Model IDs must be nonempty and free of surrounding whitespace and control characters. API keys must be nonempty printable ASCII without whitespace. Unknown fields and explicit `null` keys are rejected. The provider validates account credentials and model availability on the next Turn. A syntactically valid key can save successfully and later fail upstream, yielding a sanitized `turn_failed` event.
 
-Both methods return the same status shape. `active` is `null` until configured. Its `source` is `saved` or `environment`. `storedCredentials` indicates which providers have an encrypted credential in the database.
+Both methods return the same status shape. `active` is `null` until configured. Its `source` is `saved` or `environment`. When a custom configuration is current, `active.provider` is `custom`, `active.model` is its selected model, and `active.source` is `saved`. `storedCredentials` reports encrypted credentials for the built-in providers.
 
 ```json
 {
@@ -78,6 +78,24 @@ A successful `PUT` commits the selection and any key replacement together. Inval
 Set overrides in the daemon environment before startup. Use a trusted endpoint that implements the selected protocol and use HTTPS for network deployments. Rig supplies Anthropic output limits for known models. The daemon supplies a 1,024-token limit for Messages aliases without a Rig default.
 
 For headless deployments, `OPENAI_API_KEY` and `OMARCHY_AGENT_MODEL` optionally bootstrap OpenAI Chat Completions. The default bootstrap model is `gpt-4.1-mini`. A saved selection takes precedence. The environment key stays in the host bootstrap and does not count as a stored Settings credential.
+
+### Custom Responses providers
+
+Set `baseUrl` to an HTTP(S) API root such as `https://example.com/v1` that the daemon can reach. The service must implement `GET /models` and streamed `POST /responses` there. Configure `authentication` as `apiKey` to send a Bearer token or `none` to omit the authorization header. The daemon does not follow provider redirects.
+
+| Request | Body or response |
+| --- | --- |
+| `GET /settings/providers` | Returns `{configurations, currentId}`. `currentId` is `null` when a built-in or no model is active. |
+| `POST /settings/providers/models` | Accepts `baseUrl`, `authentication`, optional `apiKey`, and optional `id` to reuse a saved key. Returns `{models}` with the discovered Model IDs. |
+| `POST /settings/providers` | Creates a configuration from `name`, `baseUrl`, `authentication`, `model`, and optional `apiKey`. Returns the collection status. |
+| `PUT /settings/providers/{id}` | Edits the configuration using the same fields and returns the collection status. |
+| `POST /settings/providers/{id}/activate` | Sets the configuration as current and returns the collection status. |
+
+Each configuration in the collection has `id`, `name`, `baseUrl`, `authentication`, `model`, and `hasApiKey`. The daemon stores each key encrypted with its configuration ID and normalized Base URL as associated data. An edit or discovery may omit `apiKey` to reuse the key for the same configuration and Base URL. A new Base URL requires a replacement key or `none` authentication. With `none`, omit `apiKey`.
+
+Each save verifies the selected Model ID with a fresh model list from the proposed connection. If another write changes the configuration during discovery, the edit returns `409 provider_configuration_changed`. Upstream authentication failures return `502 provider_authentication_failed`. Failed saves preserve the previous configuration and selection.
+
+The first save activates its configuration when no model is current. Other creates leave the selection as it was. Activation and edits to the current configuration apply to new Turns. An admitted Turn retains its connection. `PUT /settings` selects a built-in model and clears `currentId`. The daemon restores its configurations and current selection from SQLite on restart.
 
 ## Live smoke for both protocols
 
@@ -332,4 +350,4 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 ```
 
-Integration tests launch the actual daemon binary with temporary SQLite databases and local scripted OpenAI Chat Completions and Anthropic Messages endpoints. The tests use fixture credentials.
+Integration tests launch the actual daemon binary with temporary SQLite databases and scripted loopback OpenAI Chat Completions, Anthropic Messages, and custom OpenAI Responses endpoints. The tests use fixture credentials. Run `cargo test --locked --test conversation provider_settings` for the custom Provider Settings scenarios.

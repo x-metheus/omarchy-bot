@@ -24,9 +24,12 @@ hmac = "0.12"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rig-core = { version = "=0.47.1", default-features = false }
 rig-tools = "=0.47.1"
+rolling-file.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]

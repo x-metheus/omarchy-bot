@@ -10,10 +10,31 @@ export interface AgentWork { messageId: number; status: WorkStatus; reason?: str
 export interface ToolProgress { id: string; name: string; status: "running" | "completed" | "failed" | "cancelled" | "interrupted" }
 export type Provider = "openai" | "anthropic";
 export interface AgentSettings {
-  active: { provider: Provider; model: string; source: "saved" | "environment" } | null;
+  active: { provider: Provider | "custom"; model: string; source: "saved" | "environment" } | null;
   storedCredentials: Record<Provider, boolean>;
   writable: boolean;
 }
+
+export type ProviderAuthentication = "apiKey" | "none";
+export interface ProviderConfiguration {
+  id: string;
+  name: string;
+  baseUrl: string;
+  authentication: ProviderAuthentication;
+  model: string;
+  hasApiKey: boolean;
+}
+export interface ProviderConfigurations {
+  configurations: ProviderConfiguration[];
+  currentId: string | null;
+}
+export interface ProviderConnection {
+  baseUrl: string;
+  authentication: ProviderAuthentication;
+  apiKey?: string;
+}
+
+type ProviderConfigurationUpdate = ProviderConnection & Pick<ProviderConfiguration, "name" | "model">;
 
 export class DaemonError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -38,6 +59,8 @@ async function json<T>(path: string, options?: RequestInit): Promise<T> {
 
 const botPath = (id: string) => `/bots/${encodeURIComponent(id)}`;
 const attachmentPath = (botId: string, id: string) => `${botPath(botId)}/attachments/${encodeURIComponent(id)}`;
+const providersPath = "/settings/providers";
+const providerPath = (id: string) => `${providersPath}/${encodeURIComponent(id)}`;
 
 export const agentDaemon = {
   bots: (signal?: AbortSignal) => json<AgentBot[]>("/bots", signal ? { signal } : {}),
@@ -75,6 +98,15 @@ export const agentDaemon = {
   settings: () => json<AgentSettings>("/settings"),
   saveSettings: (settings: { provider: Provider; model: string; apiKey?: string }) =>
     json<AgentSettings>("/settings", { method: "PUT", body: JSON.stringify(settings) }),
+  providerConfigurations: (signal: AbortSignal) => json<ProviderConfigurations>(providersPath, { signal }),
+  providerModels: (connection: ProviderConnection & { id?: string }, signal: AbortSignal) =>
+    json<{ models: string[] }>(`${providersPath}/models`, { method: "POST", body: JSON.stringify(connection), signal }),
+  saveProviderConfiguration: (configuration: ProviderConfigurationUpdate, id?: string) =>
+    json<ProviderConfigurations>(id ? providerPath(id) : providersPath, {
+      method: id ? "PUT" : "POST", body: JSON.stringify(configuration),
+    }),
+  activateProviderConfiguration: (id: string) =>
+    json<ProviderConfigurations>(`${providerPath(id)}/activate`, { method: "POST" }),
 };
 
 export interface ConversationFrame { id: string; event: string; data: unknown }

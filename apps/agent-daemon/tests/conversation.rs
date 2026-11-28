@@ -33,6 +33,8 @@ mod host_tools;
 mod observational_memory;
 #[path = "conversation/pairing.rs"]
 mod pairing;
+#[path = "conversation/provider_settings.rs"]
+mod provider_settings;
 #[path = "conversation/recovery.rs"]
 mod recovery;
 #[path = "conversation/source_recall.rs"]
@@ -71,6 +73,7 @@ impl Daemon {
             .env_remove("OMARCHY_AGENT_RECALL_DOWNLOAD")
             .env_remove("OMARCHY_AGENT_RECALL_MODEL_SOURCE")
             .env_remove("OMARCHY_AGENT_WORK_DIR")
+            .env_remove("OMARCHY_AGENT_LOG_DIR")
             .env("OPENAI_BASE_URL", format!("{}/v1", provider.url))
             .env("ANTHROPIC_BASE_URL", &provider.url)
             .env("NO_PROXY", "127.0.0.1")
@@ -1462,10 +1465,7 @@ async fn settings_migrate_an_existing_conversation_and_roll_back_storage_failure
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert_secret_free(&output.stderr);
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("cannot decrypt stored provider credential")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("database_open_failed"));
 
     {
         let connection = rusqlite::Connection::open(&db).unwrap();

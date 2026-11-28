@@ -1,6 +1,7 @@
 mod desktop;
 mod events;
 mod pairing;
+mod providers;
 
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -28,6 +29,7 @@ use crate::attachments::{Input as AttachmentInput, MAX_ATTACHMENTS, Submission};
 use crate::desktop_tools::{Desktops, Target};
 use crate::duties;
 use crate::recall::{Availability, Recall};
+use crate::settings::providers::{Error as ProviderError, Mutation, Status as ProviderStatus};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
 use crate::store::work::{Report, Retry, Settlement};
 use crate::store::{Admission, Bot, Conversation, History, Store, ToolProgress};
@@ -62,7 +64,8 @@ pub(crate) fn router(
         .route("/bots/{bot}/events", get(events::read))
         .route("/bots/{bot}/attachments/{id}", get(read_attachment))
         .route("/recall/status", get(recall_status));
-    let settings_router = Router::new().route("/settings", get(read_settings).put(write_settings));
+    let settings_router =
+        providers::routes().route("/settings", get(read_settings).put(write_settings));
     pairing
         .protect(conversations_router, Access::Conversation)
         .merge(pairing.protect(settings_router, Access::Settings))
@@ -374,6 +377,10 @@ pub(crate) enum ConversationCommand {
         input: SettingsUpdate,
         reply: oneshot::Sender<anyhow::Result<Update>>,
     },
+    ProviderSettings {
+        mutation: Mutation,
+        reply: oneshot::Sender<Result<ProviderStatus, ProviderError>>,
+    },
     Retry {
         source: UserMessageSource,
         reply: oneshot::Sender<Result<StatusCode, ApiError>>,
@@ -459,6 +466,13 @@ pub(crate) async fn run_conversations(
             ConversationCommand::Settings { input, reply } => {
                 let update = store.update_settings(input).await;
                 if matches!(update, Ok(Update::Saved(_))) {
+                    wake.wake();
+                }
+                let _ = reply.send(update);
+            }
+            ConversationCommand::ProviderSettings { mutation, reply } => {
+                let update = store.mutate_provider(mutation).await;
+                if update.is_ok() {
                     wake.wake();
                 }
                 let _ = reply.send(update);
@@ -605,6 +619,7 @@ pub(crate) async fn run_conversations(
                             "turn_failed",
                             "Rig did not complete a text reply; check the model and provider configuration",
                         );
+                        tracing::warn!(code = problem.code, "Agent Turn did not complete a reply");
                         match store.fail_work(bot, work, problem).await {
                             Ok(record) => record.sse(),
                             Err(error) => event("error", store_error(error).1),
@@ -677,8 +692,8 @@ const SETTINGS_STORAGE_FAILED: ApiError = ApiError(
     ),
 );
 
-fn store_error(error: anyhow::Error) -> ApiError {
-    eprintln!("SQLite operation failed: {error:#}");
+fn store_error(_: anyhow::Error) -> ApiError {
+    tracing::error!(code = "storage_failed", "Conversation storage operation failed");
     ApiError(
         StatusCode::INTERNAL_SERVER_ERROR,
         Problem::new(

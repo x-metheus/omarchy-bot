@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import * as stylex from "@stylexjs/stylex";
 import { AppShell, useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -19,6 +20,10 @@ import type { LocalAgentDaemon } from "../lib/shell.ts";
 import { AddService } from "./AddService.tsx";
 import { AgentConversationView, type ConversationFeed } from "./AgentConversation.tsx";
 import { AgentDaemonSettings, type LaunchPreference } from "./settings/AgentDaemonSettings.tsx";
+
+const styles = stylex.create({
+  hidden: { display: "none" },
+});
 
 export function AgentDesktop({ daemon, paired, baseUrl }: {
   daemon: LocalAgentDaemon;
@@ -82,7 +87,7 @@ function AgentWorkspace({ baseUrl, launch }: { baseUrl: string; launch: LaunchPr
   const [selected, setSelected] = useState(() => {
     try { return localStorage.getItem(selectedKey) ?? ""; } catch { return ""; }
   });
-  const [settings, setSettings] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [action, setAction] = useState<BotAction>();
   const feeds = useRef(new Map<string, ConversationFeed>());
   const bot = bots.data?.find(candidate => candidate.id === selected) ?? bots.data?.[0];
@@ -94,6 +99,7 @@ function AgentWorkspace({ baseUrl, launch }: { baseUrl: string; launch: LaunchPr
 
   function select(id: string) {
     setSelected(id);
+    setSettingsOpen(false);
     try { localStorage.setItem(selectedKey, id); } catch { /* Selection is still available this session. */ }
   }
 
@@ -103,12 +109,13 @@ function AgentWorkspace({ baseUrl, launch }: { baseUrl: string; launch: LaunchPr
     void queryClient.invalidateQueries({ queryKey: ["agent-bots", baseUrl] });
   }, [baseUrl, queryClient]);
 
-  const nav = <AgentBotNav bots={bots.data ?? []} selected={bot?.id ?? ""} select={select}
-    create={() => setAction({ kind: "create" })} settings={() => setSettings(true)} />;
+  const nav = <AgentBotNav bots={bots.data ?? []} selected={settingsOpen ? "" : bot?.id ?? ""} select={select}
+    settingsOpen={settingsOpen} create={() => setAction({ kind: "create" })} settings={() => setSettingsOpen(true)} />;
 
   return <AppShell height="fill" contentPadding={0} variant="section" sideNav={nav}
     mobileNav={{ breakpoint: "md", content: <MobileNav header="Bot navigation">{nav}</MobileNav> }}>
-    <Layout height="fill" padding={0} header={bot && <LayoutHeader>
+    {/* Keep the Conversation mounted so its draft and daemon event stream survive navigation. */}
+    <Layout height="fill" padding={0} xstyle={settingsOpen && styles.hidden} header={bot && <LayoutHeader>
       <HStack gap={2} justify="between" vAlign="center">
         <Heading level={1}>{bot.name}</Heading>
         <HStack gap={1}>
@@ -125,7 +132,7 @@ function AgentWorkspace({ baseUrl, launch }: { baseUrl: string; launch: LaunchPr
           </> : <Text>{bots.isPending ? "Loading Bots…" : "Create a Bot to start a Conversation."}</Text>}
         </VStack></LayoutContent>}
     </Layout>
-    {settings && <AgentDaemonSettings baseUrl={baseUrl} close={() => setSettings(false)} launch={launch} />}
+    {settingsOpen && <AgentDaemonSettings baseUrl={baseUrl} launch={launch} />}
     {action && <BotDialog action={action} close={() => setAction(undefined)} submit={async name => {
       if (action.kind === "delete") {
         await agentDaemon.remove(action.bot.id);
@@ -142,8 +149,9 @@ function AgentWorkspace({ baseUrl, launch }: { baseUrl: string; launch: LaunchPr
   </AppShell>;
 }
 
-function AgentBotNav({ bots, selected, select, create, settings }: {
+function AgentBotNav({ bots, selected, select, create, settings, settingsOpen }: {
   bots: AgentBot[]; selected: string; select: (id: string) => void; create: () => void; settings: () => void;
+  settingsOpen: boolean;
 }) {
   const { isMobile, closeMobileNav } = useAppShellMobile();
   function navigate(action: () => void) {
@@ -151,7 +159,7 @@ function AgentBotNav({ bots, selected, select, create, settings }: {
     action();
   }
   return <SideNav aria-label="Bot navigation" topContent={<Button label="New Bot" variant="primary" onClick={() => navigate(create)} />}
-    footer={<SideNavItem label="Settings" onClick={() => navigate(settings)} />}>
+    footer={<SideNavItem label="Settings" isSelected={settingsOpen} onClick={() => navigate(settings)} />}>
     <SideNavSection title="Bots">
       {bots.map(bot => <SideNavItem key={bot.id} label={bot.name} isSelected={bot.id === selected}
         onClick={() => navigate(() => select(bot.id))} />)}

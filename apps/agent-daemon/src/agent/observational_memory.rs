@@ -195,7 +195,10 @@ fn fit_history(
                     let observation = match result {
                         Ok(observation) => observation,
                         Err(_) => {
-                            eprintln!("Observational Memory could not summarize committed history for Bot {bot}");
+                            tracing::warn!(
+                                code = "observation_failed",
+                                "Observational Memory could not summarize committed history"
+                            );
                             None
                         }
                     };
