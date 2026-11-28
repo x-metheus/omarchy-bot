@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlink
 import os from "node:os";
 import path from "node:path";
 
+const nativeScript = path.join(import.meta.dirname, "windows-app/native.ps1");
 const archive = process.env.OMARCHY_BOT_SMOKE_AGENT_ARCHIVE;
 assert.ok(archive, "Set OMARCHY_BOT_SMOKE_AGENT_ARCHIVE to the native daemon archive");
 const app = process.env.OMARCHY_BOT_SMOKE_APP;
@@ -122,7 +123,7 @@ async function closeDesktop() {
   assert.ok(profile && app);
   await until("previous smoke app exits", () => {
     const pids = process.platform === "win32"
-      ? JSON.parse(command(["pwsh", "-NoProfile", "-File", "scripts/windows-app/native.ps1", "processes", app])) as number[]
+      ? JSON.parse(command(["pwsh", "-NoProfile", "-File", nativeScript, "processes", app])) as number[]
       : readdirSync("/proc").filter(entry => /^\d+$/.test(entry)).flatMap(entry => {
         try {
           return path.basename(readlinkSync(`/proc/${entry}/exe`)) === "omarchy-bot" &&
@@ -212,7 +213,7 @@ try {
     await click("Pair local daemon");
     await until("paired device stored by the native shell", () => {
       const credential = process.platform === "win32"
-        ? command(["pwsh", "-NoProfile", "-File", "scripts/windows-app/native.ps1", "credential", "-CredentialTarget", "agent-daemon-connection.com.omarchy.bot"])
+        ? command(["pwsh", "-NoProfile", "-File", nativeScript, "credential", "-CredentialTarget", "agent-daemon-connection.com.omarchy.bot"])
         : command(["secret-tool", "lookup", "service", "com.omarchy.bot", "username", "agent-daemon-connection"]);
       return JSON.parse(credential)?.baseUrl === local;
     });
@@ -256,7 +257,7 @@ try {
       await Bun.sleep(250);
       command(["xdotool", "type", "--clearmodifiers", "--delay", "25", looseFile]);
       await Bun.sleep(300);
-      if (evidence) command(["python3", "scripts/linux-app/capture.py", path.join(evidence, "native-file-picker.png")]);
+      if (evidence) command(["python3", path.join(import.meta.dirname, "linux-app/capture.py"), path.join(evidence, "native-file-picker.png")]);
       command(["xdotool", "key", "--clearmodifiers", "Return"]);
       await visible("Desktop file: sample.txt");
       await send("Read selected fixture");

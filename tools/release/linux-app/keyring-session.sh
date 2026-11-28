@@ -31,6 +31,9 @@ trap cleanup EXIT
   printf 'tauri-driver 2.1.0; tauri-cli 2.12.4 (Dockerfile --locked installs)\n'
   sha256sum /artifact/omarchy-bot.AppImage
 } > "/src/.lane/linux-app/evidence/${prefix}environment.txt"
-smoke=scripts/agent-release-smoke.ts
-if [[ ${OMARCHY_BOT_UPDATER_SMOKE:-0} == 1 ]]; then smoke=scripts/linux-app/updater-smoke.ts; fi
+smoke=tools/release/agent-release-smoke.ts
+if [[ ${OMARCHY_BOT_UPDATER_SMOKE:-0} == 1 ]]; then
+  bun install --cwd tools/release --frozen-lockfile
+  smoke=tools/release/linux-app/updater-smoke.ts
+fi
 bun "$smoke" /artifact/omarchy-bot.AppImage 2>&1 | tee "/src/.lane/linux-app/evidence/${prefix}smoke.log"

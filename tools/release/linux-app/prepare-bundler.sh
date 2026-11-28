@@ -21,5 +21,5 @@ while read -r digest name; do
     mv "$target.partial" "$target"
     chmod 755 "$target"
   fi
-done < /src/scripts/linux-app/bundler.sha256
-(cd "$cache" && sha256sum --check /src/scripts/linux-app/bundler.sha256)
+done < /src/tools/release/linux-app/bundler.sha256
+(cd "$cache" && sha256sum --check /src/tools/release/linux-app/bundler.sha256)

@@ -3,7 +3,7 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 
 const directory = process.argv[2];
-assert.ok(directory, "Usage: bun scripts/app-release.ts asset-directory");
+assert.ok(directory, "Usage: bun tools/release/app-release.ts asset-directory");
 const version = process.env.APP_VERSION;
 const repository = process.env.GITHUB_REPOSITORY;
 assert.match(version ?? "", /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
@@ -33,9 +33,10 @@ for (const name of assets) {
   assert.equal(checksum, `${hash}  ${name}`, `Checksum mismatch: ${name}`);
 }
 const platforms: Record<string, { url: string; signature: string }> = {};
+const signatureCheck = path.join(import.meta.dirname, "linux-app/check-signature.ts");
 for (const [platform, name] of Object.entries(payloads)) {
   const signatureFile = path.join(directory, `${name}.sig`);
-  const check = Bun.spawn([process.execPath, "scripts/linux-app/check-signature.ts", signatureFile, version!], { stdout: "inherit", stderr: "inherit" });
+  const check = Bun.spawn([process.execPath, signatureCheck, signatureFile, version!], { stdout: "inherit", stderr: "inherit" });
   assert.equal(await check.exited, 0, `Invalid updater key or signed version: ${name}`);
   const signature = await Bun.file(signatureFile).text();
   platforms[platform] = { url: `https://github.com/${repository}/releases/download/app-v${version}/${name}`, signature };

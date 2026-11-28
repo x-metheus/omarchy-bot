@@ -14,7 +14,7 @@ if [[ $(id -u) -eq 0 ]]; then
     echo "The private smoke requires a working non-root smoke UID/GID and setpriv privilege drop." >&2
     exit 1
   fi
-  exec setpriv --reuid="$OMARCHY_BOT_SMOKE_UID" --regid="$OMARCHY_BOT_SMOKE_GID" --clear-groups bash /src/scripts/linux-app/session.sh
+  exec setpriv --reuid="$OMARCHY_BOT_SMOKE_UID" --regid="$OMARCHY_BOT_SMOKE_GID" --clear-groups bash /src/tools/release/linux-app/session.sh
 fi
 session=$(mktemp -d /tmp/omarchy-bot-webkit-XXXXXX)
 export HOME=$session/home XDG_RUNTIME_DIR=$session/run TMPDIR=$session/tmp
@@ -62,4 +62,4 @@ EOF
 chmod 755 "$OMARCHY_BOT_SMOKE_APP"
 fi
 cd /src
-dbus-run-session -- bash /src/scripts/linux-app/keyring-session.sh
+dbus-run-session -- bash /src/tools/release/linux-app/keyring-session.sh

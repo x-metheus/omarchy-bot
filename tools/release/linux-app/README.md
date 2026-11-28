@@ -1,19 +1,19 @@
 # Linux AppImage and WebKit smoke
 
-Dispatch the [Linux package workflow](../../.github/workflows/linux-app.yml) to build and smoke the AppImage in GitHub Actions.
+Dispatch the [Linux package workflow](../../../.github/workflows/linux-app.yml) to build and smoke the AppImage in GitHub Actions.
 
 Run from a Linux x86_64 checkout with Docker available:
 
 ```sh
-bash scripts/build-linux-app.sh
-bash scripts/smoke-linux-app.sh .lane/dist/omarchy-bot_0.1.0_amd64.AppImage
+bash tools/release/build-linux-app.sh
+bash tools/release/smoke-linux-app.sh .lane/dist/omarchy-bot_0.1.0_amd64.AppImage
 ```
 
 The build container pins Rust 1.97.1 by image digest, Debian dependencies by snapshot, Bun 1.4.5 by checksum, and the locked Tauri tools. It builds the desktop and Agent Daemon with the native toolchain and verifies the pinned Recall files before bundling. `.lane/dist` receives the AppImage, standalone `omarchy-agent-daemon_<version>_x86_64-unknown-linux-gnu.tar.gz`, and checksums. Toolchains stay in the image and caches stay inside `.lane/linux-app`.
 
 The Agent Daemon smoke uses a temporary home, XDG directories, Xvfb, D-Bus, and Secret Service. It opens the AppImage's AppRun with WebKitWebDriver and launches the standalone archive separately. The test exercises autostart, attach, pairing, provider Settings, a Conversation, attachments, and offline Recall. It drives the native GTK file picker and tool approval in the private display. A loopback fixture supplies model responses.
 
-`session.sh` requires the image-owned `/etc/omarchy-bot-linux-app` marker and Docker's `/.dockerenv` or Podman's `/run/.containerenv` when started as root. It validates the requested UID and GID, then drops privileges before setting up the private profile. `bun test tests/integration/linux-app-session.test.ts` exercises the entry point in a Bubblewrap user and mount namespace with a read-only host filesystem.
+`session.sh` requires the image-owned `/etc/omarchy-bot-linux-app` marker and Docker's `/.dockerenv` or Podman's `/run/.containerenv` when started as root. It validates the requested UID and GID, then drops privileges before setting up the private profile. `bun test tools/release/tests/linux-app-session.test.ts` exercises the entry point in a Bubblewrap user and mount namespace with a read-only host filesystem.
 
 The shipped desktop runs the local file tool through its Tauri executor. The AppImage smoke checks the expected Agent Daemon executable is present before opening the WebView.
 
@@ -40,7 +40,7 @@ omarchy-bot_VERSION_amd64.AppImage.sig
 To exercise native updates with disposable signing material, run:
 
 ```sh
-bash scripts/linux-app/updater-smoke.sh
+bash tools/release/linux-app/updater-smoke.sh
 ```
 
 This uses the same pinned container flow, builds signed `0.1.0` and `0.1.1` images with an ephemeral key, and serves a private loopback updater endpoint. The packaged WebKitGTK checks cover finding the newer version, refusing a tampered AppImage without replacing the installed image, installing the genuine signed image, and restarting into it. The insecure-HTTP override belongs only to this smoke; release endpoints require HTTPS. Run this before a production signed build because the smoke writes its own build outputs. Neither test keys nor release keys belong in uploaded evidence.
@@ -72,7 +72,7 @@ The workflow derives `APP_VERSION` from the tag and sets `TAURI_UPDATER_ENDPOINT
 
 ## Publishing and rollback
 
-The [app release workflow](../../.github/workflows/app-release.yml) runs for stable `app-vX.Y.Z` tags. It requires signed desktop updater payloads and verifies the standalone Agent Daemon archives before publication.
+The [app release workflow](../../../.github/workflows/app-release.yml) runs for stable `app-vX.Y.Z` tags. It requires signed desktop updater payloads and verifies the standalone Agent Daemon archives before publication.
 
 Before publication CI runs the ephemeral-key updater smoke, builds with the release key, smokes that release AppImage, and verifies its SHA-256 sidecar. It also requires signed/notarized macOS arm64 and x64 builds and the full Windows x64 WebView2 preview smoke. Only after every platform succeeds does publication create a draft containing all installers, checksums, signed updater payloads and the complete `latest.json`, then publish and promote it. The versioned release stays prerelease while its Windows installer is an unsigned preview. A failed private draft upload can be retried; already published assets must match the retained build artifacts byte for byte and are never replaced. Do not move an app version tag or replace its binaries.
 

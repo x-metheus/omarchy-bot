@@ -2,7 +2,7 @@ param([switch]$InstallOnly)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if (-not $IsWindows) { throw 'NSIS/WebView2 smoke requires a disposable Windows runner.' }
-$root = (Resolve-Path "$PSScriptRoot/../..").Path
+$root = (Resolve-Path "$PSScriptRoot/../../..").Path
 Push-Location $root
 $driver = $null
 $installed = $false
@@ -31,7 +31,7 @@ try {
   if (-not (Get-Item $scheme).GetValueNames().Contains('URL Protocol')) { throw 'NSIS URL Protocol marker missing.' }
   @{ installerSha256 = (Get-FileHash $build.artifact).Hash; installed = $true; schemeRegistered = $true; authenticode = (Get-AuthenticodeSignature $build.artifact).Status.ToString(); label = $build.label } | ConvertTo-Json | Set-Content "$evidence/install.json"
   if (-not $InstallOnly) {
-    $credential = & pwsh -NoProfile -File scripts/windows-app/native.ps1 credential -CredentialTarget $target
+    $credential = & pwsh -NoProfile -File "$PSScriptRoot/native.ps1" credential -CredentialTarget $target
     if ($LASTEXITCODE -or $credential -ne 'null') { throw 'Use a disposable account without an Agent Daemon credential.' }
     $ownsCredential = $true
     $env:WEBVIEW2_USER_DATA_FOLDER = "$lane/webview2-profile"
@@ -47,7 +47,7 @@ try {
     $env:OMARCHY_AGENT_RECALL_MODEL_SOURCE = 'http://127.0.0.1:1'
     $edgeDriver = (Get-Command msedgedriver.exe -ErrorAction Stop).Source
     $driver = Start-Process -FilePath (Get-Command tauri-driver.exe -ErrorAction Stop).Source -ArgumentList @('--native-driver', $edgeDriver) -PassThru -RedirectStandardOutput "$evidence/driver.log" -RedirectStandardError "$evidence/driver-error.log"
-    & bun scripts/agent-release-smoke.ts
+    & bun tools/release/agent-release-smoke.ts
     if ($LASTEXITCODE) { throw 'Packaged WebView2 smoke failed.' }
   }
 } finally {
@@ -56,7 +56,7 @@ try {
     foreach ($process in @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $daemon })) {
       Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
     }
-    & pwsh -NoProfile -File scripts/windows-app/native.ps1 clear-credential -CredentialTarget $target
+    & pwsh -NoProfile -File "$PSScriptRoot/native.ps1" clear-credential -CredentialTarget $target
     if ($LASTEXITCODE) { throw 'Disposable Agent Daemon credential cleanup failed.' }
   }
   if ($installed) {
