@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted on 2026-11-10.
+Accepted on 2026-11-10. Superseded by [ADR 0017](0017-replace-pi-runtime-with-a-rig-daemon.md).
 
 ## Date
 
