@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import type { Shell } from "../../apps/omarchy-bot/src/lib/shell.ts";
+import type { Shell } from "../src/lib/shell.ts";
 
 function install(initial: Record<string, unknown> = {}, fetcher: (input: string | URL | Request, options?: RequestInit) => Promise<Response> = globalThis.fetch) {
   const calls: { command: string; args: unknown }[] = [];
@@ -21,7 +21,7 @@ function install(initial: Record<string, unknown> = {}, fetcher: (input: string 
     // Native installation must not access the page DOM, even for startup errors.
     queueMicrotask, URL, Uint8Array,
   });
-  const source = readFileSync(new URL("../../apps/omarchy-bot/src-tauri/src/shell.js", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src-tauri/src/shell.js", import.meta.url), "utf8");
   vm.runInContext(`(${source})(${JSON.stringify({
     connection: null, localDaemon: { baseUrl: "http://127.0.0.1:8765", autostart: false },
     ...initial,
@@ -30,7 +30,7 @@ function install(initial: Record<string, unknown> = {}, fetcher: (input: string 
 }
 
 test("native adapter leaves the shell unavailable when Tauri IPC is missing", () => {
-  const source = readFileSync(new URL("../../apps/omarchy-bot/src-tauri/src/shell.js", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src-tauri/src/shell.js", import.meta.url), "utf8");
   const window = {};
   vm.runInNewContext(`(${source})({})`, { window });
   expect(window).toEqual({});
