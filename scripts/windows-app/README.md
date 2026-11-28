@@ -6,6 +6,8 @@ The compiled Sidecar process suite checks that a successfully launched applicati
 
 ## Build and install checks
 
+Dispatch the [Windows package workflow](../../.github/workflows/windows-app.yml) to build and run the install-only smoke in GitHub Actions.
+
 Use a disposable Windows x64 account with PowerShell 7, Bun 1.4.5, Rust 1.97.1 MSVC, Visual Studio C++ build tools, WebView2, and network access for Tauri's NSIS toolchain and the pinned model. The frozen Bun install supplies the Tauri CLI.
 
 ```powershell

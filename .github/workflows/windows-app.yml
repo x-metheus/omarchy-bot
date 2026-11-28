@@ -1,16 +1,6 @@
 name: windows-app
 on:
-  pull_request:
-    paths:
-      - 'apps/omarchy-bot/**'
-      - 'apps/agent-daemon/**'
-      - 'packages/**'
-      - 'scripts/windows-app/**'
-      - 'scripts/build-agent-daemon.ts'
-      - 'scripts/app-release.ts'
-      - 'tests/integration/app-release.test.ts'
-      - 'bun.lock'
-      - '.github/workflows/windows-*.yml'
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:

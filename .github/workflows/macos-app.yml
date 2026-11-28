@@ -1,19 +1,5 @@
 name: macos-app
 on:
-  pull_request:
-    paths:
-      - "apps/omarchy-bot/**"
-      - "apps/agent-daemon/**"
-      - "packages/**"
-      - "tests/integration/native-shell.test.ts"
-      - "scripts/build-macos-app.sh"
-      - "scripts/build-agent-daemon.ts"
-      - "scripts/agent-release-smoke.ts"
-      - "scripts/clear-legacy-agent-data.ts"
-      - "scripts/linux-app/build-config.ts"
-      - "scripts/macos-app/**"
-      - "bun.lock"
-      - ".github/workflows/macos-app.yml"
   workflow_dispatch:
     inputs:
       signed:

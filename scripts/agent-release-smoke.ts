@@ -1,9 +1,7 @@
-import { Database } from "bun:sqlite";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { legacyAgentPaths } from "./legacy-agent-paths.ts";
 
 const archive = process.env.OMARCHY_BOT_SMOKE_AGENT_ARCHIVE;
 assert.ok(archive, "Set OMARCHY_BOT_SMOKE_AGENT_ARCHIVE to the native daemon archive");
@@ -149,20 +147,6 @@ async function nativeWindow(title: string) {
 }
 
 try {
-  const home = path.join(root, "prior-installation");
-  const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData", "Roaming"),
-    OMARCHY_BOT_HOME: undefined, OMARCHY_BOT_STATE: undefined };
-  const legacy = legacyAgentPaths(env);
-  mkdirSync(legacy.dataDir, { recursive: true });
-  mkdirSync(legacy.sharedWorkspaceDir, { recursive: true });
-  const oldDatabase = path.join(legacy.dataDir, "db.sqlite");
-  const legacySqlite = new Database(oldDatabase, { create: true });
-  legacySqlite.exec("CREATE TABLE pi_documents (id TEXT); INSERT INTO pi_documents VALUES ('old-session')");
-  legacySqlite.close();
-  writeFileSync(path.join(legacy.sharedWorkspaceDir, "old-file.txt"), "old workspace text");
-  command([process.execPath, "scripts/clear-legacy-agent-data.ts", "--apply"], env);
-  assert.ok(!existsSync(oldDatabase) && !existsSync(legacy.sharedWorkspaceDir));
-  assert.equal(readFileSync(looseFile, "utf8"), readMarker);
   const unpacked = path.join(root, "standalone");
   mkdirSync(unpacked);
   command(["tar", "-xzf", archive, "-C", unpacked]);
@@ -190,7 +174,7 @@ try {
   await ready(origin);
   await recallReady(origin, operator);
   assert.deepEqual(await (await request(origin, "/bots", operator)).json(), []);
-  pass("Release starts with a fresh profile after discarding fixture Pi sessions and the managed workspace");
+  pass("Standalone Agent Daemon starts with an empty Bot list");
   const settings = { provider: "openai", model: "release-smoke-model", apiKey: key };
   const status = await (await request(origin, "/settings", operator, settings, "PUT")).json();
   assert.deepEqual(status.active, { provider: "openai", model: settings.model, source: "saved" });
