@@ -2,14 +2,15 @@
 set -euo pipefail
 bash /src/tools/release/linux-app/prepare-bundler.sh
 bun install --cwd tools/release --frozen-lockfile
-bun install --cwd apps/omarchy-bot --frozen-lockfile
+bun install --cwd apps/metheus --frozen-lockfile
 bun tools/release/build-agent-daemon.ts
 config=$(bun tools/release/linux-app/build-config.ts)
 version=$(bun -e 'console.log(JSON.parse(process.argv[1]).version)' "$config")
-cd apps/omarchy-bot
+cd apps/metheus
+product_name=$(bun -e 'console.log((await Bun.file("src-tauri/tauri.conf.json").json()).productName)')
 bun run tauri build --config "$config" --bundles appimage -- --locked
-name=omarchy-bot_${version}_amd64.AppImage
-artifact=$CARGO_TARGET_DIR/release/bundle/appimage/$name
+name=metheus_${version}_amd64.AppImage
+artifact="$CARGO_TARGET_DIR/release/bundle/appimage/${product_name}_${version}_amd64.AppImage"
 [[ -f $artifact ]] || { echo "Missing expected AppImage: $artifact" >&2; exit 1; }
 if [[ -n ${TAURI_SIGNING_PRIVATE_KEY:-} ]]; then
   [[ -s $artifact.sig ]] || { echo "Missing updater signature: $artifact.sig" >&2; exit 1; }

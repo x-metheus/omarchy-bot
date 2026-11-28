@@ -15,7 +15,7 @@ jobs:
       - name: Build packaged Linux app in pinned container
         run: bash tools/release/build-linux-app.sh
       - name: Smoke packaged AppImage in private WebKitGTK session
-        run: bash tools/release/smoke-linux-app.sh .lane/dist/omarchy-bot_0.1.0_amd64.AppImage
+        run: bash tools/release/smoke-linux-app.sh .lane/dist/metheus_0.1.0_amd64.AppImage
       - name: Prove signed updates and tamper refusal in packaged WebKitGTK
         run: bash tools/release/linux-app/updater-smoke.sh
       - uses: actions/upload-artifact@v4
@@ -25,7 +25,7 @@ jobs:
           path: |
             .lane/dist/*.AppImage
             .lane/dist/*.AppImage.sha256
-            .lane/dist/omarchy-agent-daemon_*
+            .lane/dist/metheus-agent-daemon_*
             .lane/dist/*.AppImage.sig
             .lane/linux-app/evidence/
           if-no-files-found: error

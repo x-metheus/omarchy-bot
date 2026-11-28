@@ -1,10 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "omarchy-bot",
+  "productName": "Metheus",
+  "mainBinaryName": "metheus",
   "version": "0.1.0",
   "identifier": "com.omarchy.bot",
   "build": {
-    "beforeDevCommand": "cargo build --locked -p omarchy-agent-daemon && bun run dev --host 127.0.0.1",
+    "beforeDevCommand": "cargo build --locked -p metheus-agent-daemon && bun run dev --host 127.0.0.1",
     "devUrl": "http://127.0.0.1:7322",
     "beforeBuildCommand": "bun run build:frontend",
     "frontendDist": "../dist"
@@ -18,10 +19,10 @@
   },
   "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.png", "icons/icon.icns"], "category": "Utility", "shortDescription": "AI Bot Conversations", "macOS": { "minimumSystemVersion": "13.0", "entitlements": "Entitlements.plist" } },
   "plugins": {
-    "deep-link": { "desktop": { "schemes": ["omarchy-bot"] } },
+    "deep-link": { "desktop": { "schemes": ["metheus", "omarchy-bot"] } },
     "updater": {
       "pubkey": "UNCONFIGURED-DEVELOPMENT-BUILD",
-      "endpoints": ["https://github.com/XMethues/omarchy-bot/releases/download/app-latest/latest.json"],
+      "endpoints": ["https://github.com/x-metheus/metheus/releases/download/app-latest/latest.json"],
       "requireSignedVersion": true
     }
   }

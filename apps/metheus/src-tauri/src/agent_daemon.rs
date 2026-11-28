@@ -42,7 +42,8 @@ impl LocalDaemon {
         resource_directory: Option<PathBuf>,
         log_directory: Option<PathBuf>,
     ) -> Self {
-        let port = std::env::var("OMARCHY_BOT_AGENT_PORT")
+        let port = std::env::var("METHEUS_DESKTOP_AGENT_PORT")
+            .or_else(|_| std::env::var("OMARCHY_BOT_AGENT_PORT"))
             .ok()
             .and_then(|value| value.parse().ok())
             .filter(|port| *port != 0)
@@ -222,7 +223,7 @@ impl LocalDaemon {
         Err("The local Agent Daemon did not become ready.".into())
     }
 
-    async fn pairing_code(&self) -> Result<String, String> {
+    async fn pairing_code(&self, app_name: &str) -> Result<String, String> {
         let token = fs::read_to_string(self.directory.join(OPERATOR_TOKEN))
             .map_err(|_| "Enter the pairing code issued by the daemon operator.")?;
         let client = client()?;
@@ -242,7 +243,7 @@ impl LocalDaemon {
         let result = client
             .post(format!("{}/api/pairing/codes", self.origin()))
             .bearer_auth(token)
-            .json(&serde_json::json!({"name": format!("Omarchy Bot ({})", std::env::consts::OS)}))
+            .json(&serde_json::json!({"name": format!("{app_name} ({})", std::env::consts::OS)}))
             .send()
             .await
             .map_err(|_| "Could not reach the local Agent Daemon.")?
@@ -261,16 +262,19 @@ impl LocalDaemon {
 }
 
 fn daemon_binary() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("OMARCHY_BOT_AGENT_DAEMON_BIN").map(PathBuf::from) {
+    if let Some(path) = std::env::var_os("METHEUS_AGENT_DAEMON_BIN")
+        .or_else(|| std::env::var_os("OMARCHY_BOT_AGENT_DAEMON_BIN"))
+        .map(PathBuf::from)
+    {
         if path.is_absolute() && path.is_file() {
             return Ok(path);
         }
         return Err(
-            "OMARCHY_BOT_AGENT_DAEMON_BIN must point to an installed Agent Daemon executable."
+            "METHEUS_AGENT_DAEMON_BIN must point to an installed Agent Daemon executable."
                 .into(),
         );
     }
-    let name = format!("omarchy-agent-daemon{}", std::env::consts::EXE_SUFFIX);
+    let name = format!("metheus-agent-daemon{}", std::env::consts::EXE_SUFFIX);
     let beside_app = std::env::current_exe()
         .ok()
         .map(|path| path.with_file_name(&name));
@@ -361,9 +365,10 @@ pub(super) fn set_daemon_autostart(
 
 #[tauri::command]
 pub(super) async fn local_daemon_pairing_code(
+    app: tauri::AppHandle,
     state: tauri::State<'_, LocalDaemon>,
 ) -> Result<String, String> {
-    state.pairing_code().await
+    state.pairing_code(&app.package_info().name).await
 }
 
 #[cfg(test)]
@@ -387,7 +392,7 @@ mod tests {
         use std::io::Read;
         use std::os::unix::fs::PermissionsExt;
 
-        const PROFILE: &str = "OMARCHY_TEST_DAEMON_STDERR_PROFILE";
+        const PROFILE: &str = "METHEUS_TEST_DAEMON_STDERR_PROFILE";
         if let Some(profile) = std::env::var_os(PROFILE) {
             let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
                 .unwrap()
@@ -410,8 +415,8 @@ mod tests {
         fs::write(
             &fixture,
             r#"#!/bin/sh
-while [ ! -f "$OMARCHY_TEST_DAEMON_STDERR_PROFILE/launcher-exited" ]; do
-    [ -d "$OMARCHY_TEST_DAEMON_STDERR_PROFILE" ] || exit 1
+while [ ! -f "$METHEUS_TEST_DAEMON_STDERR_PROFILE/launcher-exited" ]; do
+    [ -d "$METHEUS_TEST_DAEMON_STDERR_PROFILE" ] || exit 1
     sleep 0.02
 done
 printf 'daemon fallback after launcher exit\n' >&2
@@ -426,7 +431,7 @@ printf 'daemon fallback after launcher exit\n' >&2
                 "agent_daemon::tests::daemon_stderr_reaches_the_original_sink_after_the_launcher_exits",
             ])
             .env(PROFILE, profile.path())
-            .env("OMARCHY_BOT_AGENT_DAEMON_BIN", &fixture)
+            .env("METHEUS_AGENT_DAEMON_BIN", &fixture)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -444,7 +449,7 @@ printf 'daemon fallback after launcher exit\n' >&2
     }
 
     #[test]
-    #[ignore = "set OMARCHY_BOT_AGENT_DAEMON_BIN to a locally built daemon"]
+    #[ignore = "set METHEUS_AGENT_DAEMON_BIN to a locally built daemon"]
     fn native_launcher_honors_preference_starts_and_attaches_to_real_daemon() {
         let profile = tempfile::tempdir().expect("disposable app profile");
         let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -485,7 +490,7 @@ printf 'daemon fallback after launcher exit\n' >&2
             assert!(log.contains("Agent Daemon ready"));
             let code = owner
                 .0
-                .pairing_code()
+                .pairing_code("Metheus")
                 .await
                 .expect("prove local ownership and mint a code");
             let paired = client()
@@ -496,6 +501,25 @@ printf 'daemon fallback after launcher exit\n' >&2
                 .await
                 .expect("exchange local pairing code");
             assert!(paired.status().is_success());
+            let operator_token = fs::read_to_string(owner.0.directory.join(OPERATOR_TOKEN))
+                .expect("read the test daemon operator token");
+            let devices: serde_json::Value = client()
+                .expect("build a loopback HTTP client")
+                .get(format!("{}/api/devices/paired", owner.0.origin()))
+                .bearer_auth(operator_token.trim())
+                .send()
+                .await
+                .expect("request the paired devices")
+                .error_for_status()
+                .expect("authorize the paired devices request")
+                .json()
+                .await
+                .expect("decode the paired devices");
+            assert_eq!(
+                devices["devices"][0]["name"],
+                format!("Metheus ({})", std::env::consts::OS),
+                "new local pairing uses the app display name"
+            );
 
             let attached = LocalDaemon {
                 directory: profile.path().join("attached"),
@@ -515,7 +539,7 @@ printf 'daemon fallback after launcher exit\n' >&2
                 .await
                 .expect("existing daemon ready"));
             assert!(attached.child.lock().unwrap().is_none());
-            assert!(attached.pairing_code().await.is_err());
+            assert!(attached.pairing_code("Metheus").await.is_err());
         });
     }
 }

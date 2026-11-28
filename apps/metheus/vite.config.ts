@@ -14,7 +14,7 @@ export default defineConfig({
   server: {
     port: 7322,
     strictPort: true,
-    host: process.env.OMARCHY_BOT_HOST ?? "127.0.0.1",
+    host: process.env.METHEUS_HOST ?? process.env.OMARCHY_BOT_HOST ?? "127.0.0.1",
     watch: {
       ignored: ["**/src-tauri/**"],
     },

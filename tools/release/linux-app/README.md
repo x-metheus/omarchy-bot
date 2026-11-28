@@ -6,14 +6,14 @@ Run from a Linux x86_64 checkout with Docker available:
 
 ```sh
 bash tools/release/build-linux-app.sh
-bash tools/release/smoke-linux-app.sh .lane/dist/omarchy-bot_0.1.0_amd64.AppImage
+bash tools/release/smoke-linux-app.sh .lane/dist/metheus_0.1.0_amd64.AppImage
 ```
 
-The build container pins Rust 1.97.1 by image digest, Debian dependencies by snapshot, Bun 1.4.5 by checksum, and the locked Tauri tools. It builds the desktop and Agent Daemon with the native toolchain and verifies the pinned Recall files before bundling. `.lane/dist` receives the AppImage, standalone `omarchy-agent-daemon_<version>_x86_64-unknown-linux-gnu.tar.gz`, and checksums. Toolchains stay in the image and caches stay inside `.lane/linux-app`.
+The build container pins Rust 1.97.1 by image digest, Debian dependencies by snapshot, Bun 1.4.5 by checksum, and the locked Tauri tools. It builds the desktop and Agent Daemon with the native toolchain and verifies the pinned Recall files before bundling. `.lane/dist` receives the AppImage, standalone `metheus-agent-daemon_<version>_x86_64-unknown-linux-gnu.tar.gz`, and checksums. Toolchains stay in the image and caches stay inside `.lane/linux-app`.
 
 The Agent Daemon smoke uses a temporary home, XDG directories, Xvfb, D-Bus, and Secret Service. It opens the AppImage's AppRun with WebKitWebDriver and launches the standalone archive separately. The test exercises autostart, attach, pairing, provider Settings, a Conversation, attachments, and offline Recall. It drives the native GTK file picker and tool approval in the private display. A loopback fixture supplies model responses.
 
-`session.sh` requires the image-owned `/etc/omarchy-bot-linux-app` marker and Docker's `/.dockerenv` or Podman's `/run/.containerenv` when started as root. It validates the requested UID and GID, then drops privileges before setting up the private profile. `bun test tools/release/tests/linux-app-session.test.ts` exercises the entry point in a Bubblewrap user and mount namespace with a read-only host filesystem.
+`session.sh` requires the image-owned `/etc/metheus-linux-app` marker and Docker's `/.dockerenv` or Podman's `/run/.containerenv` when started as root. It validates the requested UID and GID, then drops privileges before setting up the private profile. `bun test tools/release/tests/linux-app-session.test.ts` exercises the entry point in a Bubblewrap user and mount namespace with a read-only host filesystem.
 
 The shipped desktop runs the local file tool through its Tauri executor. The AppImage smoke checks the expected Agent Daemon executable is present before opening the WebView.
 
@@ -32,9 +32,9 @@ Unsigned developer builds keep the default `0.1.0` version and cannot install up
 The build embeds the version, public key, and endpoint in the AppImage, enables Tauri updater artifacts, and writes these files to `.lane/dist`:
 
 ```text
-omarchy-bot_VERSION_amd64.AppImage
-omarchy-bot_VERSION_amd64.AppImage.sha256
-omarchy-bot_VERSION_amd64.AppImage.sig
+metheus_VERSION_amd64.AppImage
+metheus_VERSION_amd64.AppImage.sha256
+metheus_VERSION_amd64.AppImage.sig
 ```
 
 To exercise native updates with disposable signing material, run:
@@ -47,23 +47,23 @@ This uses the same pinned container flow, builds signed `0.1.0` and `0.1.1` imag
 
 ## Release setup
 
-Create one Tauri updater keypair using the CLI already in the repository's container. After the ordinary build above has prepared `omarchy-bot-linux-app`, use a private directory and the CLI's interactive password prompt:
+Create one Tauri updater keypair using the CLI already in the repository's container. After the ordinary build above has prepared `metheus-linux-app`, use a private directory and the CLI's interactive password prompt:
 
 ```sh
 mkdir -p .lane/linux-app/release-signing
 chmod 700 .lane/linux-app/release-signing
 docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/tmp \
   -v "$PWD/.lane/linux-app/release-signing:/keys" \
-  omarchy-bot-linux-app cargo tauri signer generate -w /keys/omarchy-bot.key
-chmod 600 .lane/linux-app/release-signing/omarchy-bot.key
+  metheus-linux-app cargo tauri signer generate -w /keys/metheus.key
+chmod 600 .lane/linux-app/release-signing/metheus.key
 ```
 
 Keep the private key and password in the maintainer's secret storage with a recoverable backup. Losing the key prevents updates for apps that trust its public half. Provision GitHub through repository Settings → Secrets and variables → Actions:
 
 | Location | Name | Value |
 | --- | --- | --- |
-| Repository variable | `TAURI_UPDATER_PUBKEY` | Entire contents of `omarchy-bot.key.pub`, not its path |
-| Environment `app-release` secret | `TAURI_SIGNING_PRIVATE_KEY` | Entire contents of `omarchy-bot.key`, not its path |
+| Repository variable | `TAURI_UPDATER_PUBKEY` | Entire contents of `metheus.key.pub`, not its path |
+| Environment `app-release` secret | `TAURI_SIGNING_PRIVATE_KEY` | Entire contents of `metheus.key`, not its path |
 | Environment `app-release` secret | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password chosen during generation |
 
 Create the `app-release` environment, restrict its deployment tags to `app-v*`, and protect release tags against replacement. The public key is safe to distribute; it must match the private key. Release builds inject it into the app, so no generated key file needs to be committed. The existing `.lane/` and private-key ignores are safeguards, not permission to publish signing material. Keep the same public key for already installed apps; replacing only the GitHub keypair does not rotate their trust.

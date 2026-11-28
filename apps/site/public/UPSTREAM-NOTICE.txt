@@ -1,32 +1,27 @@
-Omarchy Bot website credits
+Metheus website credits
 
-The pixel-field renderer, Omarchy wordmark bitmap and SVG artwork, brand mark,
-and named theme palettes include material adapted from the Omarchy website:
+The pixel-field renderer and named theme palettes include material adapted
+from the Omarchy website:
 
 https://github.com/omacom/omarchy-site
 Revision: 47711270650b9c78c7bfa996cdd0b6050c79566f
 
 Original sources:
 - src/components/HeroPixelField.tsx
-- src/components/Brand.tsx
-- src/data/wordmark-bitmap.ts
 - src/lib/site-themes.ts
 - src/styles.css
-- brand/omarchy-wordmark.svg
-- brand/omarchy-logo.svg
 
 Credit belongs to the Omarchy website contributors. The official redesign
 announcement credits Baris Girismen with the design foundation and pixel-grid
 shader, alongside Christoffer Hallas, Daniel Schmier, and other contributors:
 https://omarchy.org/news/2026/09/omarchy-org-redesign-launches-with-29-languages/
 
-Omarchy Bot adapts the renderer to a native TypeScript lifecycle, adds explicit
+Metheus adapts the renderer to a native TypeScript lifecycle, adds explicit
 motion controls, and does not include the radio or etch-effect integrations.
-The hero wordmark adds BOT lettering to the original Omarchy artwork.
 
 The upstream repository contained no LICENSE file at the imported revision.
 Upstream authors retain their rights. These source-derived portions are not
-relicensed under the MIT license covering Omarchy Bot's original code.
+relicensed under the MIT license covering Metheus's original code.
 
 JetBrains Mono and Geist are distributed with their respective font licenses
-in /fonts/. Omarchy Bot is an independent desktop project.
+in /fonts/. Metheus is an independent desktop project.

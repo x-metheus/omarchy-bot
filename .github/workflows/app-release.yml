@@ -48,16 +48,16 @@ jobs:
           : "${TAURI_SIGNING_PRIVATE_KEY:?Set the app-release TAURI_SIGNING_PRIVATE_KEY secret}"
           bash tools/release/build-linux-app.sh
       - name: Smoke the release AppImage in private WebKitGTK
-        run: bash tools/release/smoke-linux-app.sh ".lane/dist/omarchy-bot_${APP_VERSION}_amd64.AppImage"
+        run: bash tools/release/smoke-linux-app.sh ".lane/dist/metheus_${APP_VERSION}_amd64.AppImage"
       - uses: actions/upload-artifact@v4
         with:
           name: app-release-linux
           path: |
-            .lane/dist/omarchy-bot_${{ env.APP_VERSION }}_amd64.AppImage
-            .lane/dist/omarchy-bot_${{ env.APP_VERSION }}_amd64.AppImage.sig
-            .lane/dist/omarchy-bot_${{ env.APP_VERSION }}_amd64.AppImage.sha256
-            .lane/dist/omarchy-agent-daemon_${{ env.APP_VERSION }}_x86_64-unknown-linux-gnu.tar.gz
-            .lane/dist/omarchy-agent-daemon_${{ env.APP_VERSION }}_x86_64-unknown-linux-gnu.tar.gz.sha256
+            .lane/dist/metheus_${{ env.APP_VERSION }}_amd64.AppImage
+            .lane/dist/metheus_${{ env.APP_VERSION }}_amd64.AppImage.sig
+            .lane/dist/metheus_${{ env.APP_VERSION }}_amd64.AppImage.sha256
+            .lane/dist/metheus-agent-daemon_${{ env.APP_VERSION }}_x86_64-unknown-linux-gnu.tar.gz
+            .lane/dist/metheus-agent-daemon_${{ env.APP_VERSION }}_x86_64-unknown-linux-gnu.tar.gz.sha256
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
@@ -122,7 +122,7 @@ jobs:
           cp .lane/windows-release/dist/* .lane/release-assets/
           bun tools/release/app-release.ts .lane/release-assets
           printf '%s\n' \
-            "Omarchy Bot ${APP_VERSION} for Linux x86_64, macOS Apple Silicon and Intel, and Windows x64." \
+            "Metheus ${APP_VERSION} for Linux x86_64, macOS Apple Silicon and Intel, and Windows x64." \
             '' \
             'Includes the desktop installers, macOS updater payloads, standalone Agent Daemon archives with pinned Recall assets, checksums, updater signatures, and one complete latest.json.' \
             'Windows is an unsigned preview and may show SmartScreen warnings. The release requires the complete packaged WebView2 suite; macOS support additionally requires the recorded WKWebView checklist on both architectures.' \
@@ -138,7 +138,7 @@ jobs:
           [[ $count -le 1 ]]
           if [[ $count == 0 ]]; then
             gh release create "$GITHUB_REF_NAME" .lane/release-assets/* \
-              --draft --prerelease --verify-tag --latest=false --title "Omarchy Bot ${APP_VERSION}" \
+              --draft --prerelease --verify-tag --latest=false --title "Metheus ${APP_VERSION}" \
               --notes-file "$RUNNER_TEMP/app-release-notes.md"
           elif [[ $(jq -r '.[0].draft' "$RUNNER_TEMP/existing-release.json") == true ]]; then
             # A failed upload can only be resumed while the release is still private.
@@ -174,7 +174,7 @@ jobs:
             gh release upload app-latest .lane/release-assets/latest.json --clobber
           else
             gh release create app-latest .lane/release-assets/latest.json \
-              --target "$GITHUB_SHA" --prerelease --latest=false --title 'Omarchy Bot updater channel' \
+              --target "$GITHUB_SHA" --prerelease --latest=false --title 'Metheus updater channel' \
               --notes 'Complete Linux, macOS and Windows app updater manifest with artifact URLs pinned to immutable app-vX.Y.Z releases.'
           fi
           gh release download app-latest --pattern latest.json --dir .lane/promoted-release

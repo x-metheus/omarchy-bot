@@ -1,6 +1,6 @@
 # Development workflow
 
-Start with the [project instructions](../AGENTS.md). Locate the affected source and tests using the [code map](README.md#code-map). For desktop frontend changes, follow the [frontend instructions](../apps/omarchy-bot/AGENTS.md).
+Start with the [project instructions](../AGENTS.md). Locate the affected source and tests using the [code map](README.md#code-map). For desktop frontend changes, follow the [frontend instructions](../apps/metheus/AGENTS.md).
 
 ## Workflow selection
 
@@ -22,7 +22,7 @@ For Rust implementation, porting, and review, use [rust-best-practices](../.agen
 
 ## Project artifacts
 
-`/to-spec` publishes the specification as a GitHub issue in `x-metheus/omarchy-bot`. `/to-tickets` takes a plan, spec, or discussion and publishes one issue per approved ticket. Each ticket carries its acceptance criteria and blocking dependencies. When the source is a spec issue, the tickets become its sub-issues. See the [issue tracker guide](agents/issue-tracker.md) and [triage label mapping](agents/triage-labels.md).
+`/to-spec` publishes the specification as a GitHub issue in `x-metheus/metheus`. `/to-tickets` takes a plan, spec, or discussion and publishes one issue per approved ticket. Each ticket carries its acceptance criteria and blocking dependencies. When the source is a spec issue, the tickets become its sub-issues. See the [issue tracker guide](agents/issue-tracker.md) and [triage label mapping](agents/triage-labels.md).
 
 | Repository reference | Location | Contents |
 | --- | --- | --- |
@@ -32,7 +32,7 @@ For Rust implementation, porting, and review, use [rust-best-practices](../.agen
 
 ## Stack and verification
 
-- The root Cargo workspace contains the standalone Agent Daemon and the Tauri native crate. Both use the root lockfile and toolchain. The daemon integration tests use temporary databases and scripted providers. [Workspace manifest](../Cargo.toml) · [Agent Daemon guide](../apps/agent-daemon/README.md#checks)
+- The root Cargo workspace contains the standalone Agent Daemon, the Tauri native crate, and the shared logging crate. All three use the root lockfile and toolchain. The daemon integration tests use temporary databases and scripted providers. [Workspace manifest](../Cargo.toml) · [Agent Daemon guide](../apps/agent-daemon/README.md#checks)
 - mise pins the development tools. Desktop frontend, site, and release tooling use their own Bun manifests and lockfiles. [mise configuration](../mise.toml)
 
 Run these commands from the repository root. With mise activated in your shell, run Cargo and Bun directly. Otherwise prefix them with `mise exec --`.
@@ -40,13 +40,13 @@ Run these commands from the repository root. With mise activated in your shell, 
 | Command | Purpose |
 | --- | --- |
 | `mise install` | Install the pinned Rust and Bun versions |
-| `cargo test --workspace --locked` | Test both native crates |
-| `cargo test -p omarchy-agent-daemon --locked --test conversation` | Run the daemon protocol suite |
-| `bun --cwd=apps/omarchy-bot install --frozen-lockfile` | Install the desktop's locked dependencies |
+| `cargo test --workspace --locked` | Test the native workspace |
+| `cargo test -p metheus-agent-daemon --locked --test conversation` | Run the daemon protocol suite |
+| `bun --cwd=apps/metheus install --frozen-lockfile` | Install the desktop's locked dependencies |
 | `mise run daemon` | Build and start the standalone Agent Daemon |
 | `mise run dev` | Open the native Tauri development window |
-| `bun --cwd=apps/omarchy-bot run typecheck` | Check desktop TypeScript types |
-| `bun --cwd=apps/omarchy-bot run test` | Run the desktop's Bun tests |
+| `bun --cwd=apps/metheus run typecheck` | Check desktop TypeScript types |
+| `bun --cwd=apps/metheus run test` | Run the desktop's Bun tests |
 
 
 ### Standalone daemon
@@ -55,9 +55,9 @@ Run these commands from the repository root. With mise activated in your shell, 
 
 ### Desktop project layout
 
-`apps/omarchy-bot` contains the Bun manifest, Vite config and frontend sources alongside `src-tauri`. The project is based on the official Bun, React TypeScript, Tauri 2 scaffold. To reproduce the starting scaffold in an empty directory, run `bunx create-tauri-app@4.7.5 omarchy-bot --manager bun --template react-ts --tauri-version 2 --identifier com.omarchy.bot --yes`. See the [Tauri project guide](https://v2.tauri.app/start/create-project/) and [Vite integration guide](https://v2.tauri.app/start/frontend/vite/).
+`apps/metheus` contains the Bun manifest, Vite config and frontend sources alongside `src-tauri`. The project is based on the official Bun, React TypeScript, Tauri 2 scaffold. To reproduce the starting scaffold in an empty directory, run `bunx create-tauri-app@4.7.5 metheus --manager bun --template react-ts --tauri-version 2 --identifier com.omarchy.bot --yes`. See the [Tauri project guide](https://v2.tauri.app/start/create-project/) and [Vite integration guide](https://v2.tauri.app/start/frontend/vite/).
 
-Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/). Run `mise run dev` from the repository root or `bun run tauri dev` from `apps/omarchy-bot`. Tauri builds the Agent Daemon, starts Vite at `http://127.0.0.1:7322`, and compiles the debug App in the Cargo workspace. The App attaches to an already running local Agent Daemon. Restart that daemon after rebuilding it to load the new binary with the same database and credentials. For native interactions, exercise the behavior in the App window. Set `OMARCHY_BOT_AGENT_DAEMON_BIN` to use a specific daemon executable. [Standalone daemon setup](../apps/agent-daemon/README.md#headless-startup)
+Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/). Run `mise run dev` from the repository root or `bun run tauri dev` from `apps/metheus`. Tauri builds the Agent Daemon, starts Vite at `http://127.0.0.1:7322`, and compiles the debug App in the Cargo workspace. The App attaches to an already running local Agent Daemon. Restart that daemon after rebuilding it to load the new binary with the same database and credentials. For native interactions, exercise the behavior in the App window. Set `METHEUS_AGENT_DAEMON_BIN` to use a specific daemon executable. [Standalone daemon setup](../apps/agent-daemon/README.md#headless-startup)
 
 For site development, install its dependencies and run `bun run dev` inside `apps/site`.
 
@@ -69,7 +69,7 @@ Run App production builds, packaging, and cross-platform package checks only for
 
 | Command | Purpose |
 | --- | --- |
-| `bun --cwd=apps/omarchy-bot run build:frontend` | Build the production desktop frontend |
+| `bun --cwd=apps/metheus run build:frontend` | Build the production desktop frontend |
 | `bash tools/release/build-linux-app.sh` | Package the desktop app and standalone daemon on Linux |
 
 The platform release scripts in `tools/release` stage the daemon and verified Recall model, then invoke `tauri build` with the release configuration. See the [Linux](../tools/release/linux-app/README.md), [macOS](../tools/release/macos-app/README.md), and [Windows](../tools/release/windows-app/README.md) guides and the [release workflow](../.github/workflows/app-release.yml).

@@ -33,7 +33,7 @@ export function AddService({ local }: { local: LocalDaemonController }) {
           <div className="grid size-9 place-items-center rounded-xl bg-primary text-primary-foreground">
             <BotIcon className="size-5" aria-hidden="true" />
           </div>
-          Omarchy Bot
+          Metheus
         </div>
         <h1 className="text-3xl font-semibold tracking-tight">Connect to an Agent Daemon</h1>
       </header>

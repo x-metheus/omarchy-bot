@@ -26,7 +26,7 @@ function install(initial: Record<string, unknown> = {}, fetcher: (input: string 
     connection: null, localDaemon: { baseUrl: "http://127.0.0.1:8765", autostart: false },
     ...initial,
   })})`, context);
-  return { shell: context.window.__OMARCHY_BOT_SHELL__ as Shell, window: context.window, calls };
+  return { shell: context.window.__METHEUS_SHELL__ as Shell, window: context.window, calls };
 }
 
 test("native adapter leaves the shell unavailable when Tauri IPC is missing", () => {

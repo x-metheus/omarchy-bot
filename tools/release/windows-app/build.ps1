@@ -11,13 +11,13 @@ try {
   $env:CARGO_TARGET_DIR = "$lane/target"
   & bun install --cwd tools/release --frozen-lockfile
   if ($LASTEXITCODE) { throw 'Release tool dependency install failed' }
-  & bun install --cwd apps/omarchy-bot --frozen-lockfile
+  & bun install --cwd apps/metheus --frozen-lockfile
   if ($LASTEXITCODE) { throw 'Desktop dependency install failed' }
-  $version = (Get-Content apps/omarchy-bot/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+  $version = (Get-Content apps/metheus/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
   $overlay = @{ bundle = @{
     createUpdaterArtifacts = $false
-    shortDescription = 'Omarchy Bot Windows unsigned preview'
-    externalBin = @('binaries/omarchy-agent-daemon')
+    shortDescription = 'Metheus Windows unsigned preview'
+    externalBin = @('binaries/metheus-agent-daemon')
     resources = @{ 'binaries/recall-model/' = 'recall-model/' }
   } }
   if ($Release) {
@@ -25,7 +25,7 @@ try {
     foreach ($name in @('TAURI_SIGNING_PRIVATE_KEY','TAURI_UPDATER_PUBKEY','TAURI_UPDATER_ENDPOINT')) {
       if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Missing release variable $name" }
     }
-    if (-not (Select-String -Path apps/omarchy-bot/src-tauri/Cargo.toml -Pattern '^tauri-plugin-updater\s*=' -Quiet)) { throw 'The desktop app must include tauri-plugin-updater to build a release.' }
+    if (-not (Select-String -Path apps/metheus/src-tauri/Cargo.toml -Pattern '^tauri-plugin-updater\s*=' -Quiet)) { throw 'The desktop app must include tauri-plugin-updater to build a release.' }
     $version = $env:APP_VERSION
     $overlay.version = $version
     $overlay.bundle.createUpdaterArtifacts = $true
@@ -33,7 +33,7 @@ try {
   }
   # Authenticode is independent of the updater signature. No certificate means preview.
   if ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
-    $overlay.bundle.shortDescription = 'Omarchy Bot Windows signed build'
+    $overlay.bundle.shortDescription = 'Metheus Windows signed build'
     $overlay.bundle.windows = @{ certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT; digestAlgorithm = 'sha256'; timestampUrl = 'http://timestamp.digicert.com' }
   }
   $env:APP_VERSION = $version
@@ -41,7 +41,7 @@ try {
   if ($LASTEXITCODE) { throw 'Agent Daemon build failed' }
   $config = "$lane/build-config.json"
   $overlay | ConvertTo-Json -Depth 10 | Set-Content $config -Encoding utf8
-  Push-Location apps/omarchy-bot
+  Push-Location apps/metheus
   try { & bun run tauri build --bundles nsis --config $config -- --locked; if ($LASTEXITCODE) { throw 'Tauri NSIS build failed' } }
   finally { Pop-Location }
   $installers = @(Get-ChildItem "$env:CARGO_TARGET_DIR/release/bundle/nsis/*-setup.exe")
@@ -50,7 +50,7 @@ try {
   if ($env:WINDOWS_CERTIFICATE_THUMBPRINT -and -not $signed) { throw 'Requested Authenticode signing did not produce a valid signature.' }
   $env:WINDOWS_AUTHENTICODE_SIGNED = $signed.ToString().ToLowerInvariant()
   $label = if ($signed) { 'signed' } else { 'unsigned-preview' }
-  $artifact = "$root/.lane/dist/omarchy-bot_${version}_x64-${label}-setup.exe"
+  $artifact = "$root/.lane/dist/metheus_${version}_x64-${label}-setup.exe"
   Copy-Item $installers[0].FullName $artifact
   if ($Release) { Copy-Item "$($installers[0].FullName).sig" "$artifact.sig" }
   "$((Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($artifact))" | Set-Content "$artifact.sha256" -Encoding utf8

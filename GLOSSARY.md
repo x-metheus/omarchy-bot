@@ -1,6 +1,6 @@
-# Omarchy Bot
+# Metheus
 
-Omarchy Bot lets people work with persistent assistants on a local or remote Agent Daemon.
+Metheus lets people work with persistent assistants on a local or remote Agent Daemon.
 
 ## Language
 

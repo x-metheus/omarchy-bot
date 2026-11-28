@@ -12,4 +12,4 @@ Paired desktop clients connect to a local daemon or a remote daemon over HTTPS. 
 
 Unstarted work can resume after a restart. Started work is marked interrupted and requires an explicit retry so a restart cannot repeat an unfinished tool operation. Original messages remain available alongside background Observational Memory and on-demand Recall. Verified UserMemory is shared by Bots on the same daemon and survives deletion of its source Bot.
 
-[Approved Rig requirements](https://github.com/x-metheus/omarchy-bot/issues/13) · [Agent Daemon guide](../../../apps/agent-daemon/README.md)
+[Approved Rig requirements](https://github.com/x-metheus/metheus/issues/13) · [Agent Daemon guide](../../../apps/agent-daemon/README.md)

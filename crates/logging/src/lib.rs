@@ -13,13 +13,17 @@ use tracing_subscriber::layer::{Layer, SubscriberExt};
 const ROTATION_BYTES: u64 = 5 * 1024 * 1024;
 const ARCHIVES: usize = 3;
 
-pub(super) struct Destination<'a> {
-    pub(super) file: Option<&'a Path>,
-    pub(super) always_stderr: bool,
+/// Select a private log file and whether to mirror file output to stderr.
+#[derive(Debug, Clone, Copy)]
+pub struct Destination<'a> {
+    /// Active log file path. Without a writable file, output goes to stderr.
+    pub file: Option<&'a Path>,
+    /// Also write each record to stderr when the file is writable.
+    pub always_stderr: bool,
 }
 
 /// Install the process hook before startup can panic with an unsanitized payload.
-pub(crate) fn install_panic_hook() {
+pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|panic| {
         if !tracing::dispatcher::has_been_set() {
             let _ = writeln!(io::stderr(), "panic during log initialization");
@@ -32,7 +36,14 @@ pub(crate) fn install_panic_hook() {
 }
 
 /// Install the process subscriber and return a callback that closes its file writer.
-pub(super) fn init(target: &'static str, destination: Destination<'_>) -> fn() {
+///
+/// `target` is the application crate's tracing target prefix. Dependency events
+/// are excluded even when the log level is raised.
+///
+/// # Panics
+///
+/// Panics if the process already has a global tracing subscriber.
+pub fn init(target: &'static str, destination: Destination<'_>) -> fn() {
     static FILE: Mutex<Option<RollingLog>> = Mutex::new(None);
 
     let file = destination
@@ -54,7 +65,8 @@ pub(super) fn init(target: &'static str, destination: Destination<'_>) -> fn() {
         .unwrap_or_else(|_| EnvFilter::new("info"));
     let first_party = filter::filter_fn(move |metadata| {
         let name = metadata.target();
-        name == target
+        name == module_path!()
+            || name == target
             || name
                 .strip_prefix(target)
                 .is_some_and(|suffix| suffix.starts_with("::"))
@@ -263,7 +275,7 @@ mod tests {
 
     #[test]
     fn filters_dependency_events_and_omits_panic_payload() {
-        const CHILD_LOG: &str = "OMARCHY_TEST_RUNTIME_LOG";
+        const CHILD_LOG: &str = "METHEUS_TEST_RUNTIME_LOG";
         if let Some(file) = std::env::var_os(CHILD_LOG) {
             install_panic_hook();
             init(

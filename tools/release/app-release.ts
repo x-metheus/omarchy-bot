@@ -9,19 +9,19 @@ const repository = process.env.GITHUB_REPOSITORY;
 assert.match(version ?? "", /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
 assert.match(repository ?? "", /^[\w.-]+\/[\w.-]+$/);
 const files = await readdir(directory);
-const windows = files.filter((name) => /^omarchy-bot_[\d.]+_x64-(?:signed|unsigned-preview)-setup\.exe$/.test(name));
+const windows = files.filter((name) => /^metheus_[\d.]+_x64-(?:signed|unsigned-preview)-setup\.exe$/.test(name));
 assert.equal(windows.length, 1, "Expected exactly one Windows NSIS installer");
-assert.ok(windows[0]!.startsWith(`omarchy-bot_${version}_`), "Windows installer must match APP_VERSION");
+assert.ok(windows[0]!.startsWith(`metheus_${version}_`), "Windows installer must match APP_VERSION");
 const payloads: Record<string, string> = {
-  "linux-x86_64": `omarchy-bot_${version}_amd64.AppImage`,
-  "darwin-aarch64": `omarchy-bot_${version}_aarch64.app.tar.gz`,
-  "darwin-x86_64": `omarchy-bot_${version}_x64.app.tar.gz`,
+  "linux-x86_64": `metheus_${version}_amd64.AppImage`,
+  "darwin-aarch64": `metheus_${version}_aarch64.app.tar.gz`,
+  "darwin-x86_64": `metheus_${version}_x64.app.tar.gz`,
   "windows-x86_64": windows[0]!,
 };
 const daemonTargets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"];
 const assets = [
-  ...Object.values(payloads), `omarchy-bot_${version}_aarch64.dmg`, `omarchy-bot_${version}_x64.dmg`,
-  ...daemonTargets.map(target => `omarchy-agent-daemon_${version}_${target}.tar.gz`),
+  ...Object.values(payloads), `metheus_${version}_aarch64.dmg`, `metheus_${version}_x64.dmg`,
+  ...daemonTargets.map(target => `metheus-agent-daemon_${version}_${target}.tar.gz`),
 ];
 for (const name of assets) {
   const file: Bun.BunFile = Bun.file(path.join(directory, name));

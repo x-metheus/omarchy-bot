@@ -3797,6 +3797,89 @@ dependencies = [
 ]
 
 [[package]]
+name = "metheus"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "dirs",
+ "getrandom 0.3.4",
+ "gio",
+ "hmac",
+ "keyring",
+ "metheus-logging",
+ "reqwest",
+ "rig-core",
+ "rig-tools",
+ "rustls",
+ "rustls-native-certs",
+ "schannel",
+ "security-framework 3.7.0",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-deep-link",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-updater",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "metheus-agent-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.23.1",
+ "bevy_ecs",
+ "bevy_log",
+ "bevy_tasks",
+ "fastembed",
+ "futures",
+ "image",
+ "metheus-logging",
+ "ort",
+ "rayon",
+ "reqwest",
+ "rig-basics",
+ "rig-core",
+ "rig-ecs",
+ "rig-fastembed",
+ "rig-harness",
+ "rig-reqwest",
+ "ring",
+ "rusqlite",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "metheus-logging"
+version = "0.1.0"
+dependencies = [
+ "rolling-file",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4438,81 +4521,6 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-foundation",
-]
-
-[[package]]
-name = "omarchy-agent-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.23.1",
- "bevy_ecs",
- "bevy_log",
- "bevy_tasks",
- "fastembed",
- "futures",
- "image",
- "ort",
- "rayon",
- "reqwest",
- "rig-basics",
- "rig-core",
- "rig-ecs",
- "rig-fastembed",
- "rig-harness",
- "rig-reqwest",
- "ring",
- "rolling-file",
- "rusqlite",
- "schemars 1.2.3",
- "serde",
- "serde_json",
- "subtle",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "omarchy-bot"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "dirs",
- "getrandom 0.3.4",
- "gio",
- "hmac",
- "keyring",
- "reqwest",
- "rig-core",
- "rig-tools",
- "rolling-file",
- "rustls",
- "rustls-native-certs",
- "schannel",
- "security-framework 3.7.0",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tauri",
- "tauri-build",
- "tauri-plugin-deep-link",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-single-instance",
- "tauri-plugin-updater",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
 ]
 
 [[package]]

@@ -4,15 +4,15 @@ import path from "node:path";
 import { z } from "zod";
 
 // Exercise the shipped shell in real WebKit, including the native signature verifier.
-const run = process.env.OMARCHY_BOT_SMOKE_DIR;
-const app = process.env.OMARCHY_BOT_SMOKE_APP;
+const run = process.env.METHEUS_SMOKE_DIR;
+const app = process.env.METHEUS_SMOKE_APP;
 assert.ok(run && app, "Run through tools/release/linux-app/updater-smoke.sh");
 const root = path.resolve(import.meta.dirname, "../../..");
 const evidence = path.join(root, ".lane/linux-app/evidence");
 mkdirSync(evidence, { recursive: true });
 const checks: string[] = [];
 let session = "";
-const candidate = path.resolve(process.env.OMARCHY_BOT_UPDATE_ARTIFACT ?? path.join(root, ".lane/dist/omarchy-bot_0.1.1_amd64.AppImage"));
+const candidate = path.resolve(process.env.METHEUS_UPDATE_ARTIFACT ?? path.join(root, ".lane/dist/metheus_0.1.1_amd64.AppImage"));
 assert.ok(existsSync(candidate), `Missing signed candidate: ${candidate}`);
 const signature = readFileSync(`${candidate}.sig`, "utf8").trim();
 let version = "0.1.1";
@@ -34,7 +34,7 @@ async function wd(method: string, route: string, body?: unknown): Promise<unknow
   return result.value;
 }
 async function shell(method: string): Promise<unknown> {
-  return wd("POST", `/session/${session}/execute/async`, { script: `const done=arguments[arguments.length-1]; window.__OMARCHY_BOT_SHELL__.updates[arguments[0]]().then(value=>done({ok:true,value:value===undefined?null:value}),error=>done({ok:false,error:String(error)}))`, args: [method] });
+  return wd("POST", `/session/${session}/execute/async`, { script: `const done=arguments[arguments.length-1]; window.__METHEUS_SHELL__.updates[arguments[0]]().then(value=>done({ok:true,value:value===undefined?null:value}),error=>done({ok:false,error:String(error)}))`, args: [method] });
 }
 async function until<T>(label: string, action: () => Promise<T | undefined>, timeout = 30_000): Promise<T> {
   const deadline = Date.now() + timeout;
@@ -48,8 +48,8 @@ async function until<T>(label: string, action: () => Promise<T | undefined>, tim
 function pids(): number[] {
   return readdirSync("/proc").filter(name => /^\d+$/.test(name)).flatMap(name => {
     try {
-      return path.basename(readlinkSync(`/proc/${name}/exe`)) === "omarchy-bot"
-        && readFileSync(`/proc/${name}/environ`, "utf8").split("\0").includes(`OMARCHY_BOT_SMOKE_DIR=${run}`) ? [Number(name)] : [];
+      return path.basename(readlinkSync(`/proc/${name}/exe`)) === "metheus"
+        && readFileSync(`/proc/${name}/environ`, "utf8").split("\0").includes(`METHEUS_SMOKE_DIR=${run}`) ? [Number(name)] : [];
     } catch { return []; }
   });
 }
@@ -58,7 +58,7 @@ async function open(): Promise<void> {
   session = opened.sessionId;
   await wd("POST", `/session/${session}/timeouts`, { script: 120_000 });
   const pairing = await wd("POST", `/session/${session}/execute/sync`, {
-    script: "const service = window.__OMARCHY_BOT_SHELL__.service; return { origin: service.baseUrl(), paired: Boolean(service.deviceToken()) };",
+    script: "const service = window.__METHEUS_SHELL__.service; return { origin: service.baseUrl(), paired: Boolean(service.deviceToken()) };",
     args: [],
   });
   assert.deepEqual(pairing, { origin: daemonOrigin, paired: true });

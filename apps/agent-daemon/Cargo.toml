@@ -1,5 +1,5 @@
 [package]
-name = "omarchy-agent-daemon"
+name = "metheus-agent-daemon"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
@@ -25,7 +25,7 @@ rig-fastembed = { version = "=0.47.1", default-features = false, features = ["or
 rig-harness = "=0.47.1"
 rig-reqwest = "=0.47.1"
 ring = "0.17"
-rolling-file.workspace = true
+metheus-logging.workspace = true
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -35,7 +35,6 @@ tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "net", "sync", "time"] }
 tokio-stream = "0.1"
 tracing.workspace = true
-tracing-subscriber.workspace = true
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 zeroize = "1"

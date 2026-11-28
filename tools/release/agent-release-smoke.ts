@@ -4,10 +4,10 @@ import os from "node:os";
 import path from "node:path";
 
 const nativeScript = path.join(import.meta.dirname, "windows-app/native.ps1");
-const archive = process.env.OMARCHY_BOT_SMOKE_AGENT_ARCHIVE;
-assert.ok(archive, "Set OMARCHY_BOT_SMOKE_AGENT_ARCHIVE to the native daemon archive");
-const app = process.env.OMARCHY_BOT_SMOKE_APP;
-const evidence = process.env.OMARCHY_BOT_SMOKE_EVIDENCE;
+const archive = process.env.METHEUS_SMOKE_AGENT_ARCHIVE;
+assert.ok(archive, "Set METHEUS_SMOKE_AGENT_ARCHIVE to the native daemon archive");
+const app = process.env.METHEUS_SMOKE_APP;
+const evidence = process.env.METHEUS_SMOKE_EVIDENCE;
 const root = mkdtempSync(path.join(os.tmpdir(), "agent-release-"));
 const key = "release-smoke-key";
 const marker = "The fixture swatch is cobalt. Reference QN-731.";
@@ -124,15 +124,15 @@ async function closeDesktop() {
   if (!session) return;
   await browser("DELETE", "").catch(() => {});
   session = "";
-  const profile = process.env.OMARCHY_BOT_SMOKE_DIR;
+  const profile = process.env.METHEUS_SMOKE_DIR;
   assert.ok(profile && app);
   await until("previous smoke app exits", () => {
     const pids = process.platform === "win32"
       ? JSON.parse(command(["pwsh", "-NoProfile", "-File", nativeScript, "processes", app])) as number[]
       : readdirSync("/proc").filter(entry => /^\d+$/.test(entry)).flatMap(entry => {
         try {
-          return path.basename(readlinkSync(`/proc/${entry}/exe`)) === "omarchy-bot" &&
-            readFileSync(`/proc/${entry}/environ`, "utf8").split("\0").includes(`OMARCHY_BOT_SMOKE_DIR=${profile}`) ? [Number(entry)] : [];
+          return path.basename(readlinkSync(`/proc/${entry}/exe`)) === "metheus" &&
+            readFileSync(`/proc/${entry}/environ`, "utf8").split("\0").includes(`METHEUS_SMOKE_DIR=${profile}`) ? [Number(entry)] : [];
         } catch { return []; }
       });
     for (const pid of pids) { try { process.kill(pid, "SIGTERM"); } catch {} }
@@ -147,8 +147,8 @@ async function openDesktop() {
   console.log(`Native WebView ${engine.agent}`);
 }
 async function nativeWindow(title: string) {
-  assert.ok(existsSync("/etc/omarchy-bot-linux-app") && process.env.DISPLAY === ":99" &&
-    process.env.OMARCHY_BOT_SMOKE_DIR?.startsWith("/tmp/omarchy-bot-webkit-"), "requires the private native smoke display");
+  assert.ok(existsSync("/etc/metheus-linux-app") && process.env.DISPLAY === ":99" &&
+    process.env.METHEUS_SMOKE_DIR?.startsWith("/tmp/metheus-webkit-"), "requires the private native smoke display");
   return until(title, () => command(["xdotool", "search", "--onlyvisible", "--name", `^${title}$`]).trim().split("\n").at(-1));
 }
 
@@ -156,7 +156,7 @@ try {
   const unpacked = path.join(root, "standalone");
   mkdirSync(unpacked);
   command(["tar", "-xzf", archive, "-C", unpacked]);
-  const binary = path.join(unpacked, `omarchy-agent-daemon${process.platform === "win32" ? ".exe" : ""}`);
+  const binary = path.join(unpacked, `metheus-agent-daemon${process.platform === "win32" ? ".exe" : ""}`);
   const tokenPath = path.join(root, "settings-token");
   const masterPath = path.join(root, "master.key");
   writeFileSync(tokenPath, operator, { mode: 0o600 });
@@ -199,8 +199,8 @@ try {
   pass("Standalone archive launches, pairs, configures a provider, persists Conversation and attachments, runs a host tool, and recalls offline");
 
   if (app) {
-    const local = `http://127.0.0.1:${process.env.OMARCHY_BOT_AGENT_PORT}`;
-    const profile = process.env.OMARCHY_BOT_SMOKE_AGENT_PROFILE;
+    const local = `http://127.0.0.1:${process.env.METHEUS_DESKTOP_AGENT_PORT}`;
+    const profile = process.env.METHEUS_SMOKE_AGENT_PROFILE;
     assert.ok(profile);
     const disabled = path.join(profile, "disable-autostart");
     mkdirSync(profile, { recursive: true });

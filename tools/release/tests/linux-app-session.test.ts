@@ -16,7 +16,7 @@ async function session(options: { image?: boolean; container?: boolean; uid?: st
   try {
     const bin = path.join(directory, "bin");
     mkdirSync(bin);
-    writeFileSync(path.join(directory, "image"), "omarchy-bot-linux-app-v1\n");
+    writeFileSync(path.join(directory, "image"), "metheus-linux-app-v1\n");
     writeFileSync(path.join(directory, "container"), "");
     for (const command of ["mktemp", "openssl", "cp", "update-ca-certificates", "chown", "hostname"]) {
       const file = path.join(bin, command);
@@ -30,11 +30,11 @@ async function session(options: { image?: boolean; container?: boolean; uid?: st
       "--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
       "--symlink", "usr/bin", "/bin", "--dir", "/etc", "--dir", "/run", "--dir", "/tmp",
       "--proc", "/proc", "--dev", "/dev", "--bind", directory, "/fixture", "--ro-bind", root, "/src",
-      ...(options.image ? ["--ro-bind", path.join(directory, "image"), "/etc/omarchy-bot-linux-app"] : []),
+      ...(options.image ? ["--ro-bind", path.join(directory, "image"), "/etc/metheus-linux-app"] : []),
       ...(options.container ? ["--ro-bind", path.join(directory, "container"), "/.dockerenv"] : []),
       "--chdir", "/src", "--", "/bin/bash", "-c", '[[ $(/usr/bin/id -u) == 0 ]] || exit 91; exec /bin/bash /src/tools/release/linux-app/session.sh',
     ], {
-      env: { PATH: "/fixture/bin:/usr/bin", OMARCHY_BOT_SMOKE_UID: options.uid ?? "1000", OMARCHY_BOT_SMOKE_GID: options.gid ?? "1000" },
+      env: { PATH: "/fixture/bin:/usr/bin", METHEUS_SMOKE_UID: options.uid ?? "1000", METHEUS_SMOKE_GID: options.gid ?? "1000" },
       stdout: "pipe", stderr: "pipe",
     });
     const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);

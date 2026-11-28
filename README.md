@@ -1,6 +1,6 @@
 <div align="center">
 
-# Omarchy Bot
+# Metheus
 
 **AI teammates for Linux, macOS, and Windows.**
 
@@ -14,11 +14,11 @@ Create named Bots and work with each one in a continuous Conversation.
 
 ---
 
-Omarchy Bot is a Tauri desktop app. It pairs with a standalone Rust Agent Daemon that runs Bots through Rig. The daemon can run on your computer or on another machine.
+Metheus is a Tauri desktop app. It pairs with a standalone Rust Agent Daemon that runs Bots through Rig. The daemon can run on your computer or on another machine.
 
 ## Installation
 
-Use the development setup below to run the app from source. The desktop can start its local daemon or attach to an existing instance. For standalone setup, see the [Agent Daemon guide](apps/agent-daemon/README.md#headless-startup). Desktop installers and standalone archives are tracked in the [first release checklist](https://github.com/x-metheus/omarchy-bot/issues/31).
+Use the development setup below to run the app from source. The desktop can start its local daemon or attach to an existing instance. For standalone setup, see the [Agent Daemon guide](apps/agent-daemon/README.md#headless-startup). Desktop installers and standalone archives are tracked in the [first release checklist](https://github.com/x-metheus/metheus/issues/31).
 
 On first launch, connect to an Agent Daemon with its address and one-time pairing code. The desktop stores its credential in the OS keychain. Provision a model in desktop Settings after pairing. For a remote connection, use a private HTTPS endpoint such as [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve).
 
@@ -34,15 +34,15 @@ Install [mise](https://mise.jdx.dev/getting-started.html) and the [Tauri system 
 
 ```sh
 mise install
-mise exec -- bun --cwd=apps/omarchy-bot install --frozen-lockfile
+mise exec -- bun --cwd=apps/metheus install --frozen-lockfile
 mise run dev
 ```
 
-`mise run dev` runs `bun run tauri dev` in the desktop project. Tauri starts Vite and compiles the Rust debug target as needed. Connect to a running Agent Daemon, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to an executable to check desktop-managed startup. See the [development guide](docs/development.md#desktop-project-layout) and [code map](docs/README.md#code-map).
+`mise run dev` runs `bun run tauri dev` in the desktop project. Tauri starts Vite and compiles the Rust debug target as needed. Connect to a running Agent Daemon, or set `METHEUS_AGENT_DAEMON_BIN` to an executable to check desktop-managed startup. See the [development guide](docs/development.md#desktop-project-layout) and [code map](docs/README.md#code-map).
 
-Run `cargo test --workspace --locked` from the repository root for the native workspace. Run frontend type checks and tests inside `apps/omarchy-bot`.
+Run `cargo test --workspace --locked` from the repository root for the native workspace. Run frontend type checks and tests inside `apps/metheus`.
 
-The App writes `omarchy-bot.log` and its managed Agent Daemon writes `agent-daemon.log` in the same directory.
+The App writes `metheus.log` and its managed Agent Daemon writes `agent-daemon.log` in the same directory.
 
 | Platform | Log directory |
 | --- | --- |
@@ -50,7 +50,7 @@ The App writes `omarchy-bot.log` and its managed Agent Daemon writes `agent-daem
 | macOS | `~/Library/Logs/com.omarchy.bot` |
 | Windows | `%LOCALAPPDATA%\com.omarchy.bot\logs` |
 
-Each log rotates at 5 MiB and keeps three numbered archives. The App also logs to stderr. A standalone Agent Daemon sends diagnostics to stderr and prints its `LISTENING` readiness line on stdout. A managed daemon uses the stderr stream inherited from the App when its log file is unavailable. The default level is `INFO`. Set `RUST_LOG=debug` or `RUST_LOG=omarchy_agent_daemon=trace` to increase first-party verbosity.
+Each log rotates at 5 MiB and keeps three numbered archives. The App also logs to stderr. A standalone Agent Daemon sends diagnostics to stderr and prints its `LISTENING` readiness line on stdout. A managed daemon uses the stderr stream inherited from the App when its log file is unavailable. The default level is `INFO`. Set `RUST_LOG=debug` or `RUST_LOG=metheus_agent_daemon=trace` to increase first-party verbosity.
 
 ### Public site
 

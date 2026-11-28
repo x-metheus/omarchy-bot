@@ -2,7 +2,7 @@
 
 Use a dedicated Settings page in the desktop App. The first release of this feature adds custom OpenAI-compatible providers that use the Responses API. Related decisions are recorded in the [Agent Daemon ADR](../agents/adr/0017-rig-agent-daemon.md) and the [Provider Configuration glossary entry](../../GLOSSARY.md#language).
 
-The published implementation specification is tracked in [GitHub issue #36](https://github.com/x-metheus/omarchy-bot/issues/36).
+The published implementation specification is tracked in [GitHub issue #36](https://github.com/x-metheus/metheus/issues/36).
 
 ## Settings page
 
@@ -25,7 +25,7 @@ The published implementation specification is tracked in [GitHub issue #36](http
 
 ## Runtime logging
 
-- Use `tracing` with one `tracing-subscriber` per Rust process. Initialize Tauri logging before native runtime creation so startup failures and early panics are recorded. Keep `omarchy-bot.log` in the existing App log directory, including the native smoke profile override. Emit lifecycle events to stderr as well. [Current Tauri startup](../../apps/omarchy-bot/src-tauri/src/main.rs)
+- Use `tracing` with one `tracing-subscriber` per Rust process. Initialize Tauri logging before native runtime creation so startup failures and early panics are recorded. Keep `metheus.log` in the existing App log directory, including the native smoke profile override. Emit lifecycle events to stderr as well. [Current Tauri startup](../../apps/metheus/src-tauri/src/main.rs)
 - The Agent Daemon initializes logging before opening its database and records startup failures through that subscriber. Standalone instances write to stderr for the terminal or service manager. The App passes its log directory to a managed Daemon, which owns its own `agent-daemon.log` writer and rotation. Preserve the Daemon's `LISTENING` line on stdout for readiness consumers. [Current Daemon startup](../../apps/agent-daemon/src/main.rs)
 - Use `rolling-file` for on-disk logs. Rotate each stream at 5 MiB and retain three archives plus the active file. Keep records intact at the rollover boundary. Keep log files in user-private storage, serialize rotation with one writer per file set, and use stderr if a file writer is unavailable. Use synchronous, unbuffered writes for these low-volume diagnostics so lifecycle records are written before restart or exit. [Size-based rotation and retention](https://docs.rs/rolling-file/0.2.0/rolling_file/)
 - Default to `INFO`. Allow `RUST_LOG` to adjust first-party targets within a fixed allowlist. Log lifecycle events and sanitized Provider operations using fields such as duration, HTTP status, model count, and a stable error code. Exclude API keys, tokens, authorization headers, Conversation content, and raw provider request and response bodies at all levels. Keep Bevy's `LogPlugin` disabled because Rig diagnostics can include upstream response bodies. [Current Rig log policy](../../apps/agent-daemon/src/agent.rs)

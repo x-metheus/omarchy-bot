@@ -1,4 +1,4 @@
-# Omarchy Bot agent instructions
+# Metheus agent instructions
 
 ## Conversational Style
 
@@ -25,7 +25,7 @@
 
 ### Issue tracker
 
-Publish and fetch tickets and specifications in GitHub Issues for `x-metheus/omarchy-bot`. See the [issue tracker instructions](docs/agents/issue-tracker.md).
+Publish and fetch tickets and specifications in GitHub Issues for `x-metheus/metheus`. See the [issue tracker instructions](docs/agents/issue-tracker.md).
 
 ### Triage labels
 
@@ -39,7 +39,7 @@ Use the shared root glossary and relevant architecture decisions when exploring 
 
 - Inspect the working tree and preserve edits already in progress. Locate the relevant source and tests using the [project code map](docs/README.md#code-map).
 - Before implementation, read the relevant GitHub spec or ticket and any linked specification in `docs/specs/`. Consult `docs/CONSTRAINTS.md` when present. Confirm any unresolved requirements that affect the work.
-- For frontend changes in `apps/omarchy-bot/`, follow the [frontend instructions](apps/omarchy-bot/AGENTS.md).
+- For frontend changes in `apps/metheus/`, follow the [frontend instructions](apps/metheus/AGENTS.md).
 - Run focused tests and applicable Bun or Cargo checks for the affected code. For documentation, check links, paths, commands, and the diff. Report results and blockers.
 - To verify desktop interactions or native capabilities, run `mise run dev` from the repository root and exercise the behavior in the App window on the current platform. Report blockers to native verification.
 - Run App production builds, packaging, and cross-platform package checks only for explicit release tasks. See the [development guide](docs/development.md#stack-and-verification).

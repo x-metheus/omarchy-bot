@@ -5,9 +5,9 @@ bun = "1.4.5"
 [tasks.daemon]
 description = "Run the standalone Agent Daemon in development mode"
 dir = "apps/agent-daemon"
-run = "cargo run --locked -p omarchy-agent-daemon"
+run = "cargo run --locked -p metheus-agent-daemon"
 
 [tasks.dev]
 description = "Open the Tauri development window"
-dir = "apps/omarchy-bot"
+dir = "apps/metheus"
 run = "bun run tauri dev"

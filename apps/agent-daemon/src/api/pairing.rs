@@ -199,6 +199,7 @@ async fn health(State(daemon): State<Daemon>, Query(query): Query<HealthQuery>) 
             URL_SAFE_NO_PAD.encode(hmac::sign(&key, challenge.as_bytes()))
         });
     Json(Health {
+        // Older desktop clients check this protocol value before attaching.
         service: "omarchy-agent-daemon",
         proof,
     })

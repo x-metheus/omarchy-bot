@@ -139,7 +139,7 @@ function AgentBotNav({ bots, selected, select, create, settings, settingsOpen, b
           <BotIcon className="size-4" aria-hidden="true" />
         </div>
         <div className="min-w-0 group-data-[collapsible=icon]:hidden">
-          <p className="truncate text-sm font-semibold">Omarchy Bot</p>
+          <p className="truncate text-sm font-semibold">Metheus</p>
           <p className="truncate text-xs text-muted-foreground" title={host}>{host}</p>
         </div>
       </div>

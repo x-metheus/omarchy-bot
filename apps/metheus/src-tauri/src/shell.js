@@ -10,9 +10,9 @@ function installNativeShell(initial) {
     if (listeners.size === 0) pending = request;
     else for (const listener of listeners) listener(request);
   }
-  window.addEventListener("omarchy-pair", () => { void receivePairing(); });
+  window.addEventListener("metheus-pair", () => { void receivePairing(); });
 
-  window.__OMARCHY_BOT_SHELL__ = {
+  window.__METHEUS_SHELL__ = {
     service: {
       baseUrl: () => connection?.baseUrl ?? initial.revoked ?? initial.localDaemon.baseUrl,
       deviceToken: () => connection?.token,

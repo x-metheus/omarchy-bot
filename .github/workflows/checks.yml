@@ -3,8 +3,9 @@ on:
   pull_request:
     paths:
       - 'apps/agent-daemon/**'
-      - 'apps/omarchy-bot/**'
+      - 'apps/metheus/**'
       - 'apps/site/**'
+      - 'crates/logging/**'
       - 'tools/release/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -21,17 +22,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v3
       - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-      - run: bun --cwd=apps/omarchy-bot install --frozen-lockfile
-      - run: bun --cwd=apps/omarchy-bot run typecheck
+      - run: bun --cwd=apps/metheus install --frozen-lockfile
+      - run: bun --cwd=apps/metheus run typecheck
       - run: bun test
-        working-directory: apps/omarchy-bot
-      - run: cargo test --locked -p omarchy-bot
+        working-directory: apps/metheus
+      - run: cargo test --locked -p metheus -p metheus-logging
   agent-daemon:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v3
-      - run: cargo test --locked -p omarchy-agent-daemon --test conversation
+      - run: cargo test --locked -p metheus-agent-daemon --test conversation
   tooling:
     runs-on: ubuntu-24.04
     strategy:

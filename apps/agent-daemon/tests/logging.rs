@@ -9,7 +9,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const SECRET: &str = "fixture-secret-in-database-path";
 
 fn daemon(profile: &Path, db: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_omarchy-agent-daemon"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_metheus-agent-daemon"));
     command
         .kill_on_drop(true)
         .current_dir(profile)

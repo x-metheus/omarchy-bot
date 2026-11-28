@@ -64,7 +64,7 @@ fn is_loopback_service(url: &Url) -> bool {
 
 fn pairing_request(value: &str) -> Option<PairingRequest> {
     let url = Url::parse(value).ok()?;
-    if url.scheme() != "omarchy-bot" || url.host_str() != Some("pair")
+    if !matches!(url.scheme(), "metheus" | "omarchy-bot") || url.host_str() != Some("pair")
         || !url.username().is_empty() || url.password().is_some() || url.port().is_some()
         || !matches!(url.path(), "" | "/") || url.fragment().is_some()
     {
@@ -273,7 +273,7 @@ fn receive_link(app: &tauri::AppHandle, link: &str) {
     }
     if let Ok(mut pending) = state.pending_pairing.lock() { *pending = Some(request); }
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.eval("window.dispatchEvent(new Event('omarchy-pair')); ");
+        let _ = window.eval("window.dispatchEvent(new Event('metheus-pair')); ");
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
@@ -319,7 +319,7 @@ fn restart_process(environment: &tauri::Env) -> ! {
         tracing::error!(
             error_code = "restart_failed",
             kind = ?error.kind(),
-            "Could not restart Omarchy Bot"
+            "Could not restart the desktop app"
         );
         std::process::exit(1);
     }
@@ -331,7 +331,7 @@ fn main() {
     logging::install_panic_hook();
     let mut context = tauri::generate_context!();
     #[cfg(windows)]
-    if let Some(directory) = std::env::var_os("OMARCHY_BOT_SMOKE_DIR") {
+    if let Some(directory) = std::env::var_os("METHEUS_SMOKE_DIR") {
         context.config_mut().app.app_directories_override = Some(tauri::utils::config::AppDirectoriesOverride::Root(directory.into()));
     }
     let log_directory = logging::directory(&context.config().identifier);
@@ -390,7 +390,7 @@ fn main() {
             let initial = serde_json::json!({ "connection": connection, "pairing": incoming, "error": error, "revoked": revoked, "localDaemon": local });
             let script = format!("({})({});", include_str!("shell.js"), initial);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("Omarchy Bot").inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)
+                .title(app.package_info().name.as_str()).inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)
                 .disable_drag_drop_handler()
                 .initialization_script(script)
                 .on_navigation(|url| allows_app_navigation(url, cfg!(dev)))
@@ -406,7 +406,7 @@ fn main() {
     let application = match application {
         Ok(application) => application,
         Err(_) => {
-            tracing::error!(error_code = "native_app_build_failed", "Could not start Omarchy Bot");
+            tracing::error!(error_code = "native_app_build_failed", "Could not start the desktop app");
             std::process::exit(1);
         }
     };
@@ -438,6 +438,17 @@ fn main() {
         restart_process(&environment);
     }
     std::process::exit(exit);
+}
+
+#[test]
+fn pairing_links_accept_both_app_schemes() {
+    let query = "pair?service=https%3A%2F%2Fdaemon.example&code=fixture-code";
+    for scheme in ["metheus", "omarchy-bot"] {
+        let request = pairing_request(&format!("{scheme}://{query}")).expect("valid pairing link");
+        assert_eq!(request.service_url, "https://daemon.example");
+        assert_eq!(request.code, "fixture-code");
+    }
+    assert!(pairing_request(&format!("https://{query}")).is_none());
 }
 
 #[cfg(test)]

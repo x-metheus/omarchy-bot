@@ -1,5 +1,5 @@
 {
-  "name": "@omarchy-bot/site",
+  "name": "@metheus/site",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@omarchy-bot/protocol": "workspace:*",
+    "@metheus/protocol": "workspace:*",
     "@vercel/oidc": "^5.0.0",
     "jose": "^6.2.18",
     "zod": "^4.6.7"

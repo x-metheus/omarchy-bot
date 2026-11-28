@@ -60,7 +60,7 @@ impl Daemon {
         let directory = db
             .parent()
             .expect("test database has a temporary directory");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_omarchy-agent-daemon"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_metheus-agent-daemon"));
         command
             .env("OMARCHY_AGENT_DB", db)
             .env("OMARCHY_AGENT_PORT", "0")

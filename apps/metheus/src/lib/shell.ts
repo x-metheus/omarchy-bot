@@ -33,12 +33,12 @@ export interface Shell {
   };
 }
 
-// The app installs __OMARCHY_BOT_SHELL__ before the Web UI bundle loads.
+// The app installs __METHEUS_SHELL__ before the Web UI bundle loads.
 declare global {
-  var __OMARCHY_BOT_SHELL__: Shell | undefined;
+  var __METHEUS_SHELL__: Shell | undefined;
 }
 export function getShell(): Shell {
-  const shell = globalThis.__OMARCHY_BOT_SHELL__;
+  const shell = globalThis.__METHEUS_SHELL__;
   if (!shell) throw new Error("The native shell is unavailable.");
   return shell;
 }

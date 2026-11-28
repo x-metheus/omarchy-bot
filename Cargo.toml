@@ -1,11 +1,10 @@
 [workspace]
-members = ["apps/agent-daemon", "apps/omarchy-bot/src-tauri"]
+members = ["apps/agent-daemon", "apps/metheus/src-tauri", "crates/logging"]
 resolver = "3"
 
 [workspace.package]
 rust-version = "1.97.1"
 
 [workspace.dependencies]
-rolling-file = "0.2"
+metheus-logging = { path = "crates/logging" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }

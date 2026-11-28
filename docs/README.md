@@ -12,9 +12,10 @@ These paths are starting points. Follow imports, contracts, and tests when a cha
 
 | Area | Starting points | Read together when relevant |
 | --- | --- | --- |
-| Bot identity, Conversations, events, attachments, and pairing | `apps/agent-daemon/src/api.rs`, `apps/agent-daemon/src/api/`, `apps/agent-daemon/src/store/` | Daemon [protocol tests](../apps/agent-daemon/tests/conversation.rs) and `apps/omarchy-bot/src/lib/agentDaemon.ts` |
+| Bot identity, Conversations, events, attachments, and pairing | `apps/agent-daemon/src/api.rs`, `apps/agent-daemon/src/api/`, `apps/agent-daemon/src/store/` | Daemon [protocol tests](../apps/agent-daemon/tests/conversation.rs) and `apps/metheus/src/lib/agentDaemon.ts` |
 | Rig execution, work control, and memory | `apps/agent-daemon/src/agent/`, `apps/agent-daemon/src/user_memory.rs`, `apps/agent-daemon/src/recall.rs` | [Agent Daemon guide](../apps/agent-daemon/README.md) and Conversation scenarios in `apps/agent-daemon/tests/` |
-| Desktop UI and native shell | `apps/omarchy-bot/src/`, `apps/omarchy-bot/src-tauri/` | [Frontend instructions](../apps/omarchy-bot/AGENTS.md) and the native and shell integration tests in the desktop project |
+| Desktop UI and native shell | `apps/metheus/src/`, `apps/metheus/src-tauri/` | [Frontend instructions](../apps/metheus/AGENTS.md) and the native and shell integration tests in the desktop project |
+| Runtime logging | `crates/logging/` | App and Agent Daemon log destinations in their respective `src/logging.rs` files |
 | Platform packaging and updates | `.github/workflows/app-release.yml`, `tools/release/` | Platform WebView release checks and release manifest tests |
 | Public site | `apps/site/` | Site scripts, assets, publisher contract, route tests, and Vite configuration |
 

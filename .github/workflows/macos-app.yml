@@ -87,7 +87,7 @@ jobs:
         with:
           toolchain: 1.97.1
       - name: Exercise native shell interface
-        working-directory: apps/omarchy-bot
+        working-directory: apps/metheus
         run: bun test native-shell.test.ts
       - name: Build and verify native package
         env:
@@ -114,7 +114,7 @@ jobs:
             bash tools/release/build-macos-app.sh --unsigned
           fi
       - name: Check native certificate diagnostics
-        run: cargo test --locked -p omarchy-bot
+        run: cargo test --locked -p metheus
       - uses: actions/upload-artifact@v4
         with:
           name: macos-app-${{ matrix.arch }}

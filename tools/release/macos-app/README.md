@@ -24,9 +24,9 @@ An `app-vX.Y.Z` tag runs `.github/workflows/app-release.yml`, which calls this w
 
 Updater builds require an explicit `APP_VERSION`, `TAURI_SIGNING_PRIVATE_KEY` and matching `TAURI_SIGNING_PUBLIC_KEY` (the workflow maps the public key input/variable). The password is optional for an unencrypted updater key. The builder uses the shared updater build-config CLI to embed that version, public key, stable endpoint and `requireSignedVersion`; filenames and signed-version metadata use the same version. It requests `app,dmg`, checks the archive signature's key/version metadata, and uploads these assets in `macos-app-aarch64` and `macos-app-x64`:
 
-- `omarchy-bot_<version>_<arch>.dmg` and `.dmg.sha256`
-- `omarchy-bot_<version>_<arch>.app.tar.gz`, `.app.tar.gz.sig` and `.app.tar.gz.sha256`
-- `omarchy-agent-daemon_<version>_<target>.tar.gz` and `.tar.gz.sha256`
+- `metheus_<version>_<arch>.dmg` and `.dmg.sha256`
+- `metheus_<version>_<arch>.app.tar.gz`, `.app.tar.gz.sig` and `.app.tar.gz.sha256`
+- `metheus-agent-daemon_<version>_<target>.tar.gz` and `.tar.gz.sha256`
 
 The caller downloads both asset sets into one release directory. It verifies the installers, daemon archives, checksums, and updater signature metadata, then writes the four-platform manifest. macOS entries point to `.app.tar.gz` updater payloads. The workflow uploads the assets to a draft `app-vX.Y.Z` release, verifies the downloaded bytes, publishes the complete release, and promotes `app-latest/latest.json` when the stable version increases. The unsigned Windows installer keeps the combined release labeled preview.
 

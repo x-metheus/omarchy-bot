@@ -32,7 +32,7 @@ case $(uname -m) in
   x86_64) architecture=x64; triple=x86_64-apple-darwin ;;
   *) echo 'Only arm64 and x64 macOS are supported' >&2; exit 1 ;;
 esac
-export APP_VERSION=${APP_VERSION:-$(bun -e 'console.log(JSON.parse(await Bun.file("apps/omarchy-bot/src-tauri/tauri.conf.json").text()).version)')}
+export APP_VERSION=${APP_VERSION:-$(bun -e 'console.log(JSON.parse(await Bun.file("apps/metheus/src-tauri/tauri.conf.json").text()).version)')}
 export TAURI_UPDATER_PUBKEY=${TAURI_SIGNING_PUBLIC_KEY:-}
 build_config=$(bun tools/release/linux-app/build-config.ts)
 version=$APP_VERSION
@@ -41,19 +41,20 @@ export CARGO_HOME="$root/.lane/macos-app/cargo"
 export BUN_INSTALL_CACHE_DIR="$root/.lane/macos-app/bun-cache"
 mkdir -p "$root/.lane/dist" "$root/.lane/macos-app/evidence"
 bun install --cwd tools/release --frozen-lockfile
-bun install --cwd apps/omarchy-bot --frozen-lockfile
+bun install --cwd apps/metheus --frozen-lockfile
 bun tools/release/build-agent-daemon.ts
 arguments=(--bundles app,dmg --target "$triple" --config "$build_config")
-(cd apps/omarchy-bot && bun run tauri build "${arguments[@]}" -- --locked)
+(cd apps/metheus && bun run tauri build "${arguments[@]}" -- --locked)
 bundle="$CARGO_TARGET_DIR/$triple/release/bundle"
-app="$bundle/macos/omarchy-bot.app"
+product_name=$(bun -e 'console.log((await Bun.file("apps/metheus/src-tauri/tauri.conf.json").json()).productName)')
+app="$bundle/macos/$product_name.app"
 dmgs=("$bundle"/dmg/*.dmg)
 [[ ${#dmgs[@]} -eq 1 && -f ${dmgs[0]} && -d $app ]] || { echo 'Expected one dmg and application bundle' >&2; exit 1; }
-artifact="$root/.lane/dist/omarchy-bot_${version}_${architecture}.dmg"
-daemon="$app/Contents/MacOS/omarchy-agent-daemon"
+artifact="$root/.lane/dist/metheus_${version}_${architecture}.dmg"
+daemon="$app/Contents/MacOS/metheus-agent-daemon"
 "$daemon" --verify-recall-model "$app/Contents/Resources/recall-model"
-OMARCHY_BOT_SMOKE_AGENT_ARCHIVE="$root/.lane/dist/omarchy-agent-daemon_${version}_${triple}.tar.gz" \
-  OMARCHY_BOT_SMOKE_EVIDENCE="$root/.lane/macos-app/evidence" bun tools/release/agent-release-smoke.ts
+METHEUS_SMOKE_AGENT_ARCHIVE="$root/.lane/dist/metheus-agent-daemon_${version}_${triple}.tar.gz" \
+  METHEUS_SMOKE_EVIDENCE="$root/.lane/macos-app/evidence" bun tools/release/agent-release-smoke.ts
 if [[ $mode == --signed ]]; then
   codesign --verify --deep --strict --verbose=2 "$app"
   codesign --verify --strict --verbose=2 "$daemon"
@@ -68,9 +69,9 @@ fi
 cp "${dmgs[0]}" "$artifact"
 (cd "$root/.lane/dist" && shasum -a 256 "$(basename "$artifact")") | tee "$artifact.sha256"
 if [[ -n ${TAURI_SIGNING_PRIVATE_KEY:-} ]]; then
-  updater="$bundle/macos/omarchy-bot.app.tar.gz"
+  updater="$app.tar.gz"
   [[ -s $updater && -s $updater.sig ]] || { echo 'Missing signed updater archive' >&2; exit 1; }
-  archive="$root/.lane/dist/omarchy-bot_${version}_${architecture}.app.tar.gz"
+  archive="$root/.lane/dist/metheus_${version}_${architecture}.app.tar.gz"
   cp "$updater" "$archive"
   cp "$updater.sig" "$archive.sig"
   bun tools/release/linux-app/check-signature.ts "$archive.sig" "$version"

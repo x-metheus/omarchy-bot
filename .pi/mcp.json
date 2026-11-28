@@ -6,7 +6,7 @@
         "shadcn@latest",
         "mcp"
       ],
-      "cwd": "apps/omarchy-bot",
+      "cwd": "apps/metheus",
       "description": "Browse, search, and install shadcn/ui components from registries"
     }
   }

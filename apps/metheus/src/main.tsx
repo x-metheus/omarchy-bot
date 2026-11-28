@@ -21,6 +21,6 @@ try {
 } catch {
   const message = document.createElement("p");
   message.setAttribute("role", "alert");
-  message.textContent = "Omarchy Bot could not start because its native shell is unavailable or broken. Close and reopen the app. If the problem continues, reinstall Omarchy Bot.";
+  message.textContent = "Metheus could not start because its native shell is unavailable or broken. Close and reopen the app. If the problem continues, reinstall Metheus.";
   document.getElementById("root")!.replaceChildren(message);
 }

@@ -5,14 +5,14 @@ assert.match(version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/, "APP_VERSION
 const signed = Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY);
 const pubkey = process.env.TAURI_UPDATER_PUBKEY;
 assert.ok(!signed || pubkey, "Signed builds require TAURI_UPDATER_PUBKEY");
-const endpoint = new URL(process.env.TAURI_UPDATER_ENDPOINT ?? "https://github.com/XMethues/omarchy-bot/releases/download/app-latest/latest.json");
-const smoke = process.env.OMARCHY_BOT_UPDATER_SMOKE === "1";
+const endpoint = new URL(process.env.TAURI_UPDATER_ENDPOINT ?? "https://github.com/x-metheus/metheus/releases/download/app-latest/latest.json");
+const smoke = process.env.METHEUS_UPDATER_SMOKE === "1";
 assert.ok(endpoint.protocol === "https:" || (smoke && endpoint.protocol === "http:" && endpoint.hostname === "127.0.0.1"), "Updater endpoint must use HTTPS (private smoke permits loopback HTTP)");
 console.log(JSON.stringify({
   version,
   bundle: {
     createUpdaterArtifacts: signed,
-    externalBin: ["binaries/omarchy-agent-daemon"],
+    externalBin: ["binaries/metheus-agent-daemon"],
     resources: { "binaries/recall-model/": "recall-model/" },
   },
   plugins: { updater: {

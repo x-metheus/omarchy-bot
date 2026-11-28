@@ -9,14 +9,14 @@ const signaturePacket = Buffer.alloc(74, 1);
 const publicKey = Buffer.from(`untrusted comment: fixture\n${publicPacket.toString("base64")}\n`).toString("base64");
 const signature = (version = "1.2.3") => Buffer.from(`untrusted comment: fixture\n${signaturePacket.toString("base64")}\ntrusted comment: timestamp:0\tfile:fixture\tversion:${version}\nfixture\n`).toString("base64");
 const payloads = [
-  "omarchy-bot_1.2.3_amd64.AppImage",
-  "omarchy-bot_1.2.3_aarch64.app.tar.gz",
-  "omarchy-bot_1.2.3_x64.app.tar.gz",
-  "omarchy-bot_1.2.3_x64-unsigned-preview-setup.exe",
+  "metheus_1.2.3_amd64.AppImage",
+  "metheus_1.2.3_aarch64.app.tar.gz",
+  "metheus_1.2.3_x64.app.tar.gz",
+  "metheus_1.2.3_x64-unsigned-preview-setup.exe",
 ];
-const installers = ["omarchy-bot_1.2.3_aarch64.dmg", "omarchy-bot_1.2.3_x64.dmg"];
+const installers = ["metheus_1.2.3_aarch64.dmg", "metheus_1.2.3_x64.dmg"];
 const daemonArchives = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
-  .map(target => `omarchy-agent-daemon_1.2.3_${target}.tar.gz`);
+  .map(target => `metheus-agent-daemon_1.2.3_${target}.tar.gz`);
 
 test("release CLI prepares one complete four-platform manifest and refuses incomplete or inconsistent assets", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "app-release-"));
@@ -48,10 +48,10 @@ test("release CLI prepares one complete four-platform manifest and refuses incom
     const manifest = await Bun.file(manifestFile).json();
     expect(manifest.version).toBe("1.2.3");
     expect(Object.keys(manifest.platforms).sort()).toEqual(["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"]);
-    expect(manifest.platforms["darwin-aarch64"]).toEqual({ url: "https://github.com/example/bot/releases/download/app-v1.2.3/omarchy-bot_1.2.3_aarch64.app.tar.gz", signature: signature() });
-    expect(manifest.platforms["windows-x86_64"].url).toBe("https://github.com/example/bot/releases/download/app-v1.2.3/omarchy-bot_1.2.3_x64-unsigned-preview-setup.exe");
-    expect(manifest.platforms["linux-x86_64"].url).toEndWith("/omarchy-bot_1.2.3_amd64.AppImage");
-    expect(manifest.platforms["darwin-x86_64"].url).toEndWith("/omarchy-bot_1.2.3_x64.app.tar.gz");
+    expect(manifest.platforms["darwin-aarch64"]).toEqual({ url: "https://github.com/example/bot/releases/download/app-v1.2.3/metheus_1.2.3_aarch64.app.tar.gz", signature: signature() });
+    expect(manifest.platforms["windows-x86_64"].url).toBe("https://github.com/example/bot/releases/download/app-v1.2.3/metheus_1.2.3_x64-unsigned-preview-setup.exe");
+    expect(manifest.platforms["linux-x86_64"].url).toEndWith("/metheus_1.2.3_amd64.AppImage");
+    expect(manifest.platforms["darwin-x86_64"].url).toEndWith("/metheus_1.2.3_x64.app.tar.gz");
     expect(Number.isFinite(Date.parse(manifest.pub_date))).toBe(true);
     await Bun.write(path.join(directory, installers[0]!), "tampered dmg");
     expect((await run()).code).not.toBe(0);

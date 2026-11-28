@@ -7,7 +7,7 @@ import {
   HttpsOrigin, OAuthStartBody, OAuthTokenBody, PLUGIN_PROVIDERS, PluginProviderId,
   SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT, TOKEN_METADATA_KEYS, normaliseCatalog,
   SkillsShCatalogResponse, SkillsShDetailResponse,
-} from "@omarchy-bot/protocol";
+} from "@metheus/protocol";
 
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store", "referrer-policy": "no-referrer" };
 const STATE_AUDIENCE = "omarchy-bot-oauth";
@@ -149,7 +149,7 @@ export async function handlePluginCloudRequest(request: Request): Promise<Respon
       const providerId = PluginProviderId.parse(route.slice("oauth/client/".length));
       if (!PLUGIN_PROVIDERS[providerId].clientMetadata) throw new BrokerError(404, "No public client metadata for this provider.");
       const origin = publisherOrigin();
-      return Response.json({ client_id: `${origin}/api/plugins/oauth/client/${providerId}`, client_name: "Omarchy Bot", client_uri: origin,
+      return Response.json({ client_id: `${origin}/api/plugins/oauth/client/${providerId}`, client_name: "Metheus", client_uri: origin,
         redirect_uris: [`${origin}/api/plugins/oauth/callback`], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" });
     }
     if (route === "oauth/start" && request.method === "POST") {

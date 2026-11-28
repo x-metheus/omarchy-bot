@@ -7,7 +7,7 @@ The standalone daemon hosts one Rig 0.47.1 root Agent per Bot Conversation. The 
 Use Rust 1.97.1. In a POSIX shell, create a private state directory and provision two separate random secrets. Run this block once for a new instance.
 
 ```sh
-state="$HOME/.local/state/omarchy-agent-daemon"
+state="$HOME/.local/state/metheus-agent-daemon"
 install -d -m 700 "$state"
 (
   umask 077
@@ -19,10 +19,10 @@ install -d -m 700 "$state"
 
 From the repository root, start the daemon. These paths work on restart too. The daemon reads both files at startup.
 
-Extract `omarchy-agent-daemon_<version>_<target>.tar.gz` on a release host and keep the `recall-model` directory beside the executable. After setting the environment below, run the extracted `omarchy-agent-daemon` (`omarchy-agent-daemon.exe` on Windows). A source checkout can use `cargo run --locked` instead.
+Extract `metheus-agent-daemon_<version>_<target>.tar.gz` on a release host and keep the `recall-model` directory beside the executable. After setting the environment below, run the extracted `metheus-agent-daemon` (`metheus-agent-daemon.exe` on Windows). A source checkout can use `cargo run --locked` instead.
 
 ```sh
-state="$HOME/.local/state/omarchy-agent-daemon"
+state="$HOME/.local/state/metheus-agent-daemon"
 export OMARCHY_AGENT_DB="$state/agent-daemon.sqlite3"
 export OMARCHY_AGENT_MASTER_KEY_FILE="$state/master.key"
 export OMARCHY_AGENT_SETTINGS_TOKEN_FILE="$state/settings-token"
@@ -30,19 +30,21 @@ cd apps/agent-daemon
 cargo run --locked
 ```
 
+Use your existing state directory when upgrading an earlier standalone build.
+
 The daemon prints its bound address. `OMARCHY_AGENT_PORT` defaults to `8765`. Set it to `0` for an available port and use the printed address. `OMARCHY_AGENT_DB` defaults to `agent-daemon.sqlite3` in the current directory. On startup with no provider credential, the daemon can create Bots and read Conversations. A message POST receives `503 provider_unconfigured` before the user message is committed.
 
 The master key file must contain exactly 32 raw bytes. SQLite stores provider keys as AES-256-GCM ciphertext with a fresh OS-random nonce per write. Keep the database and its matching master key in separate protected backups. Restore both to resume saved Settings. A missing or incorrect master key for a key-protected current selection prevents startup. If the key is permanently lost, stop the daemon and back up SQLite before clearing Settings in a transaction. Run `BEGIN IMMEDIATE; DELETE FROM current_provider_configuration; DELETE FROM provider_configurations; DELETE FROM model_settings; DELETE FROM provider_credentials; COMMIT;` against that database, then provision a new master key and re-enter provider credentials. Conversation history remains available. An independently replaced Settings bearer token takes effect on restart.
 
 ## Desktop connection
 
-Desktop release packages include `omarchy-agent-daemon` and the verified Recall model. For source builds, place the executable beside the Tauri executable, add it to the desktop process's `PATH`, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to its absolute path. The desktop checks `http://127.0.0.1:8765` when it opens for local use and attaches to an existing daemon. If the port is free and startup is enabled, it starts one using a private application data directory. Disable **Start the local daemon when opening Omarchy Bot** on the connection screen or in Settings. A launched daemon can keep working when the desktop disconnects or closes.
+Desktop release packages include `metheus-agent-daemon` and the verified Recall model. For source builds, place the executable beside the Tauri executable, add it to the desktop process's `PATH`, or set `METHEUS_AGENT_DAEMON_BIN` to its absolute path. The desktop checks `http://127.0.0.1:8765` when it opens for local use and attaches to an existing daemon. If the port is free and startup is enabled, it starts one using a private application data directory. In Metheus, disable **Start the local daemon on launch** on the connection screen or in Settings. A launched daemon can keep working when the desktop disconnects or closes.
 
 Choose **Pair local daemon** for a daemon started by this desktop profile. To attach to a standalone daemon, obtain a code from its operator, then enter the daemon address and code in the desktop. With the token file from the setup above, the operator can mint a code on the daemon host:
 
 ```sh
 base=http://127.0.0.1:8765
-token_file="$HOME/.local/state/omarchy-agent-daemon/settings-token"
+token_file="$HOME/.local/state/metheus-agent-daemon/settings-token"
 printf 'Authorization: Bearer %s\n' "$(cat "$token_file")" |
   curl -fsS "$base/api/pairing/codes" -H @- -H 'Content-Type: application/json' \
     -d '{"name":"Work desktop"}' | jq -r .code
@@ -103,7 +105,7 @@ Start the daemon as above with the official endpoints or authorized gateway over
 
 ```sh
 base=http://127.0.0.1:8765
-token_file="$HOME/.local/state/omarchy-agent-daemon/settings-token"
+token_file="$HOME/.local/state/metheus-agent-daemon/settings-token"
 
 select_provider() {
   python3 - "$base" "$token_file" "$1" "$2" "${3:-}" <<'PY'
@@ -299,7 +301,7 @@ The daemon embeds and indexes messages locally. Ordinary chat can run while Reca
 
 ### Offline provision
 
-Release packages include the pinned Xenova multilingual E5 small INT8 ONNX export at revision `761b726dd34fb83930e26aab4e9ac3899aa1fa78`. To prepare these same assets for a separate offline host, run `omarchy-agent-daemon --prepare-recall-model /path/to/recall-model` on a connected machine and copy the verified directory. The destination must have an existing parent directory. The following downloads the same files independently from `apps/agent-daemon`.
+Release packages include the pinned Xenova multilingual E5 small INT8 ONNX export at revision `761b726dd34fb83930e26aab4e9ac3899aa1fa78`. To prepare these same assets for a separate offline host, run `metheus-agent-daemon --prepare-recall-model /path/to/recall-model` on a connected machine and copy the verified directory. The destination must have an existing parent directory. The following downloads the same files independently from `apps/agent-daemon`.
 
 ```sh
 recall_dir=/path/to/recall-model
