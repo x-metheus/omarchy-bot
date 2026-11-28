@@ -1,5 +1,9 @@
+mod events;
 mod observations;
 mod recall_index;
+pub(crate) mod work;
+
+pub(crate) use events::ConversationEvent;
 
 use std::path::{self, Path};
 use std::sync::{Arc, Mutex};
@@ -9,6 +13,7 @@ use rig_ecs::model::Connection as RigConnection;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::agent::conversation::UserMessageSource;
@@ -86,13 +91,13 @@ struct Database {
 }
 
 #[derive(Clone)]
-pub(crate) struct Store(Arc<Mutex<Database>>, CurrentMemory);
+pub(crate) struct Store(Arc<Mutex<Database>>, CurrentMemory, watch::Sender<()>);
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path::absolute(path)?).context("open SQLite database")?;
-        // Keep the database locked for the lifetime of the daemon. Turn admission
-        // is in memory, so there must be one writer process per database.
+        let mut connection =
+            Connection::open(path::absolute(path)?).context("open SQLite database")?;
+        // The running Rig world belongs to the process that owns this database lock.
         connection
             .execute_batch(
                 "PRAGMA locking_mode = EXCLUSIVE;
@@ -168,10 +173,14 @@ impl Store {
                 .execute("ALTER TABLE bots ADD COLUMN duties TEXT", [])
                 .context("add duties to existing Bot profiles")?;
         }
+        events::initialize(&connection).context("initialize Conversation event storage")?;
+        work::initialize(&connection).context("initialize Conversation work storage")?;
         connection
             .execute_batch("COMMIT")
             .context("commit SQLite schema")?;
         let settings = Settings::load(&connection)?;
+        work::restart(&mut connection, settings.connection().is_some())
+            .context("recover Conversation work")?;
         let user_memory = CurrentMemory::load(&connection)?;
         Ok(Self(
             Arc::new(Mutex::new(Database {
@@ -179,6 +188,7 @@ impl Store {
                 settings,
             })),
             user_memory,
+            watch::Sender::new(()),
         ))
     }
 
@@ -221,7 +231,8 @@ impl Store {
 
     pub(crate) async fn conversation(&self, bot: Uuid) -> Result<Option<Conversation>> {
         self.run(move |db| {
-            let Some(mut conversation) = load_conversation(&db.connection, bot)? else {
+            let Some(mut conversation) = load_conversation(&db.connection, bot, History::Live)?
+            else {
                 return Ok(None);
             };
             let mut messages = conversation.messages.iter_mut().peekable();
@@ -254,55 +265,64 @@ impl Store {
         submissions: Vec<Submission>,
         history: History,
     ) -> Result<Admission> {
-        self.run(move |db| {
-            let transaction = db.connection.transaction()?;
-            let history = match history {
-                History::Restore => {
-                    let Some(conversation) = load_conversation(&transaction, bot)? else {
-                        return Ok(Admission::BotNotFound);
-                    };
-                    Some(RestoredConversation {
-                        conversation,
-                        observation: observations::load(&transaction, bot)?.map(Box::new),
-                    })
-                }
-                History::Live => None,
-            };
-            // Settings writes use this same lock and publish only after commit.
-            let Some(model) = db.settings.connection() else {
-                return Ok(Admission::Unconfigured);
-            };
-            // Resolve against committed history before inserting any associations for this message.
-            let mut attachments = Vec::with_capacity(submissions.len());
-            for submission in submissions {
-                let attachment = match submission {
-                    Submission::Inline(attachment) => {
-                        attachments::insert(&transaction, &attachment)?;
-                        attachment
-                    }
-                    Submission::Reference(id) => {
-                        let Some(attachment) = attachments::for_bot(&transaction, bot, id)? else {
-                            return Ok(Admission::AttachmentNotFound);
+        let admission = self
+            .run(move |db| {
+                let transaction = db.connection.transaction()?;
+                let history = match history {
+                    History::Restore => {
+                        let Some(history) = restore_conversation(&transaction, bot)? else {
+                            return Ok(Admission::BotNotFound);
                         };
-                        attachment
+                        Some(history)
                     }
+                    History::Live => None,
                 };
-                attachments.push(attachment);
-            }
-            let message_id = insert_message(&transaction, bot, Role::User, &text)?;
-            for (position, attachment) in attachments.iter().enumerate() {
-                attachments::associate(&transaction, message_id, position, attachment.metadata.id)?;
-            }
-            transaction.commit()?;
-            Ok(Admission::Accepted {
-                history,
-                message_id,
-                text,
-                attachments,
-                model,
+                // Settings writes use this same lock and publish only after commit.
+                let Some(model) = db.settings.connection() else {
+                    return Ok(Admission::Unconfigured);
+                };
+                // Resolve against committed history before inserting any associations for this message.
+                let mut attachments = Vec::with_capacity(submissions.len());
+                for submission in submissions {
+                    let attachment = match submission {
+                        Submission::Inline(attachment) => {
+                            attachments::insert(&transaction, &attachment)?;
+                            attachment
+                        }
+                        Submission::Reference(id) => {
+                            let Some(attachment) = attachments::for_bot(&transaction, bot, id)?
+                            else {
+                                return Ok(Admission::AttachmentNotFound);
+                            };
+                            attachment
+                        }
+                    };
+                    attachments.push(attachment);
+                }
+                let message_id = insert_message(&transaction, bot, Role::User, &text)?;
+                for (position, attachment) in attachments.iter().enumerate() {
+                    attachments::associate(
+                        &transaction,
+                        message_id,
+                        position,
+                        attachment.metadata.id,
+                    )?;
+                }
+                work::admit(&transaction, UserMessageSource { bot, message_id })?;
+                transaction.commit()?;
+                Ok(Admission::Accepted {
+                    history,
+                    message_id,
+                    text,
+                    attachments,
+                    model,
+                })
             })
-        })
-        .await
+            .await?;
+        if matches!(admission, Admission::Accepted { .. }) {
+            self.events_changed();
+        }
+        Ok(admission)
     }
 
     pub(crate) async fn commit_reply(
@@ -310,26 +330,38 @@ impl Store {
         bot: Uuid,
         text: String,
         duties: Option<String>,
-    ) -> Result<Message> {
-        self.run(move |db| {
-            let role = Role::Assistant;
-            let transaction = db.connection.transaction()?;
-            let id = insert_message(&transaction, bot, role, &text)?;
-            if let Some(duties) = duties {
-                transaction.execute(
-                    "UPDATE bots SET duties = ?2 WHERE id = ?1",
-                    params![bot.as_bytes().as_slice(), duties],
+        work: work::Settlement,
+    ) -> Result<(ConversationEvent, i64)> {
+        let committed = self
+            .run(move |db| {
+                let role = Role::Assistant;
+                let transaction = db.connection.transaction()?;
+                let id = insert_message(&transaction, bot, role, &text)?;
+                if let Some(duties) = duties {
+                    transaction.execute(
+                        "UPDATE bots SET duties = ?2 WHERE id = ?1",
+                        params![bot.as_bytes().as_slice(), duties],
+                    )?;
+                }
+                let message = Message {
+                    id,
+                    role,
+                    text,
+                    attachments: Vec::new(),
+                };
+                let event = events::append(
+                    &transaction,
+                    bot,
+                    "committed",
+                    serde_json::to_string(&message)?,
                 )?;
-            }
-            transaction.commit()?;
-            Ok(Message {
-                id,
-                role,
-                text,
-                attachments: Vec::new(),
+                work::settle(&transaction, bot, work, "completed")?;
+                transaction.commit()?;
+                Ok((event, id))
             })
-        })
-        .await
+            .await?;
+        self.events_changed();
+        Ok(committed)
     }
 
     pub(crate) fn user_memory(&self) -> &CurrentMemory {
@@ -376,7 +408,22 @@ impl Store {
     }
 }
 
-fn load_conversation(connection: &Connection, id: Uuid) -> rusqlite::Result<Option<Conversation>> {
+fn restore_conversation(connection: &Connection, bot: Uuid) -> Result<Option<RestoredConversation>> {
+    let Some(conversation) = load_conversation(connection, bot, History::Restore)? else {
+        return Ok(None);
+    };
+    let observation = observations::load(connection, bot)?.map(Box::new);
+    Ok(Some(RestoredConversation {
+        conversation,
+        observation,
+    }))
+}
+
+fn load_conversation(
+    connection: &Connection,
+    id: Uuid,
+    history: History,
+) -> rusqlite::Result<Option<Conversation>> {
     let key = id.as_bytes().as_slice();
     let Some((name, duties)) = connection
         .query_row(
@@ -388,10 +435,15 @@ fn load_conversation(connection: &Connection, id: Uuid) -> rusqlite::Result<Opti
     else {
         return Ok(None);
     };
-    let mut statement = connection
-        .prepare_cached("SELECT id, role, text FROM messages WHERE bot_id = ?1 ORDER BY id")?;
+    // Pending inputs are delivered by Rig once. Interrupted inputs require an explicit retry.
+    let mut statement = connection.prepare_cached(
+        "SELECT id, role, text FROM messages m WHERE bot_id = ?1 AND (?2 OR NOT EXISTS (
+             SELECT 1 FROM conversation_work w
+             WHERE w.message_id = m.id AND w.status IN ('queued', 'interrupted')
+         )) ORDER BY id",
+    )?;
     let messages = statement
-        .query_map([key], |row| {
+        .query_map(params![key, matches!(history, History::Live)], |row| {
             Ok(Message {
                 id: row.get(0)?,
                 role: row.get(1)?,

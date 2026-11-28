@@ -27,6 +27,8 @@ use tokio_stream::wrappers::ReceiverStream;
 mod host_tools;
 #[path = "conversation/observational_memory.rs"]
 mod observational_memory;
+#[path = "conversation/recovery.rs"]
+mod recovery;
 #[path = "conversation/source_recall.rs"]
 mod source_recall;
 #[path = "conversation/user_memory.rs"]
@@ -163,6 +165,16 @@ impl Daemon {
             .send()
             .await
             .expect("send Conversation message")
+    }
+
+    async fn events(&self, client: &Client, bot: &str, after: i64) -> ReplyStream {
+        let response = client
+            .get(format!("{}/bots/{bot}/events", self.url))
+            .header("Last-Event-ID", after)
+            .send()
+            .await
+            .expect("subscribe to Conversation events");
+        ReplyStream::new(response)
     }
 }
 
@@ -403,6 +415,7 @@ async fn completion(
 struct ReplyStream {
     response: Response,
     buffer: Vec<u8>,
+    cursor: Option<i64>,
 }
 
 impl ReplyStream {
@@ -412,6 +425,7 @@ impl ReplyStream {
         Self {
             response,
             buffer: Vec::new(),
+            cursor: None,
         }
     }
 
@@ -420,6 +434,13 @@ impl ReplyStream {
             if let Some(end) = self.buffer.windows(2).position(|bytes| bytes == b"\n\n") {
                 let frame: Vec<u8> = self.buffer.drain(..end + 2).collect();
                 let frame = std::str::from_utf8(&frame).expect("SSE frame is UTF-8");
+                if frame.starts_with(':') {
+                    continue;
+                }
+                self.cursor = frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("id: "))
+                    .map(|id| id.parse().expect("SSE id is a numeric cursor"));
                 let event = frame
                     .lines()
                     .find_map(|line| line.strip_prefix("event: "))
@@ -762,6 +783,7 @@ async fn a_disconnected_stream_keeps_its_turn_and_accepts_an_overlap() {
     let call = provider.next().await;
     call.text("Still ").await;
     assert_eq!(stream.expect("delta").await, "Still ");
+    let before = stream.cursor.unwrap_or(0);
     drop(stream);
 
     let mut later = ReplyStream::new(daemon.send(&client, id, "One more thought.").await);
@@ -777,12 +799,19 @@ async fn a_disconnected_stream_keeps_its_turn_and_accepts_an_overlap() {
 
     call.text("here.").await;
     call.finish().await;
+    let mut resumed = daemon.events(&client, id, before).await;
+    assert!(before > 0, "the POST stream supplies a reconnect cursor");
+    assert_eq!(resumed.expect_reply("delta").await, "here.");
+    assert!(resumed.cursor.unwrap() > before);
     let call = provider.next().await;
     call.text("I read your messages.").await;
     call.finish().await;
     assert_eq!(later.expect("delta").await, "I read your messages.");
     assert_eq!(other.expect("delta").await, "I read your messages.");
     let committed = later.expect("committed").await;
+    assert_eq!(resumed.expect_reply("delta").await, "I read your messages.");
+    assert_eq!(resumed.expect_reply("committed").await, committed);
+    assert_eq!(resumed.cursor, later.cursor);
     assert_eq!(other.expect("committed").await, committed);
     assert!(other.next().await.is_none());
     assert!(later.next().await.is_none());

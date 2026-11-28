@@ -111,6 +111,8 @@ Expect ordered `delta` events followed by `committed` for both replies. The foll
 | `GET /bots/{id}` | `200` with `bot` and `messages`, oldest first |
 | `PATCH /bots/{id}` with `{"name":"Prism"}` | `200` with the renamed Bot profile |
 | `POST /bots/{id}/messages` with `{"text":"Hello"}` | `200` with a `text/event-stream` reply |
+| `GET /bots/{id}/events` | `200` with ordered replay followed by live Conversation events |
+| `POST /bots/{id}/work/{messageId}/retry` | `202` queues the original interrupted input, `409` for other work states |
 | `GET /bots/{id}/attachments/{attachmentId}` | `200` with the stored bytes and media type |
 | `GET /recall/status` | `200` with independent Recall model availability |
 
@@ -120,13 +122,19 @@ Set duties by sending an explicit standing instruction such as “Your ongoing j
 
 A successful message POST commits the user message before starting the model call. Each `delta` contains a JSON string. The terminal `committed` event contains the same `{id, role, text}` message returned by `GET` and is sent after the SQLite commit. A failed Turn ends with an `error` event containing `code` and `message`. Any deltas from that Turn are provisional. The committed user message remains in the Conversation.
 
-A Bot accepts new messages while a Turn is running. Rig delivers them through the Inbox at the next model call. A POST stream starts receiving deltas when its input is delivered and closes after that Turn's `committed` or `error` event. When Rig delivers multiple inputs to the same Turn, their POST streams receive the same committed reply ID. A disconnect leaves the Turn running. Use `GET` to read committed history, including replies to background Subagent reports after the POST streams close.
+A Bot accepts new messages while a Turn is running. Rig delivers them through the Inbox at the next model call. A POST stream starts receiving deltas when its input is delivered and closes after that Turn's `committed` or `error` event. When Rig delivers multiple inputs to the same Turn, their POST streams receive the same committed reply ID. A disconnect leaves the Turn running.
+
+Read `/bots/{id}/events` to subscribe to the entire Conversation, including detached replies after the POST streams close. Save the last processed SSE `id` and pass it as `Last-Event-ID` on reconnect. IDs are increasing and remain stable across restart. The daemon replays later events for that Bot and then follows live updates on the same connection. Reply events use the same IDs on the POST and Conversation streams. The history endpoint includes committed messages from before event recording was available.
+
+The Conversation stream also emits `work` events with `messageId` and `status`. A request can be `queued`, `running`, `waiting` for a delegated report, `completed`, `failed`, or `interrupted`. On restart, the daemon resumes queued inputs with the current model and credential. If configuration is missing, queued work reports `reason: "provider_unconfigured"` and resumes when Settings are saved.
+
+Previously running or delegated work becomes `interrupted`. Its original message and any committed replies are available in Message History. An explicit retry reuses the original message and attachments with current Settings. Interrupted instructions stay out of restored model input until that retry. Interrupted Rig tool calls and Subagents are discarded on restart.
 
 ### Rig lifecycle
 
-The daemon restores a Bot's committed Conversation into its root Agent on the first POST after startup. Subsequent POSTs append the user message to SQLite before handing it to the root's Rig Inbox. The Inbox effect carries the Bot and durable user message ID, and Rig provides its `DeliveredAs` and `DeliveredIn` mapping when the message reaches the model. Model calls and the tools they produce carry the eligible source for that invocation. Subagent results enter the root Inbox with Rig's Agent author and are available to the root on its next model call.
+The daemon restores committed model context when it creates a Bot's root Agent. Admission saves a user message and its queued work in one SQLite transaction. The Inbox effect carries the Bot and durable user message ID. Rig provides `DeliveredAs` and `DeliveredIn` when the message reaches a Turn. Before its model request can start, the daemon durably marks the delivered input as running. Model calls and tools retain the eligible source for each invocation.
 
-`SubagentsPlugin` owns delegation, messaging, and reports. The `task` tool instructs the root to end its Turn after dispatching asynchronous work, leaving it available for new requests. Turn settlement sends one reply to the ordered Conversation writer, which commits before notifying any attached POST streams. A report can start a Turn with no attached POST stream. SQLite preserves committed messages across a daemon restart. Live Rig Inbox entries and Subagents last for the daemon process.
+`SubagentsPlugin` owns delegation, messaging, and reports. The daemon records the originating authored input for a delegated request and resolves it when the root commits its report reply. A live report can wake the root using its existing connection. Settlement commits the reply, work state, and corresponding events before notifying the POST or Conversation streams.
 
 ### Control ongoing work in chat
 

@@ -1,3 +1,5 @@
+mod events;
+
 use std::collections::HashSet;
 use std::convert::Infallible;
 
@@ -19,11 +21,13 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use crate::agent::conversation::UserMessageSource;
 use crate::agent::{AgentCommand, ReplySink, TurnRequest};
 use crate::attachments::{Input as AttachmentInput, MAX_ATTACHMENTS, Submission};
 use crate::duties;
 use crate::recall::{Availability, Recall};
 use crate::settings::{SettingsStatus, SettingsUpdate, Update};
+use crate::store::work::{Report, Retry, Settlement};
 use crate::store::{Admission, Bot, Conversation, History, Store};
 
 #[derive(Clone)]
@@ -44,6 +48,8 @@ pub(crate) fn router(
         .route("/bots", post(create_bot))
         .route("/bots/{bot}", get(read_bot).patch(rename_bot))
         .route("/bots/{bot}/messages", post(send_message))
+        .route("/bots/{bot}/work/{message}/retry", post(retry_work))
+        .route("/bots/{bot}/events", get(events::read))
         .route("/bots/{bot}/attachments/{id}", get(read_attachment));
     // Device authorization can replace this loopback guard at the Conversation boundary.
     let conversation_routes = if let Some(expected) = conversation_token {
@@ -143,10 +149,14 @@ async fn write_settings(
             ),
         )
     })?;
-    match daemon
-        .store
-        .update_settings(input)
+    let (reply, result) = oneshot::channel();
+    daemon
+        .conversations
+        .send(ConversationCommand::Settings { input, reply })
+        .map_err(|_| SETTINGS_STORAGE_FAILED)?;
+    match result
         .await
+        .map_err(|_| SETTINGS_STORAGE_FAILED)?
         .map_err(|_| SETTINGS_STORAGE_FAILED)?
     {
         Update::Saved(status) => Ok(Json(status)),
@@ -343,7 +353,43 @@ async fn send_message(
     ))
 }
 
+async fn retry_work(
+    State(daemon): State<Daemon>,
+    Path((bot, message_id)): Path<(Uuid, i64)>,
+) -> Result<StatusCode, ApiError> {
+    let (reply, result) = oneshot::channel();
+    daemon
+        .conversations
+        .send(ConversationCommand::Retry {
+            source: UserMessageSource { bot, message_id },
+            reply,
+        })
+        .map_err(|_| UNAVAILABLE)?;
+    result.await.map_err(|_| UNAVAILABLE)?
+}
+
 pub(crate) enum ConversationCommand {
+    Settings {
+        input: SettingsUpdate,
+        reply: oneshot::Sender<anyhow::Result<Update>>,
+    },
+    Retry {
+        source: UserMessageSource,
+        reply: oneshot::Sender<Result<StatusCode, ApiError>>,
+    },
+    Started {
+        sources: Vec<UserMessageSource>,
+        committed: std::sync::mpsc::SyncSender<bool>,
+    },
+    Delegated {
+        source: UserMessageSource,
+        report: Report,
+        committed: std::sync::mpsc::SyncSender<bool>,
+    },
+    ConsumedReport {
+        bot: Uuid,
+        report: Report,
+    },
     Message {
         bot: Uuid,
         text: String,
@@ -351,11 +397,18 @@ pub(crate) enum ConversationCommand {
         stream: ReplySink,
         accepted: oneshot::Sender<Result<(), ApiError>>,
     },
+    Event {
+        bot: Uuid,
+        name: &'static str,
+        data: serde_json::Value,
+        streams: Vec<ReplySink>,
+    },
     Settled {
         bot: Uuid,
         answer: Option<String>,
         reply: Option<MessageId>,
         duties: Option<String>,
+        work: Settlement,
         streams: Vec<ReplySink>,
     },
 }
@@ -368,9 +421,73 @@ pub(crate) async fn run_conversations(
     recall: Recall,
 ) {
     let mut live = HashSet::new();
+    let queued = match store.recovery_queue().await {
+        Ok(queued) => queued,
+        Err(error) => {
+            store_error(error);
+            return;
+        }
+    };
+    for source in queued {
+        live.insert(source.bot);
+        if turns.send(AgentCommand::Recover(source)).is_err() {
+            return;
+        }
+    }
+    wake.wake();
     // Keep SQLite admission and reply commits in order with their runtime handoff.
     while let Some(command) = commands.recv().await {
         match command {
+            ConversationCommand::Settings { input, reply } => {
+                let update = store.update_settings(input).await;
+                if matches!(update, Ok(Update::Saved(_))) {
+                    wake.wake();
+                }
+                let _ = reply.send(update);
+            }
+            ConversationCommand::Retry { source, reply } => {
+                let result = match store.retry(source).await {
+                    Ok(Retry::Queued) => turns
+                        .send(AgentCommand::Recover(source))
+                        .map_err(|_| UNAVAILABLE)
+                        .map(|()| {
+                            live.insert(source.bot);
+                            wake.wake();
+                            StatusCode::ACCEPTED
+                        }),
+                    Ok(Retry::NotFound) => Err(ApiError(
+                        StatusCode::NOT_FOUND,
+                        Problem::new("work_not_found", "Conversation work not found"),
+                    )),
+                    Ok(Retry::NotInterrupted) => Err(ApiError(
+                        StatusCode::CONFLICT,
+                        Problem::new(
+                            "work_not_interrupted",
+                            "only interrupted work can be retried",
+                        ),
+                    )),
+                    Err(error) => Err(store_error(error)),
+                };
+                let _ = reply.send(result);
+            }
+            ConversationCommand::Started { sources, committed } => {
+                let result = store.start_work(sources).await.map_err(store_error);
+                let _ = committed.send(result.is_ok());
+            }
+            ConversationCommand::Delegated {
+                source,
+                report,
+                committed,
+            } => {
+                let result = store
+                    .add_delegation(source, report)
+                    .await
+                    .map_err(store_error);
+                let _ = committed.send(result.is_ok());
+            }
+            ConversationCommand::ConsumedReport { bot, report } => {
+                let _ = store.consume_report(bot, report).await.map_err(store_error);
+            }
             ConversationCommand::Message {
                 bot,
                 text,
@@ -400,7 +517,7 @@ pub(crate) async fn run_conversations(
                                 text,
                                 attachments,
                                 model,
-                                stream,
+                                stream: Some(stream),
                             }))
                             .map_err(|_| UNAVAILABLE)
                             .map(|()| {
@@ -415,11 +532,26 @@ pub(crate) async fn run_conversations(
                 };
                 let _ = accepted.send(admission);
             }
+            ConversationCommand::Event {
+                bot,
+                name,
+                data,
+                streams,
+            } => {
+                let event = match store.record_event(bot, name, data).await {
+                    Ok(record) => record.sse(),
+                    Err(error) => event("error", store_error(error).1),
+                };
+                for stream in streams {
+                    stream.send(event.clone());
+                }
+            }
             ConversationCommand::Settled {
                 bot,
                 answer,
                 reply,
                 duties,
+                work,
                 streams,
             } => {
                 let terminal = match answer {
@@ -427,41 +559,41 @@ pub(crate) async fn run_conversations(
                         let prompt = duties
                             .as_deref()
                             .map(|text| duties::system_prompt(Some(text)));
-                        match store.commit_reply(bot, text, duties).await {
-                            Ok(message) => {
+                        match store.commit_reply(bot, text, duties, work).await {
+                            Ok((record, message_id)) => {
                                 let _ = turns.send(AgentCommand::ReplyCommitted {
                                     bot,
                                     entry: reply,
-                                    message_id: message.id,
+                                    message_id,
                                     prompt,
                                 });
-                                wake.wake();
                                 recall.history_changed();
-                                if streams.is_empty() {
-                                    continue;
-                                }
-                                event("committed", message)
+                                record.sse()
                             }
                             Err(error) => event("error", store_error(error).1),
                         }
                     }
-                    None => event(
-                        "error",
-                        Problem::new(
+                    None => {
+                        let problem = Problem::new(
                             "turn_failed",
                             "Rig did not complete a text reply; check the model and provider configuration",
-                        ),
-                    ),
+                        );
+                        match store.fail_work(bot, work, problem).await {
+                            Ok(record) => record.sse(),
+                            Err(error) => event("error", store_error(error).1),
+                        }
+                    }
                 };
-                for mut stream in streams {
+                for stream in streams {
                     stream.send(terminal.clone());
                 }
+                wake.wake();
             }
         }
     }
 }
 
-pub(crate) fn event(name: &'static str, value: impl Serialize) -> Event {
+fn event(name: &'static str, value: impl Serialize) -> Event {
     Event::default()
         .event(name)
         .json_data(value)
