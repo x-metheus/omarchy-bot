@@ -38,6 +38,7 @@ coverage/
 
 # Native builds, container caches, and private smoke evidence
 .lane/
+/target/
 apps/omarchy-bot/src-tauri/target/
 apps/omarchy-bot/src-tauri/binaries/
 apps/agent-daemon/target/
