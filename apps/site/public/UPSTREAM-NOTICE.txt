@@ -29,5 +29,4 @@ Upstream authors retain their rights. These source-derived portions are not
 relicensed under the MIT license covering Omarchy Bot's original code.
 
 JetBrains Mono and Geist are distributed with their respective font licenses
-in /fonts/. Omarchy Bot is an independent plugin, not the Omarchy operating
-system's official website.
+in /fonts/. Omarchy Bot is an independent desktop project.
