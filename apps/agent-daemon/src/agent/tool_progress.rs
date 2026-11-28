@@ -63,7 +63,8 @@ pub(super) fn settled(mut records: MessageReader<EffectRecorded>, mut progress: 
             | Disposition::Superseded
             | Disposition::AnsweredWhileRunning => ToolStatus::Cancelled,
             _ => match record.reviewed.as_ref().unwrap_or(&record.outcome) {
-                Ok(Answered::ToolResult { result }) if !result.is_error() => ToolStatus::Completed,
+                Ok(Answered::ToolResult { result }) if result.is_skipped() => ToolStatus::Cancelled,
+                Ok(Answered::ToolResult { result }) if result.is_success() => ToolStatus::Completed,
                 _ => ToolStatus::Failed,
             },
         };

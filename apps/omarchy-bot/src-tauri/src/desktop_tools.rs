@@ -38,7 +38,6 @@ struct Running {
     stop: watch::Sender<()>,
     task: tauri::async_runtime::JoinHandle<()>,
 }
-
 impl DesktopTools {
     pub(super) fn stop(&self) {
         let running = self

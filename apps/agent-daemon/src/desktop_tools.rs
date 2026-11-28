@@ -332,14 +332,20 @@ fn route(
         if !NAMES.contains(&request.call.function.name.as_str()) {
             continue;
         }
-        if let (Some(&target), Some(handler)) = (target, handler) {
-            commands
-                .entity(entity)
-                .insert(CallHandler(Handler(ErasedHandler::new(DesktopCall {
-                    desktops: desktops.clone(),
-                    target,
-                    descriptor: handler.0.0.descriptor(),
-                }))));
+        if let Some(&target) = target {
+            if let Some(handler) = handler {
+                commands
+                    .entity(entity)
+                    .insert(CallHandler(Handler(ErasedHandler::new(DesktopCall {
+                        desktops: desktops.clone(),
+                        target,
+                        descriptor: handler.0.0.descriptor(),
+                    }))));
+            } else {
+                commands
+                    .entity(entity)
+                    .insert(Outcome::refused("Desktop tool execution is unavailable."));
+            }
         } else if host.is_none() {
             commands.entity(entity).insert(Outcome::refused("No daemon-host working directory is configured. Choose a desktop working directory for desktop tools."));
         }

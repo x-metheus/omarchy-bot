@@ -34,8 +34,24 @@ async fn pair(daemon: &Daemon, client: &Client, name: &str) -> String {
     device["token"].as_str().unwrap().to_owned()
 }
 
+async fn next_tool(events: &mut ReplyStream, operation: &str, status: &str) -> Value {
+    let payload = timeout(DEADLINE, async {
+        loop {
+            let (event, payload) = events.next().await.expect("Conversation stream stays open");
+            if event == "tool" {
+                return payload;
+            }
+        }
+    })
+    .await
+    .expect("Conversation reports tool progress");
+    assert_eq!(payload["name"], operation, "{payload}");
+    assert_eq!(payload["status"], status, "{operation}: {payload}");
+    payload["id"].clone()
+}
+
 #[tokio::test]
-async fn desktop_tool_denial_returns_to_its_rig_call_without_running_on_host() {
+async fn desktop_tools_report_correlated_results_denial_and_disconnect() {
     let directory = tempfile::tempdir().unwrap();
     let mut provider = Provider::start().await;
     let (daemon, work) = start(directory.path(), &provider).await;
@@ -53,6 +69,7 @@ async fn desktop_tool_denial_returns_to_its_rig_call_without_running_on_host() {
     let session = ready["session"].as_str().unwrap();
     let bot = daemon.create(&client).await;
     let bot = bot_id(&bot);
+    let mut events = daemon.events(&client, bot, 0).await;
     let send = |token: &str| {
         client
         .post(format!("{}/bots/{bot}/messages", daemon.url))
@@ -71,6 +88,7 @@ async fn desktop_tool_denial_returns_to_its_rig_call_without_running_on_host() {
     )
     .await;
     let request = desktop.expect("request").await;
+    let denial = next_tool(&mut events, "write", "running").await;
     assert_eq!(request["name"], "write");
     assert_eq!(request["arguments"]["path"], "sample.txt");
     let id = request["id"].as_str().unwrap();
@@ -93,6 +111,7 @@ async fn desktop_tool_denial_returns_to_its_rig_call_without_running_on_host() {
     assert!(latest_result(&call).contains("denied"));
     assert!(!work.join("sample.txt").exists());
     chat_reply(call, &mut reply, "The operation was denied.").await;
+    assert_eq!(denial, next_tool(&mut events, "write", "failed").await);
 
     let mut reply = ReplyStream::new(send(&token).await.unwrap());
     tool(
@@ -147,6 +166,8 @@ async fn desktop_tool_denial_returns_to_its_rig_call_without_running_on_host() {
             .any(|message| message["tool_call_id"] == "call_fixture_2")
     );
     chat_reply(call, &mut reply, "The desktop read completed.").await;
+    let read = next_tool(&mut events, "read", "running").await;
+    assert_eq!(read, next_tool(&mut events, "read", "completed").await);
 
     let mut reply = ReplyStream::new(send(&token).await.unwrap());
     tool(
@@ -157,11 +178,13 @@ async fn desktop_tool_denial_returns_to_its_rig_call_without_running_on_host() {
     )
     .await;
     desktop.expect("request").await;
+    let disconnect = next_tool(&mut events, "write", "running").await;
     drop(desktop);
     let call = provider.next().await;
     assert!(latest_result(&call).contains("desktop disconnected"));
     assert!(!work.join("sample.txt").exists());
     chat_reply(call, &mut reply, "The desktop disconnected.").await;
+    assert_eq!(disconnect, next_tool(&mut events, "write", "failed").await);
     assert_eq!(send(&token).await.unwrap().status(), StatusCode::CONFLICT);
 
     let mut reply = ReplyStream::new(daemon.send(&client, bot, "Write the host sample.").await);
@@ -179,26 +202,8 @@ async fn desktop_tool_denial_returns_to_its_rig_call_without_running_on_host() {
     );
     chat_reply(call, &mut reply, "The daemon host write completed.").await;
 
-    let mut events = daemon.events(&client, bot, 0).await;
-    let tools = timeout(DEADLINE, async {
-        let mut tools = Vec::new();
-        while tools.len() < 8 {
-            let (event, payload) = events.next().await.unwrap();
-            if event == "tool" {
-                tools.push(payload);
-            }
-        }
-        tools
-    })
-    .await
-    .unwrap();
-    for (call, status) in tools
-        .chunks_exact(2)
-        .zip(["failed", "completed", "failed", "completed"])
-    {
-        assert_eq!(call[0]["id"], call[1]["id"]);
-        assert_eq!(call[0]["status"], "running");
-        assert_eq!(call[1]["status"], status);
-    }
+    let host = next_tool(&mut events, "write", "running").await;
+    assert_eq!(host, next_tool(&mut events, "write", "completed").await);
+    assert_ne!(host, denial);
     daemon.stop().await;
 }

@@ -260,3 +260,57 @@ impl Workspace for DesktopWorkspace {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn selected_file_tools_keep_the_local_path_private_and_protect_unseen_versions() {
+        let fixture = tempfile::tempdir().expect("create a disposable desktop workspace");
+        let root = fixture
+            .path()
+            .canonicalize()
+            .expect("resolve the selected directory");
+        let directory: Arc<Path> = root.as_path().into();
+        let path = root.join("sample.txt");
+        fs::write(&path, "initial sample\n").expect("write the fixture sample");
+        let seen = Seen::default();
+        let read = Name::Read
+            .decode(&json!({"path": "sample.txt"}), Some("sample.txt"))
+            .expect("allow read of the selected file");
+        let output = read
+            .execute(directory.clone(), seen.clone())
+            .await
+            .expect("read the sample");
+        let text = output.as_text().expect("read returns text");
+        assert!(text.contains("initial sample"));
+        assert!(!text.contains(root.to_string_lossy().as_ref()));
+        assert!(Name::Read
+            .decode(&json!({"path": "other.txt"}), Some("sample.txt"))
+            .is_err());
+        assert!(Name::Shell
+            .decode(&json!({"command": "printf sample"}), Some("sample.txt"))
+            .is_err());
+        assert!(Name::Write
+            .decode(
+                &json!({"path": "../sample.txt", "content": "outside"}),
+                None
+            )
+            .is_err());
+
+        fs::write(&path, "changed after read\n").expect("update the fixture sample");
+        let write = Name::Write
+            .decode(
+                &json!({"path": "sample.txt", "content": "replacement"}),
+                Some("sample.txt"),
+            )
+            .expect("the write is scoped to the selected file");
+        assert!(write.execute(directory, seen).await.is_err());
+        assert_eq!(
+            fs::read_to_string(path).expect("read the preserved sample"),
+            "changed after read\n"
+        );
+    }
+}
