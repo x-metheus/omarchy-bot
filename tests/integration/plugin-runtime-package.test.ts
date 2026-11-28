@@ -186,7 +186,7 @@ if (process.env.OMARCHY_BOT_SERVE_FIXTURE_MARKER !== undefined) {
 }
 `,
   );
-  write(root, "apps/web/dist/index.html", "<!doctype html><title>built web fixture</title>\n");
+  write(root, "apps/omarchy-bot/dist/index.html", "<!doctype html><title>built desktop fixture</title>\n");
   writeExecutable(
     root,
     "scripts/serve.sh",
@@ -233,7 +233,7 @@ test("packages a runnable production dependency tree without mutating the source
     cwd: fixture.root,
   });
   assertSucceeded(extract, "runtime extraction");
-  expect(existsSync(path.join(extracted, "apps/web/dist"))).toBe(false);
+  expect(existsSync(path.join(extracted, "apps/omarchy-bot"))).toBe(false);
   expect(readFileSync(path.join(extracted, "apps/cli/src/release-public-key"), "utf8").trim()).toBe(releaseKey);
 
   expect(readFileSync(path.join(extracted, "sway/.omarchy-bot-runtime"), "utf8"))
@@ -288,7 +288,7 @@ test("packages a runnable production dependency tree without mutating the source
 
 test("packages a keyless nonpublication runtime without a Web build or inherited trust key", () => {
   const fixture = createFixture();
-  rmSync(path.join(fixture.root, "apps/web/dist"), { recursive: true });
+  rmSync(path.join(fixture.root, "apps/omarchy-bot/dist"), { recursive: true });
   write(fixture.root, "apps/cli/src/release-public-key", releaseKey);
   const installEnv = { ...process.env, BUN_INSTALL_CACHE_DIR: fixture.cache, TAURI_UPDATER_PUBKEY: undefined, RELEASE_BUILD: undefined };
   assertSucceeded(run(["bun", "install"], { cwd: fixture.root, env: installEnv }), "fixture dependency install");

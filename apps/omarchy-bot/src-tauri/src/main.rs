@@ -502,6 +502,17 @@ fn receive_link(app: &tauri::AppHandle, link: &str) {
     }
 }
 
+fn allows_app_navigation(url: &Url, dev: bool) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let origin = (url.scheme(), url.host_str(), url.port());
+    matches!(
+        origin,
+        ("tauri", Some("localhost"), None) | ("http" | "https", Some("tauri.localhost"), None)
+    ) || (dev && origin == ("http", Some("127.0.0.1"), Some(7322)))
+}
+
 fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
@@ -571,8 +582,7 @@ fn main() {
                 .title("Omarchy Bot").inner_size(1200.0, 800.0).min_inner_size(480.0, 480.0)
                 .disable_drag_drop_handler()
                 .initialization_script(script)
-                .on_navigation(|url| url.username().is_empty() && url.password().is_none() && url.port().is_none()
-                    && matches!((url.scheme(), url.host_str()), ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost"))))
+                .on_navigation(|url| allows_app_navigation(url, cfg!(dev)))
                 .build()?;
             Ok(())
         })
@@ -610,6 +620,32 @@ fn main() {
         tauri::process::restart(&environment);
     }
     std::process::exit(exit);
+}
+
+#[cfg(test)]
+#[test]
+fn navigation_allows_only_app_origins_and_the_exact_vite_origin_in_dev() {
+    for app in ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"] {
+        let url = Url::parse(app).expect("app origin");
+        assert!(allows_app_navigation(&url, false), "{app}");
+        assert!(allows_app_navigation(&url, true), "{app}");
+    }
+    let vite = Url::parse("http://127.0.0.1:7322/index.html").expect("Vite dev URL");
+    assert!(allows_app_navigation(&vite, true));
+    assert!(!allows_app_navigation(&vite, false));
+    for foreign in [
+        "http://127.0.0.1:7323",
+        "http://localhost:7322",
+        "https://127.0.0.1:7322",
+        "http://127.0.0.1",
+        "http://user@127.0.0.1:7322",
+        "https://tauri.localhost:7322",
+        "https://example.test",
+    ] {
+        let url = Url::parse(foreign).expect("foreign origin");
+        assert!(!allows_app_navigation(&url, true), "{foreign}");
+        assert!(!allows_app_navigation(&url, false), "{foreign}");
+    }
 }
 
 #[cfg(test)]

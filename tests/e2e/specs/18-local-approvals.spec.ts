@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "../fixtures.ts";
-import type { LocalApproval, LocalApprovalDecision } from "../../../apps/web/src/lib/shell.ts";
+import type { LocalApproval, LocalApprovalDecision } from "../../../apps/omarchy-bot/src/lib/shell.ts";
 
 declare global {
   var __localApprovalDecisions__: Record<string, Promise<LocalApprovalDecision>>;

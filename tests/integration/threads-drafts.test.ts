@@ -5,7 +5,7 @@ import {
   draftStorageKey,
   loadDraft,
   saveDraft,
-} from "../../apps/web/src/lib/drafts.ts";
+} from "../../apps/omarchy-bot/src/lib/drafts.ts";
 import {
   api,
   apiStatus,

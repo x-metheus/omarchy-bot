@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const daemonBinary = process.env.OMARCHY_BOT_AGENT_DAEMON_BIN;
 const operator = "desktop-test-operator-token-4bfe1657";
 const web = "http://127.0.0.1:7322";
-const webDirectory = fileURLToPath(new URL("../../apps/web", import.meta.url));
+const appDirectory = fileURLToPath(new URL("../../apps/omarchy-bot", import.meta.url));
 const duties = "Classify new color samples by shade.";
 const instruction = `Your ongoing job is to ${duties[0]?.toLowerCase()}${duties.slice(1)}`;
 const hold = "Hold the neutral swatch check.";
@@ -89,9 +89,9 @@ test.skipIf(!daemonBinary)("desktop pairs, manages a Conversation, rotates Setti
     const issued = await fetch(`${origin}/api/pairing/codes`, { method: "POST", headers, body: JSON.stringify({ name: "Disposable desktop" }) });
     expect(issued.status).toBe(200);
     const { code } = await issued.json() as { code: string };
-    const build = Bun.spawn(["bun", "run", "build"], { cwd: webDirectory, stdout: "ignore", stderr: "inherit" });
-    if (await build.exited !== 0) throw new Error("production web build failed");
-    const dist = join(webDirectory, "dist");
+    const build = Bun.spawn(["bun", "run", "build:frontend"], { cwd: appDirectory, stdout: "ignore", stderr: "inherit" });
+    if (await build.exited !== 0) throw new Error("production desktop frontend build failed");
+    const dist = join(appDirectory, "dist");
     staticUi = Bun.serve({ hostname: "127.0.0.1", port: Number(new URL(web).port), fetch(request) {
       const pathname = decodeURIComponent(new URL(request.url).pathname);
       const asset = resolve(dist, pathname === "/" ? "index.html" : `.${pathname}`);
@@ -99,7 +99,7 @@ test.skipIf(!daemonBinary)("desktop pairs, manages a Conversation, rotates Setti
       return new Response(Bun.file(asset));
     } });
     const bridge = await Bun.build({
-      entrypoints: [join(webDirectory, "src/dev-shell.ts")], target: "browser", format: "iife",
+      entrypoints: [join(appDirectory, "src/dev-shell.ts")], target: "browser", format: "iife",
       define: { "import.meta.env.VITE_OMARCHY_AGENT_DAEMON_URL": JSON.stringify(origin) },
     });
     const bridgeScript = bridge.outputs[0];

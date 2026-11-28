@@ -4,9 +4,6 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
     "types": ["vite/client"],
-    "noEmit": true,
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
     "paths": {
       "@omarchy-bot/protocol": ["../../packages/protocol/src/index.ts"],
       "@omarchy-bot/api-client": ["../../packages/api-client/src/index.ts"]

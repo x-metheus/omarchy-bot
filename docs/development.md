@@ -1,6 +1,6 @@
 # Development workflow
 
-Start with the [project instructions](../AGENTS.md). Locate the affected source and tests using the [code map](README.md#code-map). For changes under `apps/web/`, also follow the [frontend instructions](../apps/web/AGENTS.md).
+Start with the [project instructions](../AGENTS.md). Locate the affected source and tests using the [code map](README.md#code-map). For desktop frontend changes, follow the [frontend instructions](../apps/omarchy-bot/AGENTS.md).
 
 ## Workflow selection
 
@@ -33,20 +33,28 @@ For Rust implementation, porting, and review, use [rust-best-practices](../.agen
 ## Stack and verification
 
 - The TypeScript workspaces use ES modules and the exact Bun version pinned in `engines.bun`. When upgrading Bun, rerun the secret-store tests because the runtime uses the experimental `Bun.secrets` API. [Root manifest](../package.json) · [Secret-store tests](../apps/daemon/src/modules/runtime/bunSecrets.test.ts)
-- The web UI uses React, Vite, and Astryx. Dependency versions are declared in the [web package manifest](../apps/web/package.json).
-- The desktop app uses a Tauri WebView and the Local Sidecar uses Rust. For native integration changes, exercise the packaged AppImage with the [Linux smoke test](../scripts/smoke-linux-app.sh).
+- The desktop app keeps React, Vite, Astryx, and Tauri in one project. The [app manifest](../apps/omarchy-bot/package.json) pins the Tauri CLI and declares frontend dependencies. The Rust Local Sidecar builds separately. For native integration changes, exercise the packaged AppImage with the [Linux smoke test](../scripts/smoke-linux-app.sh).
 
 Run these commands from the repository root. Consult the affected workspace’s `package.json` for additional checks.
 
 | Command | Purpose |
 | --- | --- |
 | `bun install --frozen-lockfile` | Install locked dependencies |
-| `OMARCHY_BOT_DEV=1 bun run dev` | Run the Service and web development harness |
+| `bun run tauri dev` / `bun run tauri build` | Run or build the Tauri desktop application after preparing the native prerequisites |
+| `OMARCHY_BOT_DEV=1 bun run dev` | Run the legacy Service and the desktop frontend's browser harness |
 | `bun run typecheck` | Check TypeScript types |
 | `bun run lint:boundaries` | Check package dependency boundaries |
-| `bun run build` | Check boundaries and build workspaces |
+| `bun run build` | Check boundaries and build the Service helper and desktop frontend |
 | `bun test <path>` / `bun test` | Run focused tests / the Bun suite |
 | `bun run test:e2e` | Run the Playwright suite with its configured prerequisites |
+
+### Desktop project layout
+
+`apps/omarchy-bot` contains the Bun manifest, Vite config and frontend sources alongside `src-tauri`. The project is based on the official Bun, React TypeScript, Tauri 2 scaffold. To reproduce the starting scaffold in an empty directory, run `bunx create-tauri-app@4.7.5 omarchy-bot --manager bun --template react-ts --tauri-version 2 --identifier com.omarchy.bot --yes`. See the [Tauri project guide](https://v2.tauri.app/start/create-project/) and [Vite integration guide](https://v2.tauri.app/start/frontend/vite/).
+
+Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/), then run `bun install --frozen-lockfile` and `bun scripts/build-sidecar.ts` from the repository root. Run `bun run tauri dev` or `bun run tauri build` from `apps/omarchy-bot` or the repository root. The CLI runs Vite on `http://127.0.0.1:7322` for development and builds the app's `dist` for packaging. For the frontend alone, run `bun run --filter=@omarchy-bot/desktop build:frontend`. For local Agent Daemon autostart, build the daemon using its [standalone guide](../apps/agent-daemon/README.md) and set `OMARCHY_BOT_AGENT_DAEMON_BIN` to its absolute path.
+
+The legacy `apps/site` workspace retains its explicit `site:dev` and `site:build` commands.
 
 Implement and verify one increment at a time. For a behavior fix, start with a failing regression test. For web UI changes, verify the affected behavior in a browser. For documentation, check links, paths, commands, and the diff. Preserve existing checks and report the verification commands, their results, and any unresolved blockers.
 

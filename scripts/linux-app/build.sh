@@ -3,12 +3,11 @@ set -euo pipefail
 bash /src/scripts/linux-app/prepare-bundler.sh
 if [[ ! -d node_modules ]]; then bun install --frozen-lockfile; fi
 bun scripts/build-sidecar.ts
-bun run --filter=@omarchy-bot/web build
 config=$(bun scripts/linux-app/build-config.ts)
 version=$(bun -e 'console.log(JSON.parse(process.argv[1]).version)' "$config")
 cd apps/omarchy-bot
 [[ -f src-tauri/Cargo.lock ]] || cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
-cargo tauri build --config "$config" --bundles appimage -- --locked
+bun run tauri build --config "$config" --bundles appimage -- --locked
 name=omarchy-bot_${version}_amd64.AppImage
 artifact=/src/.lane/linux-app/target/release/bundle/appimage/$name
 [[ -f $artifact ]] || { echo "Missing expected AppImage: $artifact" >&2; exit 1; }

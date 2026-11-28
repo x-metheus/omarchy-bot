@@ -23,7 +23,7 @@ export default defineConfig({
   globalSetup: "./global-setup.ts",
   globalTeardown: "./global-teardown.ts",
   webServer: {
-    command: `bun run --filter=@omarchy-bot/web dev -- --host 127.0.0.1 --port ${new URL(WEB_ORIGIN).port || "80"} --strictPort --force`,
+    command: `bun run --filter=@omarchy-bot/desktop dev -- --host 127.0.0.1 --port ${new URL(WEB_ORIGIN).port || "80"} --strictPort --force`,
     cwd: path.resolve(import.meta.dirname, "../.."),
     url: WEB_ORIGIN,
     timeout: 120_000,

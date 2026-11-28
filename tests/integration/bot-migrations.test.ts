@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Database } from "bun:sqlite";
 import { applyMigration, MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
-import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
+import { renderAvatarRecipe } from "../../apps/omarchy-bot/src/components/avatarRenderer.ts";
 import { AVATAR_RENDERER_ID, AvatarRecipeDto, type MessageDto, type ToolCallSummaryDto } from "../../packages/protocol/src/index.ts";
 import { isToolCallSummary, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "../../packages/domain/src/index.ts";
 import { api, authedFetch, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";

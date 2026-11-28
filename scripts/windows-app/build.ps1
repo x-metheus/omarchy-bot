@@ -12,8 +12,6 @@ try {
   if (-not (Test-Path node_modules)) { & bun install --frozen-lockfile; if ($LASTEXITCODE) { throw 'bun install failed' } }
   & bun scripts/build-sidecar.ts
   if ($LASTEXITCODE) { throw 'Sidecar build failed' }
-  & bun run --filter=@omarchy-bot/web build
-  if ($LASTEXITCODE) { throw 'Web build failed' }
   $version = (Get-Content apps/omarchy-bot/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
   $overlay = @{ bundle = @{ createUpdaterArtifacts = $false; shortDescription = 'Omarchy Bot Windows unsigned preview' } }
   if ($Release) {
@@ -35,7 +33,7 @@ try {
   $config = "$lane/build-config.json"
   $overlay | ConvertTo-Json -Depth 10 | Set-Content $config -Encoding utf8
   Push-Location apps/omarchy-bot
-  try { & cargo tauri build --bundles nsis --config $config -- --locked; if ($LASTEXITCODE) { throw 'Tauri NSIS build failed' } }
+  try { & bun run tauri build --bundles nsis --config $config -- --locked; if ($LASTEXITCODE) { throw 'Tauri NSIS build failed' } }
   finally { Pop-Location }
   $installers = @(Get-ChildItem "$lane/target/release/bundle/nsis/*-setup.exe")
   if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer.' }

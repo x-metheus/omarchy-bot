@@ -30,7 +30,7 @@ jobs:
           bun install --frozen-lockfile
           bash scripts/build-sway-runtime.sh .lane/dist
           bash scripts/prepare-fonts.sh .lane/fonts
-          bun run --filter=@omarchy-bot/web build
+          bun run --filter=@omarchy-bot/desktop build:frontend
           bun apps/daemon/native/pointer-helper/build.ts
           bun apps/daemon/native/capture-helper/build.ts
           bun apps/daemon/native/bot-desktop/build.ts
