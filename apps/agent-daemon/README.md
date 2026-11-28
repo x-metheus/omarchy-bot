@@ -110,6 +110,7 @@ Expect ordered `delta` events followed by `committed` for both replies. The foll
 | `POST /bots` with `{"name":"Lumen"}` | `201` with the new Bot profile and `duties: null` |
 | `GET /bots/{id}` | `200` with `bot` and `messages`, oldest first |
 | `PATCH /bots/{id}` with `{"name":"Prism"}` | `200` with the renamed Bot profile |
+| `DELETE /bots/{id}` | `204` after deletion, `404 bot_not_found` for an unknown Bot |
 | `POST /bots/{id}/messages` with `{"text":"Hello"}` | `200` with a `text/event-stream` reply |
 | `GET /bots/{id}/events` | `200` with ordered replay followed by live Conversation events |
 | `POST /bots/{id}/work/{messageId}/retry` | `202` queues the original interrupted input, `409` for other work states |
@@ -117,6 +118,8 @@ Expect ordered `delta` events followed by `committed` for both replies. The foll
 | `GET /recall/status` | `200` with independent Recall model availability |
 
 A Bot profile has `id`, `name`, and `duties`. Creating a Bot requires a nonempty name. Rename updates the name on the existing profile. The same ID opens the original Conversation before and after a restart.
+
+Deleting a Bot stops its Rig work and closes its Conversation and reply streams. The daemon removes its Message History, events, work records, Observational Memory, Recall entries, and attachments with no remaining Conversation references. Shared UserMemory values and forgetting state survive. UserMemory inspection returns `source: null` if the original message was deleted.
 
 Set duties by sending an explicit standing instruction such as “Your ongoing job is to classify new color samples by their shade.” Send a later message to revise those duties. Use a model that supports tool calls. The Agent uses the latest user-authored message text as evidence. The daemon saves the proposed duties and the completed reply in the same transaction, then supplies the saved duties to the model on later Turns.
 

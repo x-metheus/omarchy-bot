@@ -46,7 +46,10 @@ pub(crate) fn router(
 ) -> Router {
     let conversation_routes = Router::new()
         .route("/bots", post(create_bot))
-        .route("/bots/{bot}", get(read_bot).patch(rename_bot))
+        .route(
+            "/bots/{bot}",
+            get(read_bot).patch(rename_bot).delete(delete_bot),
+        )
         .route("/bots/{bot}/messages", post(send_message))
         .route("/bots/{bot}/work/{message}/retry", post(retry_work))
         .route("/bots/{bot}/events", get(events::read))
@@ -249,6 +252,22 @@ async fn read_bot(
         .ok_or(BOT_NOT_FOUND)
 }
 
+async fn delete_bot(
+    State(daemon): State<Daemon>,
+    Path(bot): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (reply, result) = oneshot::channel();
+    daemon
+        .conversations
+        .send(ConversationCommand::DeleteBot { bot, reply })
+        .map_err(|_| UNAVAILABLE)?;
+    if result.await.map_err(|_| UNAVAILABLE)?? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(BOT_NOT_FOUND)
+    }
+}
+
 async fn read_attachment(
     State(daemon): State<Daemon>,
     Path((bot, id)): Path<(Uuid, Uuid)>,
@@ -369,6 +388,14 @@ async fn retry_work(
 }
 
 pub(crate) enum ConversationCommand {
+    DeleteBot {
+        bot: Uuid,
+        reply: oneshot::Sender<Result<bool, ApiError>>,
+    },
+    DeleteBotData {
+        bot: Uuid,
+        committed: std::sync::mpsc::SyncSender<Result<bool, ApiError>>,
+    },
     Settings {
         input: SettingsUpdate,
         reply: oneshot::Sender<anyhow::Result<Update>>,
@@ -438,6 +465,18 @@ pub(crate) async fn run_conversations(
     // Keep SQLite admission and reply commits in order with their runtime handoff.
     while let Some(command) = commands.recv().await {
         match command {
+            ConversationCommand::DeleteBot { bot, reply } => {
+                if turns.send(AgentCommand::DeleteBot { bot, reply }).is_ok() {
+                    wake.wake();
+                }
+            }
+            ConversationCommand::DeleteBotData { bot, committed } => {
+                let result = store.delete_bot(bot).await.map_err(store_error);
+                if matches!(result, Ok(true)) {
+                    live.remove(&bot);
+                }
+                let _ = committed.send(result);
+            }
             ConversationCommand::Settings { input, reply } => {
                 let update = store.update_settings(input).await;
                 if matches!(update, Ok(Update::Saved(_))) {
@@ -631,7 +670,7 @@ const ATTACHMENT_NOT_FOUND: ApiError = ApiError(
         "attachment is unavailable to this Conversation",
     ),
 );
-const UNAVAILABLE: ApiError = ApiError(
+pub(crate) const UNAVAILABLE: ApiError = ApiError(
     StatusCode::SERVICE_UNAVAILABLE,
     Problem::new("agent_unavailable", "the Rig runtime is unavailable"),
 );

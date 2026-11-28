@@ -185,10 +185,14 @@ fn fit_history(
                 let store = store.0.clone();
                 // Use the chosen provider connection, with no Bot tools or request context.
                 let model = model.clone();
-                let (sender, receiver) = oneshot::channel();
+                let (mut sender, receiver) = oneshot::channel();
                 state.pending = Some(receiver);
                 runtime.0.spawn(async move {
-                    let observation = match observe(&store, bot, through, previous, &model).await {
+                    let result = tokio::select! {
+                        result = observe(&store, bot, through, previous, &model) => result,
+                        () = sender.closed() => return,
+                    };
+                    let observation = match result {
                         Ok(observation) => observation,
                         Err(_) => {
                             eprintln!("Observational Memory could not summarize committed history for Bot {bot}");

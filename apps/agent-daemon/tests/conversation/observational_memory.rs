@@ -342,3 +342,58 @@ async fn observation_stops_before_interrupted_work_after_restart() {
     chat_reply(chat, &mut stream, "Ready").await;
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn deleting_bots_cancels_pending_observation_and_removes_saved_observation() {
+    let mut provider = Provider::start_with_observers(ObserverReplies::Scripted).await;
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("daemon.sqlite3");
+    let client = http_client();
+    let daemon = Daemon::start(&db, &provider).await;
+    let saved = daemon.create(&client).await;
+    let saved = bot_id(&saved);
+    let pending = daemon.create(&client).await;
+    let pending = bot_id(&pending);
+    record_catalog(&daemon, &client, &mut provider, saved, CATALOG_ID).await;
+    record_catalog(&daemon, &client, &mut provider, pending, "TEA-731").await;
+
+    let mut stream = ReplyStream::new(
+        daemon
+            .send(&client, saved, "Check the first catalog.")
+            .await,
+    );
+    let (observation, chat) = observation_and_chat(&mut provider).await;
+    chat_reply(chat, &mut stream, "Checked.").await;
+    let summary = "Historical record of the first catalog.";
+    observation.text(summary).await;
+    observation.finish().await;
+    let (mut stream, chat) =
+        request_with_summary(&daemon, &client, &mut provider, saved, summary).await;
+    chat_reply(chat, &mut stream, "Ready.").await;
+
+    let mut stream = ReplyStream::new(
+        daemon
+            .send(&client, pending, "Check the second catalog.")
+            .await,
+    );
+    let (held_observation, chat) = observation_and_chat(&mut provider).await;
+    chat_reply(chat, &mut stream, "Checked.").await;
+    for id in [pending, saved] {
+        let result = client
+            .delete(format!("{}/bots/{id}", daemon.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status(), reqwest::StatusCode::NO_CONTENT);
+    }
+    timeout(DEADLINE, held_observation.frames.closed())
+        .await
+        .expect("deletion cancels the pending summary request");
+    daemon.stop().await;
+
+    let fixture = rusqlite::Connection::open(&db).unwrap();
+    let count: i64 = fixture
+        .query_row("SELECT count(*) FROM observations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "both Bots' derived data was removed");
+}

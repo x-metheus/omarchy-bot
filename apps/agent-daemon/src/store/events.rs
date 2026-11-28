@@ -45,7 +45,7 @@ pub(super) fn append(
 }
 
 impl Store {
-    pub(crate) fn watch_events(&self) -> watch::Receiver<()> {
+    pub(crate) fn watch_events(&self) -> watch::Receiver<u64> {
         self.2.subscribe()
     }
 

@@ -35,19 +35,28 @@ pub(super) async fn read(
     let store = daemon.store;
     // Subscribe before reading SQLite so a commit at the end of replay wakes the stream.
     let changes = store.watch_events();
+    // The watch value advances on deletion. Ordinary event commits only wake the stream.
+    let deletions = *changes.borrow();
     if !store.bot_exists(bot).await.map_err(store_error)? {
         return Err(BOT_NOT_FOUND);
     }
     let page = Vec::<ConversationEvent>::new().into_iter();
     let events = stream::unfold(
-        (store, changes, after, page),
-        move |(store, mut changes, mut after, mut page)| async move {
+        (store, changes, deletions, after, page),
+        move |(store, mut changes, mut deletions, mut after, mut page)| async move {
             loop {
+                let current_deletions = *changes.borrow();
+                if current_deletions != deletions {
+                    deletions = current_deletions;
+                    if !store.bot_exists(bot).await.map_err(store_error).ok()? {
+                        return None;
+                    }
+                }
                 if let Some(event) = page.next() {
                     after = event.id;
                     return Some((
                         Ok::<_, Infallible>(event.sse()),
-                        (store, changes, after, page),
+                        (store, changes, deletions, after, page),
                     ));
                 }
                 match store.events_after(bot, after).await {

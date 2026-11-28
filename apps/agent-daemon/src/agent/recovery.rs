@@ -47,6 +47,10 @@ pub(super) fn register(
 }
 
 impl Journal {
+    pub(super) fn discard_bot(&mut self, bot: Uuid) {
+        self.messages.retain(|_, source| source.bot != bot);
+    }
+
     // Wait for the Conversation writer before Rig can enter Start for these inputs.
     pub(super) fn start(&self, sources: Vec<UserMessageSource>) -> bool {
         let (committed, result) = sync::sync_channel(1);

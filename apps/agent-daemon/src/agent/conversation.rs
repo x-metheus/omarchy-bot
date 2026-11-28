@@ -6,12 +6,12 @@ use rig_basics::subagents::{MESSAGE, SpawnedAgent, TASK, WAIT};
 use rig_core::completion::Message;
 use rig_core::effect::EffectId;
 use rig_harness::prelude::*;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use super::observational_memory::ObservationalHistory;
 use super::recovery::{DeliveredReports, Journal};
-use crate::api::ConversationCommand;
+use crate::api::{ApiError, ConversationCommand, UNAVAILABLE};
 use crate::attachments::Stored as StoredAttachment;
 use crate::duties::{self, DutyTurn};
 use crate::host_tools::WorkspaceRoot;
@@ -22,6 +22,10 @@ const DELEGATION_GUIDANCE: &str = "\n\nWhen you delegate independent work, ackno
     reports arrive, using earlier reports when they help answer the request.";
 
 pub(crate) enum AgentCommand {
+    DeleteBot {
+        bot: Uuid,
+        reply: oneshot::Sender<Result<bool, ApiError>>,
+    },
     Message(TurnRequest),
     Recover(UserMessageSource),
     ReplyCommitted {
@@ -30,6 +34,16 @@ pub(crate) enum AgentCommand {
         message_id: i64,
         prompt: Option<SystemPrompt>,
     },
+}
+
+impl AgentCommand {
+    fn bot(&self) -> Uuid {
+        match self {
+            Self::DeleteBot { bot, .. } | Self::ReplyCommitted { bot, .. } => *bot,
+            Self::Message(request) => request.bot,
+            Self::Recover(source) => source.bot,
+        }
+    }
 }
 
 pub(crate) struct TurnRequest {
@@ -167,10 +181,48 @@ pub(super) fn add(
     .add_systems(PostUpdate, (stream_deltas, finish_turns).chain());
 }
 
+fn delete_bot(
+    world: &mut World,
+    conversations: &mut Conversations,
+    bot: Uuid,
+) -> Result<bool, ApiError> {
+    // Rig is paused here while the Conversation writer drains earlier writes and deletes the Bot.
+    let (committed, result) = std::sync::mpsc::sync_channel(1);
+    conversations
+        .outgoing
+        .send(ConversationCommand::DeleteBotData { bot, committed })
+        .map_err(|_| UNAVAILABLE)?;
+    if !result.recv().map_err(|_| UNAVAILABLE)?? {
+        return Ok(false);
+    }
+    if let Some(root) = conversations.roots.remove(&bot) {
+        // Rig's linked entities own Subagents, Inbox entries, and cancellable calls.
+        world.despawn(root);
+    }
+    world.resource_mut::<Journal>().discard_bot(bot);
+    Ok(true)
+}
+
 fn deliver(world: &mut World) {
     world.resource_scope(|world, mut conversations: Mut<Conversations>| {
+        let mut deleted = HashSet::new();
         while let Ok(command) = conversations.pending.try_recv() {
-            conversations.deferred.push_back(command);
+            match command {
+                AgentCommand::DeleteBot { bot, reply } => {
+                    let result = delete_bot(world, &mut conversations, bot);
+                    if matches!(result, Ok(true)) {
+                        deleted.insert(bot);
+                    }
+                    let _ = reply.send(result);
+                }
+                command => conversations.deferred.push_back(command),
+            }
+        }
+        if !deleted.is_empty() {
+            // Includes admissions made while the writer was processing the deletion request.
+            conversations
+                .deferred
+                .retain(|command| !deleted.contains(&command.bot()));
         }
         let mut blocked = HashSet::new();
         let mut first = HashSet::new();
@@ -180,6 +232,7 @@ fn deliver(world: &mut World) {
                 .pop_front()
                 .expect("deferred command");
             let request = match command {
+                AgentCommand::DeleteBot { .. } => unreachable!("dropped before Inbox delivery"),
                 AgentCommand::Message(request) => {
                     if blocked.contains(&request.bot) {
                         conversations

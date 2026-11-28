@@ -1,3 +1,4 @@
+mod deletion;
 mod events;
 mod observations;
 mod recall_index;
@@ -91,7 +92,7 @@ struct Database {
 }
 
 #[derive(Clone)]
-pub(crate) struct Store(Arc<Mutex<Database>>, CurrentMemory, watch::Sender<()>);
+pub(crate) struct Store(Arc<Mutex<Database>>, CurrentMemory, watch::Sender<u64>);
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
@@ -173,6 +174,7 @@ impl Store {
                 .execute("ALTER TABLE bots ADD COLUMN duties TEXT", [])
                 .context("add duties to existing Bot profiles")?;
         }
+        deletion::initialize(&connection).context("initialize Conversation deletion")?;
         events::initialize(&connection).context("initialize Conversation event storage")?;
         work::initialize(&connection).context("initialize Conversation work storage")?;
         connection
@@ -188,7 +190,7 @@ impl Store {
                 settings,
             })),
             user_memory,
-            watch::Sender::new(()),
+            watch::Sender::new(0),
         ))
     }
 

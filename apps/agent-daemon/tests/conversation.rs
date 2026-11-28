@@ -23,6 +23,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "conversation/deletion.rs"]
+mod deletion;
 #[path = "conversation/host_tools.rs"]
 mod host_tools;
 #[path = "conversation/observational_memory.rs"]

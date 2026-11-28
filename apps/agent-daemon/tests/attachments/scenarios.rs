@@ -212,6 +212,84 @@ async fn restores_attachment_ownership_and_reuses_only_authorized_references() {
 }
 
 #[tokio::test]
+async fn deleting_a_bot_removes_exclusive_attachments_and_keeps_shared_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("conversation.sqlite3");
+    let client = http_client();
+    let mut provider = Provider::start().await;
+    let daemon = start(&db, &provider, VISION_MODEL).await;
+    let owner = daemon.create(&client).await;
+    let owner = bot_id(&owner);
+    let survivor = daemon.create(&client).await;
+    let survivor = bot_id(&survivor);
+
+    let mut stream = ReplyStream::new(
+        send(&daemon, &client, owner, json!({
+            "text": "Save both samples.", "attachments": [
+                {"type": "inline", "name": "shared.txt", "mediaType": "text/plain", "content": TEXT},
+                {"type": "inline", "name": "exclusive.txt", "mediaType": "text/plain", "content": "Ochre."}
+            ]
+        })).await,
+    );
+    chat_reply(provider.next().await, &mut stream, "Saved both.").await;
+    let mut stream = ReplyStream::new(
+        daemon
+            .send(&client, survivor, "Keep the shared sample.")
+            .await,
+    );
+    chat_reply(provider.next().await, &mut stream, "Saved.").await;
+    let owner_history = daemon.read(&client, owner).await;
+    let survivor_history = daemon.read(&client, survivor).await;
+    let message = survivor_history["messages"][0]["id"].as_i64().unwrap();
+    let attachments = &owner_history["messages"][0]["attachments"];
+    let shared = attachments[0]["id"].as_str().unwrap();
+    let exclusive = attachments[1]["id"].as_str().unwrap();
+    daemon.stop().await;
+
+    // The API only grants existing Conversation access. Seed a second association in this fixture.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO message_attachments (message_id, position, attachment_id) VALUES (?1, 0, ?2)",
+            rusqlite::params![message, Uuid::parse_str(shared).unwrap().as_bytes()],
+        )
+        .unwrap();
+    let daemon = start(&db, &provider, VISION_MODEL).await;
+    let shared_bytes = download(&daemon, &client, survivor, shared).await;
+    assert_eq!(shared_bytes.text().await.unwrap(), TEXT);
+    let response = client
+        .delete(format!("{}/bots/{owner}", daemon.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        download(&daemon, &client, owner, exclusive).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    daemon.stop().await;
+
+    let fixture = rusqlite::Connection::open(&db).unwrap();
+    let remaining: bool = fixture
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM attachments WHERE id = ?1)",
+            [Uuid::parse_str(exclusive).unwrap().as_bytes()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!remaining, "the unreferenced attachment bytes were removed");
+    drop(fixture);
+    let daemon = start(&db, &provider, VISION_MODEL).await;
+    assert_eq!(
+        download(&daemon, &client, owner, shared).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let shared_bytes = download(&daemon, &client, survivor, shared).await;
+    assert_eq!(shared_bytes.text().await.unwrap(), TEXT);
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn warns_about_unavailable_and_unsupported_attachments_and_keeps_the_message() {
     let directory = tempfile::tempdir().unwrap();
     let db = directory.path().join("conversation.sqlite3");

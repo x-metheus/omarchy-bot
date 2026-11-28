@@ -429,30 +429,39 @@ async fn user_memory_source_order_survives_existing_history_and_deletion() {
     )
     .await;
     chat_reply(provider.next().await, &mut stream, "Saved.").await;
+    let clear = "Forget my time zone.";
+    let mut stream = ReplyStream::new(daemon.send(&client, bot_id(&writer), clear).await);
+    forget(provider.next().await, "profile.time_zone", clear).await;
+    let call = provider.next().await;
+    assert_tool_result(&call, "Forgot UserMemory.");
+    chat_reply(call, &mut stream, "Forgotten.").await;
     let history = daemon.read(&client, bot_id(&writer)).await;
-    let last_id = history["messages"][1]["id"].as_i64().unwrap();
+    let forget_order = history["messages"][2]["id"].as_i64().unwrap();
+    let last_id = history["messages"][3]["id"].as_i64().unwrap();
     assert!(history["messages"][0]["id"].as_i64().unwrap() > 73);
+    let url = format!("{}/bots/{}", daemon.url, bot_id(&writer));
+    let deleted = client.delete(&url).send().await.unwrap();
+    assert_eq!(deleted.status(), reqwest::StatusCode::NO_CONTENT);
+    let missing = client.get(&url).send().await.unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(
+        missing.json::<serde_json::Value>().await.unwrap()["code"],
+        "bot_not_found"
+    );
     daemon.stop().await;
 
-    // The dispatched base has no Bot deletion route. Remove only disposable fixture rows.
-    {
-        let fixture = rusqlite::Connection::open(&db).unwrap();
-        let writer = uuid::Uuid::parse_str(bot_id(&writer)).unwrap();
-        fixture
-            .execute(
-                "DELETE FROM messages WHERE bot_id = ?1",
-                [writer.as_bytes()],
-            )
-            .unwrap();
-        fixture
-            .execute("DELETE FROM bots WHERE id = ?1", [writer.as_bytes()])
-            .unwrap();
-    }
     let daemon = Daemon::start(&db, &provider).await;
+    let restarted = client
+        .get(format!("{}/bots/{}", daemon.url, bot_id(&writer)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restarted.status(), reqwest::StatusCode::NOT_FOUND);
     let reader = daemon.create(&client).await;
     let mut stream = ReplyStream::new(daemon.send(&client, bot_id(&reader), "Hello.").await);
     let call = provider.next().await;
     assert!(system_prompt(&call).contains("Rowan"));
+    assert!(system_prompt(&call).contains(&json!({"profile.time_zone": forget_order}).to_string()));
     tool_call(
         call,
         "inspect_user_memory",
