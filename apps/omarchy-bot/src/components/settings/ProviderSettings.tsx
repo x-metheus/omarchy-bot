@@ -1,19 +1,17 @@
-import { useEffect, useState } from "react";
-import { Banner } from "@astryxdesign/core/Banner";
-import { Button } from "@astryxdesign/core/Button";
-import { FormLayout } from "@astryxdesign/core/FormLayout";
-import { Heading } from "@astryxdesign/core/Heading";
-import { HStack } from "@astryxdesign/core/HStack";
-import { Selector } from "@astryxdesign/core/Selector";
-import { Text } from "@astryxdesign/core/Text";
-import { TextInput } from "@astryxdesign/core/TextInput";
-import { VStack } from "@astryxdesign/core/VStack";
+import { useState } from "react";
+import { CheckIcon, CircleAlertIcon, KeyRoundIcon, PencilIcon, RefreshCwIcon, SaveIcon } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "@/components/ui/combobox";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Spinner } from "@/components/ui/spinner";
+import { useProviderModelDiscovery, type ProviderConnectionDraft } from "../../lib/providerDiscovery.ts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   agentDaemon, DaemonError, type AgentSettings, type ProviderConfiguration, type ProviderConfigurations, type ProviderConnection,
 } from "../../lib/agentDaemon.ts";
-
-const discoveryDelay = 350;
 
 type Feedback = { status: "success" | "error"; message: string };
 const addProvider = "add-provider";
@@ -73,23 +71,31 @@ export function ProviderSettings({ baseUrl, settings }: { baseUrl: string; setti
     { label: "OpenAI", value: "openai" },
     { label: "Anthropic", value: "anthropic" },
     ...(providers.data?.configurations.map(config => ({
-      label: config.name, value: config.id, description: `${config.model} · ${config.baseUrl}`,
+      label: config.name, value: config.id,
     })) ?? []),
     ...(providers.data ? [{ label: "Add custom provider…", value: addProvider, disabled: !settings.writable }] : []),
   ];
 
-  return <VStack gap={3}>
-    <Selector label="Provider" options={options} {...(selected === undefined ? {} : { value: selected })}
-      onChange={select} isDisabled={busy} />
-    {!settings.writable && <Banner status="warning" title="The daemon operator must enable writable Settings." />}
-    {feedback && <Banner status={feedback.status} title={feedback.message} />}
-    {providers.isPending && <Text>Loading Provider Configurations…</Text>}
-    {providers.isError && <VStack gap={2}>
-      <Banner status="error" title={providers.error instanceof DaemonError && providers.error.status === 404
+  return <div className="flex flex-col gap-4">
+    <Field data-disabled={busy}>
+      <FieldLabel htmlFor="provider">Provider</FieldLabel>
+      <Select items={options} value={selected ?? null} onValueChange={select} disabled={busy}>
+        <SelectTrigger id="provider" className="w-full"><SelectValue placeholder="Choose a provider" /></SelectTrigger>
+        <SelectContent><SelectGroup>{options.map(option => <SelectItem key={option.value} value={option.value}
+          disabled={option.value === addProvider && !settings.writable}>{option.label}</SelectItem>)}</SelectGroup></SelectContent>
+      </Select>
+    </Field>
+    {!settings.writable && <Alert><CircleAlertIcon /><AlertDescription>The daemon operator must enable writable Settings.</AlertDescription></Alert>}
+    {feedback && <Alert variant={feedback.status === "error" ? "destructive" : "default"} role={feedback.status === "error" ? "alert" : "status"}>
+      {feedback.status === "error" ? <CircleAlertIcon /> : <CheckIcon />}<AlertDescription>{feedback.message}</AlertDescription>
+    </Alert>}
+    {providers.isPending && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /> Loading Provider Configurations…</p>}
+    {providers.isError && <div className="flex flex-col items-start gap-2">
+      <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>{providers.error instanceof DaemonError && providers.error.status === 404
         ? "Update the Agent Daemon to use custom providers."
-        : "Could not load saved Provider Configurations."} />
-      <Button label="Retry loading providers" onClick={() => void providers.refetch()} />
-    </VStack>}
+        : "Could not load saved Provider Configurations."}</AlertDescription></Alert>
+      <Button variant="outline" disabled={providers.isFetching} onClick={() => void providers.refetch()}><RefreshCwIcon data-icon="inline-start" /> Retry loading providers</Button>
+    </div>}
     {(selected === "openai" || selected === "anthropic") && <ModelForm key={selected}
       modelId={settings.active?.provider === selected ? settings.active.model : ""}
       keyStored={settings.storedCredentials[selected]} disabled={disabled} saving={busy}
@@ -108,19 +114,22 @@ export function ProviderSettings({ baseUrl, settings }: { baseUrl: string; setti
           setEditor(undefined);
         }, "Provider Configuration saved.");
       }} />}
-    {configuration && !editor && <VStack gap={2}>
-      <Text color="secondary" wordBreak="break-word">Base URL: {configuration.baseUrl}</Text>
-      <Text color="secondary" wordBreak="break-word">Model: {configuration.model}</Text>
-      <Text color="secondary">{configuration.hasApiKey ? "API key configured" : "No API key"}</Text>
-      <HStack gap={2} wrap="wrap">
-        <Button label="Edit" isDisabled={disabled} onClick={() => { setFeedback(undefined); setEditor(configuration); }} />
-        {configuration.id !== providers.data?.currentId && <Button label="Set as current" variant="primary"
-          isDisabled={disabled} onClick={() => void update(async () => {
-            await applyConfigurations(await agentDaemon.activateProviderConfiguration(configuration.id));
-          }, "Current Provider Configuration updated.")} />}
-      </HStack>
-    </VStack>}
-  </VStack>;
+    {configuration && !editor && <div className="flex flex-col gap-3">
+      <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+        <dt className="text-muted-foreground">Base URL</dt><dd className="wrap-anywhere">{configuration.baseUrl}</dd>
+        <dt className="text-muted-foreground">Model</dt><dd className="wrap-anywhere">{configuration.model}</dd>
+        <dt className="text-muted-foreground">API key</dt><dd>{configuration.hasApiKey ? "Configured" : "None"}</dd>
+      </dl>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" disabled={disabled} onClick={() => { setFeedback(undefined); setEditor(configuration); }}><PencilIcon data-icon="inline-start" /> Edit</Button>
+        {configuration.id !== providers.data?.currentId && <Button disabled={disabled} onClick={() => void update(async () => {
+          await applyConfigurations(await agentDaemon.activateProviderConfiguration(configuration.id));
+        }, "Current Provider Configuration updated.")}>
+          {busy ? <Spinner data-icon="inline-start" /> : <CheckIcon data-icon="inline-start" />} Set as current
+        </Button>}
+      </div>
+    </div>}
+  </div>;
 }
 
 function ModelForm({ modelId, keyStored, disabled, saving, save }: {
@@ -138,32 +147,23 @@ function ModelForm({ modelId, keyStored, disabled, saving, save }: {
     event.preventDefault();
     if (canSave && await save(model.trim(), apiKey)) setApiKey("");
   }}>
-    <VStack gap={3}>
-      <FormLayout>
-        <TextInput label="Model ID" value={model} onChange={setModel} isRequired isDisabled={disabled} />
-        <TextInput label={keyStored ? "Replacement API key" : "API key"} type="password" autoComplete="new-password"
-          description={keyStored ? "Leave blank to use the stored key." : "The Agent Daemon stores this key."}
-          value={apiKey} onChange={setApiKey} isRequired={!keyStored} isDisabled={disabled} />
-      </FormLayout>
-      <Button label="Save daemon Settings" variant="primary" type="submit" isLoading={saving} isDisabled={!canSave} />
-    </VStack>
+    <FieldGroup>
+      <Field data-disabled={disabled}>
+        <FieldLabel htmlFor="builtin-model">Model ID</FieldLabel>
+        <Input id="builtin-model" value={model} onChange={event => setModel(event.target.value)} required disabled={disabled} />
+      </Field>
+      <Field data-disabled={disabled}>
+        <FieldLabel htmlFor="builtin-key">{keyStored ? "Replacement API key" : "API key"}</FieldLabel>
+        <Input id="builtin-key" type="password" autoComplete="new-password" aria-describedby="builtin-key-help"
+          value={apiKey} onChange={event => setApiKey(event.target.value)} required={!keyStored} disabled={disabled} />
+        <FieldDescription id="builtin-key-help">{keyStored ? "Leave blank to use the stored key." : "The Agent Daemon stores this key."}</FieldDescription>
+      </Field>
+      <Button type="submit" className="self-start" disabled={!canSave}>
+        {saving ? <Spinner data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />} Save daemon Settings
+      </Button>
+    </FieldGroup>
   </form>;
 }
-
-function apiRoot(value: string): string | undefined {
-  try {
-    const url = new URL(value.trim());
-    if ((url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password
-        && !url.href.includes("?") && !url.href.includes("#")) {
-      return url.href.replace(/\/+$/, "");
-    }
-  } catch {
-    // An incomplete URL is normal while editing.
-  }
-}
-
-type ConnectionDraft = { baseUrl: string; apiKey: string; omitStoredKey?: boolean };
-type Discovery = { connection: ConnectionDraft; models: string[] } | { connection: ConnectionDraft; error: string };
 
 function ProviderForm({ configuration, disabled, close, save }: {
   configuration: ProviderConfiguration | undefined;
@@ -172,81 +172,68 @@ function ProviderForm({ configuration, disabled, close, save }: {
   save: (connection: ProviderConnection, name: string, model: string) => void;
 }) {
   const [name, setName] = useState(configuration?.name ?? "");
-  const [connection, setConnection] = useState<ConnectionDraft>({ baseUrl: configuration?.baseUrl ?? "", apiKey: "" });
+  const [connection, setConnection] = useState<ProviderConnectionDraft>({ baseUrl: configuration?.baseUrl ?? "", apiKey: "" });
   const [model, setModel] = useState<string | null>(configuration?.model ?? null);
-  const [discovery, setDiscovery] = useState<Discovery>();
-  const baseUrl = apiRoot(connection.baseUrl);
   const { apiKey, omitStoredKey } = connection;
-  const id = configuration?.id;
-  const keyStored = !!configuration?.hasApiKey && baseUrl === configuration.baseUrl;
-  const authentication: ProviderConnection["authentication"] = apiKey || (keyStored && !omitStoredKey) ? "apiKey" : "none";
-  const ready = baseUrl !== undefined && (!apiKey || /^[!-~]+$/.test(apiKey));
-  const result = discovery?.connection === connection ? discovery : undefined;
-  const models = result && "models" in result ? result.models : [];
+  const { baseUrl, authentication, keyStored, ready, result, models, error, loading } = useProviderModelDiscovery(connection, configuration);
   const modelSelected = model !== null && models.includes(model);
-  const writable = !disabled;
+  const canSave = !disabled && ready && Boolean(name.trim()) && modelSelected;
 
-  useEffect(() => {
-    if (!ready) return;
-    const controller = new AbortController();
-    const lookup = window.setTimeout(async () => {
-      try {
-        const listing = await agentDaemon.providerModels({
-          baseUrl, authentication, ...(apiKey ? { apiKey } : {}), ...(id ? { id } : {}),
-        }, controller.signal);
-        if (!controller.signal.aborted) setDiscovery({ connection, models: listing.models });
-      } catch (error) {
-        if (!controller.signal.aborted) setDiscovery({
-          connection, error: error instanceof DaemonError ? error.message : "Could not load the provider's models.",
-        });
-      }
-    }, discoveryDelay);
-    return () => {
-      window.clearTimeout(lookup);
-      controller.abort();
-    };
-  }, [ready, baseUrl, authentication, apiKey, id, connection]);
-
-  function changeConnection(next: ConnectionDraft) {
+  function changeConnection(next: ProviderConnectionDraft) {
     setConnection(next);
     setModel(null);
-    setDiscovery(undefined);
   }
 
   return <form onSubmit={event => {
     event.preventDefault();
-    if (writable && ready && name.trim() && model !== null && modelSelected) {
-      void save({ baseUrl, authentication, ...(apiKey ? { apiKey } : {}) }, name.trim(), model);
+    if (canSave && baseUrl !== undefined && model !== null) {
+      save({ baseUrl, authentication, ...(apiKey ? { apiKey } : {}) }, name.trim(), model);
     }
   }}>
-    <VStack gap={3}>
-      {configuration && <Heading level={4}>Edit {configuration.name}</Heading>}
-      <FormLayout>
-        <TextInput label="Provider name" value={name} onChange={setName} isRequired isDisabled={disabled} />
-        <TextInput label="Base URL" value={connection.baseUrl} isRequired isDisabled={disabled}
-          description="Use the API root reachable from the Agent Daemon, including any prefix such as /v1."
-          placeholder="https://example.com/v1" onChange={value => changeConnection({ baseUrl: value, apiKey: "" })} />
-        <TextInput label="API key" type="password" autoComplete="new-password" isOptional isDisabled={disabled}
-          description={keyStored && !omitStoredKey ? "Leave blank to use the saved API key." : "Leave blank for anonymous access."}
-          value={apiKey} onChange={value => changeConnection({ ...connection, apiKey: value })} />
-        {keyStored && !apiKey && <Button label={omitStoredKey ? "Use saved API key" : "Remove saved API key"}
-          type="button" size="sm" variant="secondary" isDisabled={disabled}
-          onClick={() => changeConnection({ ...connection, omitStoredKey: !omitStoredKey })} />}
-        <Selector label="Provider Model" hasSearch hasClear options={models} value={modelSelected ? model : null} isRequired
-          onChange={setModel} isDisabled={disabled || models.length === 0} isLoading={ready && !result} />
-      </FormLayout>
-      <VStack gap={2}>
-        {ready && !result && <Text>Loading models…</Text>}
-        {result && "error" in result && <Banner status="error" title={result.error} />}
-        {result && "models" in result && models.length === 0 && <Text>No models were returned by the provider.</Text>}
-        <HStack gap={2} wrap="wrap">
-          <Button label="Refresh models" type="button" isDisabled={disabled || !ready}
-            onClick={() => setConnection(previous => ({ ...previous }))} />
-          <Button label="Save Provider Configuration" type="submit" variant="primary"
-            isDisabled={disabled || !ready || !name.trim() || !modelSelected} />
-          <Button label="Cancel" type="button" isDisabled={disabled} onClick={close} />
-        </HStack>
-      </VStack>
-    </VStack>
+    <FieldGroup>
+      {configuration && <h3 className="text-sm font-semibold">Edit {configuration.name}</h3>}
+      <Field data-disabled={disabled}>
+        <FieldLabel htmlFor="custom-name">Provider name</FieldLabel>
+        <Input id="custom-name" value={name} onChange={event => setName(event.target.value)} required disabled={disabled} />
+      </Field>
+      <Field data-disabled={disabled}>
+        <FieldLabel htmlFor="custom-base-url">Base URL</FieldLabel>
+        <Input id="custom-base-url" value={connection.baseUrl} required disabled={disabled} aria-describedby="custom-base-url-help"
+          placeholder="https://example.com/v1" onChange={event => changeConnection({ baseUrl: event.target.value, apiKey: "" })} />
+        <FieldDescription id="custom-base-url-help">Use the API root reachable from the Agent Daemon, including any prefix such as /v1.</FieldDescription>
+      </Field>
+      <Field data-disabled={disabled}>
+        <FieldLabel htmlFor="custom-key">API key</FieldLabel>
+        <Input id="custom-key" type="password" autoComplete="new-password" disabled={disabled} aria-describedby="custom-key-help"
+          value={apiKey} onChange={event => changeConnection({ ...connection, apiKey: event.target.value })} />
+        <FieldDescription id="custom-key-help">{keyStored && !omitStoredKey ? "Leave blank to use the saved API key." : "Leave blank for anonymous access."}</FieldDescription>
+        {keyStored && !apiKey && <Button variant="outline" size="sm" className="self-start" disabled={disabled}
+          onClick={() => changeConnection({ ...connection, omitStoredKey: !omitStoredKey })}>
+          <KeyRoundIcon data-icon="inline-start" /> {omitStoredKey ? "Use saved API key" : "Remove saved API key"}
+        </Button>}
+      </Field>
+      <Field data-disabled={disabled || models.length === 0}>
+        <FieldLabel htmlFor="custom-model">Provider Model</FieldLabel>
+        <Combobox items={models} value={modelSelected ? model : null} onValueChange={setModel} disabled={disabled || models.length === 0}>
+          <ComboboxInput id="custom-model" placeholder="Search models" showClear disabled={disabled || models.length === 0} />
+          <ComboboxContent>
+            <ComboboxEmpty>No matching models.</ComboboxEmpty>
+            <ComboboxList>
+              {(model: string) => <ComboboxItem key={model} value={model}>{model}</ComboboxItem>}
+            </ComboboxList>
+          </ComboboxContent>
+        </Combobox>
+        {loading && <FieldDescription role="status" className="flex items-center gap-2"><Spinner /> Loading models…</FieldDescription>}
+        {result && "models" in result && models.length === 0 && <FieldDescription role="status">No models were returned by the provider.</FieldDescription>}
+      </Field>
+      {error && <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>{error}</AlertDescription></Alert>}
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" disabled={disabled || !ready || loading} onClick={() => setConnection(previous => ({ ...previous }))}>
+          <RefreshCwIcon data-icon="inline-start" /> Refresh models
+        </Button>
+        <Button type="submit" disabled={!canSave}><SaveIcon data-icon="inline-start" /> Save Provider Configuration</Button>
+        <Button variant="ghost" disabled={disabled} onClick={close}>Cancel</Button>
+      </div>
+    </FieldGroup>
   </form>;
 }

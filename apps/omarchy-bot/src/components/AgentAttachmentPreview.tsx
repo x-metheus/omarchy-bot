@@ -1,18 +1,12 @@
 import { useEffect, useState } from "react";
-import * as stylex from "@stylexjs/stylex";
-import { Banner } from "@astryxdesign/core/Banner";
-import { Button } from "@astryxdesign/core/Button";
-import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
-import { HStack } from "@astryxdesign/core/HStack";
-import { Text } from "@astryxdesign/core/Text";
-import { VStack } from "@astryxdesign/core/VStack";
+import { CircleAlertIcon, DownloadIcon, FileTextIcon, ImageIcon } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { CodeBlock, CodeBlockContent } from "@/components/ui/code-block";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Spinner } from "@/components/ui/spinner";
 import { isAttachmentImage, type AgentAttachment } from "../lib/agentAttachments.ts";
 import { agentDaemon, DaemonError } from "../lib/agentDaemon.ts";
-
-const styles = stylex.create({
-  text: { whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: "45dvh", overflow: "auto" },
-  image: { maxWidth: "100%", maxHeight: "45dvh", objectFit: "contain", alignSelf: "start" },
-});
 
 type Preview = { kind: "text" | "image" | "unavailable" | "error"; value: string };
 
@@ -23,6 +17,7 @@ export function AgentAttachmentPreview({ botId, attachment, close }: {
 }) {
   const [preview, setPreview] = useState<Preview>();
   const [saveError, setSaveError] = useState("");
+  const [saving, setSaving] = useState(false);
   const isText = attachment.mediaType === "text/plain";
   const canPreview = attachment.available && (isText || isAttachmentImage(attachment.mediaType));
   useEffect(() => {
@@ -62,29 +57,38 @@ export function AgentAttachmentPreview({ botId, attachment, close }: {
 
   async function save() {
     setSaveError("");
+    setSaving(true);
     const name = attachment.name.replace(/[<>:"/\\|?*\p{Cc}]/gu, "_");
     const extension = isText ? "txt" : attachment.mediaType.slice("image/".length);
     const lower = name.toLowerCase();
     const hasExtension = lower.endsWith(`.${extension}`) || (extension === "jpeg" && lower.endsWith(".jpg"));
     try { await agentDaemon.saveAttachment(botId, attachment.id, hasExtension ? name : `${name}.${extension}`); }
     catch { setSaveError("Could not save the submitted content. Check the connection and Downloads permissions."); }
+    finally { setSaving(false); }
   }
 
-  return <Dialog isOpen onOpenChange={open => { if (!open) close(); }} width={520}>
-    <DialogHeader title={attachment.name} />
-    <VStack gap={2}>
-      <Text color="secondary">Original file unavailable in Conversation.</Text>
-      {!canPreview ? <Text>Submitted content is unavailable.</Text> :
-        !preview ? <Text>Loading submitted content…</Text> :
-        preview.kind === "text" ? <Text as="p" xstyle={styles.text}>{preview.value}</Text> :
-        preview.kind === "image" ? <img src={preview.value} alt={attachment.name} {...stylex.props(styles.image)} /> :
-        <Banner status={preview.kind === "error" ? "error" : "warning"} title={preview.value} />}
-      {saveError && <Banner status="error" title={saveError} />}
-      <HStack gap={2} justify="end" wrap="wrap">
-        <Button label="Close" onClick={close} />
+  return <Dialog open onOpenChange={open => { if (!open) close(); }}>
+    <DialogContent className="sm:max-w-xl">
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2 wrap-anywhere">
+          {isText ? <FileTextIcon className="size-4 shrink-0" aria-hidden="true" /> : <ImageIcon className="size-4 shrink-0" aria-hidden="true" />}
+          {attachment.name}
+        </DialogTitle>
+        <DialogDescription>Preview of the submitted content.</DialogDescription>
+      </DialogHeader>
+      {!canPreview ? <p>Submitted content is unavailable.</p> :
+        !preview ? <p role="status" className="flex items-center gap-2"><Spinner /> Loading submitted content…</p> :
+        preview.kind === "text" ? <CodeBlock><CodeBlockContent wrap className="max-h-[45dvh]">{preview.value}</CodeBlockContent></CodeBlock> :
+        preview.kind === "image" ? <img src={preview.value} alt={attachment.name} className="max-h-[45dvh] max-w-full object-contain" /> :
+        <Alert variant={preview.kind === "error" ? "destructive" : "default"}><CircleAlertIcon /><AlertDescription>{preview.value}</AlertDescription></Alert>}
+      {saveError && <Alert variant="destructive"><CircleAlertIcon /><AlertDescription>{saveError}</AlertDescription></Alert>}
+      <DialogFooter>
+        <Button variant="outline" onClick={close}>Close</Button>
         {canPreview && (preview?.kind === "text" || preview?.kind === "image") &&
-          <Button label="Save submitted content" variant="primary" clickAction={save} />}
-      </HStack>
-    </VStack>
+          <Button disabled={saving} onClick={() => void save()}>
+            {saving ? <Spinner data-icon="inline-start" /> : <DownloadIcon data-icon="inline-start" />} Save submitted content
+          </Button>}
+      </DialogFooter>
+    </DialogContent>
   </Dialog>;
 }

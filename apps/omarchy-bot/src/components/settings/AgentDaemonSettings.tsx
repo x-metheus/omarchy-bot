@@ -1,60 +1,79 @@
 import { useState } from "react";
-import { Banner } from "@astryxdesign/core/Banner";
-import { Button } from "@astryxdesign/core/Button";
-import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
-import { Divider } from "@astryxdesign/core/Divider";
-import { Heading } from "@astryxdesign/core/Heading";
-import { Layout, LayoutContent, LayoutHeader } from "@astryxdesign/core/Layout";
-import { Text } from "@astryxdesign/core/Text";
-import { VStack } from "@astryxdesign/core/VStack";
 import { useQuery } from "@tanstack/react-query";
+import { CircleAlertIcon, CpuIcon, MonitorIcon, MoonIcon, RefreshCwIcon, SunIcon } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Separator } from "@/components/ui/separator";
+import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { agentDaemon } from "../../lib/agentDaemon.ts";
+import { isColorMode, useAppearance } from "../../lib/appearance.tsx";
+import type { LocalDaemonController } from "../../lib/localDaemon.ts";
 import { ProviderSettings } from "./ProviderSettings.tsx";
 
-export interface LaunchPreference {
-  enabled: boolean;
-  setEnabled?: (enabled: boolean) => Promise<void>;
-}
+const providerLabels = { openai: "OpenAI", anthropic: "Anthropic", custom: "Custom OpenAI-compatible" };
 
-export function AgentDaemonSettings({ baseUrl, launch }: { baseUrl: string; launch: LaunchPreference }) {
+export function AgentDaemonSettings({ baseUrl, local }: { baseUrl: string; local: LocalDaemonController }) {
   const settings = useQuery({ queryKey: ["agent-settings", baseUrl], queryFn: agentDaemon.settings });
   const [launchError, setLaunchError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const { mode, setMode } = useAppearance();
   const active = settings.data?.active;
-  return (
-    <Layout height="fill" contentWidth={640} header={<LayoutHeader hasDivider><Heading level={1}>Settings</Heading></LayoutHeader>}>
-      <LayoutContent padding={4}>
-        <VStack gap={4}>
-          <VStack as="section" gap={2}>
-            <Heading level={2}>General</Heading>
-            {launch.setEnabled && <CheckboxInput label="Start the local daemon when opening Omarchy Bot" value={launch.enabled}
-              changeAction={async enabled => {
-                setLaunchError("");
-                try { await launch.setEnabled?.(enabled); }
-                catch { setLaunchError("Could not save the local daemon launch preference."); }
-              }} onChange={() => {}} />}
-            {launchError && <Banner status="error" title={launchError} />}
-          </VStack>
-          <Divider />
-          <VStack as="section" gap={3}>
-            <Heading level={2}>Providers</Heading>
-            <VStack gap={1}>
-              {active && <>
-                <Text color="secondary" wordBreak="break-word">Current provider: {active.name ?? providerLabels[active.provider]}</Text>
-                <Text color="secondary" wordBreak="break-word">Current model: {active.model}</Text>
-              </>}
-              {settings.data && !active && <Text color="secondary">No model configured.</Text>}
-            </VStack>
-            {settings.isPending && <Text>Loading daemon Settings…</Text>}
-            {settings.isError && <>
-              <Banner status="error" title="Could not read daemon Settings." />
-              <Button label="Try again" clickAction={async () => { await settings.refetch(); }} />
-            </>}
-            {settings.data && <ProviderSettings baseUrl={baseUrl} settings={settings.data} />}
-          </VStack>
-        </VStack>
-      </LayoutContent>
-    </Layout>
-  );
-}
 
-const providerLabels = { openai: "OpenAI", anthropic: "Anthropic", custom: "Custom OpenAI-compatible" };
+  async function changeAutostart(enabled: boolean) {
+    setLaunchError("");
+    setSaving(true);
+    try { await local.setAutostart(enabled); }
+    catch { setLaunchError("Could not save the local daemon launch preference."); }
+    finally { setSaving(false); }
+  }
+
+  return <div className="min-h-0 flex-1 overflow-y-auto">
+    <div className="mx-auto flex max-w-3xl flex-col gap-7 px-4 py-6 sm:px-8">
+      <section aria-labelledby="settings-general" className="flex flex-col gap-4">
+        <h2 id="settings-general" className="text-lg font-semibold tracking-tight">General</h2>
+        <FieldGroup>
+          <Field orientation="responsive" data-disabled={saving}>
+            <FieldLabel htmlFor="autostart" className="flex-1">Start the local daemon on launch</FieldLabel>
+            <Switch id="autostart" checked={local.autostart} disabled={saving} onCheckedChange={enabled => void changeAutostart(enabled)} />
+          </Field>
+          {launchError && <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>{launchError}</AlertDescription></Alert>}
+          <Field orientation="responsive">
+            <FieldLabel id="appearance-label" className="flex-1">Appearance</FieldLabel>
+            <ToggleGroup aria-labelledby="appearance-label" size="sm" variant="outline" spacing={0} value={[mode]} onValueChange={([value]) => {
+              if (isColorMode(value)) setMode(value);
+            }}>
+              <ToggleGroupItem value="system"><MonitorIcon data-icon="inline-start" /> System</ToggleGroupItem>
+              <ToggleGroupItem value="light"><SunIcon data-icon="inline-start" /> Light</ToggleGroupItem>
+              <ToggleGroupItem value="dark"><MoonIcon data-icon="inline-start" /> Dark</ToggleGroupItem>
+            </ToggleGroup>
+          </Field>
+        </FieldGroup>
+      </section>
+      <Separator />
+      <section aria-labelledby="settings-providers" className="flex flex-col gap-4">
+        <h2 id="settings-providers" className="text-lg font-semibold tracking-tight">Providers</h2>
+        {settings.isPending && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /> Loading daemon Settings…</p>}
+        {settings.isError && <>
+          <Alert variant="destructive" role="alert"><CircleAlertIcon /><AlertDescription>Could not read daemon Settings.</AlertDescription></Alert>
+          <Button variant="outline" className="self-start" disabled={settings.isFetching} onClick={() => void settings.refetch()}>
+            <RefreshCwIcon data-icon="inline-start" /> Try again
+          </Button>
+        </>}
+        {settings.data && <>
+          <Card size="sm">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><CpuIcon className="size-4" aria-hidden="true" /> Current model</CardTitle>
+              {active && <CardDescription>{active.name ?? providerLabels[active.provider]}</CardDescription>}
+            </CardHeader>
+            <CardContent className="text-sm wrap-anywhere">{active?.model ?? "No model configured."}</CardContent>
+          </Card>
+          <ProviderSettings baseUrl={baseUrl} settings={settings.data} />
+        </>}
+      </section>
+    </div>
+  </div>;
+}

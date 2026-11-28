@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "shadcn": {
+      "command": "bunx",
+      "args": [
+        "shadcn@latest",
+        "mcp"
+      ],
+      "cwd": "apps/omarchy-bot",
+      "description": "Browse, search, and install shadcn/ui components from registries"
+    }
+  }
+}

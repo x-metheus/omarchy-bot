@@ -111,8 +111,13 @@ const field = async (label: string, text: string) => {
   const id = await until(label, () => script("return [...document.querySelectorAll('label')].find(el => el.textContent.includes(arguments[0]))?.htmlFor", [label]));
   await input(`[id=${JSON.stringify(id)}]`, text);
 };
+const control = (label: string) => until(label, () => script(`
+  return [...document.querySelectorAll('button, [role="menuitem"]')].find(el =>
+    el.getClientRects().length && !el.disabled && el.getAttribute('aria-disabled') !== 'true' &&
+    (el.textContent.trim() === arguments[0] || el.getAttribute('aria-label') === arguments[0]));
+`, [label]));
 async function click(label: string) {
-  const button = await until(label, () => script("return [...document.querySelectorAll('button')].find(el => !el.disabled && (el.textContent.trim() === arguments[0] || el.getAttribute('aria-label') === arguments[0]))", [label]));
+  const button = await control(label);
   await browser("POST", `/element/${button[elementKey]}/click`, {});
 }
 async function closeDesktop() {
@@ -219,12 +224,12 @@ try {
     });
     await closeDesktop();
     await openDesktop();
-    await visible("Create a Bot to start a Conversation.");
+    await visible("Create your first Bot");
     assert.equal(readFileSync(path.join(profile, "settings-token"), "utf8"), localToken);
     assert.equal((await (await request(local, "/api/devices/paired", localToken)).json()).devices.length, 1);
     pass("Packaged WebView honors disabled launch, autostarts bundled daemon and attaches to it after pairing and reopen");
     await click("Settings");
-    await visible("Start the local daemon when opening Omarchy Bot");
+    await visible("Start the local daemon on launch");
     await visible("Providers");
     await field("Model ID", settings.model);
     await field("API key", key);
@@ -234,21 +239,21 @@ try {
     await field("Bot name", "Desktop fixture");
     await click("Create Bot");
     await visible("Desktop fixture");
-    const composer = '[placeholder="Message this Bot…"], [aria-label="Message input"][contenteditable="true"], textarea[aria-label="Message input"]';
+    const composer = 'textarea[aria-label="Message"]';
     const send = async (text: string) => {
       await input(composer, text);
-      await click("Send");
+      await click("Send message");
     };
     await send(marker);
     await visible("The swatch is cobalt.");
     await input('input[type="file"]', looseFile);
-    await visible("Remove sample.txt");
+    await control("Remove sample.txt");
     await input(composer, "Read the attachment");
     await click("Settings");
-    await visible(`Current model: ${settings.model}`);
+    await visible(settings.model);
     await click("Desktop fixture");
-    await visible("Remove sample.txt");
-    await click("Send");
+    await control("Remove sample.txt");
+    await click("Send message");
     await visible("Read the attachment");
     await click("View sample.txt");
     await visible(readMarker);
@@ -257,6 +262,7 @@ try {
     await visible("Recalled cobalt from QN-731.");
     pass("Packaged WebView configures its provider in Settings, preserves a draft and attachment when returning to its Bot, and invokes offline Recall");
     if (process.platform === "linux") {
+      await click("Daemon host");
       await click("Choose desktop file");
       const picker = await nativeWindow("Choose a desktop file");
       command(["xdotool", "windowfocus", "--sync", picker]);
@@ -267,7 +273,8 @@ try {
       await Bun.sleep(300);
       if (evidence) command(["python3", path.join(import.meta.dirname, "linux-app/capture.py"), path.join(evidence, "native-file-picker.png")]);
       command(["xdotool", "key", "--clearmodifiers", "Return"]);
-      await visible("Desktop file: sample.txt");
+      await visible("Desktop file");
+      await visible("sample.txt");
       await send("Read selected fixture");
       const prompt = await nativeWindow("Approve desktop tool");
       const geometry = command(["xdotool", "getwindowgeometry", "--shell", prompt]);
@@ -276,7 +283,11 @@ try {
       assert.ok(width > 0 && height > 30);
       command(["xdotool", "mousemove", "--window", prompt, String(Math.floor(width / 4)), String(height - 15), "click", "1"]);
       await visible("The selected file contains cobalt.");
-      await visible("read · completed");
+      await until("completed read tool", () => script(`
+        return [...document.querySelectorAll('[data-slot="trace-line"]')].some(row =>
+          row.querySelector('[data-slot="trace-title"]')?.textContent === 'read' &&
+          row.querySelector('[data-slot="trace-description"]')?.textContent === 'Completed');
+      `));
       pass("Packaged WebKitGTK drives the native file picker and desktop tool approval through the Conversation");
     }
   }
