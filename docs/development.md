@@ -43,10 +43,15 @@ Run these commands from the repository root. With mise activated in your shell, 
 | `cargo test --workspace --locked` | Test both native crates |
 | `cargo test -p omarchy-agent-daemon --locked --test conversation` | Run the daemon protocol suite |
 | `bun --cwd=apps/omarchy-bot install --frozen-lockfile` | Install the desktop's locked dependencies |
+| `mise run daemon` | Build and start the standalone Agent Daemon |
 | `mise run dev` | Open the native Tauri development window |
 | `bun --cwd=apps/omarchy-bot run typecheck` | Check desktop TypeScript types |
 | `bun --cwd=apps/omarchy-bot run test` | Run the desktop's Bun tests |
 
+
+### Standalone daemon
+
+`mise run daemon` starts the daemon in the foreground and prints its loopback address. It runs from `apps/agent-daemon` and uses the root Cargo lockfile. For pairing and provider Settings, set `OMARCHY_AGENT_DB`, `OMARCHY_AGENT_MASTER_KEY_FILE`, and `OMARCHY_AGENT_SETTINGS_TOKEN_FILE` as shown in the standalone setup. Then open the desktop in a second terminal with `mise run dev`. [Standalone daemon setup](../apps/agent-daemon/README.md#headless-startup)
 
 ### Desktop project layout
 
