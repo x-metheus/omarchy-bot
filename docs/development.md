@@ -33,7 +33,7 @@ For Rust implementation, porting, and review, use [rust-best-practices](../.agen
 ## Stack and verification
 
 - TypeScript workspaces use ES modules and the exact Bun version pinned in `engines.bun`. [Root manifest](../package.json)
-- The desktop app uses React, Vite, Astryx, and Tauri. Verify desktop interactions in the running Tauri window with the platform WebView. Release smoke uses packaged builds on Linux (WebKitGTK), macOS (WKWebView), and Windows (WebView2). [App manifest](../apps/omarchy-bot/package.json) · [Release workflow](../.github/workflows/app-release.yml)
+- The desktop app uses React, Vite, Astryx, and Tauri. For desktop interactions, native capabilities, and end-to-end flows, run `bun run tauri dev` and verify the behavior in the running App window on the current platform. The App window exercises the native Tauri bridge and platform WebView. [App manifest](../apps/omarchy-bot/package.json)
 - The standalone Agent Daemon runs Rig on Rust 1.97.1. Its integration tests use temporary databases and scripted providers. [Agent Daemon guide](../apps/agent-daemon/README.md#checks)
 
 Run these commands from the repository root. Consult the affected workspace’s `package.json` for additional checks.
@@ -42,9 +42,7 @@ Run these commands from the repository root. Consult the affected workspace’s 
 | --- | --- |
 | `bun install --frozen-lockfile` | Install locked dependencies |
 | `bun run tauri dev` | Run the native Tauri development window |
-| `bash scripts/build-linux-app.sh` | Package the desktop and standalone daemon on Linux |
 | `bun run typecheck` | Check TypeScript types |
-| `bun run build` | Build the desktop frontend for packaging |
 | `bun test <path>` / `bun test` | Run focused tests / the Bun suite |
 
 
@@ -54,11 +52,20 @@ Run these commands from the repository root. Consult the affected workspace’s 
 
 Install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and run `bun install --frozen-lockfile`. Start daily UI checks from `apps/omarchy-bot` or the repository root with `bun run tauri dev`. Tauri starts Vite on `http://127.0.0.1:7322` and incrementally compiles the native debug target. A clean checkout can start without a prebuilt frontend or staged binaries. Connect to a running Agent Daemon, or set `OMARCHY_BOT_AGENT_DAEMON_BIN` to a daemon executable to check managed startup. [Standalone daemon setup](../apps/agent-daemon/README.md#headless-startup)
 
-The platform release scripts stage the daemon and verified Recall model, then invoke `tauri build` with the release configuration. See [Linux](../scripts/linux-app/README.md), [macOS](../scripts/macos-app/README.md), and [Windows](../scripts/windows-app/README.md) for packaging and native smoke commands.
-
 The legacy `apps/site` workspace retains its explicit `site:dev` and `site:build` commands.
 
 Implement and verify one increment at a time. For a behavior fix, start with a failing regression test. For desktop UI changes, verify the affected behavior in the Tauri development window. For documentation, check links, paths, commands, and the diff. Preserve existing checks and report the verification commands, their results, and any unresolved blockers.
+
+### Desktop releases
+
+Run App production builds, packaging, and cross-platform package checks only for explicit release tasks.
+
+| Command | Purpose |
+| --- | --- |
+| `bun run build` | Build the production desktop frontend |
+| `bash scripts/build-linux-app.sh` | Package the desktop app and standalone daemon on Linux |
+
+The platform release scripts stage the daemon and verified Recall model, then invoke `tauri build` with the release configuration. Release smoke checks use packaged builds on Linux (WebKitGTK), macOS (WKWebView), and Windows (WebView2). See the [Linux](../scripts/linux-app/README.md), [macOS](../scripts/macos-app/README.md), and [Windows](../scripts/windows-app/README.md) guides and the [release workflow](../.github/workflows/app-release.yml).
 
 ## Skill resources and maintenance
 
